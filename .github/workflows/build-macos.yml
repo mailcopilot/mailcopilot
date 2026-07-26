@@ -1,0 +1,88 @@
+# GitHub Actions workflow for building macOS DMG.
+# Triggered remotely from GitLab CI tag pipeline via workflow_dispatch API.
+# The GitLab job pushes clean source code + tag to this repo, then triggers this workflow.
+
+name: Build macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag (e.g. v1.14.0)"
+        required: true
+        type: string
+      # Sentry DSN is NOT a secret — it ships inside every client bundle by
+      # design — so it travels as a plain dispatch input from the GitLab
+      # trigger (scripts/trigger-github-build.sh). Empty is allowed: the build
+      # step below falls back to the SENTRY_DSN repo secret for manual runs.
+      sentry_dsn:
+        description: "Sentry DSN baked into the bundle (plain value, not a secret)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    env:
+      # Disable code signing (no Apple Developer ID certificate configured yet).
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # Placeholder URL for electron-updater (overridden in production by MAILCOPILOT_UPDATE_URL).
+      MAILCOPILOT_UPDATE_URL: "https://placeholder.local/updates"
+
+    steps:
+      - name: Checkout source at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Universal build needs native binaries for both architectures.
+      # npm ci on arm64 only installs @napi-rs/canvas-darwin-arm64;
+      # we also need the x64 variant for the universal merge.
+      - name: Install cross-arch native modules
+        run: npm install --no-save --force @napi-rs/canvas-darwin-x64
+
+      - name: Build (typecheck + bundle + package)
+        env:
+          # vite.config.ts bakes __SENTRY_DSN__ from SENTRY_DSN at `vite build`
+          # time. Without it the bundled SDK starts with enabled:false and the
+          # release ships a silent zero of telemetry (the DSN-first lesson:
+          # always confirm the DSN reaches the bundle before touching capture
+          # code). DSN priority: dispatch input from the GitLab trigger, else
+          # the SENTRY_DSN repo secret (fallback for manual runs; secrets must
+          # be created by hand on the GitHub mirror — the mirror is recreated
+          # by scripts/mirror-github.sh, which never carries secrets).
+          SENTRY_DSN: ${{ inputs.sentry_dsn != '' && inputs.sentry_dsn || secrets.SENTRY_DSN }}
+          # Sourcemap upload is intentionally NOT wired here. This build step
+          # executes vite.config.ts from an arbitrary workflow_dispatch ref
+          # (checkout above uses `ref: inputs.tag`), so attaching
+          # SENTRY_AUTH_TOKEN would let a malicious ref exfiltrate the token.
+          # vite.config.ts gates the upload on SENTRY_AUTH_TOKEN && SENTRY_DSN
+          # both being set, so without the token the upload is skipped and the
+          # build still passes. Wire it later via a protected GitHub
+          # Environment (required reviewers) or a separate trusted upload step.
+        run: |
+          npx tsc
+          npx vite build
+          npx electron-builder --mac dmg --universal --publish never
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: |
+            dist/*.dmg
+            dist/latest-mac.yml
+          retention-days: 7
+          if-no-files-found: error

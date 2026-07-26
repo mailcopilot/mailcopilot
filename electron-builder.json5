@@ -1,0 +1,61 @@
+// @see - https://www.electron.build/configuration/configuration
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "io.mailcopilot.app",
+  "asar": true,
+  "productName": "MailCopilot",
+  "directories": { "output": "dist" },
+  "icon": "public/icon.png",
+  "protocols": [{
+    "name": "Mailto Protocol",
+    "schemes": ["mailto"]
+  }],
+  "files": [
+    "dist/**/*",
+    "!dist/linux-unpacked",
+    "!dist/win-unpacked",
+    "!dist/mac*",
+    "!dist/.*",
+    "!dist/*.AppImage",
+    "!dist/*.deb",
+    "!dist/*.rpm",
+    "!dist/*.dmg",
+    "!dist/*.exe",
+    "!dist/*.yml",
+    "!dist/*.yaml",
+    "!dist/builder-*",
+    "dist-electron"
+  ],
+  "publish": [{
+    "provider": "generic",
+    "url": "${env.MAILCOPILOT_UPDATE_URL}"
+  }],
+  "linux": {
+    "maintainer": "MailCopilot Team <team@mailcopilot.io>",
+    // deb/rpm are required on Ubuntu 23.10+/24.04: their postinst installs
+    // chrome-sandbox as root:root +4755, while the AppImage relies on
+    // unprivileged user namespaces that those kernels restrict by default
+    // (apparmor_restrict_unprivileged_userns=1) → SIGTRAP on startup.
+    // CI already passes these targets via the --linux CLI flag; declaring
+    // them here keeps the config in sync with the published artifacts.
+    "target": ["AppImage", "deb", "rpm"],
+    "category": "Network",
+    "mimeTypes": ["x-scheme-handler/mailto"],
+    "artifactName": "mailcopilot-${version}-${arch}.${ext}"
+  },
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["universal"] }],
+    "artifactName": "mailcopilot-${version}-${arch}.${ext}",
+    // Tell @electron/universal which files are arch-specific in the x64 build,
+    // so it can correctly merge native .node binaries (better-sqlite3, keytar, @napi-rs/canvas).
+    "x64ArchFiles": "Contents/Resources/app.asar.unpacked/**/*.node",
+    // Platform-specific packages (e.g. @napi-rs/canvas-darwin-{x64,arm64}) exist only
+    // in one arch's ASAR. Tell @electron/universal this is expected.
+    "singleArchFiles": "node_modules/@napi-rs/**"
+  },
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "artifactName": "mailcopilot-${version}-setup.${ext}"
+  },
+  "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true }
+}

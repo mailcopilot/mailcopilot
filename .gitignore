@@ -1,0 +1,86 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-electron
+dist-ssr
+*.local
+
+# Отчёты тестов
+playwright-report/
+test-results/
+coverage/
+
+# Локальные QA-чеклисты (генерируются qa-plan агентом per-task)
+docs/qa/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Секреты и переменные окружения
+.env
+.env.*
+!.env.integration.example
+.env.test
+.env.local
+
+# MCP конфигурация
+.mcp.json
+
+# Claude Code
+.claude/*
+!.claude/agents/
+!.claude/hooks/
+!.claude/skills/
+!.claude/settings.json
+claude.md
+
+# Codex
+.codex/
+
+# Docusaurus build artifacts
+docs/.docusaurus/
+docs/build/
+docs/node_modules/
+
+# Демо-видео
+demo-video.mp4
+tests/e2e/demo-video.spec.ts
+
+# Production-readiness тест (артефакты)
+tests/e2e/screenshots/
+tests/e2e/production-readiness.spec.ts
+PRODUCTION_FIXES_PLAN.md
+
+# Локальные рабочие ТЗ
+docs-old/
+docs/tz.md
+docs/TZ-landing-mailcopilot.md
+docs/screenshots/*
+TZ.md
+PRD.md
+!docs/PRD.md
+review.md
+analysis.md
+demo-oauth.mp4
+
+# Internal sprint/planning docs
+SPRINT_*.md
+
+# Internal test/debug scripts
+scripts/test-*.mjs

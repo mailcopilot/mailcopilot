@@ -1,0 +1,24 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <defs>
+    <linearGradient id="env" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4da6ff"/>
+      <stop offset="100%" stop-color="#0066e0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Тело конверта -->
+  <rect x="16" y="72" width="200" height="152" rx="18" fill="url(#env)"/>
+
+  <!-- Клапан конверта (треугольник) -->
+  <path d="M16 90 L116 168 L216 90 Q216 72 198 72 L34 72 Q16 72 16 90 Z" fill="url(#env)" opacity="0.85"/>
+
+  <!-- Белые линии конверта -->
+  <line x1="16" y1="90" x2="116" y2="168" stroke="#fff" stroke-width="8" stroke-linecap="round" opacity="0.9"/>
+  <line x1="216" y1="90" x2="116" y2="168" stroke="#fff" stroke-width="8" stroke-linecap="round" opacity="0.9"/>
+  <line x1="16" y1="220" x2="90" y2="160" stroke="#fff" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+  <line x1="216" y1="220" x2="142" y2="160" stroke="#fff" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Звезда-искра -->
+  <path d="M212 16 L218 34 L236 40 L218 46 L212 64 L206 46 L188 40 L206 34 Z" fill="#0066e0"/>
+  <path d="M236 4 L238 12 L246 14 L238 16 L236 24 L234 16 L226 14 L234 12 Z" fill="#0066e0" opacity="0.6"/>
+</svg>

@@ -1,0 +1,1381 @@
+{
+  "common": {
+    "save": "Enregistrer",
+    "close": "Fermer",
+    "cancel": "Annuler",
+    "ok": "OK",
+    "error": "erreur"
+  },
+  "folders": {
+    "inbox": "Boîte de réception",
+    "sent": "Envoyés",
+    "drafts": "Brouillons",
+    "trash": "Corbeille",
+    "junk": "Spam",
+    "archive": "Archives",
+    "outbox": "Boîte d'envoi",
+    "snoozed": "En pause",
+    "followUp": "Suivis",
+    "readLater": "Lire plus tard",
+    "menu": {
+      "syncFull": "Synchroniser tous les en-têtes",
+      "syncOnOpen": "Synchroniser à l'ouverture",
+      "syncOff": "Ne pas synchroniser",
+      "addToBadges": "Afficher dans les badges",
+      "removeFromBadges": "Masquer des badges",
+      "hideFromSidebar": "Masquer de la barre latérale",
+      "showInSidebar": "Afficher dans la barre latérale",
+      "changeIcon": "Changer l'icône",
+      "includeInSearch": "Inclure dans la recherche",
+      "excludeFromSearch": "Exclure de la recherche",
+      "rename": "Renommer le dossier",
+      "delete": "Supprimer le dossier",
+      "renamePrompt": "Nouveau nom pour le dossier {{current}}",
+      "deleteConfirm": "Supprimer le dossier {{folder}} du serveur ?",
+      "iconPrompt": "Saisissez un émoji/icône pour le dossier"
+    }
+  },
+  "app": {
+    "sidebar": {
+      "compose": "Nouveau message",
+      "sync": "Synchroniser",
+      "settings": "Paramètres",
+      "connectAccount": "Connecter un e-mail",
+      "unifiedInbox": "Tous les comptes",
+      "expand": "Développer le panneau",
+      "collapse": "Réduire le panneau",
+      "workOffline": "Travailler hors ligne"
+    },
+    "syncing": "Synchronisation...",
+    "statusbar": {
+      "syncing": "Synchronisation…",
+      "headersCoverage": "En-têtes : {{covered}}/{{total}} dossiers",
+      "bodyIndex": "Index texte : {{percent}}%"
+    },
+    "search": {
+      "placeholder": "Rechercher...",
+      "clear": "Effacer la recherche",
+      "scopeFolder": "Dossier actuel",
+      "scopeAccount": "Tous les dossiers",
+      "scopeAll": "Tous les comptes",
+      "sortDate": "Plus récents",
+      "sortRelevance": "Pertinence",
+      "sortRelevanceUnavailable": "Le tri par pertinence n'est disponible que pour les requêtes en texte brut",
+      "searching": "Recherche en cours…",
+      "loadingMore": "Chargement de résultats supplémentaires…",
+      "indexPartial": "Recherche plein texte : {{percent}}% indexé",
+      "headersCoverage": "En-têtes : {{covered}}/{{total}} dossiers synchronisés",
+      "remoteResults": "+{{count}} du serveur"
+    },
+    "empty": {
+      "loading": {
+        "title": "Chargement..."
+      },
+      "noAccount": {
+        "title": "Connectez votre e-mail",
+        "hint": "Cliquez sur l'icône de courrier en bas à gauche"
+      },
+      "noMessages": {
+        "title": "Aucun message",
+        "hint": "Ce dossier est vide"
+      },
+      "selectMessage": {
+        "title": "Sélectionnez un message",
+        "hint": "Cliquez sur un message à gauche pour le consulter",
+        "rightClickTip": "Clic droit sur un message pour les actions rapides"
+      },
+      "loadingMessage": {
+        "title": "Chargement du message..."
+      },
+      "messageNotFound": {
+        "title": "Message introuvable"
+      }
+    },
+    "errors": {
+      "sync": "Erreur de synchronisation : {{error}}",
+      "load": "Erreur de chargement : {{error}}",
+      "loadMessage": "Erreur de chargement du message : {{error}}",
+      "bodyNotAvailableOffline": "Le contenu du message n'est pas disponible hors ligne. Seuls les en-têtes sont mis en cache.",
+      "delete": "Erreur de suppression : {{error}}",
+      "archive": "Erreur d'archivage : {{error}}",
+      "search": "Erreur de recherche : {{error}}",
+      "move": "Erreur de déplacement : {{error}}",
+      "queue": "Erreur de file d'envoi : {{error}}",
+      "markSeen": "Erreur de statut de lecture : {{error}}",
+      "flag": "Erreur de marquage : {{error}}",
+      "pin": "Erreur d'épinglage : {{error}}",
+      "compose": "Erreur de création : {{error}}",
+      "attachment": "Erreur de pièce jointe : {{error}}",
+      "openExternal": "Erreur d'ouverture du lien : {{error}}"
+    },
+    "authRecovery": {
+      "googlePrompt": "L'autorisation Google pour {{account}} est expirée. Reconnecter maintenant ?",
+      "googleRequired": "Une réautorisation Google est requise pour {{account}}.",
+      "googleStarting": "Ouverture de la connexion Google pour {{account}}...",
+      "googleSuccess": "Compte Google {{account}} reconnecté.",
+      "googleFailed": "Échec de la réautorisation Google : {{error}}",
+      "googleFailedHelp": "Échec de la réautorisation Google : {{error}}. Fenêtre du compte ouverte pour réessayer.",
+      "outlookPrompt": "L'autorisation Outlook pour {{account}} est expirée. Reconnecter maintenant ?",
+      "outlookRequired": "Une réautorisation Outlook est requise pour {{account}}.",
+      "outlookStarting": "Ouverture de la connexion Outlook pour {{account}}...",
+      "outlookSuccess": "Compte Outlook {{account}} reconnecté.",
+      "outlookFailedHelp": "Échec de la réautorisation Outlook : {{error}}. Fenêtre du compte ouverte pour réessayer.",
+      "passwordPrompt": "L'authentification pour {{account}} a échoué. Ouvrir la fenêtre du compte pour saisir le mot de passe IMAP/SMTP ?",
+      "passwordRequired": "Le mot de passe IMAP/SMTP est requis pour {{account}}.",
+      "passwordOpen": "Fenêtre du compte ouverte pour {{account}}. Saisissez le mot de passe et enregistrez."
+    },
+    "confirm": {
+      "deleteForever": "Supprimer définitivement {{count}} message(s) ? Cette action est irréversible.",
+      "yes": "Supprimer",
+      "no": "Annuler",
+      "ariaTitle": "Confirmation"
+    },
+    "undo": {
+      "deleted": "Déplacé dans la corbeille",
+      "archived": "Archivé",
+      "spammed": "Marqué comme spam",
+      "sendScheduled": "Envoi différé",
+      "undo": "Annuler"
+    },
+    "sentCopyFailed": {
+      "message": "Message envoyé, mais la copie n'a pas pu être enregistrée dans le dossier Envoyés",
+      "messageWithFolder": "Message envoyé, mais la copie n'a pas pu être enregistrée dans « {{folder}} »",
+      "dismiss": "Fermer"
+    },
+    "certRecovery": {
+      "title": "Le serveur a présenté un certificat différent",
+      "serverLabel": "Serveur",
+      "issuerLabel": "Émetteur",
+      "issuerUnknown": "inconnu",
+      "subjectLabel": "Délivré à",
+      "fingerprintLabel": "Empreinte (SHA-256)",
+      "fingerprintUnknown": "n’a pas pu être déterminée",
+      "copy": "Copier",
+      "copyFingerprint": "Copier l’empreinte SHA-256",
+      "copied": "Copiée",
+      "detailsLabel": "Détails",
+      "interception": "Il semble que cette connexion soit inspectée par un antivirus ou un proxy ({{issuer}}).",
+      "trust": "Approuver et continuer",
+      "readCertificate": "Lire le certificat",
+      "trusting": "Approbation…",
+      "trustingHint": "Vérification du certificat du serveur — cela peut prendre quelques secondes.",
+      "reprobing": "Vérification…",
+      "cancel": "Annuler",
+      "dismissing": "Fermeture…",
+      "review": {
+        "fetched": "Ces informations viennent d’être lues sur le serveur. Vérifiez-les et ne confirmez que si elles correspondent à ce que vous attendez.",
+        "updated": "Le certificat du serveur a changé depuis l’ouverture de cette fenêtre ; rien n’a donc été approuvé. Voici le certificat que le serveur présente maintenant : vérifiez-le et ne confirmez que si vous attendiez ce changement."
+      },
+      "error": {
+        "trustFailed": "Impossible d’enregistrer la confiance pour ce certificat. Veuillez réessayer.",
+        "trustFingerprintMismatch": "Le certificat du serveur a changé depuis l’ouverture de cette fenêtre ; rien n’a été approuvé et le nouveau certificat n’a pas pu être lu. L’approbation est indisponible.",
+        "trustPinWriteFailed": "Impossible de mémoriser ce certificat comme approuvé. Veuillez réessayer.",
+        "trustNotOffered": "Cet avertissement n’est plus à jour, la confirmation n’a donc pas été acceptée. Fermez-le et attendez le prochain avertissement concernant ce serveur.",
+        "reprobeFailed": "Impossible de lire le certificat du serveur. L’approbation est indisponible.",
+        "dismissFailed": "Impossible de fermer cette demande. Veuillez réessayer.",
+        "dismissNotPending": "Cet avertissement n’est plus d’actualité — vous pouvez le fermer."
+      },
+      "notice": {
+        "message": "La connexion à {{host}} est inspectée.",
+        "messageWithIssuer": "La connexion à {{host}} est inspectée par {{issuer}}.",
+        "dismiss": "Ignorer"
+      }
+    },
+    "update": {
+      "available": "Nouvelle version {{version}} disponible",
+      "download": "Télécharger",
+      "downloading": "Téléchargement…",
+      "later": "Plus tard",
+      "ready": "Mise à jour prête à installer",
+      "restart": "Redémarrer",
+      "adminRequired": "La version {{version}} est disponible. Veuillez contacter votre administrateur système pour la mise à jour."
+    }
+  },
+  "unified": {
+    "title": "Boîte de réception unifiée",
+    "allAccounts": "Tous les comptes",
+    "filterByAccount": "Filtrer par compte",
+    "openInAccount": "Ouvrir dans le compte"
+  },
+  "outbox": {
+    "empty": {
+      "title": "La boîte d'envoi est vide",
+      "hint": "Les messages planifiés et différés apparaîtront ici"
+    },
+    "noSubject": "(sans objet)",
+    "status": {
+      "queued": "en attente",
+      "sending": "envoi en cours",
+      "failed": "échec"
+    },
+    "actions": {
+      "sendNow": "Envoyer maintenant",
+      "edit": "Modifier",
+      "cancel": "Annuler",
+      "postpone15": "+15 min"
+    }
+  },
+  "snooze": {
+    "snooze": "Mettre en pause",
+    "laterToday": "Plus tard aujourd'hui",
+    "tomorrowMorning": "Demain matin",
+    "nextWeek": "La semaine prochaine",
+    "custom": "Choisir la date et l'heure",
+    "apply": "Appliquer",
+    "cancel": "Annuler",
+    "wakeNotification": "Rappel de message en pause",
+    "wakeAt": "Rappel à : {{time}}",
+    "empty": {
+      "title": "Aucun message en pause",
+      "hint": "Mettez des messages en pause pour y revenir plus tard"
+    }
+  },
+  "followUp": {
+    "remind": "Rappeler si pas de réponse",
+    "reminderDays": "Délai de rappel",
+    "days2": "Après 2 jours",
+    "days3": "Après 3 jours",
+    "days7": "Après 7 jours",
+    "title": "Suivis",
+    "empty": "Aucun suivi en attente",
+    "dismiss": "Ignorer",
+    "dueSince": "En attente depuis {{date}}",
+    "to": "À : {{address}}",
+    "notificationTitle": "Rappel de suivi",
+    "notificationBody": "Pas de réponse de {{address}} sur : {{subject}}"
+  },
+  "readLater": {
+    "add": "Lire plus tard",
+    "remove": "Retirer de la liste",
+    "empty": {
+      "title": "Aucun élément à lire plus tard",
+      "hint": "Enregistrez des articles et e-mails à lire plus tard"
+    }
+  },
+  "inboxZero": {
+    "processedToday": "Traités aujourd'hui : {{count}}",
+    "congrats": "Inbox Zero !"
+  },
+  "mcpExport": {
+    "title": "Serveur MCP",
+    "hint": "Exposez les outils de messagerie aux clients MCP externes (Claude Code, Obsidian, etc.) via localhost.",
+    "enable": "Activer le serveur MCP (localhost uniquement)",
+    "port": "Port",
+    "status": "Statut",
+    "running": "En cours",
+    "stopped": "Arrêté",
+    "start": "Démarrer",
+    "stop": "Arrêter",
+    "url": "URL de connexion",
+    "token": "Jeton",
+    "copy": "Copier",
+    "copyConfig": "Copier la config MCP"
+  },
+  "mcpClient": {
+    "title": "Connexions MCP",
+    "hint": "Connectez-vous à des serveurs MCP externes (Obsidian, gestionnaires de tâches, calendriers) pour étendre les capacités de l'IA.",
+    "addConnection": "+ Ajouter une connexion",
+    "name": "Nom",
+    "transport": "Transport",
+    "command": "Commande",
+    "args": "Arguments",
+    "enableStdio": "Transport stdio (processus locaux)",
+    "stdioWarning": "Les serveurs MCP stdio lancent des processus enfants locaux avec vos privilèges d'utilisateur. Ils peuvent lire des fichiers, accéder au réseau et exécuter d'autres commandes. L'activation nécessite une boîte de dialogue de confirmation native.",
+    "stdioEnabled": "Stdio MCP est activé. Chaque connexion ci-dessous nécessite encore sa propre approbation.",
+    "requestStdioEnable": "Activer stdio MCP…",
+    "needsApproval": "Approbation nécessaire — vérifiez la commande et les arguments avant de vous connecter",
+    "approved": "Approuvé",
+    "approve": "Approuver…",
+    "env": "Variables d'environnement",
+    "autoConnect": "Connexion automatique au démarrage",
+    "testConnection": "Tester la connexion",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "connect": "Connecter",
+    "disconnect": "Déconnecter",
+    "connected": "Connecté",
+    "connecting": "Connexion",
+    "disconnected": "Déconnecté",
+    "error": "Erreur",
+    "testSuccess": "OK — {{count}} outils",
+    "saveError": {
+      "forbiddenEnvKey": "La variable d'environnement {{keys}} n'est pas autorisée pour des raisons de sécurité.",
+      "unapprovedCommand": "Cette commande n'est pas dans la liste blanche intégrée. Contactez le support pour demander son ajout.",
+      "generic": "Échec de l'enregistrement de la connexion MCP : {{reason}}"
+    },
+    "testError": {
+      "notApproved": "La connexion n'est pas approuvée. Ouvrez l'éditeur de connexion et approuvez-la avant de tester.",
+      "envDisabled": "Stdio MCP est désactivé. Activez-le dans les paramètres avant de tester une connexion stdio.",
+      "generic": "Échec du test de connexion : {{reason}}"
+    }
+  },
+  "mail": {
+    "actions": {
+      "editDraft": "Modifier le brouillon",
+      "reply": "Répondre",
+      "replyAll": "Répondre à tous",
+      "forward": "Transférer",
+      "flag": "Marquer d'une étoile",
+      "unflag": "Retirer l'étoile",
+      "delete": "Supprimer",
+      "archive": "Archiver",
+      "markRead": "Marquer comme lu",
+      "markUnread": "Marquer comme non lu",
+      "moveToFolder": "Déplacer vers le dossier",
+      "spam": "Marquer comme spam",
+      "spamTo": "Vers Spam ({{junk}})",
+      "deleteToTrash": "Vers la corbeille ({{trash}})",
+      "deleteForever": "Supprimer définitivement",
+      "archiveTo": "Vers les archives ({{archive}})",
+      "archiveNotFound": "Dossier d'archives introuvable",
+      "junkNotFound": "Dossier spam introuvable",
+      "trashNotFound": "Corbeille introuvable",
+      "selectToAct": "Sélectionnez des e-mails pour effectuer des actions",
+      "moveNotInUnified": "Le déplacement n'est pas disponible dans la boîte unifiée",
+      "pin": "Épingler en haut",
+      "unpin": "Désépingler",
+      "print": "Imprimer",
+      "retry": "Réessayer",
+      "openInWindow": "Ouvrir dans une fenêtre",
+      "snooze": "Reporter",
+      "confirmPermanentDelete": "Ce message sera supprimé définitivement. Cette action est irréversible.",
+      "actionFailed": "L'action a échoué. Veuillez réessayer.",
+      "archived": "Archivé. Annuler",
+      "movedToTrash": "Déplacé vers la corbeille. Annuler",
+      "undo": "Annuler",
+      "undoFailed": "Échec de l'annulation.",
+      "toolbarLabel": "Actions sur l'e-mail"
+    },
+    "headers": {
+      "from": "De",
+      "to": "À",
+      "cc": "Cc",
+      "bcc": "Cci",
+      "date": "Date"
+    },
+    "recipients": {
+      "moreCount": "+{{count}} de plus"
+    },
+    "privacy": {
+      "imagesBlocked": "Les images externes sont bloquées pour protéger votre vie privée.",
+      "showImages": "Afficher les images"
+    },
+    "links": {
+      "title": "Ce lien semble suspect",
+      "textLabel": "Texte du lien",
+      "cancel": "Annuler",
+      "openAnyway": "Ouvrir quand même",
+      "warningIdn": "Le domaine utilise IDN/punycode : {{unicode}} (punycode : {{ascii}}).",
+      "warningIdnSimple": "Le domaine utilise IDN/punycode : {{ascii}}.",
+      "warningHttp": "Le lien utilise http (non chiffré).",
+      "warningMismatch": "Le texte du lien affiche {{shown}}, mais il mène en réalité à {{real}}.",
+      "warningRawExternalLink": "Ce lien a contourné le ré-écrivain d'URL standard — n'ouvrez que si vous faites confiance à la source."
+    },
+    "attachments": {
+      "download": "Télécharger la pièce jointe",
+      "unnamed": "Pièce jointe"
+    },
+    "list": {
+      "filter": "Filtrer",
+      "sort": "Trier",
+      "loadMore": "Charger plus",
+      "autoPagingDisabled": "Le chargement automatique est désactivé en mode filtre/tri"
+    },
+    "filters": {
+      "all": "Tous",
+      "unread": "Non lus",
+      "attachments": "Avec pièces jointes",
+      "flagged": "Avec étoile",
+      "fromTooltip": "Afficher tous les e-mails de {{from}}"
+    },
+    "date": {
+      "yesterday": "Hier"
+    },
+    "sort": {
+      "date": "Date",
+      "from": "Expéditeur",
+      "subject": "Objet"
+    },
+    "bulk": {
+      "selected": "{{count}} sélectionné(s)",
+      "clear": "Désélectionner"
+    },
+    "thread": {
+      "count": "+{{count}}",
+      "countTitle": "{{count}} messages dans la conversation",
+      "inConversation": "Conversation ({{count}})",
+      "confirmAction": "Appliquer aux {{count}} messages de cette conversation ?",
+      "confirmYes": "Appliquer à tous",
+      "markAllRead": "Marquer le fil comme lu",
+      "archiveThread": "Archiver le fil",
+      "deleteThread": "Supprimer le fil",
+      "reply": "Répondre",
+      "replyAll": "Répondre à tous",
+      "forward": "Transférer",
+      "snooze": "Mettre en attente",
+      "bulkConfirm": "Appliquer aux {{count}} messages de cette conversation ?",
+      "expandCard": "Développer le message",
+      "collapseCard": "Réduire le message",
+      "snippetEmpty": "(aperçu indisponible)",
+      "showQuoted": "Afficher le texte cité"
+    },
+    "pin": "Épingler",
+    "unpin": "Désépingler",
+    "pinned": "Épinglé",
+    "print": "Imprimer",
+    "context": {
+      "selected": "{{count}} messages sélectionnés"
+    }
+  },
+  "settings": {
+    "title": "Paramètres",
+    "unsavedWarning": "Vous avez des modifications non enregistrées. Fermer sans enregistrer ?",
+    "hint": "Personnalisez l'apparence et le comportement de l'application",
+    "tabs": {
+      "accounts": "Comptes",
+      "general": "Général",
+      "productivity": "Productivité",
+      "folders": "Dossiers",
+      "signature": "Signature",
+      "templates": "Modèles",
+      "rules": "Règles",
+      "about": "À propos"
+    },
+    "accounts": {
+      "title": "Comptes",
+      "hint": "Gérez les comptes mail connectés et choisissez le compte actif.",
+      "empty": "Aucun compte connecté",
+      "add": "Ajouter un compte",
+      "edit": "Modifier",
+      "openManager": "Ouvrir le gestionnaire de comptes",
+      "remove": "Supprimer",
+      "makeCurrent": "Définir comme actif",
+      "current": "Actif",
+      "confirmRemove": "Supprimer le compte {{label}} ? Le cache local de ce compte sera supprimé.",
+      "statusOnline": "en ligne",
+      "statusOffline": "hors ligne",
+      "customizeAvatar": "Personnaliser l'avatar",
+      "avatarMode": "Mode d'affichage",
+      "avatarInitials": "Lettres",
+      "avatarIcon": "Icône",
+      "avatarInitialsLabel": "Initiales personnalisées",
+      "avatarInitialsHint": "1–2 caractères",
+      "avatarIconLabel": "Choisir une icône",
+      "avatarColor": "Couleur",
+      "avatarPreview": "Aperçu",
+      "gravatarHint": "Utilise votre photo de profil gravatar.com pour {{email}}",
+      "gravatarNotFound": "Aucun Gravatar trouvé pour {{email}}. Créez-en un sur gravatar.com"
+    },
+    "sections": {
+      "general": "Général"
+    },
+    "badges": {
+      "title": "Badges de non-lus",
+      "hint": "Choisissez les dossiers affichant le compteur de messages non lus"
+    },
+    "folderPolicy": {
+      "title": "Politique de synchronisation des dossiers",
+      "hint": "Configurez la visibilité, les badges, la synchronisation des en-têtes et le mode hors ligne pour chaque dossier.",
+      "visible": "Afficher dans la barre latérale",
+      "hiddenNoSync": "Les dossiers masqués sont entièrement exclus de la synchronisation des en-têtes, du stockage hors ligne et des badges.",
+      "badges": "Inclure dans les badges de non-lus",
+      "headerSync": "Synchronisation des en-têtes",
+      "syncFull": "Tous les messages",
+      "syncOnOpen": "À l'ouverture",
+      "syncPeriod": "Par période",
+      "syncOff": "Désactivé",
+      "offline": "Mode hors ligne",
+      "offlineOff": "Désactivé",
+      "offlinePeriod": "Par période",
+      "offlineFull": "Tous les messages",
+      "days": "Jours"
+    },
+    "theme": {
+      "label": "Thème",
+      "light": "Clair",
+      "dark": "Sombre"
+    },
+    "language": {
+      "label": "Langue",
+      "en": "English",
+      "ru": "Русский",
+      "fr": "Français",
+      "de": "Deutsch",
+      "es": "Español",
+      "it": "Italiano"
+    },
+    "general": {
+      "defaultMailApp": "Définir comme application de messagerie par défaut",
+      "defaultMailAppHint": "Gérer les liens mailto: depuis les navigateurs et autres applications"
+    },
+    "bodyRetentionDays": {
+      "label": "Conserver le contenu complet pendant",
+      "hint": "S'applique aux dossiers en téléchargement complet. Les en-têtes et l'index de recherche sont conservés ; seuls les fichiers .eml sont supprimés pour libérer de l'espace.",
+      "option30": "30 jours",
+      "option90": "90 jours",
+      "option180": "180 jours",
+      "option365": "1 an",
+      "optionForever": "Toujours",
+      "confirmShrink": "{{count}} contenus de message (~{{mb}} Mo) seront supprimés du disque. Les en-têtes et l'index de recherche sont conservés. Continuer ?",
+      "confirmShrinkUnknown": "Impossible d'estimer l'impact. Certains contenus de messages seront supprimés du disque. Continuer quand même ?"
+    },
+    "productivity": {
+      "title": "Productivité",
+      "hint": "Fonctionnalités optionnelles pour un tri plus rapide",
+      "groupConversations": "Regrouper les messages en conversations",
+      "sortMode": "Trier les e-mails par",
+      "autoAdvance": "Après archivage/suppression",
+      "autoAdvanceOlder": "Ouvrir l'e-mail plus ancien",
+      "autoAdvanceNewer": "Ouvrir l'e-mail plus récent",
+      "autoAdvanceBackToList": "Retour à la liste",
+      "autoAdvanceOff": "Rester (ne rien faire)",
+      "trustedDomains": "Domaines de confiance",
+      "trustedDomainsHint": "Domaines qui ne déclencheront pas d'avertissement d'envoi erroné (un par ligne)"
+    },
+    "privacy": {
+      "alwaysLoadImages": "Toujours charger les images externes",
+      "gravatarInMail": "Afficher les photos des expéditeurs (Gravatar)",
+      "gravatarInMailHint": "Charge les photos de profil depuis gravatar.com pour les expéditeurs qui en ont une",
+      "darkModeEmails": "Mode sombre pour le contenu des e-mails",
+      "darkModeEmailsHint": "Inverse les couleurs des e-mails HTML en thème sombre pour un confort de lecture"
+    },
+    "appearance": {
+      "conversationOrder": {
+        "label": "Ordre de conversation",
+        "newestTop": "Plus récent en premier",
+        "oldestTop": "Plus ancien en premier"
+      }
+    },
+    "hotkeys": {
+      "preset": "Raccourcis clavier",
+      "gmail": "Gmail",
+      "outlook": "Outlook"
+    },
+    "sendDelay": {
+      "label": "Délai d'envoi",
+      "off": "Désactivé",
+      "seconds": "{{count}} sec"
+    },
+    "notifications": {
+      "enabled": "Notifications pour les nouveaux messages"
+    },
+    "sync": {
+      "imapIdle": "IMAP IDLE (mises à jour push)",
+      "interval": "Intervalle de synchronisation",
+      "intervalMinutes": "{{count}} min",
+      "periodicSync": "Synchronisation périodique des dossiers",
+      "periodicSyncHint": "Intervalle de synchronisation en arrière-plan pour les dossiers en mode complet/périodique"
+    },
+    "drafts": {
+      "sync": "Synchroniser les brouillons avec IMAP Drafts"
+    },
+    "folders": {
+      "title": "Dossiers",
+      "hint": "Associer les rôles standard aux dossiers du serveur. Si non sélectionné, la détection automatique est utilisée.",
+      "account": "Compte",
+      "loading": "Chargement des dossiers...",
+      "loadFailed": "Échec du chargement des dossiers : {{error}}",
+      "noAccount": "Connectez un compte pour configurer les dossiers",
+      "onlyInbox": "Seul INBOX est visible sur le serveur. Créez les dossiers nécessaires, puis sélectionnez-les ici.",
+      "notSet": "— non défini —",
+      "auto": "Auto : {{path}}",
+      "create": "Créer",
+      "createNew": "Créer un nouveau dossier...",
+      "createNewTitle": "Créer un nouveau dossier",
+      "folderNamePlaceholder": "Nom du dossier",
+      "creating": "Création...",
+      "createFolder": "Créer le dossier {{path}}",
+      "createExists": "Le dossier existe déjà"
+    },
+    "signature": {
+      "title": "Signature",
+      "hint": "Ajoutée automatiquement aux nouveaux messages",
+      "placeholder": "Saisissez votre signature..."
+    },
+    "identities": {
+      "tabLabel": "Identités",
+      "empty": "Aucune identité pour le moment",
+      "add": "Ajouter une identité",
+      "edit": "Modifier",
+      "delete": "Supprimer",
+      "setDefault": "Définir par défaut",
+      "defaultBadge": "Par défaut",
+      "displayNameLabel": "Nom affiché",
+      "emailLabel": "E-mail",
+      "signatureLabel": "Signature",
+      "defaultBccLabel": "Cci par défaut",
+      "saveError": "Échec de l'enregistrement des identités"
+    },
+    "templates": {
+      "title": "Modèles",
+      "hint": "Créez des modèles de messages réutilisables. Utilisez {name}, {email}, {date} comme variables.",
+      "name": "Nom du modèle",
+      "subject": "Objet",
+      "body": "Corps du message",
+      "shortcut": "Raccourci (optionnel)",
+      "add": "Ajouter un modèle",
+      "edit": "Modifier",
+      "delete": "Supprimer",
+      "save": "Enregistrer",
+      "confirmDelete": "Supprimer le modèle «{{name}}» ?",
+      "variables": "Variables disponibles : {name}, {email}, {date}",
+      "empty": "Aucun modèle. Cliquez sur «Ajouter un modèle» pour en créer un.",
+      "namePlaceholder": "Ex. Relance rapide",
+      "subjectPlaceholder": "Ex. Re: {subject}",
+      "bodyPlaceholder": "Ex. Bonjour {name}, merci de votre message…"
+    },
+    "offline": {
+      "title": "Mode hors ligne",
+      "hint": "Téléchargez les messages pour les lire sans connexion. Les originaux (EML) sont stockés séparément.",
+      "perFolderHint": "Le mode hors ligne est configuré par dossier dans l'onglet Dossiers. Seule la limite de taille globale est définie ici.",
+      "enabled": "Activer le mode hors ligne",
+      "syncDays": "Télécharger les messages des derniers (jours)",
+      "syncDaysAll": "0 = tous les messages",
+      "maxSizeKB": "Taille max. du message (Ko)",
+      "maxSizeHint": "0 = sans limite",
+      "folders": "Dossiers à synchroniser hors ligne",
+      "syncNow": "Synchroniser maintenant",
+      "syncing": "Synchronisation…",
+      "syncStarted": "Synchronisation lancée"
+    },
+    "rules": {
+      "title": "Règles de messagerie",
+      "hint": "Trier automatiquement le courrier entrant à l'aide de règles",
+      "add": "Ajouter une règle",
+      "name": "Nom de la règle",
+      "conditions": "Conditions",
+      "actions": "Actions",
+      "field": {
+        "from": "Expéditeur",
+        "to": "Destinataire",
+        "cc": "Cc",
+        "subject": "Objet",
+        "has_attachment": "Contient une pièce jointe"
+      },
+      "op": {
+        "contains": "contient",
+        "not_contains": "ne contient pas",
+        "equals": "est égal à",
+        "starts_with": "commence par",
+        "ends_with": "se termine par",
+        "matches_regex": "correspond au regex"
+      },
+      "action": {
+        "move": "Déplacer vers le dossier",
+        "archive": "Archiver",
+        "trash": "Mettre à la corbeille",
+        "mark_read": "Marquer comme lu",
+        "mark_starred": "Marquer d'une étoile",
+        "mark_spam": "Marquer comme spam"
+      },
+      "stopProcessing": "Arrêter le traitement des règles suivantes",
+      "enabled": "Activée",
+      "empty": "Aucune règle pour le moment. Ajoutez une règle pour trier automatiquement le courrier entrant.",
+      "deleteConfirm": "Supprimer cette règle ?",
+      "priority": "Priorité",
+      "account": "Compte",
+      "allAccounts": "Tous les comptes",
+      "andHint": "Toutes les conditions doivent correspondre (logique ET). Pour OU, créez des règles séparées.",
+      "test": "Tester sur les e-mails existants",
+      "testNoMatch": "Aucun e-mail ne correspond à ces conditions",
+      "testMatches": "{{count}} e-mails correspondraient :",
+      "applyToExisting": "Appliquer aux e-mails existants dans la boîte de réception",
+      "aiSection": "Règles IA",
+      "aiRequiresProvider": "Configurez un fournisseur IA dans l'onglet IA pour utiliser les règles IA",
+      "addCondition": "Ajouter une condition",
+      "addAction": "Ajouter une action",
+      "folderPlaceholder": "Nom du dossier",
+      "saveFailed": "Impossible d'enregistrer ou d'appliquer la règle. Veuillez réessayer.",
+      "conditionField": "Champ de condition",
+      "conditionOp": "Opérateur de condition",
+      "actionType": "Type d'action"
+    },
+    "aiRules": {
+      "title": "Règles IA",
+      "hint": "Utiliser l'IA pour trier les e-mails qui ne correspondent à aucune règle statique",
+      "add": "Ajouter une règle IA",
+      "name": "Nom de la règle",
+      "prompt": "Prompt (décrivez comment trier les e-mails)",
+      "promptPlaceholder": "Ex. : Si l'e-mail vient d'un recruteur, l'archiver. Les newsletters vont dans le dossier Newsletters.",
+      "allowedActions": "Actions autorisées",
+      "budget": "Budget quotidien (USD)",
+      "log": "Journal des actions",
+      "logEmpty": "Aucune action de règle IA pour le moment",
+      "enabled": "Activée",
+      "empty": "Aucune règle IA pour le moment",
+      "deleteConfirm": "Supprimer cette règle IA ?",
+      "budgetPerDay": "${{amount}}/day",
+      "enabledLimit": "Vous pouvez activer au maximum {{max}} règles IA par compte. Désactivez d'abord une autre règle."
+    },
+    "about": {
+      "title": "À propos de MailCopilot",
+      "version": "Version",
+      "website": "Site web",
+      "docs": "Documentation",
+      "sentryEnabled": "Envoyer les diagnostics et données d'utilisation anonymes",
+      "sentryHint": "Inclut les rapports de plantage, les métriques de performance et les événements d'utilisation anonymes (par exemple, quelles fonctionnalités sont utilisées). N'inclut jamais le contenu des messages, les adresses, les objets ou les noms de dossiers.",
+      "debugLogging": "Activer la journalisation détaillée",
+      "debugLoggingHint": "Écrit des journaux détaillés dans un fichier pour le dépannage. Les journaux sont stockés localement et ne sont jamais envoyés automatiquement.",
+      "system": {
+        "title": "Informations système",
+        "appVersion": "Version de l'application",
+        "channel": {
+          "dev": "dev",
+          "nightly": "nightly",
+          "stable": "stable"
+        },
+        "electron": "Electron",
+        "chromium": "Chromium",
+        "node": "Node.js",
+        "platform": "Plateforme",
+        "installPath": "Chemin d'installation",
+        "readOnly": "lecture seule",
+        "latestAvailable": "dernière disponible {{version}}"
+      },
+      "update": {
+        "title": "Mises à jour",
+        "autoDownload": "Télécharger automatiquement les mises à jour en arrière-plan",
+        "autoDownloadHint": "Si activé, les nouvelles versions se téléchargent silencieusement et vous invitent à redémarrer. Si désactivé, vous choisissez de télécharger chaque mise à jour.",
+        "cannotSelfUpdateHint": "Cette installation est en lecture seule (installation système). Les mises à jour nécessitent un administrateur.",
+        "checkNow": "Rechercher les mises à jour",
+        "checking": "Vérification…",
+        "upToDate": "Vous avez la dernière version",
+        "downloadVersion": "Télécharger {{version}}",
+        "downloadingPercent": "Téléchargement… {{percent}} %",
+        "restartToInstall": "Redémarrer pour installer",
+        "errorNetwork": "Erreur réseau — réessayez quand vous serez en ligne",
+        "errorPermission": "Permission refusée — administrateur requis",
+        "errorUnknown": "Échec de la mise à jour — voir les journaux pour les détails",
+        "unsupportedDev": "Les mises à jour sont désactivées dans cette version"
+      }
+    }
+  },
+  "account": {
+    "title": "Connecter un e-mail",
+    "editTitle": "Modifier le compte",
+    "hint": "Saisissez les paramètres IMAP/SMTP. Les mots de passe sont stockés dans le trousseau système (keytar).",
+    "editHint": "Modifier les paramètres IMAP/SMTP de ce compte.",
+    "tlsHint": "La vérification du certificat TLS est toujours activée. Si votre serveur mail utilise un certificat personnalisé, une invite de confiance apparaîtra lors du test de connexion.",
+    "tls": {
+      "unknown": "inconnu",
+      "pinConfirm": "Faire confiance à ce certificat TLS ?\n\nHôte : {{host}}:{{port}}\nSujet : {{subject}}\nÉmetteur : {{issuer}}\nSHA-256 : {{fingerprint}}\n\nUtilisez ceci uniquement si vous faites confiance à ce serveur mail.",
+      "title": "Épinglage de certificats TLS",
+      "hint": "Épinglez les certificats serveur pour une sécurité renforcée",
+      "noPins": "Aucun certificat épinglé",
+      "host": "Hôte",
+      "port": "Port",
+      "fingerprint": "Empreinte SHA-256",
+      "trustAnchor": "Ancre de confiance",
+      "anchorStored": "Certificat enregistré",
+      "anchorStoredHint": "Le certificat lui-même est enregistré : ce serveur est donc approuvé même si son certificat est auto-signé.",
+      "fingerprintOnly": "Empreinte seule",
+      "fingerprintOnlyHint": "Les épinglages marqués « Empreinte seule » conservent l’empreinte mais pas le certificat. C’est insuffisant pour un serveur auto-signé : il n’est approuvé qu’via l’avertissement de certificat affiché lors de la connexion.",
+      "created": "Ajouté",
+      "addPin": "Ajouter un pin",
+      "addPinTitle": "Épingler un certificat serveur",
+      "addPinHint": "Entrez le nom d'hôte et le port du serveur pour récupérer et épingler son certificat.",
+      "addPinAnchorWarning": "Un épinglage ajouté ici ne conserve que l’empreinte. Un serveur auto-signé ne se connectera toujours pas — approuvez-le plutôt dans l’avertissement de certificat affiché lors de la connexion.",
+      "fetchAndPin": "Récupérer et épingler",
+      "fetchError": "Impossible de récupérer le certificat : {{error}}"
+    },
+    "sections": {
+      "imap": "IMAP",
+      "smtp": "SMTP"
+    },
+    "fields": {
+      "account": "Compte",
+      "displayName": "Votre nom",
+      "email": "Adresse email (De)",
+      "host": "Hôte",
+      "port": "Port",
+      "user": "Utilisateur",
+      "emailAddress": "Email",
+      "smtpUser": "Utilisateur SMTP",
+      "password": "Mot de passe",
+      "smtpPassword": "Mot de passe SMTP",
+      "ssl": "SSL/TLS"
+    },
+    "actions": {
+      "new": "Nouveau compte",
+      "googleSignIn": "Se connecter avec Google",
+      "googleReauth": "Reconnecter Google",
+      "microsoftSignIn": "Se connecter avec Microsoft",
+      "microsoftReauth": "Reconnecter Microsoft",
+      "save": "Enregistrer",
+      "saveAndClose": "Enregistrer et fermer",
+      "setCurrent": "Définir comme actif",
+      "remove": "Supprimer",
+      "test": "Tester la connexion",
+      "autoconfig": "Configuration auto",
+      "back": "Retour",
+      "next": "Suivant",
+      "manual": "Configuration manuelle",
+      "connect": "Connecter"
+    },
+    "status": {
+      "ok": "Connexion réussie",
+      "saved": "Enregistré",
+      "removed": "Supprimé",
+      "current": "Compte actif défini",
+      "googleConnected": "Google connecté : {{email}}",
+      "microsoftConnected": "Microsoft connecté : {{email}}",
+      "tlsPinned": "Certificat de confiance enregistré pour {{host}}:{{port}}",
+      "currentLabel": "actif",
+      "autoconfigApplied": "Paramètres serveur détectés automatiquement ({{source}})",
+      "autoconfigManual": "Configuration automatique non trouvée. Veuillez saisir les paramètres manuellement."
+    },
+    "errors": {
+      "enterPassword": "Saisissez les mots de passe IMAP et SMTP pour tester la connexion",
+      "enterEmailPassword": "Saisissez l'e-mail et le mot de passe",
+      "imapSmtp": "IMAP : {{imap}}, SMTP : {{smtp}}",
+      "enterEmailForAutoconfig": "Saisissez l'e-mail pour lancer la configuration automatique",
+      "autoconfigNotFound": "Impossible de détecter les paramètres automatiquement",
+      "autoconfigFailed": "Erreur de configuration auto : {{error}}",
+      "tlsPinFetch": "Échec de la récupération du certificat TLS : {{error}}",
+      "googleOAuthFailed": "Échec de l'authentification Google",
+      "microsoftOAuthFailed": "Échec de l'authentification Microsoft"
+    },
+    "wizard": {
+      "actions": {
+        "imapSmtp": "Compte IMAP/SMTP"
+      },
+      "stepProvider": {
+        "title": "Ajouter un compte mail",
+        "hint": "Choisissez votre fournisseur de messagerie"
+      },
+      "stepType": {
+        "title": "Ajouter un compte mail",
+        "hint": "Choisissez la méthode de connexion"
+      },
+      "stepCredentials": {
+        "title": "E-mail et mot de passe"
+      },
+      "stepDetected": {
+        "title": "Paramètres serveur détectés"
+      },
+      "provider": {
+        "gmail": {
+          "label": "Gmail",
+          "desc": "Connexion via Google OAuth"
+        },
+        "outlook": {
+          "label": "Outlook / Microsoft 365",
+          "desc": "Connexion via Microsoft OAuth"
+        },
+        "generic": {
+          "label": "IMAP/SMTP générique",
+          "desc": "Tout fournisseur de messagerie avec accès IMAP/SMTP"
+        },
+        "comingSoon": "Bientôt disponible"
+      },
+      "smtpSeparate": "Le login/mot de passe SMTP est différent",
+      "imapDetected": "IMAP : {{host}}:{{port}}",
+      "smtpDetected": "SMTP : {{host}}:{{port}}"
+    },
+    "confirm": {
+      "remove": "Supprimer le compte {{label}} ? Le cache local sera supprimé.",
+      "removeDetailed": "Supprimer le compte {{label}} ?\n\nDonnées locales à supprimer :\n- Messages en cache : {{count}}\n- Fichiers locaux : {{size}}\n\nLes messages sur le serveur ne seront pas supprimés."
+    }
+  },
+  "compose": {
+    "title": "Nouveau message",
+    "from": "De",
+    "to": "À",
+    "cc": "Cc",
+    "bcc": "Cci",
+    "showCcBcc": "Cc/Cci",
+    "subject": "Objet",
+    "text": "Texte du message...",
+    "identity": {
+      "selectorLabel": "Identité d'envoi",
+      "autoMatched": "Détectée depuis le destinataire"
+    },
+    "contacts": {
+      "removeRecipient": "Supprimer le destinataire"
+    },
+    "actions": {
+      "attach": "Joindre",
+      "removeAttachment": "Supprimer la pièce jointe",
+      "send": "Envoyer",
+      "schedule": "Planifier",
+      "sending": "Envoi en cours...",
+      "sendAndArchive": "Envoyer et archiver",
+      "moreOptions": "Plus d'options"
+    },
+    "status": {
+      "sent": "Envoyé !",
+      "scheduled": "Message en file d'attente ({{seconds}} sec)",
+      "scheduledAt": "Message planifié pour {{at}}",
+      "draftRestored": "Brouillon restauré",
+      "draftSynced": "Brouillon synchronisé",
+      "sentAndArchived": "Envoyé et archivé !"
+    },
+    "schedule": {
+      "laterToday": "Plus tard aujourd'hui",
+      "tomorrowMorning": "Demain matin (09:00)",
+      "mondayMorning": "Lundi matin (09:00)",
+      "custom": "Choisir la date et l'heure...",
+      "prompt": "Saisissez la date et l'heure au format YYYY-MM-DDTHH:mm",
+      "dateTime": "Date et heure",
+      "apply": "Planifier",
+      "cancel": "Annuler"
+    },
+    "templates": {
+      "unknownSender": "Expéditeur inconnu",
+      "unknownDate": "date inconnue",
+      "replyIntro": "Le {{date}}, {{from}} a écrit :",
+      "replyIntroNoDate": "{{from}} a écrit :",
+      "forwardHeader": "---------- Message transféré ----------",
+      "forwardFrom": "De : {{from}}",
+      "forwardDate": "Date : {{date}}",
+      "forwardSubject": "Objet : {{subject}}",
+      "forwardTo": "À : {{to}}",
+      "title": "Modèles",
+      "empty": "Aucun modèle. Créez-les dans les Paramètres."
+    },
+    "errors": {
+      "noAccount": "Le compte n'est pas configuré",
+      "sendFailed": "Erreur d'envoi : {{error}}",
+      "invalidDate": "Date/heure invalide",
+      "fileTooLarge": "Le fichier « {{name}} » est trop volumineux ({{size}}). Maximum : {{max}}",
+      "archiveFailed": "Erreur d'archivage : {{error}}"
+    },
+    "misdirection": {
+      "externalDomain": "Vous envoyez à un domaine externe ({{domains}}). Êtes-vous sûr ?",
+      "newRecipients": "Vous avez ajouté des destinataires absents du message original : {{recipients}}. Continuer ?",
+      "confirm": "Envoyer quand même",
+      "cancel": "Annuler"
+    }
+  },
+  "notifications": {
+    "newMail": "Nouveau message",
+    "sendFailed": "Erreur d'envoi"
+  },
+  "notificationCenter": {
+    "title": "Notifications",
+    "markAllRead": "Tout marquer comme lu",
+    "empty": "Aucune notification",
+    "followUpDue": "Rappel de suivi",
+    "sendFailed": "Échec de l'envoi",
+    "dismiss": "Ignorer"
+  },
+  "shortcuts": {
+    "title": "Raccourcis clavier",
+    "navigation": "Navigation",
+    "actions": "Actions",
+    "general": "Général",
+    "nextPrev": "Message suivant / précédent",
+    "open": "Ouvrir le message",
+    "backToList": "Retour à la liste",
+    "focusSearch": "Focus sur la recherche",
+    "goInbox": "Aller à la boîte de réception",
+    "goSent": "Aller aux envoyés",
+    "goDrafts": "Aller aux brouillons",
+    "goStarred": "Aller aux messages étoilés",
+    "compose": "Nouveau message",
+    "reply": "Répondre",
+    "replyAll": "Répondre à tous",
+    "forward": "Transférer",
+    "star": "Ajouter / retirer l'étoile",
+    "archive": "Archiver",
+    "markUnread": "Marquer comme non lu",
+    "markRead": "Marquer comme lu",
+    "spam": "Marquer comme spam",
+    "selectToggle": "Sélectionner / désélectionner",
+    "move": "Déplacer vers le dossier",
+    "undo": "Annuler la dernière action",
+    "delete": "Supprimer",
+    "pin": "Épingler / désépingler",
+    "print": "Imprimer",
+    "clearSelection": "Effacer la sélection",
+    "commandPalette": "Ouvrir la palette de commandes",
+    "showHelp": "Afficher les raccourcis clavier",
+    "contextMenuTitle": "Menu contextuel",
+    "contextMenuHint": "Actions rapides sur le message (répondre, archiver, déplacer…)"
+  },
+  "commandPalette": {
+    "placeholder": "Saisissez une commande...",
+    "ariaLabel": "Palette de commandes",
+    "empty": "Aucune commande trouvée",
+    "commands": {
+      "compose": "Nouveau message",
+      "sync": "Synchroniser la vue",
+      "focusSearch": "Focus sur la recherche",
+      "openSettings": "Ouvrir les paramètres",
+      "goInbox": "Aller à la boîte de réception",
+      "goSent": "Aller aux envoyés",
+      "goDrafts": "Aller aux brouillons",
+      "goOutbox": "Aller à la boîte d'envoi",
+      "goSnoozed": "Aller aux messages en pause",
+      "goFollowUps": "Aller aux Suivis",
+      "goReadLater": "Aller à Lire plus tard",
+      "goStarred": "Afficher les messages étoilés",
+      "goUnified": "Aller à la boîte de réception unifiée",
+      "enableThreads": "Activer le regroupement par conversation",
+      "disableThreads": "Désactiver le regroupement par conversation",
+      "switchAccount": "Basculer vers {{account}}",
+      "aiSummarize": "IA : Résumer",
+      "aiReply": "IA : Préparer la réponse",
+      "aiNewChat": "IA : Nouveau chat",
+      "aiOpenPanel": "IA : Ouvrir le panneau"
+    }
+  },
+  "ai": {
+    "panel": {
+      "title": "Assistant IA",
+      "newChat": "Nouveau chat",
+      "close": "Fermer",
+      "stop": "Arrêter",
+      "thinking": "Réflexion...",
+      "usingTool": "Utilisation de l'outil : {{tool}}...",
+      "streaming": "Génération...",
+      "placeholder": "Posez une question sur votre courrier...",
+      "send": "Envoyer",
+      "sources": "Sources",
+      "costTooltip": "Coût de la requête : {{cost}}",
+      "sessionCostTooltip": "Coût de la session : {{cost}}"
+    },
+    "onboarding": {
+      "title": "Assistant IA",
+      "description": "L'assistant intégré vous aide avec votre courrier :",
+      "features": {
+        "summarize": "Résumé des e-mails",
+        "drafts": "Brouillons de réponses",
+        "search": "Recherche et analyse",
+        "digest": "Résumé quotidien"
+      },
+      "chooseProvider": "Choisissez le mode de connexion :",
+      "subscription": "Abonnement Claude",
+      "subscriptionHint": "Pro/Max — si vous êtes déjà autorisé via CLI",
+      "apiKey": "Clé API",
+      "apiKeyHint": "Facturation par token",
+      "configure": "Configurer dans les Paramètres"
+    },
+    "privacy": {
+      "audit": {
+        "title": "Confidentialité et audit",
+        "hint": "Journal par requête de l'activité IA : fournisseur, jetons, encapsulation du contenu non fiable et blocages de sortie. Les entrées supprimées logiquement sont masquées dans cette vue, mais restent physiquement en base de données jusqu'à ce que la rotation (limite de 10 000 lignes) supprime les plus anciennes.",
+        "period": "Période",
+        "periodToday": "Aujourd'hui",
+        "periodWeek": "7 derniers jours",
+        "periodMonth": "30 derniers jours",
+        "refresh": "Actualiser",
+        "aggregateTitle": "Utilisation par fournisseur",
+        "aggregateEmpty": "Aucune requête IA sur cette période. Dès que vous utilisez l'assistant, chaque fournisseur (ex. Claude, OpenAI) apparaît ici avec l'utilisation des tokens et le coût.",
+        "logTitle": "Requêtes récentes",
+        "logEmpty": "Aucune entrée d'audit pour le moment. Chaque message envoyé à l'assistant IA est enregistré ici : fournisseur, modèle, tokens et indication si le contenu email a été enveloppé pour protéger la confidentialité.",
+        "exportJson": "Exporter JSON",
+        "exportCsv": "Exporter CSV",
+        "clearAll": "Tout effacer",
+        "deleteRow": "Marquer cette entrée supprimée",
+        "prev": "Précédent",
+        "next": "Suivant",
+        "pageOf": "Page {{page}} sur {{total}}",
+        "notAvailable": "n/d",
+        "col": {
+          "timestamp": "Heure",
+          "provider": "Fournisseur",
+          "model": "Modèle",
+          "goal": "Objectif",
+          "tool": "Outil",
+          "tokensIn": "Jetons d'entrée",
+          "tokensOut": "Jetons de sortie",
+          "cost": "Coût",
+          "wrapped": "Encapsulé",
+          "wrappedTooltip": "Nombre de fois où le contenu d'e-mail non fiable a été encapsulé par les marqueurs anti-injection dans cette requête.",
+          "blocked": "Bloqué",
+          "blockedTooltip": "Nombre de tentatives d'appels sortants bloquées par la passerelle de confidentialité dans cette requête.",
+          "outcome": "Résultat",
+          "requests": "Requêtes",
+          "actions": "Actions"
+        },
+        "outcome": {
+          "ok": "OK",
+          "error": "Erreur",
+          "aborted": "Annulé"
+        }
+      },
+      "title": "Avis de confidentialité IA",
+      "description": "MailCopilot IA traite le contenu de vos e-mails de manière sécurisée. En acceptant, vous acceptez de partager les données d'e-mail nécessaires avec le fournisseur IA configuré uniquement pour l'assistance. Vous pouvez révoquer ce consentement à tout moment dans les Paramètres.",
+      "accept": "Accepter",
+      "cancel": "Annuler"
+    },
+    "confirmation": {
+      "apply": "Appliquer",
+      "applied": "Appliqué",
+      "cancel": "Annuler",
+      "account": "{{email}}",
+      "accountFallback": "Compte #{{accountId}}",
+      "crossAccount_one": "{{count}} compte",
+      "crossAccount_other": "{{count}} comptes",
+      "folder": "Dossier : {{folder}}",
+      "emailCount_one": "{{count}} e-mail",
+      "emailCount_other": "{{count}} e-mails",
+      "folderCount_one": "{{count}} dossier",
+      "folderCount_other": "{{count}} dossiers",
+      "errorPreviewMissing": "Cette action n'est plus disponible. Elle a peut-être expiré ou déjà été traitée. Demandez à l'IA de la préparer à nouveau.",
+      "proceedPrompt": "J'ai confirmé l'action. Veuillez continuer en utilisant confirmation_token={{token}}.",
+      "kinds": {
+        "mail_action": {
+          "archive": "Archiver les e-mails",
+          "trash": "Déplacer à la corbeille",
+          "mark_read": "Marquer comme lus"
+        },
+        "unsubscribe": "Se désabonner",
+        "send_email": "Envoyer l'e-mail",
+        "move_email": "Déplacer les e-mails",
+        "snooze_email": "Reporter les e-mails",
+        "unsnooze_email": "Annuler le report",
+        "flag_email": {
+          "star": "Marquer d'une étoile",
+          "unstar": "Retirer l'étoile"
+        },
+        "mark_read_later": {
+          "add": "Ajouter à « Lire plus tard »",
+          "remove": "Retirer de « Lire plus tard »"
+        },
+        "add_followup": "Ajouter un rappel de suivi",
+        "dismiss_followup": "Annuler le rappel",
+        "create_mail_rule": "Créer une règle",
+        "update_mail_rule": "Modifier la règle",
+        "delete_mail_rule": "Supprimer la règle"
+      }
+    },
+    "egress": {
+      "policy_label": "Accès web de l'IA",
+      "blocked": "Accès web désactivé tant que le contenu d'e-mail est en contexte",
+      "allow_once": "Autoriser l'accès web pour ce tour",
+      "allowed_this_turn": "Accès web autorisé pour ce tour",
+      "policy_section_hint": "Contrôle quand l'IA peut utiliser des outils externes (recherche web, récupération, MCP externe) tant que le contenu d'e-mail est en contexte.",
+      "policy_deny": "Refuser par défaut (recommandé)",
+      "policy_deny_hint": "Bloquer l'accès web tant que le contenu d'e-mail est en contexte. Autoriser tour par tour via la boîte de confirmation.",
+      "policy_ask": "Demander à chaque tour",
+      "policy_ask_hint": "Identique à « refuser par défaut » : opt-in explicite par tour via la boîte de confirmation.",
+      "policy_allow": "Toujours autoriser",
+      "policy_allow_hint": "L'IA peut appeler librement les outils web même avec du contenu d'e-mail en contexte.",
+      "policy_allow_warning": "Attention : l'IA peut envoyer le contenu des e-mails à des services externes.",
+      "shieldTooltip": "L'accès web de l'IA est intercepté — chaque appel sortant nécessite votre approbation",
+      "confirmTitle": "L'IA veut accéder à Internet",
+      "confirmAllow": "Autoriser",
+      "confirmDeny": "Refuser",
+      "action": {
+        "webSearch": "Recherche web :",
+        "webFetch": "Récupération d'URL :",
+        "externalTool": "Appel d'outil externe"
+      },
+      "timeout": "Délai dépassé — accès refusé"
+    },
+    "chips": {
+      "summarize": "Résumer",
+      "reply": "Répondre",
+      "summarizeThread": "Résumer la conversation",
+      "keyDecisions": "Décisions clés",
+      "digest": "Résumé du jour",
+      "needsReply": "Nécessite une réponse ?",
+      "tasksDeadlines": "Tâches et échéances",
+      "nlSearch": "Recherche intelligente",
+      "triage": "Classer",
+      "snooze": "Reporter",
+      "flag": "Étoile",
+      "followup": "Suivi",
+      "triageInbox": "Classer la boîte",
+      "gtdClassify": "Que faire ?",
+      "gtdTriage": "Tri GTD",
+      "weeklyReview": "Revue hebdo",
+      "cleanupAll": "Tout nettoyer",
+      "scopeFolder": "Actions dossier",
+      "scopeEmail": "Actions e-mail"
+    },
+    "errors": {
+      "authCheck": "Échec de la vérification d'autorisation",
+      "errorPrefix": "Erreur",
+      "notConfigured": "Le fournisseur IA n'est pas configuré. Configurez-le dans les Paramètres.",
+      "invalidKey": "Clé API invalide. Vérifiez votre clé dans Paramètres → IA.",
+      "noSubscription": "Autorisez-vous via `claude login` dans le terminal.",
+      "quotaExceeded": "Limite de messages atteinte. Réessayez plus tard ou passez à une clé API.",
+      "requestBudgetStopped": "Requête interrompue : la limite de coût par requête a été atteinte. Modifiez-la dans Paramètres → IA.",
+      "offline": "L'assistant IA n'est pas disponible hors ligne.",
+      "timeout": "Délai d'attente dépassé. Réessayez.",
+      "changeProvider": "Changer de fournisseur"
+    },
+    "prompts": {
+      "summarize": "Résume cet e-mail",
+      "reply": "Prépare une réponse à cet e-mail",
+      "summarizeThread": "Résume cette conversation",
+      "keyDecisions": "Extrais les décisions clés de cette conversation",
+      "digest": "Fais un résumé des e-mails non lus d'aujourd'hui",
+      "needsReply": "Quels e-mails nécessitent une réponse ?",
+      "tasksDeadlines": "Extrais les tâches, responsables et échéances du contexte courant",
+      "nlSearch": "Trouve des e-mails à partir d'une demande en langage naturel et affiche les opérateurs de recherche utilisés",
+      "triage": "Classe cet e-mail : catégorise et suggère des actions (archiver, reporter, marquer, suivi)",
+      "triageThread": "Classe ce fil : résume et suggère des actions pour chaque message",
+      "snooze": "Dois-je reporter cet e-mail ? Suggère quand y revenir",
+      "flag": "Dois-je marquer cet e-mail d'une étoile ? Explique pourquoi",
+      "followup": "Crée un rappel de suivi pour cet e-mail s'il nécessite une réponse",
+      "triageInbox": "Classe ma boîte de réception : catégorise les non-lus et suggère des actions",
+      "gtdClassify": "Classe cet e-mail selon la méthode GTD : est-il actionnable ? Si c'est moins de 2 minutes, suggère une action rapide. Sinon : reporter (snooze), déléguer (transférer + suivi), archiver, marquer d'une étoile ou mettre en lecture ultérieure.",
+      "gtdTriage": "Passe en revue tous les e-mails non lus de ce dossier selon la méthode GTD. Classe chaque e-mail : archive les newsletters et notifications, étoile les éléments actionnables, reporte ceux liés à une date, crée des suivis pour les éléments délégués, et marque les lectures longues pour plus tard. Affiche le plan complet groupé par type d'action avant d'exécuter quoi que ce soit.",
+      "weeklyReview": "Revue hebdomadaire GTD : vérifie les suivis en retard, les e-mails reportés arrivant à échéance, les éléments étoilés non lus, les compteurs de non-lus par dossier, et suggère des actions de nettoyage. Scanne tous les comptes.",
+      "cleanupAll": "Scanne les boîtes de réception de tous les comptes et propose un plan de nettoyage : archive les anciennes newsletters et notifications, signale les éléments suspects de spam, affiche le plan groupé par type d'action. N'agis pas sans ma confirmation."
+    },
+    "settings": {
+      "tab": "IA",
+      "provider": "Fournisseur",
+      "providerSubscription": "Abonnement Claude",
+      "providerApi": "Clé API Anthropic",
+      "providerOpenAI": "Clé API OpenAI",
+      "providerGemini": "Clé API Google Gemini",
+      "providerRag": "Backend RAG d'entreprise",
+      "apiKey": "Clé API",
+      "apiKeyPlaceholder": "sk-ant-...",
+      "apiKeyPlaceholderOpenAI": "sk-...",
+      "apiKeyPlaceholderGemini": "AIza...",
+      "openAiBaseUrl": "URL de base",
+      "openAiBaseUrlPlaceholder": "https://openrouter.ai/api",
+      "openAiBaseUrlHint": "Laisser vide pour api.openai.com",
+      "customModelPlaceholder": "p. ex. gpt-4o, claude-3.5-sonnet",
+      "model": "Modèle",
+      "modelCorpDefault": "Entreprise par défaut",
+      "modelCorpFast": "Entreprise rapide",
+      "modelCorpReasoning": "Entreprise reasoning",
+      "checkConnection": "Vérifier la connexion",
+      "connectionOk": "Connecté",
+      "connectionFailed": "Échec de connexion : {{error}}",
+      "sendKey": "Touche d'envoi",
+      "sendKeyEnter": "Entrée",
+      "sendKeyCtrlEnter": "Ctrl+Entrée",
+      "locale": "Langue des réponses",
+      "localeAuto": "Auto",
+      "localeRu": "Russe",
+      "localeEn": "Anglais",
+      "showSources": "Afficher les sources dans les réponses",
+      "dailyBudgetUsd": "Budget quotidien (USD)",
+      "monthlyBudgetUsd": "Budget mensuel (USD)",
+      "maxTurns": "Étapes max par requête",
+      "maxBudgetPerRequest": "Budget max par requête (USD)",
+      "proxyUrl": "Proxy HTTP",
+      "proxyUrlPlaceholder": "http://proxy.company.local:3128",
+      "proxyUrlHint": "Facultatif. Utilisé pour toutes les requêtes IA.",
+      "title": "Assistant IA",
+      "hint": "Configurez le fournisseur et les préférences de l'assistant IA",
+      "chooseProvider": "Choisissez le mode de connexion :",
+      "back": "Retour",
+      "resetProvider": "Réinitialiser la configuration",
+      "resetConfirm": "Réinitialiser la configuration AI ? La clé API sera supprimée.",
+      "checkRequired": "Vérifiez d'abord la connexion",
+      "memory": {
+        "title": "Mémoire IA",
+        "hint": "Contexte personnel que l'IA mémorisera pour toutes les conversations (max 4000 caractères).",
+        "placeholder": "Exemple :\n- Je travaille chez Acme Corp en tant que chef de projet\n- Mon fuseau horaire est UTC+3\n- Je préfère les emails concis",
+        "clear": "Effacer"
+      },
+      "threadSummary": {
+        "title": "Résumé IA du fil",
+        "label": "Résumer les longs fils avec l'IA",
+        "help": "Lorsque vous ouvrez un fil de trois messages ou plus, afficher un résumé IA d'une ligne au-dessus des messages, extensible en cinq points clés. Désactivé par défaut ; activé par compte."
+      },
+      "instantReply": {
+        "title": "Réponse instantanée",
+        "label": "Proposer des brouillons de réponse avec l'IA",
+        "help": "Ajoute un bouton Réponse instantanée sur le message ouvert qui rédige deux ou trois réponses prêtes à modifier. Rien n'est envoyé automatiquement. Désactivé par défaut ; activé par compte."
+      }
+    },
+    "threadSummary": {
+      "title": "Résumé IA",
+      "loading": "Résumé du fil…",
+      "expand": "Afficher les points clés",
+      "collapse": "Masquer les points clés",
+      "retry": "Réessayer",
+      "refusal": {
+        "budget": "Budget IA quotidien atteint — le résumé est suspendu jusqu'à sa réinitialisation.",
+        "noProvider": "Configurez un fournisseur IA dans les paramètres pour résumer les fils.",
+        "providerError": "Impossible de résumer ce fil pour le moment."
+      }
+    },
+    "quickAction": {
+      "preset": {
+        "improve": "Améliorer",
+        "shorter": "Raccourcir",
+        "formal": "Formel",
+        "grammar": "Corriger la grammaire"
+      },
+      "diff": {
+        "title": "Vérifier la réécriture IA",
+        "before": "Avant",
+        "after": "Après",
+        "replace": "Remplacer",
+        "insert": "Insérer au curseur",
+        "cancel": "Annuler"
+      },
+      "refusal": {
+        "budget": "Budget IA quotidien atteint — la réécriture est suspendue jusqu'à sa réinitialisation.",
+        "noProvider": "Configurez un fournisseur IA dans les paramètres pour réécrire les brouillons.",
+        "providerError": "Impossible de réécrire ce brouillon pour le moment.",
+        "emptyInput": "Écrivez d'abord du texte, puis choisissez une action rapide."
+      }
+    },
+    "instantReply": {
+      "trigger": "Réponse instantanée",
+      "useThisDraft": "Utiliser ce brouillon",
+      "refusal": {
+        "budget": "Budget IA quotidien atteint — les réponses instantanées sont suspendues jusqu'à sa réinitialisation.",
+        "noProvider": "Configurez un fournisseur IA dans les paramètres pour rédiger des réponses.",
+        "providerError": "Impossible de rédiger des réponses pour le moment."
+      }
+    },
+    "sidebar": {
+      "ai": "Assistant IA"
+    },
+    "sessions": {
+      "title": "Historique des chats",
+      "history": "Historique",
+      "empty": "Aucune conversation sauvegardée",
+      "untitled": "Sans titre",
+      "delete": "Supprimer la conversation",
+      "clearAll": "Tout effacer"
+    }
+  },
+  "feedback": {
+    "title": "Signaler un problème",
+    "hint": "Aidez à améliorer MailCopilot en signalant les problèmes aux développeurs.",
+    "reportBug": "Signaler un bug",
+    "placeholder": "Décrivez le problème...",
+    "emailPlaceholder": "Votre e-mail (facultatif)",
+    "send": "Envoyer",
+    "thanks": "Merci pour vos commentaires !",
+    "disabledHint": "L'envoi de rapports d'erreurs est désactivé. Visitez notre site pour obtenir de l'aide."
+  },
+  "attachments": {
+    "previewAvailable": "Aperçu disponible",
+    "downloadAction": "Télécharger la pièce jointe : {{name}}",
+    "iconLabel": {
+      "pdf": "Document PDF",
+      "image": "Image",
+      "archive": "Archive",
+      "doc": "Document",
+      "spreadsheet": "Feuille de calcul",
+      "presentation": "Présentation",
+      "text": "Fichier texte",
+      "eml": "E-mail",
+      "generic": "Fichier"
+    }
+  },
+  "invite": {
+    "title": "Invitation à une réunion",
+    "organizer": "Organisateur",
+    "location": "Lieu",
+    "when": "Quand",
+    "accept": "Accepter",
+    "tentative": "Peut-être",
+    "decline": "Refuser",
+    "responding": "Envoi de la réponse…",
+    "responseAccepted": "Vous avez accepté cette invitation",
+    "responseTentative": "Vous avez répondu « Peut-être »",
+    "responseDeclined": "Vous avez refusé cette invitation",
+    "responseFailed": "Échec de l'envoi de la réponse : {{error}}",
+    "noOrganizer": "Aucun organisateur spécifié",
+    "cancelled": "Cet événement a été annulé",
+    "notActionable": "Cette invitation ne nécessite pas de réponse",
+    "originalTimezone": "Initialement planifié dans {{tzid}}"
+  }
+}

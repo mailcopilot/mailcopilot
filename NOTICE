@@ -1,0 +1,189 @@
+MailCopilot
+Copyright (C) 2024-2026 MailCopilot Team <team@mailcopilot.io>
+
+This product is licensed under the GNU Affero General Public License v3.0
+(AGPL-3.0-only). See the LICENSE file for the full license text.
+
+================================================================================
+THIRD-PARTY SOFTWARE NOTICES
+================================================================================
+
+MailCopilot includes or depends on the following third-party software. Each
+component is distributed under its own license terms as listed below.
+
+--------------------------------------------------------------------------------
+Runtime Dependencies
+--------------------------------------------------------------------------------
+
+better-sqlite3 — MIT License
+  Copyright (c) 2017 Joshua Wise
+  https://github.com/WiseLibs/better-sqlite3
+
+imapflow — MIT License
+  Copyright (c) 2020-2024 Postal Systems OU
+  https://github.com/postalsys/imapflow
+
+keytar — MIT License
+  Copyright (c) 2013 GitHub Inc.
+  https://github.com/atom/node-keytar
+
+nodemailer — MIT-0 License
+  Copyright (c) 2011-2023 Andris Reinman
+  https://github.com/nodemailer/nodemailer
+
+pdfjs-dist — Apache License 2.0
+  Copyright (c) Mozilla Foundation
+  https://github.com/mozilla/pdf.js
+
+@napi-rs/canvas — MIT License
+  Copyright (c) 2020 lynweklm@gmail.com
+  https://github.com/Brooooooklyn/canvas
+
+ai (Vercel AI SDK) — Apache License 2.0
+  Copyright (c) Vercel, Inc.
+  https://github.com/vercel/ai
+
+@ai-sdk/openai-compatible — Apache License 2.0
+  Copyright (c) Vercel, Inc.
+  https://github.com/vercel/ai
+
+@ai-sdk/mcp — Apache License 2.0
+  Copyright (c) Vercel, Inc.
+  https://github.com/vercel/ai
+
+@modelcontextprotocol/sdk — MIT License
+  Copyright (c) Anthropic PBC
+  https://github.com/modelcontextprotocol/typescript-sdk
+
+ical.js — Mozilla Public License 2.0 (MPL-2.0)
+  Copyright (c) Mozilla Foundation and ical.js contributors
+  https://github.com/kewisch/ical.js
+
+--------------------------------------------------------------------------------
+Bundled Dependencies (included in Electron application)
+--------------------------------------------------------------------------------
+
+Electron — MIT License
+  Copyright (c) Electron contributors
+  Copyright (c) 2013-2020 GitHub Inc.
+  https://github.com/electron/electron
+
+React — MIT License
+  Copyright (c) Meta Platforms, Inc. and affiliates
+  https://github.com/facebook/react
+
+React DOM — MIT License
+  Copyright (c) Meta Platforms, Inc. and affiliates
+  https://github.com/facebook/react
+
+DOMPurify — (MPL-2.0 OR Apache-2.0)
+  Copyright (c) Dr.-Ing. Mario Heiderich, Cure53
+  https://github.com/cure53/DOMPurify
+  Used under the Apache License 2.0.
+
+electron-store — MIT License
+  Copyright (c) Sindre Sorhus
+  https://github.com/sindresorhus/electron-store
+
+electron-log — MIT License
+  Copyright (c) Alexey Prokhorov
+  https://github.com/megahertz/electron-log
+
+electron-updater — MIT License
+  Copyright (c) Vladimir Krivosheev
+  https://github.com/electron-userland/electron-builder
+
+i18next — MIT License
+  Copyright (c) Jan Muhlemann
+  https://github.com/i18next/i18next
+
+react-i18next — MIT License
+  Copyright (c) Jan Muhlemann
+  https://github.com/i18next/react-i18next
+
+lucide-react — ISC License
+  Copyright (c) Eric Fennis
+  https://github.com/lucide-icons/lucide
+
+zod — MIT License
+  Copyright (c) Colin McDonnell
+  https://github.com/colinhacks/zod
+
+undici — MIT License
+  Copyright (c) Node.js contributors
+  https://github.com/nodejs/undici
+
+react-markdown — MIT License
+  Copyright (c) Espen Hovlandsdal
+  https://github.com/remarkjs/react-markdown
+
+remark-gfm — MIT License
+  Copyright (c) Titus Wormer
+  https://github.com/remarkjs/remark-gfm
+
+react-virtuoso — MIT License
+  Copyright (c) Petyo Ivanov
+  https://github.com/petyosi/react-virtuoso
+
+mailparser — MIT License
+  Copyright (c) Andris Reinman
+  https://github.com/nodemailer/mailparser
+
+fast-xml-parser — MIT License
+  Copyright (c) Amit Gupta
+  https://github.com/NaturalIntelligence/fast-xml-parser
+
+@sentry/node — MIT License
+  Copyright (c) Sentry
+  https://github.com/getsentry/sentry-javascript
+
+@sentry/react — MIT License
+  Copyright (c) Sentry
+  https://github.com/getsentry/sentry-javascript
+
+--------------------------------------------------------------------------------
+Special Notice: Anthropic Claude Agent SDK
+--------------------------------------------------------------------------------
+
+@anthropic-ai/claude-agent-sdk — Proprietary (Anthropic Terms of Service)
+  Copyright (c) Anthropic PBC
+  https://github.com/anthropics/claude-code
+
+  The AI assistant functionality uses the Anthropic Claude Agent SDK, which is
+  distributed under Anthropic's proprietary license (Commercial Terms / Consumer
+  Terms). This SDK is NOT covered by the AGPL-3.0 license of MailCopilot.
+
+  The SDK provides the query() function used for Claude-based providers
+  (subscription and anthropic-api). MCP tools are defined using the standard
+  @modelcontextprotocol/sdk (MIT). OpenAI-compatible providers use the Vercel
+  AI SDK (Apache-2.0) and do not depend on this proprietary SDK.
+
+  MailCopilot functions as an email client without AI features if the SDK
+  is not available.
+
+  Use of the Claude Agent SDK is subject to Anthropic's terms:
+  https://www.anthropic.com/legal/commercial-terms
+  https://www.anthropic.com/legal/consumer-terms
+
+--------------------------------------------------------------------------------
+Transitive Dependencies with Non-Permissive Licenses
+--------------------------------------------------------------------------------
+
+@img/sharp-libvips-* — LGPL-3.0-or-later
+  Copyright (c) libvips contributors
+  Transitive dependency of @anthropic-ai/claude-agent-sdk.
+  Distributed as a prebuilt native binary (dynamic linking).
+  LGPL-3.0 is compatible with AGPL-3.0.
+
+@sentry/cli — FSL-1.1-MIT (Functional Source License)
+  Copyright (c) Sentry
+  Build-time only dependency (source map upload). Not included in
+  distributed binaries. Transitions to MIT after 2 years.
+
+================================================================================
+
+For the complete list of transitive dependencies and their licenses, run:
+  npx license-checker --summary
+
+The full license text for each dependency can be found in its respective
+directory under node_modules/.
