@@ -53,7 +53,7 @@
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.21",
     "@ai-sdk/openai-compatible": "^2.0.30",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@napi-rs/canvas": "^0.1.92",
     "ai": "^6.0.90",
     "better-sqlite3": "^12.6.2",
