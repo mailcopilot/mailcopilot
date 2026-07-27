@@ -1,0 +1,1381 @@
+{
+  "common": {
+    "save": "Salva",
+    "close": "Chiudi",
+    "cancel": "Annulla",
+    "ok": "OK",
+    "error": "errore"
+  },
+  "folders": {
+    "inbox": "Posta in arrivo",
+    "sent": "Inviati",
+    "drafts": "Bozze",
+    "trash": "Cestino",
+    "junk": "Spam",
+    "archive": "Archivio",
+    "outbox": "Posta in uscita",
+    "snoozed": "Posticipati",
+    "followUp": "Promemoria",
+    "readLater": "Leggi più tardi",
+    "menu": {
+      "syncFull": "Sincronizza tutte le intestazioni",
+      "syncOnOpen": "Sincronizza all'apertura",
+      "syncOff": "Non sincronizzare",
+      "addToBadges": "Mostra nei badge non letti",
+      "removeFromBadges": "Nascondi dai badge",
+      "hideFromSidebar": "Nascondi dalla barra laterale",
+      "showInSidebar": "Mostra nella barra laterale",
+      "changeIcon": "Cambia icona",
+      "includeInSearch": "Includi nella ricerca",
+      "excludeFromSearch": "Escludi dalla ricerca",
+      "rename": "Rinomina cartella",
+      "delete": "Elimina cartella",
+      "renamePrompt": "Nuovo nome per la cartella {{current}}",
+      "deleteConfirm": "Eliminare la cartella {{folder}} dal server?",
+      "iconPrompt": "Inserisci un'emoji/icona per la cartella"
+    }
+  },
+  "app": {
+    "sidebar": {
+      "compose": "Scrivi",
+      "sync": "Sincronizza",
+      "settings": "Impostazioni",
+      "connectAccount": "Connetti e-mail",
+      "unifiedInbox": "Tutti gli account",
+      "expand": "Espandi pannello",
+      "collapse": "Comprimi pannello",
+      "workOffline": "Lavora offline"
+    },
+    "syncing": "Sincronizzazione...",
+    "statusbar": {
+      "syncing": "Sincronizzazione…",
+      "headersCoverage": "Intestazioni: {{covered}}/{{total}} cartelle",
+      "bodyIndex": "Indice: {{percent}}%"
+    },
+    "search": {
+      "placeholder": "Cerca...",
+      "clear": "Cancella ricerca",
+      "scopeFolder": "Cartella corrente",
+      "scopeAccount": "Tutte le cartelle",
+      "scopeAll": "Tutti gli account",
+      "sortDate": "Più recenti",
+      "sortRelevance": "Rilevanza",
+      "sortRelevanceUnavailable": "L'ordinamento per rilevanza è disponibile solo per query in testo semplice",
+      "searching": "Ricerca in corso…",
+      "loadingMore": "Caricamento di altri risultati…",
+      "indexPartial": "Ricerca full-text: {{percent}}% indicizzato",
+      "headersCoverage": "Intestazioni: {{covered}}/{{total}} cartelle sincronizzate",
+      "remoteResults": "+{{count}} dal server"
+    },
+    "empty": {
+      "loading": {
+        "title": "Caricamento..."
+      },
+      "noAccount": {
+        "title": "Connetti la tua e-mail",
+        "hint": "Clicca sull'icona della posta in basso a sinistra"
+      },
+      "noMessages": {
+        "title": "Nessun messaggio",
+        "hint": "Questa cartella è vuota"
+      },
+      "selectMessage": {
+        "title": "Seleziona un messaggio",
+        "hint": "Clicca su un messaggio a sinistra per visualizzarlo",
+        "rightClickTip": "Clic destro su qualsiasi messaggio per azioni rapide"
+      },
+      "loadingMessage": {
+        "title": "Caricamento messaggio..."
+      },
+      "messageNotFound": {
+        "title": "Messaggio non trovato"
+      }
+    },
+    "errors": {
+      "sync": "Errore di sincronizzazione: {{error}}",
+      "load": "Errore di caricamento: {{error}}",
+      "loadMessage": "Errore nel caricamento del messaggio: {{error}}",
+      "bodyNotAvailableOffline": "Il contenuto del messaggio non è disponibile offline. Solo le intestazioni sono memorizzate nella cache.",
+      "delete": "Errore di eliminazione: {{error}}",
+      "archive": "Errore di archiviazione: {{error}}",
+      "search": "Errore di ricerca: {{error}}",
+      "move": "Errore di spostamento: {{error}}",
+      "queue": "Errore nella coda di invio: {{error}}",
+      "markSeen": "Errore dello stato di lettura: {{error}}",
+      "flag": "Errore di contrassegno: {{error}}",
+      "pin": "Errore di fissaggio: {{error}}",
+      "compose": "Errore di creazione: {{error}}",
+      "attachment": "Errore dell'allegato: {{error}}",
+      "openExternal": "Errore nell'apertura del link: {{error}}"
+    },
+    "authRecovery": {
+      "googlePrompt": "L'autorizzazione Google per {{account}} è scaduta. Riconnettere ora?",
+      "googleRequired": "È necessaria una riautorizzazione Google per {{account}}.",
+      "googleStarting": "Apertura dell'accesso Google per {{account}}...",
+      "googleSuccess": "Account Google {{account}} riconnesso.",
+      "googleFailed": "Riautorizzazione Google fallita: {{error}}",
+      "googleFailedHelp": "Riautorizzazione Google fallita: {{error}}. Finestra dell'account aperta per riprovare.",
+      "outlookPrompt": "L'autorizzazione Outlook per {{account}} è scaduta. Riconnettere ora?",
+      "outlookRequired": "È necessaria una riautorizzazione Outlook per {{account}}.",
+      "outlookStarting": "Apertura dell'accesso Outlook per {{account}}...",
+      "outlookSuccess": "Account Outlook {{account}} riconnesso.",
+      "outlookFailedHelp": "Riautorizzazione Outlook fallita: {{error}}. Finestra dell'account aperta per riprovare.",
+      "passwordPrompt": "Autenticazione per {{account}} fallita. Aprire la finestra dell'account per inserire la password IMAP/SMTP?",
+      "passwordRequired": "Password IMAP/SMTP richiesta per {{account}}.",
+      "passwordOpen": "Finestra dell'account aperta per {{account}}. Inserisci la password e salva."
+    },
+    "confirm": {
+      "deleteForever": "Eliminare definitivamente {{count}} messaggio/i? Questa azione non può essere annullata.",
+      "yes": "Elimina",
+      "no": "Annulla",
+      "ariaTitle": "Conferma"
+    },
+    "undo": {
+      "deleted": "Spostato nel cestino",
+      "archived": "Archiviato",
+      "spammed": "Contrassegnato come spam",
+      "sendScheduled": "Invio ritardato",
+      "undo": "Annulla"
+    },
+    "sentCopyFailed": {
+      "message": "Messaggio consegnato, ma non è stato possibile salvare una copia nella cartella Posta inviata",
+      "messageWithFolder": "Messaggio consegnato, ma non è stato possibile salvare una copia in \"{{folder}}\"",
+      "dismiss": "Chiudi"
+    },
+    "certRecovery": {
+      "title": "Il server ha presentato un certificato diverso",
+      "serverLabel": "Server",
+      "issuerLabel": "Emittente",
+      "issuerUnknown": "sconosciuto",
+      "subjectLabel": "Rilasciato a",
+      "fingerprintLabel": "Impronta (SHA-256)",
+      "fingerprintUnknown": "non è stato possibile determinarla",
+      "copy": "Copia",
+      "copyFingerprint": "Copia l’impronta SHA-256",
+      "copied": "Copiata",
+      "detailsLabel": "Dettagli",
+      "interception": "Sembra che questa connessione venga ispezionata da un antivirus o proxy ({{issuer}}).",
+      "trust": "Considera attendibile e continua",
+      "readCertificate": "Leggi il certificato",
+      "trusting": "Salvataggio…",
+      "trustingHint": "Verifica del certificato del server: può richiedere alcuni secondi.",
+      "reprobing": "Verifica…",
+      "cancel": "Annulla",
+      "dismissing": "Chiusura…",
+      "review": {
+        "fetched": "Questi dati sono stati appena letti dal server. Controllali e conferma solo se corrispondono a quelli che ti aspetti.",
+        "updated": "Il certificato del server è cambiato dopo l’apertura di questa finestra, quindi non è stato salvato nulla. Qui sotto trovi il certificato che il server presenta adesso: controllalo e conferma solo se ti aspettavi questo cambiamento."
+      },
+      "error": {
+        "trustFailed": "Impossibile salvare l’attendibilità per questo certificato. Riprova.",
+        "trustFingerprintMismatch": "Il certificato del server è cambiato dopo l’apertura di questa finestra, quindi non è stato salvato nulla e non è stato possibile leggere il nuovo certificato. L’attendibilità non è disponibile.",
+        "trustPinWriteFailed": "Impossibile memorizzare questo certificato come attendibile. Riprova.",
+        "trustNotOffered": "Questo avviso non è più aggiornato, quindi la conferma non è stata accettata. Chiudilo e attendi il prossimo avviso su questo server.",
+        "reprobeFailed": "Impossibile leggere il certificato dal server. L’attendibilità non è disponibile.",
+        "dismissFailed": "Impossibile chiudere questa richiesta. Riprova.",
+        "dismissNotPending": "Questo avviso non è più attuale: puoi chiuderlo."
+      },
+      "notice": {
+        "message": "La connessione a {{host}} viene ispezionata.",
+        "messageWithIssuer": "La connessione a {{host}} viene ispezionata da {{issuer}}.",
+        "dismiss": "Ignora"
+      }
+    },
+    "update": {
+      "available": "Nuova versione {{version}} disponibile",
+      "download": "Scarica",
+      "downloading": "Download in corso…",
+      "later": "Più tardi",
+      "ready": "Aggiornamento pronto per l'installazione",
+      "restart": "Riavvia",
+      "adminRequired": "La versione {{version}} è disponibile. Contattare l'amministratore di sistema per l'aggiornamento."
+    }
+  },
+  "unified": {
+    "title": "Posta in arrivo unificata",
+    "allAccounts": "Tutti gli account",
+    "filterByAccount": "Filtra per account",
+    "openInAccount": "Apri nell'account"
+  },
+  "outbox": {
+    "empty": {
+      "title": "La posta in uscita è vuota",
+      "hint": "I messaggi programmati e ritardati appariranno qui"
+    },
+    "noSubject": "(senza oggetto)",
+    "status": {
+      "queued": "in coda",
+      "sending": "invio in corso",
+      "failed": "fallito"
+    },
+    "actions": {
+      "sendNow": "Invia ora",
+      "edit": "Modifica",
+      "cancel": "Annulla",
+      "postpone15": "+15 min"
+    }
+  },
+  "snooze": {
+    "snooze": "Posticipa",
+    "laterToday": "Più tardi oggi",
+    "tomorrowMorning": "Domani mattina",
+    "nextWeek": "La prossima settimana",
+    "custom": "Scegli data e ora",
+    "apply": "Applica",
+    "cancel": "Annulla",
+    "wakeNotification": "Promemoria messaggio posticipato",
+    "wakeAt": "Promemoria alle: {{time}}",
+    "empty": {
+      "title": "Nessun messaggio posticipato",
+      "hint": "Posticipa i messaggi per ricevere un promemoria più tardi"
+    }
+  },
+  "followUp": {
+    "remind": "Ricorda se nessuna risposta",
+    "reminderDays": "Ritardo promemoria",
+    "days2": "Dopo 2 giorni",
+    "days3": "Dopo 3 giorni",
+    "days7": "Dopo 7 giorni",
+    "title": "Promemoria",
+    "empty": "Nessun promemoria in sospeso",
+    "dismiss": "Ignora",
+    "dueSince": "In sospeso dal {{date}}",
+    "to": "A: {{address}}",
+    "notificationTitle": "Promemoria di follow-up",
+    "notificationBody": "Nessuna risposta da {{address}} su: {{subject}}"
+  },
+  "readLater": {
+    "add": "Leggi più tardi",
+    "remove": "Rimuovi dalla lista",
+    "empty": {
+      "title": "Nessun elemento da leggere più tardi",
+      "hint": "Salva articoli ed e-mail da leggere più tardi"
+    }
+  },
+  "inboxZero": {
+    "processedToday": "Elaborati oggi: {{count}}",
+    "congrats": "Inbox Zero!"
+  },
+  "mcpExport": {
+    "title": "Server MCP",
+    "hint": "Esponi gli strumenti di posta ai client MCP esterni (Claude Code, Obsidian, ecc.) tramite localhost.",
+    "enable": "Abilita server MCP (solo localhost)",
+    "port": "Porta",
+    "status": "Stato",
+    "running": "In esecuzione",
+    "stopped": "Arrestato",
+    "start": "Avvia",
+    "stop": "Arresta",
+    "url": "URL di connessione",
+    "token": "Token",
+    "copy": "Copia",
+    "copyConfig": "Copia config MCP"
+  },
+  "mcpClient": {
+    "title": "Connessioni MCP",
+    "hint": "Connettiti a server MCP esterni (Obsidian, gestori di attività, calendari) per estendere le capacità dell'IA.",
+    "addConnection": "+ Aggiungi connessione",
+    "name": "Nome",
+    "transport": "Trasporto",
+    "command": "Comando",
+    "args": "Argomenti",
+    "enableStdio": "Trasporto stdio (processi locali)",
+    "stdioWarning": "I server MCP stdio avviano processi figlio locali con i tuoi privilegi utente. Possono leggere file, accedere alla rete ed eseguire altri comandi. L'abilitazione richiede una finestra di conferma nativa.",
+    "stdioEnabled": "Stdio MCP è abilitato. Ogni connessione seguente richiede comunque la propria approvazione.",
+    "requestStdioEnable": "Abilita stdio MCP…",
+    "needsApproval": "Richiede approvazione — rivedi comando e argomenti prima di connetterti",
+    "approved": "Approvato",
+    "approve": "Approva…",
+    "env": "Variabili d'ambiente",
+    "autoConnect": "Connessione automatica all'avvio",
+    "testConnection": "Testa connessione",
+    "save": "Salva",
+    "cancel": "Annulla",
+    "connect": "Connetti",
+    "disconnect": "Disconnetti",
+    "connected": "Connesso",
+    "connecting": "Connessione",
+    "disconnected": "Disconnesso",
+    "error": "Errore",
+    "testSuccess": "OK — {{count}} strumenti",
+    "saveError": {
+      "forbiddenEnvKey": "La variabile d'ambiente {{keys}} non è consentita per motivi di sicurezza.",
+      "unapprovedCommand": "Questo comando non è nella lista consentita integrata. Contatta il supporto per richiederne l'aggiunta.",
+      "generic": "Impossibile salvare la connessione MCP: {{reason}}"
+    },
+    "testError": {
+      "notApproved": "La connessione non è approvata. Apri l'editor della connessione e approvala prima di testarla.",
+      "envDisabled": "Stdio MCP è disabilitato. Abilitalo nelle impostazioni prima di testare una connessione stdio.",
+      "generic": "Test della connessione fallito: {{reason}}"
+    }
+  },
+  "mail": {
+    "actions": {
+      "editDraft": "Modifica bozza",
+      "reply": "Rispondi",
+      "replyAll": "Rispondi a tutti",
+      "forward": "Inoltra",
+      "flag": "Aggiungi stella",
+      "unflag": "Rimuovi stella",
+      "delete": "Elimina",
+      "archive": "Archivia",
+      "markRead": "Segna come letto",
+      "markUnread": "Segna come non letto",
+      "moveToFolder": "Sposta nella cartella",
+      "spam": "Segna come spam",
+      "spamTo": "Sposta in Spam ({{junk}})",
+      "deleteToTrash": "Sposta nel Cestino ({{trash}})",
+      "deleteForever": "Elimina definitivamente",
+      "archiveTo": "Sposta in Archivio ({{archive}})",
+      "archiveNotFound": "Cartella archivio non trovata",
+      "junkNotFound": "Cartella spam non trovata",
+      "trashNotFound": "Cestino non trovato",
+      "selectToAct": "Seleziona le email per eseguire azioni",
+      "moveNotInUnified": "Lo spostamento non è disponibile nella posta unificata",
+      "pin": "Fissa in alto",
+      "unpin": "Rimuovi fissaggio",
+      "print": "Stampa",
+      "retry": "Riprova",
+      "openInWindow": "Apri in finestra",
+      "snooze": "Posticipa",
+      "confirmPermanentDelete": "Questo messaggio verrà eliminato definitivamente. Questa azione non può essere annullata.",
+      "actionFailed": "Azione non riuscita. Riprova.",
+      "archived": "Archiviato. Annulla",
+      "movedToTrash": "Spostato nel cestino. Annulla",
+      "undo": "Annulla",
+      "undoFailed": "Annullamento non riuscito.",
+      "toolbarLabel": "Azioni e-mail"
+    },
+    "headers": {
+      "from": "Da",
+      "to": "A",
+      "cc": "Cc",
+      "bcc": "Ccn",
+      "date": "Data"
+    },
+    "recipients": {
+      "moreCount": "+{{count}} altri"
+    },
+    "privacy": {
+      "imagesBlocked": "Le immagini esterne sono bloccate per proteggere la tua privacy.",
+      "showImages": "Mostra immagini"
+    },
+    "links": {
+      "title": "Questo link sembra sospetto",
+      "textLabel": "Testo del link",
+      "cancel": "Annulla",
+      "openAnyway": "Apri comunque",
+      "warningIdn": "Il dominio usa IDN/punycode: {{unicode}} (punycode: {{ascii}}).",
+      "warningIdnSimple": "Il dominio usa IDN/punycode: {{ascii}}.",
+      "warningHttp": "Il link usa http (non crittografato).",
+      "warningMismatch": "Il testo del link mostra {{shown}}, ma in realtà porta a {{real}}.",
+      "warningRawExternalLink": "Questo link ha aggirato il riscrittore URL standard: aprilo solo se ti fidi del mittente."
+    },
+    "attachments": {
+      "download": "Scarica allegato",
+      "unnamed": "Allegato"
+    },
+    "list": {
+      "filter": "Filtra",
+      "sort": "Ordina",
+      "loadMore": "Carica altri",
+      "autoPagingDisabled": "Il caricamento automatico è disattivato in modalità filtro/ordinamento"
+    },
+    "filters": {
+      "all": "Tutti",
+      "unread": "Non letti",
+      "attachments": "Con allegati",
+      "flagged": "Con stella",
+      "fromTooltip": "Mostra tutte le e-mail da {{from}}"
+    },
+    "date": {
+      "yesterday": "Ieri"
+    },
+    "sort": {
+      "date": "Data",
+      "from": "Mittente",
+      "subject": "Oggetto"
+    },
+    "bulk": {
+      "selected": "{{count}} selezionato/i",
+      "clear": "Deseleziona"
+    },
+    "thread": {
+      "count": "+{{count}}",
+      "countTitle": "{{count}} messaggi nella conversazione",
+      "inConversation": "Conversazione ({{count}})",
+      "confirmAction": "Applicare a tutti i {{count}} messaggi in questa conversazione?",
+      "confirmYes": "Applica a tutti",
+      "markAllRead": "Segna thread come letto",
+      "archiveThread": "Archivia thread",
+      "deleteThread": "Elimina thread",
+      "reply": "Rispondi",
+      "replyAll": "Rispondi a tutti",
+      "forward": "Inoltra",
+      "snooze": "Posticipa",
+      "bulkConfirm": "Applicare a tutti i {{count}} messaggi in questa conversazione?",
+      "expandCard": "Espandi messaggio",
+      "collapseCard": "Comprimi messaggio",
+      "snippetEmpty": "(anteprima non disponibile)",
+      "showQuoted": "Mostra testo citato"
+    },
+    "pin": "Fissa",
+    "unpin": "Rimuovi fissaggio",
+    "pinned": "Fissato",
+    "print": "Stampa",
+    "context": {
+      "selected": "{{count}} messaggi selezionati"
+    }
+  },
+  "settings": {
+    "title": "Impostazioni",
+    "unsavedWarning": "Ci sono modifiche non salvate. Chiudere senza salvare?",
+    "hint": "Personalizza l'aspetto e il comportamento dell'applicazione",
+    "tabs": {
+      "accounts": "Account",
+      "general": "Generale",
+      "productivity": "Produttività",
+      "folders": "Cartelle",
+      "signature": "Firma",
+      "templates": "Modelli",
+      "rules": "Regole",
+      "about": "Info"
+    },
+    "accounts": {
+      "title": "Account",
+      "hint": "Gestisci gli account e-mail connessi e scegli quello attivo.",
+      "empty": "Nessun account connesso",
+      "add": "Aggiungi account",
+      "edit": "Modifica",
+      "openManager": "Apri gestione account",
+      "remove": "Rimuovi",
+      "makeCurrent": "Imposta come attivo",
+      "current": "Attivo",
+      "confirmRemove": "Rimuovere l'account {{label}}? La cache locale di questo account verrà eliminata.",
+      "statusOnline": "online",
+      "statusOffline": "offline",
+      "customizeAvatar": "Personalizza avatar",
+      "avatarMode": "Modalità di visualizzazione",
+      "avatarInitials": "Lettere",
+      "avatarIcon": "Icona",
+      "avatarInitialsLabel": "Iniziali personalizzate",
+      "avatarInitialsHint": "1–2 caratteri",
+      "avatarIconLabel": "Scegli icona",
+      "avatarColor": "Colore",
+      "avatarPreview": "Anteprima",
+      "gravatarHint": "Usa la tua foto profilo di gravatar.com per {{email}}",
+      "gravatarNotFound": "Nessun Gravatar trovato per {{email}}. Creane uno su gravatar.com"
+    },
+    "sections": {
+      "general": "Generale"
+    },
+    "badges": {
+      "title": "Badge dei non letti",
+      "hint": "Scegli quali cartelle mostrano il contatore dei messaggi non letti"
+    },
+    "folderPolicy": {
+      "title": "Politica di sincronizzazione cartelle",
+      "hint": "Configura visibilità, badge, sincronizzazione intestazioni e modalità offline per ogni cartella.",
+      "visible": "Mostra nella barra laterale",
+      "hiddenNoSync": "Le cartelle nascoste sono completamente escluse dalla sincronizzazione delle intestazioni, dall'archiviazione offline e dai badge.",
+      "badges": "Includere nei badge dei non letti",
+      "headerSync": "Sincronizzazione intestazioni",
+      "syncFull": "Tutti i messaggi",
+      "syncOnOpen": "All'apertura",
+      "syncPeriod": "Per periodo",
+      "syncOff": "Disattivato",
+      "offline": "Modalità offline",
+      "offlineOff": "Disattivato",
+      "offlinePeriod": "Per periodo",
+      "offlineFull": "Tutti i messaggi",
+      "days": "Giorni"
+    },
+    "theme": {
+      "label": "Tema",
+      "light": "Chiaro",
+      "dark": "Scuro"
+    },
+    "language": {
+      "label": "Lingua",
+      "en": "English",
+      "ru": "Русский",
+      "fr": "Français",
+      "de": "Deutsch",
+      "es": "Español",
+      "it": "Italiano"
+    },
+    "general": {
+      "defaultMailApp": "Imposta come app di posta predefinita",
+      "defaultMailAppHint": "Gestisci i link mailto: da browser e altre applicazioni"
+    },
+    "bodyRetentionDays": {
+      "label": "Conserva la copia completa per",
+      "hint": "Si applica alle cartelle configurate per il download completo. Intestazioni e indice di ricerca rimangono; vengono eliminati solo i file .eml per liberare spazio su disco.",
+      "option30": "30 giorni",
+      "option90": "90 giorni",
+      "option180": "180 giorni",
+      "option365": "1 anno",
+      "optionForever": "Per sempre",
+      "confirmShrink": "Verranno eliminati dal disco i corpi di {{count}} messaggi (~{{mb}} MB). Intestazioni e indice di ricerca rimangono. Continuare?",
+      "confirmShrinkUnknown": "Impossibile stimare l'impatto. Alcuni corpi di messaggi verranno eliminati dal disco. Continuare comunque?"
+    },
+    "productivity": {
+      "title": "Produttività",
+      "hint": "Funzionalità opzionali per una gestione più rapida della posta",
+      "groupConversations": "Raggruppa i messaggi in conversazioni",
+      "sortMode": "Ordina email per",
+      "autoAdvance": "Dopo archiviazione/eliminazione",
+      "autoAdvanceOlder": "Apri email più vecchia",
+      "autoAdvanceNewer": "Apri email più recente",
+      "autoAdvanceBackToList": "Torna alla lista",
+      "autoAdvanceOff": "Resta (non fare nulla)",
+      "trustedDomains": "Domini attendibili",
+      "trustedDomainsHint": "Domini che non attiveranno avvisi di invio errato (uno per riga)"
+    },
+    "privacy": {
+      "alwaysLoadImages": "Carica sempre le immagini esterne",
+      "gravatarInMail": "Mostra foto dei mittenti (Gravatar)",
+      "gravatarInMailHint": "Carica le foto profilo da gravatar.com per i mittenti che ne hanno una",
+      "darkModeEmails": "Modalità scura per il contenuto delle email",
+      "darkModeEmailsHint": "Inverte i colori delle email HTML nel tema scuro per una lettura confortevole"
+    },
+    "appearance": {
+      "conversationOrder": {
+        "label": "Ordine di conversazione",
+        "newestTop": "Più recente prima",
+        "oldestTop": "Più vecchio prima"
+      }
+    },
+    "hotkeys": {
+      "preset": "Scorciatoie da tastiera",
+      "gmail": "Gmail",
+      "outlook": "Outlook"
+    },
+    "sendDelay": {
+      "label": "Ritardo di invio",
+      "off": "Disattivato",
+      "seconds": "{{count}} sec"
+    },
+    "notifications": {
+      "enabled": "Notifiche desktop per nuove e-mail"
+    },
+    "sync": {
+      "imapIdle": "IMAP IDLE (aggiornamenti push)",
+      "interval": "Intervallo di sincronizzazione",
+      "intervalMinutes": "{{count}} min",
+      "periodicSync": "Sincronizzazione periodica delle cartelle",
+      "periodicSyncHint": "Intervallo di sincronizzazione in background per le cartelle in modalità completa/periodica"
+    },
+    "drafts": {
+      "sync": "Sincronizza le bozze con IMAP Drafts"
+    },
+    "folders": {
+      "title": "Cartelle",
+      "hint": "Associa i ruoli standard alle cartelle del server. Se non selezionato, viene usato il rilevamento automatico.",
+      "account": "Account",
+      "loading": "Caricamento cartelle...",
+      "loadFailed": "Impossibile caricare le cartelle: {{error}}",
+      "noAccount": "Connetti un account per configurare le cartelle",
+      "onlyInbox": "Sul server è visibile solo INBOX. Crea le cartelle necessarie, poi selezionale qui.",
+      "notSet": "— non impostato —",
+      "auto": "Auto: {{path}}",
+      "create": "Crea",
+      "createNew": "Crea nuova cartella...",
+      "createNewTitle": "Crea nuova cartella",
+      "folderNamePlaceholder": "Nome della cartella",
+      "creating": "Creazione...",
+      "createFolder": "Crea cartella {{path}}",
+      "createExists": "La cartella esiste già"
+    },
+    "signature": {
+      "title": "Firma",
+      "hint": "Aggiunta automaticamente ai nuovi messaggi",
+      "placeholder": "Inserisci la tua firma..."
+    },
+    "identities": {
+      "tabLabel": "Identità",
+      "empty": "Nessuna identità ancora",
+      "add": "Aggiungi identità",
+      "edit": "Modifica",
+      "delete": "Elimina",
+      "setDefault": "Imposta come predefinita",
+      "defaultBadge": "Predefinita",
+      "displayNameLabel": "Nome visualizzato",
+      "emailLabel": "Email",
+      "signatureLabel": "Firma",
+      "defaultBccLabel": "Ccn predefinito",
+      "saveError": "Impossibile salvare le identità"
+    },
+    "templates": {
+      "title": "Modelli",
+      "hint": "Crea modelli di messaggi riutilizzabili. Usa {name}, {email}, {date} come variabili.",
+      "name": "Nome del modello",
+      "subject": "Oggetto",
+      "body": "Corpo del messaggio",
+      "shortcut": "Scorciatoia (opzionale)",
+      "add": "Aggiungi modello",
+      "edit": "Modifica",
+      "delete": "Elimina",
+      "save": "Salva",
+      "confirmDelete": "Eliminare il modello «{{name}}»?",
+      "variables": "Variabili disponibili: {name}, {email}, {date}",
+      "empty": "Nessun modello. Clicca su «Aggiungi modello» per crearne uno.",
+      "namePlaceholder": "Es. Sollecito rapido",
+      "subjectPlaceholder": "Es. Re: {subject}",
+      "bodyPlaceholder": "Es. Buongiorno {name}, grazie per averci contattato…"
+    },
+    "offline": {
+      "title": "Modalità offline",
+      "hint": "Scarica i messaggi per leggerli senza connessione. Gli originali (EML) sono salvati come file separati.",
+      "perFolderHint": "La modalità offline è configurata per cartella nella scheda Cartelle. Qui viene impostato solo il limite di dimensione globale.",
+      "enabled": "Attiva modalità offline",
+      "syncDays": "Scarica i messaggi degli ultimi (giorni)",
+      "syncDaysAll": "0 = tutti i messaggi",
+      "maxSizeKB": "Dimensione max. messaggio (KB)",
+      "maxSizeHint": "0 = senza limite",
+      "folders": "Cartelle per la sincronizzazione offline",
+      "syncNow": "Sincronizza ora",
+      "syncing": "Sincronizzazione…",
+      "syncStarted": "Sincronizzazione avviata"
+    },
+    "rules": {
+      "title": "Regole di posta",
+      "hint": "Ordina automaticamente la posta in arrivo usando regole",
+      "add": "Aggiungi regola",
+      "name": "Nome della regola",
+      "conditions": "Condizioni",
+      "actions": "Azioni",
+      "field": {
+        "from": "Mittente",
+        "to": "Destinatario",
+        "cc": "Cc",
+        "subject": "Oggetto",
+        "has_attachment": "Ha allegato"
+      },
+      "op": {
+        "contains": "contiene",
+        "not_contains": "non contiene",
+        "equals": "è uguale a",
+        "starts_with": "inizia con",
+        "ends_with": "finisce con",
+        "matches_regex": "corrisponde al regex"
+      },
+      "action": {
+        "move": "Sposta nella cartella",
+        "archive": "Archivia",
+        "trash": "Sposta nel cestino",
+        "mark_read": "Segna come letto",
+        "mark_starred": "Aggiungi stella",
+        "mark_spam": "Segna come spam"
+      },
+      "stopProcessing": "Non elaborare le regole successive",
+      "enabled": "Attivata",
+      "empty": "Nessuna regola. Aggiungi una regola per ordinare automaticamente la posta in arrivo.",
+      "deleteConfirm": "Eliminare questa regola?",
+      "priority": "Priorità",
+      "account": "Account",
+      "allAccounts": "Tutti gli account",
+      "andHint": "Tutte le condizioni devono corrispondere (logica AND). Per OR, crea regole separate.",
+      "test": "Testa sulle email esistenti",
+      "testNoMatch": "Nessuna email corrisponde a queste condizioni",
+      "testMatches": "{{count}} email corrisponderebbero:",
+      "applyToExisting": "Applica alle email esistenti nella posta in arrivo",
+      "aiSection": "Regole IA",
+      "aiRequiresProvider": "Configura un provider IA nella scheda IA per usare le regole IA",
+      "addCondition": "Aggiungi condizione",
+      "addAction": "Aggiungi azione",
+      "folderPlaceholder": "Nome cartella",
+      "saveFailed": "Impossibile salvare o applicare la regola. Riprova.",
+      "conditionField": "Campo condizione",
+      "conditionOp": "Operatore condizione",
+      "actionType": "Tipo di azione"
+    },
+    "aiRules": {
+      "title": "Regole IA",
+      "hint": "Usa l'IA per classificare le email che non corrispondono alle regole statiche",
+      "add": "Aggiungi regola IA",
+      "name": "Nome della regola",
+      "prompt": "Prompt (descrivi come classificare le email)",
+      "promptPlaceholder": "Es.: Se l'email è da un recruiter, archiviala. Le newsletter vanno nella cartella Newsletter.",
+      "allowedActions": "Azioni consentite",
+      "budget": "Budget giornaliero (USD)",
+      "log": "Registro azioni",
+      "logEmpty": "Nessuna azione delle regole IA finora",
+      "enabled": "Attivata",
+      "empty": "Nessuna regola IA",
+      "deleteConfirm": "Eliminare questa regola IA?",
+      "budgetPerDay": "${{amount}}/day",
+      "enabledLimit": "Puoi attivare al massimo {{max}} regole IA per account. Disattiva prima un'altra regola."
+    },
+    "about": {
+      "title": "Informazioni su MailCopilot",
+      "version": "Versione",
+      "website": "Sito web",
+      "docs": "Documentazione",
+      "sentryEnabled": "Invia diagnostica e dati di utilizzo anonimi",
+      "sentryHint": "Include rapporti sui crash, metriche di prestazione ed eventi di utilizzo anonimi (ad esempio, quali funzioni vengono usate). Non include mai il contenuto dei messaggi, gli indirizzi, gli oggetti o i nomi delle cartelle.",
+      "debugLogging": "Attiva registrazione di debug",
+      "debugLoggingHint": "Scrive registri dettagliati in un file per la risoluzione dei problemi. I registri vengono archiviati localmente e non vengono mai inviati automaticamente.",
+      "system": {
+        "title": "Informazioni di sistema",
+        "appVersion": "Versione dell'app",
+        "channel": {
+          "dev": "dev",
+          "nightly": "nightly",
+          "stable": "stable"
+        },
+        "electron": "Electron",
+        "chromium": "Chromium",
+        "node": "Node.js",
+        "platform": "Piattaforma",
+        "installPath": "Percorso di installazione",
+        "readOnly": "sola lettura",
+        "latestAvailable": "ultima disponibile {{version}}"
+      },
+      "update": {
+        "title": "Aggiornamenti",
+        "autoDownload": "Scarica automaticamente gli aggiornamenti in background",
+        "autoDownloadHint": "Se attivo, le nuove versioni vengono scaricate silenziosamente e ti viene chiesto di riavviare. Se disattivo, scegli tu se scaricare ogni aggiornamento.",
+        "cannotSelfUpdateHint": "Questa installazione è di sola lettura (installazione di sistema). Gli aggiornamenti richiedono un amministratore.",
+        "checkNow": "Controlla aggiornamenti",
+        "checking": "Verifica…",
+        "upToDate": "Hai l'ultima versione",
+        "downloadVersion": "Scarica {{version}}",
+        "downloadingPercent": "Download in corso… {{percent}} %",
+        "restartToInstall": "Riavvia per installare",
+        "errorNetwork": "Errore di rete — riprova quando sei online",
+        "errorPermission": "Permesso negato — è richiesto un amministratore",
+        "errorUnknown": "Aggiornamento non riuscito — vedi i log per i dettagli",
+        "unsupportedDev": "Gli aggiornamenti sono disabilitati in questa build"
+      }
+    }
+  },
+  "account": {
+    "title": "Connetti e-mail",
+    "editTitle": "Modifica account",
+    "hint": "Inserisci le impostazioni IMAP/SMTP. Le password sono salvate nel portachiavi di sistema (keytar).",
+    "editHint": "Modifica le impostazioni IMAP/SMTP di questo account.",
+    "tlsHint": "La verifica del certificato TLS è sempre attiva. Se il tuo server mail utilizza un certificato personalizzato, apparirà una richiesta di fiducia durante il test di connessione.",
+    "tls": {
+      "unknown": "sconosciuto",
+      "pinConfirm": "Fidarsi di questo certificato TLS?\n\nHost: {{host}}:{{port}}\nSoggetto: {{subject}}\nEmittente: {{issuer}}\nSHA-256: {{fingerprint}}\n\nUsa questa opzione solo se ti fidi di questo server mail.",
+      "title": "Pinning dei certificati TLS",
+      "hint": "Blocca i certificati del server per una sicurezza avanzata",
+      "noPins": "Nessun certificato bloccato",
+      "host": "Host",
+      "port": "Porta",
+      "fingerprint": "Impronta SHA-256",
+      "trustAnchor": "Ancora di fiducia",
+      "anchorStored": "Certificato salvato",
+      "anchorStoredHint": "Il certificato stesso è salvato, quindi questo server è considerato attendibile anche con un certificato autofirmato.",
+      "fingerprintOnly": "Solo impronta",
+      "fingerprintOnlyHint": "Le voci contrassegnate con «Solo impronta» salvano l’impronta ma non il certificato. Per un server autofirmato non basta: diventa attendibile solo tramite l’avviso sul certificato che compare durante la connessione.",
+      "created": "Aggiunto",
+      "addPin": "Aggiungi pin",
+      "addPinTitle": "Blocca certificato del server",
+      "addPinHint": "Inserisci il nome host e la porta del server per recuperare e bloccare il suo certificato.",
+      "addPinAnchorWarning": "Un’associazione aggiunta qui salva soltanto l’impronta. Un server autofirmato continuerà a non connettersi: confermalo nell’avviso sul certificato che compare durante la connessione.",
+      "fetchAndPin": "Recupera e blocca",
+      "fetchError": "Impossibile recuperare il certificato: {{error}}"
+    },
+    "sections": {
+      "imap": "IMAP",
+      "smtp": "SMTP"
+    },
+    "fields": {
+      "account": "Account",
+      "displayName": "Il tuo nome",
+      "email": "Indirizzo email (Da)",
+      "host": "Host",
+      "port": "Porta",
+      "user": "Utente",
+      "emailAddress": "Email",
+      "smtpUser": "Utente SMTP",
+      "password": "Password",
+      "smtpPassword": "Password SMTP",
+      "ssl": "SSL/TLS"
+    },
+    "actions": {
+      "new": "Nuovo account",
+      "googleSignIn": "Accedi con Google",
+      "googleReauth": "Riconnetti Google",
+      "microsoftSignIn": "Accedi con Microsoft",
+      "microsoftReauth": "Riconnetti Microsoft",
+      "save": "Salva",
+      "saveAndClose": "Salva e chiudi",
+      "setCurrent": "Imposta come attivo",
+      "remove": "Rimuovi",
+      "test": "Testa connessione",
+      "autoconfig": "Configurazione automatica",
+      "back": "Indietro",
+      "next": "Avanti",
+      "manual": "Configurazione manuale",
+      "connect": "Connetti"
+    },
+    "status": {
+      "ok": "Connessione riuscita",
+      "saved": "Salvato",
+      "removed": "Rimosso",
+      "current": "Account attivo impostato",
+      "googleConnected": "Google connesso: {{email}}",
+      "microsoftConnected": "Microsoft connesso: {{email}}",
+      "tlsPinned": "Certificato di fiducia salvato per {{host}}:{{port}}",
+      "currentLabel": "attivo",
+      "autoconfigApplied": "Impostazioni del server rilevate automaticamente ({{source}})",
+      "autoconfigManual": "Configurazione automatica non trovata. Inserisci le impostazioni del server manualmente."
+    },
+    "errors": {
+      "enterPassword": "Inserisci le password IMAP e SMTP per testare la connessione",
+      "enterEmailPassword": "Inserisci e-mail e password",
+      "imapSmtp": "IMAP: {{imap}}, SMTP: {{smtp}}",
+      "enterEmailForAutoconfig": "Inserisci l'e-mail per eseguire la configurazione automatica",
+      "autoconfigNotFound": "Impossibile rilevare automaticamente le impostazioni del server",
+      "autoconfigFailed": "Errore di configurazione automatica: {{error}}",
+      "tlsPinFetch": "Impossibile recuperare il certificato TLS: {{error}}",
+      "googleOAuthFailed": "Autenticazione Google fallita",
+      "microsoftOAuthFailed": "Autenticazione Microsoft fallita"
+    },
+    "wizard": {
+      "actions": {
+        "imapSmtp": "Account IMAP/SMTP"
+      },
+      "stepProvider": {
+        "title": "Aggiungi account e-mail",
+        "hint": "Scegli il tuo provider di posta elettronica"
+      },
+      "stepType": {
+        "title": "Aggiungi account e-mail",
+        "hint": "Scegli il metodo di accesso"
+      },
+      "stepCredentials": {
+        "title": "E-mail e password"
+      },
+      "stepDetected": {
+        "title": "Impostazioni del server rilevate"
+      },
+      "provider": {
+        "gmail": {
+          "label": "Gmail",
+          "desc": "Accedi con Google OAuth"
+        },
+        "outlook": {
+          "label": "Outlook / Microsoft 365",
+          "desc": "Accedi con Microsoft OAuth"
+        },
+        "generic": {
+          "label": "IMAP/SMTP generico",
+          "desc": "Qualsiasi provider di posta con accesso IMAP/SMTP"
+        },
+        "comingSoon": "Prossimamente"
+      },
+      "smtpSeparate": "Login/password SMTP è diverso",
+      "imapDetected": "IMAP: {{host}}:{{port}}",
+      "smtpDetected": "SMTP: {{host}}:{{port}}"
+    },
+    "confirm": {
+      "remove": "Rimuovere l'account {{label}}? La cache locale verrà eliminata.",
+      "removeDetailed": "Rimuovere l'account {{label}}?\n\nDati locali da eliminare:\n- Messaggi nella cache: {{count}}\n- File locali: {{size}}\n\nI messaggi sul server non verranno eliminati."
+    }
+  },
+  "compose": {
+    "title": "Nuovo messaggio",
+    "from": "Da",
+    "to": "A",
+    "cc": "Cc",
+    "bcc": "Ccn",
+    "showCcBcc": "Cc/Ccn",
+    "subject": "Oggetto",
+    "text": "Testo del messaggio...",
+    "identity": {
+      "selectorLabel": "Identità mittente",
+      "autoMatched": "Selezionata dal destinatario"
+    },
+    "contacts": {
+      "removeRecipient": "Rimuovi destinatario"
+    },
+    "actions": {
+      "attach": "Allega",
+      "removeAttachment": "Rimuovi allegato",
+      "send": "Invia",
+      "schedule": "Programma",
+      "sending": "Invio in corso...",
+      "sendAndArchive": "Invia e archivia",
+      "moreOptions": "Altre opzioni"
+    },
+    "status": {
+      "sent": "Inviato!",
+      "scheduled": "Messaggio in coda ({{seconds}} sec)",
+      "scheduledAt": "Messaggio programmato per {{at}}",
+      "draftRestored": "Bozza ripristinata",
+      "draftSynced": "Bozza sincronizzata",
+      "sentAndArchived": "Inviato e archiviato!"
+    },
+    "schedule": {
+      "laterToday": "Più tardi oggi",
+      "tomorrowMorning": "Domani mattina (09:00)",
+      "mondayMorning": "Lunedì mattina (09:00)",
+      "custom": "Scegli data e ora...",
+      "prompt": "Inserisci data e ora nel formato YYYY-MM-DDTHH:mm",
+      "dateTime": "Data e ora",
+      "apply": "Programma",
+      "cancel": "Annulla"
+    },
+    "templates": {
+      "unknownSender": "Mittente sconosciuto",
+      "unknownDate": "data sconosciuta",
+      "replyIntro": "Il {{date}}, {{from}} ha scritto:",
+      "replyIntroNoDate": "{{from}} ha scritto:",
+      "forwardHeader": "---------- Messaggio inoltrato ----------",
+      "forwardFrom": "Da: {{from}}",
+      "forwardDate": "Data: {{date}}",
+      "forwardSubject": "Oggetto: {{subject}}",
+      "forwardTo": "A: {{to}}",
+      "title": "Modelli",
+      "empty": "Nessun modello. Creali nelle Impostazioni."
+    },
+    "errors": {
+      "noAccount": "L'account non è configurato",
+      "sendFailed": "Errore di invio: {{error}}",
+      "invalidDate": "Data/ora non valida",
+      "fileTooLarge": "Il file \"{{name}}\" è troppo grande ({{size}}). Massimo: {{max}}",
+      "archiveFailed": "Errore di archiviazione: {{error}}"
+    },
+    "misdirection": {
+      "externalDomain": "Stai inviando a un dominio esterno ({{domains}}). Sei sicuro?",
+      "newRecipients": "Hai aggiunto nuovi destinatari non presenti nel messaggio originale: {{recipients}}. Continuare?",
+      "confirm": "Invia comunque",
+      "cancel": "Annulla"
+    }
+  },
+  "notifications": {
+    "newMail": "Nuova e-mail",
+    "sendFailed": "Errore di invio"
+  },
+  "notificationCenter": {
+    "title": "Notifiche",
+    "markAllRead": "Segna tutto come letto",
+    "empty": "Nessuna notifica",
+    "followUpDue": "Promemoria di follow-up",
+    "sendFailed": "Errore di invio",
+    "dismiss": "Ignora"
+  },
+  "shortcuts": {
+    "title": "Scorciatoie da tastiera",
+    "navigation": "Navigazione",
+    "actions": "Azioni",
+    "general": "Generale",
+    "nextPrev": "Messaggio successivo / precedente",
+    "open": "Apri messaggio",
+    "backToList": "Torna alla lista",
+    "focusSearch": "Focus sulla ricerca",
+    "goInbox": "Vai alla Posta in arrivo",
+    "goSent": "Vai agli Inviati",
+    "goDrafts": "Vai alle Bozze",
+    "goStarred": "Vai ai Preferiti",
+    "compose": "Scrivi messaggio",
+    "reply": "Rispondi",
+    "replyAll": "Rispondi a tutti",
+    "forward": "Inoltra",
+    "star": "Aggiungi / rimuovi stella",
+    "archive": "Archivia",
+    "markUnread": "Segna come non letto",
+    "markRead": "Segna come letto",
+    "spam": "Segna come spam",
+    "selectToggle": "Seleziona / deseleziona",
+    "move": "Sposta nella cartella",
+    "undo": "Annulla ultima azione",
+    "delete": "Elimina",
+    "pin": "Fissa / rimuovi fissaggio",
+    "print": "Stampa",
+    "clearSelection": "Cancella selezione",
+    "commandPalette": "Apri tavolozza comandi",
+    "showHelp": "Mostra scorciatoie da tastiera",
+    "contextMenuTitle": "Menu contestuale",
+    "contextMenuHint": "Azioni rapide sul messaggio (rispondere, archiviare, spostare…)"
+  },
+  "commandPalette": {
+    "placeholder": "Digita un comando...",
+    "ariaLabel": "Tavolozza comandi",
+    "empty": "Nessun comando trovato",
+    "commands": {
+      "compose": "Scrivi messaggio",
+      "sync": "Sincronizza vista corrente",
+      "focusSearch": "Focus sulla ricerca",
+      "openSettings": "Apri impostazioni",
+      "goInbox": "Vai alla Posta in arrivo",
+      "goSent": "Vai agli Inviati",
+      "goDrafts": "Vai alle Bozze",
+      "goOutbox": "Vai alla Posta in uscita",
+      "goSnoozed": "Vai ai Posticipati",
+      "goFollowUps": "Vai ai Promemoria",
+      "goReadLater": "Vai a Leggi più tardi",
+      "goStarred": "Mostra preferiti",
+      "goUnified": "Vai alla Posta in arrivo unificata",
+      "enableThreads": "Attiva raggruppamento conversazioni",
+      "disableThreads": "Disattiva raggruppamento conversazioni",
+      "switchAccount": "Passa a {{account}}",
+      "aiSummarize": "IA: Riassumi",
+      "aiReply": "IA: Prepara risposta",
+      "aiNewChat": "IA: Nuova chat",
+      "aiOpenPanel": "IA: Apri pannello"
+    }
+  },
+  "ai": {
+    "panel": {
+      "title": "Assistente IA",
+      "newChat": "Nuova chat",
+      "close": "Chiudi",
+      "stop": "Ferma",
+      "thinking": "Sto pensando...",
+      "usingTool": "Uso strumento: {{tool}}...",
+      "streaming": "Generazione...",
+      "placeholder": "Chiedi qualcosa sulla tua posta...",
+      "send": "Invia",
+      "sources": "Fonti",
+      "costTooltip": "Costo della richiesta: {{cost}}",
+      "sessionCostTooltip": "Costo della sessione: {{cost}}"
+    },
+    "onboarding": {
+      "title": "Assistente IA",
+      "description": "L'assistente integrato ti aiuterà con la tua posta:",
+      "features": {
+        "summarize": "Riepilogo delle e-mail",
+        "drafts": "Bozze di risposte",
+        "search": "Ricerca e analisi",
+        "digest": "Riepilogo giornaliero"
+      },
+      "chooseProvider": "Scegli il metodo di connessione:",
+      "subscription": "Abbonamento Claude",
+      "subscriptionHint": "Pro/Max — se sei già autorizzato tramite CLI",
+      "apiKey": "Chiave API",
+      "apiKeyHint": "Fatturazione per token",
+      "configure": "Configura nelle Impostazioni"
+    },
+    "privacy": {
+      "audit": {
+        "title": "Privacy e audit",
+        "hint": "Registro per richiesta dell'attività IA: provider, token, incapsulamento di contenuti non attendibili e blocchi in uscita. Le voci eliminate logicamente vengono nascoste in questa visualizzazione, ma rimangono fisicamente nel database fino a quando la rotazione (limite di 10.000 righe) non rimuove le più vecchie.",
+        "period": "Periodo",
+        "periodToday": "Oggi",
+        "periodWeek": "Ultimi 7 giorni",
+        "periodMonth": "Ultimi 30 giorni",
+        "refresh": "Aggiorna",
+        "aggregateTitle": "Utilizzo per provider",
+        "aggregateEmpty": "Nessuna richiesta IA in questo periodo. Non appena usi l'assistente, ogni provider (es. Claude, OpenAI) appare qui con utilizzo di token e costi.",
+        "logTitle": "Richieste recenti",
+        "logEmpty": "Nessuna voce di audit ancora. Ogni messaggio inviato all'assistente IA viene registrato qui: provider, modello, conteggio token e se il contenuto email è stato racchiuso per proteggere la privacy.",
+        "exportJson": "Esporta JSON",
+        "exportCsv": "Esporta CSV",
+        "clearAll": "Cancella tutto",
+        "deleteRow": "Marca questa voce come eliminata",
+        "prev": "Precedente",
+        "next": "Successivo",
+        "pageOf": "Pagina {{page}} di {{total}}",
+        "notAvailable": "n/d",
+        "col": {
+          "timestamp": "Ora",
+          "provider": "Provider",
+          "model": "Modello",
+          "goal": "Obiettivo",
+          "tool": "Strumento",
+          "tokensIn": "Token in ingresso",
+          "tokensOut": "Token in uscita",
+          "cost": "Costo",
+          "wrapped": "Incapsulato",
+          "wrappedTooltip": "Quante volte il contenuto email non attendibile è stato incapsulato con marcatori anti-injection in questa richiesta.",
+          "blocked": "Bloccato",
+          "blockedTooltip": "Quante chiamate in uscita sono state bloccate dal gateway di privacy in questa richiesta.",
+          "outcome": "Risultato",
+          "requests": "Richieste",
+          "actions": "Azioni"
+        },
+        "outcome": {
+          "ok": "OK",
+          "error": "Errore",
+          "aborted": "Annullato"
+        }
+      },
+      "title": "Informativa sulla privacy IA",
+      "description": "MailCopilot IA elabora il contenuto delle tue e-mail in modo sicuro. Accettando, acconsenti a condividere i dati e-mail necessari con il fornitore IA configurato solo per l'assistenza. Puoi revocare questo consenso in qualsiasi momento nelle Impostazioni.",
+      "accept": "Accetta",
+      "cancel": "Annulla"
+    },
+    "confirmation": {
+      "apply": "Applica",
+      "applied": "Applicato",
+      "cancel": "Annulla",
+      "account": "{{email}}",
+      "accountFallback": "Account #{{accountId}}",
+      "crossAccount_one": "{{count}} account",
+      "crossAccount_other": "{{count}} account",
+      "folder": "Cartella: {{folder}}",
+      "emailCount_one": "{{count}} email",
+      "emailCount_other": "{{count}} email",
+      "folderCount_one": "{{count}} cartella",
+      "folderCount_other": "{{count}} cartelle",
+      "errorPreviewMissing": "Questa azione non è più disponibile. Potrebbe essere scaduta o già eseguita. Chiedi all'IA di prepararla di nuovo.",
+      "proceedPrompt": "Ho confermato l'azione. Continua usando confirmation_token={{token}}.",
+      "kinds": {
+        "mail_action": {
+          "archive": "Archivia email",
+          "trash": "Sposta nel cestino",
+          "mark_read": "Segna come lette"
+        },
+        "unsubscribe": "Annulla iscrizione",
+        "send_email": "Invia email",
+        "move_email": "Sposta email",
+        "snooze_email": "Posticipa email",
+        "unsnooze_email": "Annulla posticipazione",
+        "flag_email": {
+          "star": "Aggiungi stella",
+          "unstar": "Rimuovi stella"
+        },
+        "mark_read_later": {
+          "add": "Aggiungi a «Leggi più tardi»",
+          "remove": "Rimuovi da «Leggi più tardi»"
+        },
+        "add_followup": "Aggiungi promemoria",
+        "dismiss_followup": "Chiudi promemoria",
+        "create_mail_rule": "Crea regola",
+        "update_mail_rule": "Aggiorna regola",
+        "delete_mail_rule": "Elimina regola"
+      }
+    },
+    "egress": {
+      "policy_label": "Accesso web dell'IA",
+      "blocked": "Accesso web disattivato mentre il contenuto delle email è nel contesto",
+      "allow_once": "Consenti accesso web per questo turno",
+      "allowed_this_turn": "Accesso web consentito per questo turno",
+      "policy_section_hint": "Controlla quando l'IA può utilizzare strumenti esterni (ricerca web, fetch, MCP esterno) mentre il contenuto delle email è nel contesto.",
+      "policy_deny": "Nega per impostazione predefinita (consigliato)",
+      "policy_deny_hint": "Bloccare l'accesso web mentre il contenuto delle email è nel contesto. Consentire per turno tramite la finestra di conferma.",
+      "policy_ask": "Chiedi a ogni turno",
+      "policy_ask_hint": "Identico a «nega per impostazione predefinita»: opt-in esplicito per turno tramite la finestra di conferma.",
+      "policy_allow": "Consenti sempre",
+      "policy_allow_hint": "L'IA può chiamare liberamente gli strumenti web anche con contenuti email nel contesto.",
+      "policy_allow_warning": "Attenzione: l'IA può inviare contenuti delle email a servizi esterni.",
+      "shieldTooltip": "L'accesso web dell'IA è intercettato — ogni chiamata in uscita richiede la tua approvazione",
+      "confirmTitle": "L'IA vuole accedere a Internet",
+      "confirmAllow": "Consenti",
+      "confirmDeny": "Rifiuta",
+      "action": {
+        "webSearch": "Ricerca web:",
+        "webFetch": "Recupero URL:",
+        "externalTool": "Chiamata a strumento esterno"
+      },
+      "timeout": "Timeout scaduto — accesso negato"
+    },
+    "chips": {
+      "summarize": "Riassumi",
+      "reply": "Rispondi",
+      "summarizeThread": "Riassumi conversazione",
+      "keyDecisions": "Decisioni chiave",
+      "digest": "Riepilogo del giorno",
+      "needsReply": "Richiede risposta?",
+      "tasksDeadlines": "Attività e scadenze",
+      "nlSearch": "Ricerca intelligente",
+      "triage": "Classificare",
+      "snooze": "Posticipa",
+      "flag": "Stella",
+      "followup": "Follow-up",
+      "triageInbox": "Classificare posta",
+      "gtdClassify": "Che fare?",
+      "gtdTriage": "Triage GTD",
+      "weeklyReview": "Revisione settimanale",
+      "cleanupAll": "Pulisci tutto",
+      "scopeFolder": "Azioni cartella",
+      "scopeEmail": "Azioni e-mail"
+    },
+    "errors": {
+      "authCheck": "Verifica dell'autorizzazione fallita",
+      "errorPrefix": "Errore",
+      "notConfigured": "Il fornitore IA non è configurato. Configuralo nelle Impostazioni.",
+      "invalidKey": "Chiave API non valida. Verifica la chiave in Impostazioni → IA.",
+      "noSubscription": "Autorizzati tramite `claude login` nel terminale.",
+      "quotaExceeded": "Limite di messaggi raggiunto. Riprova più tardi o passa a una chiave API.",
+      "requestBudgetStopped": "Richiesta interrotta: è stato raggiunto il limite di costo per richiesta. Modificalo in Impostazioni → IA.",
+      "offline": "L'assistente IA non è disponibile offline.",
+      "timeout": "Timeout della richiesta. Riprova.",
+      "changeProvider": "Cambia provider"
+    },
+    "prompts": {
+      "summarize": "Riassumi questa e-mail",
+      "reply": "Prepara una risposta a questa e-mail",
+      "summarizeThread": "Riassumi questa conversazione",
+      "keyDecisions": "Estrai le decisioni chiave da questa conversazione",
+      "digest": "Fai un riepilogo delle e-mail non lette di oggi",
+      "needsReply": "Quali e-mail richiedono una risposta?",
+      "tasksDeadlines": "Estrai attività, responsabili e scadenze dal contesto corrente",
+      "nlSearch": "Trova e-mail con una richiesta in linguaggio naturale e mostra quali operatori di ricerca sono stati usati",
+      "triage": "Classifica questa email: categorizza e suggerisci azioni (archivia, posticipa, contrassegna, follow-up)",
+      "triageThread": "Classifica questo thread: riassumi e suggerisci azioni per ogni messaggio",
+      "snooze": "Dovrei posticipare questa email? Suggerisci quando tornarci",
+      "flag": "Dovrei contrassegnare questa email con una stella? Spiega perché",
+      "followup": "Imposta un promemoria di follow-up per questa email se richiede una risposta",
+      "triageInbox": "Classifica la posta in arrivo: categorizza le non lette e suggerisci azioni",
+      "gtdClassify": "Classifica questa email secondo la metodologia GTD: è perseguibile? Se richiede meno di 2 minuti, suggerisci un'azione rapida. Altrimenti: posticipa (snooze), delega (inoltra + follow-up), archivia, contrassegna con stella o segna per leggere dopo.",
+      "gtdTriage": "Esamina tutte le email non lette in questa cartella usando la metodologia GTD. Classifica ogni email: archivia newsletter e notifiche, contrassegna con stella gli elementi perseguibili, posticipa quelli con scadenza, imposta follow-up per quelli delegati, e segna le letture lunghe per dopo. Mostra il piano completo raggruppato per tipo di azione prima di eseguire qualsiasi cosa.",
+      "weeklyReview": "Revisione settimanale GTD: controlla follow-up scaduti, email posticipate in scadenza, elementi con stella non letti, contatori di non letti per cartella, e suggerisci azioni di pulizia. Scansiona tutti gli account.",
+      "cleanupAll": "Scansiona le caselle di posta di tutti gli account e suggerisci un piano di pulizia: archivia vecchie newsletter e notifiche, segnala elementi sospetti di spam, mostra il piano raggruppato per tipo di azione. Non agire senza la mia conferma."
+    },
+    "settings": {
+      "tab": "IA",
+      "provider": "Fornitore",
+      "providerSubscription": "Abbonamento Claude",
+      "providerApi": "Chiave API Anthropic",
+      "providerOpenAI": "Chiave API OpenAI",
+      "providerGemini": "Chiave API Google Gemini",
+      "providerRag": "Backend RAG aziendale",
+      "apiKey": "Chiave API",
+      "apiKeyPlaceholder": "sk-ant-...",
+      "apiKeyPlaceholderOpenAI": "sk-...",
+      "apiKeyPlaceholderGemini": "AIza...",
+      "openAiBaseUrl": "URL base",
+      "openAiBaseUrlPlaceholder": "https://openrouter.ai/api",
+      "openAiBaseUrlHint": "Lasciare vuoto per api.openai.com",
+      "customModelPlaceholder": "es. gpt-4o, claude-3.5-sonnet",
+      "model": "Modello",
+      "modelCorpDefault": "Aziendale predefinito",
+      "modelCorpFast": "Aziendale veloce",
+      "modelCorpReasoning": "Aziendale reasoning",
+      "checkConnection": "Verifica connessione",
+      "connectionOk": "Connesso",
+      "connectionFailed": "Errore di connessione: {{error}}",
+      "sendKey": "Tasto di invio",
+      "sendKeyEnter": "Invio",
+      "sendKeyCtrlEnter": "Ctrl+Invio",
+      "locale": "Lingua risposte",
+      "localeAuto": "Auto",
+      "localeRu": "Russo",
+      "localeEn": "Inglese",
+      "showSources": "Mostra fonti nelle risposte",
+      "dailyBudgetUsd": "Budget giornaliero (USD)",
+      "monthlyBudgetUsd": "Budget mensile (USD)",
+      "maxTurns": "Passi max per richiesta",
+      "maxBudgetPerRequest": "Budget max per richiesta (USD)",
+      "proxyUrl": "Proxy HTTP",
+      "proxyUrlPlaceholder": "http://proxy.company.local:3128",
+      "proxyUrlHint": "Facoltativo. Utilizzato per tutte le richieste IA.",
+      "title": "Assistente IA",
+      "hint": "Configura il fornitore e le preferenze dell'assistente IA",
+      "chooseProvider": "Scegli il metodo di connessione:",
+      "back": "Indietro",
+      "resetProvider": "Reimposta configurazione",
+      "resetConfirm": "Reimpostare la configurazione AI? La chiave API verrà eliminata.",
+      "checkRequired": "Prima verifica la connessione",
+      "memory": {
+        "title": "Memoria IA",
+        "hint": "Contesto personale che l'IA ricorderà in tutte le conversazioni (max 4000 caratteri).",
+        "placeholder": "Esempio:\n- Lavoro presso Acme Corp come project manager\n- Il mio fuso orario è UTC+3\n- Preferisco email concise",
+        "clear": "Cancella"
+      },
+      "threadSummary": {
+        "title": "Riepilogo IA della conversazione",
+        "label": "Riepiloga le conversazioni lunghe con l'IA",
+        "help": "Quando apri una conversazione di tre o più messaggi, mostra un riepilogo IA di una riga sopra i messaggi, espandibile in cinque punti chiave. Disattivato per impostazione predefinita; si attiva per account."
+      },
+      "instantReply": {
+        "title": "Risposta immediata",
+        "label": "Suggerisci bozze di risposta con l'IA",
+        "help": "Aggiunge un pulsante Risposta immediata al messaggio aperto che redige due o tre risposte pronte da modificare. Nulla viene inviato automaticamente. Disattivato per impostazione predefinita; abilitabile per account."
+      }
+    },
+    "threadSummary": {
+      "title": "Riepilogo IA",
+      "loading": "Riepilogo della conversazione…",
+      "expand": "Mostra i punti chiave",
+      "collapse": "Nascondi i punti chiave",
+      "retry": "Riprova",
+      "refusal": {
+        "budget": "Budget IA giornaliero raggiunto: il riepilogo è in pausa fino al ripristino.",
+        "noProvider": "Configura un provider IA nelle impostazioni per riepilogare le conversazioni.",
+        "providerError": "Non è stato possibile riepilogare questa conversazione al momento."
+      }
+    },
+    "quickAction": {
+      "preset": {
+        "improve": "Migliora",
+        "shorter": "Accorcia",
+        "formal": "Formale",
+        "grammar": "Correggi grammatica"
+      },
+      "diff": {
+        "title": "Rivedi la riscrittura IA",
+        "before": "Prima",
+        "after": "Dopo",
+        "replace": "Sostituisci",
+        "insert": "Inserisci al cursore",
+        "cancel": "Annulla"
+      },
+      "refusal": {
+        "budget": "Budget IA giornaliero raggiunto: la riscrittura è in pausa fino al ripristino.",
+        "noProvider": "Configura un provider IA nelle impostazioni per riscrivere le bozze.",
+        "providerError": "Impossibile riscrivere questa bozza in questo momento.",
+        "emptyInput": "Scrivi prima del testo, poi scegli un'azione rapida."
+      }
+    },
+    "instantReply": {
+      "trigger": "Risposta immediata",
+      "useThisDraft": "Usa questa bozza",
+      "refusal": {
+        "budget": "Budget IA giornaliero raggiunto: le risposte immediate sono in pausa fino al ripristino.",
+        "noProvider": "Configura un provider IA nelle impostazioni per redigere risposte.",
+        "providerError": "Impossibile redigere risposte in questo momento."
+      }
+    },
+    "sidebar": {
+      "ai": "Assistente IA"
+    },
+    "sessions": {
+      "title": "Cronologia chat",
+      "history": "Cronologia",
+      "empty": "Nessuna conversazione salvata",
+      "untitled": "Senza titolo",
+      "delete": "Elimina conversazione",
+      "clearAll": "Cancella tutto"
+    }
+  },
+  "feedback": {
+    "title": "Segnala un problema",
+    "hint": "Aiuta a migliorare MailCopilot segnalando i problemi agli sviluppatori.",
+    "reportBug": "Segnala un bug",
+    "placeholder": "Descrivi il problema...",
+    "emailPlaceholder": "La tua e-mail (facoltativa)",
+    "send": "Invia",
+    "thanks": "Grazie per il tuo feedback!",
+    "disabledHint": "L'invio di segnalazioni è disattivato. Visita il nostro sito per assistenza."
+  },
+  "attachments": {
+    "previewAvailable": "Anteprima disponibile",
+    "downloadAction": "Scarica allegato: {{name}}",
+    "iconLabel": {
+      "pdf": "Documento PDF",
+      "image": "Immagine",
+      "archive": "Archivio",
+      "doc": "Documento",
+      "spreadsheet": "Foglio di calcolo",
+      "presentation": "Presentazione",
+      "text": "File di testo",
+      "eml": "E-mail",
+      "generic": "File"
+    }
+  },
+  "invite": {
+    "title": "Invito alla riunione",
+    "organizer": "Organizzatore",
+    "location": "Luogo",
+    "when": "Quando",
+    "accept": "Accetta",
+    "tentative": "Forse",
+    "decline": "Rifiuta",
+    "responding": "Invio della risposta…",
+    "responseAccepted": "Hai accettato questo invito",
+    "responseTentative": "Hai risposto con «Forse»",
+    "responseDeclined": "Hai rifiutato questo invito",
+    "responseFailed": "Impossibile inviare la risposta: {{error}}",
+    "noOrganizer": "Nessun organizzatore specificato",
+    "cancelled": "Questo evento è stato annullato",
+    "notActionable": "Questo invito non richiede una risposta",
+    "originalTimezone": "Originariamente pianificato in {{tzid}}"
+  }
+}

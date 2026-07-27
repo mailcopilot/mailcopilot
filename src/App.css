@@ -1,0 +1,4470 @@
+/* Корневой контейнер */
+.mailcopilot-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ===== Кастомный title bar ===== */
+.titlebar {
+  height: 36px;
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--mailcopilot-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  -webkit-app-region: drag;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.titlebar-icon {
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.titlebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  padding-left: 8px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.titlebar-beta {
+  font-size: 0.55em;
+  opacity: 0.7;
+  font-weight: 400;
+  vertical-align: super;
+}
+
+.titlebar-badge {
+  background: var(--btn-primary-bg);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  line-height: 1.4;
+}
+
+.titlebar-controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-btn {
+  background: transparent;
+  border: none;
+  width: 36px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  gap: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+.titlebar-btn:hover {
+  background: var(--titlebar-btn-hover);
+  color: var(--fg);
+}
+
+.titlebar-btn-close:hover {
+  background: var(--titlebar-close-hover);
+  color: var(--titlebar-close-fg);
+}
+
+/* ===== Основная разметка 3 колонки ===== */
+.mailcopilot-app {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+/* ===== Узкий sidebar с иконками ===== */
+.mailcopilot-sidebar {
+  min-width: 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--mailcopilot-border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 0;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.sidebar-compose-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  gap: 0;
+  margin-bottom: 2px;
+  flex-shrink: 0;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.sidebar-compose-btn:hover {
+  background: var(--btn-primary-hover);
+  transform: scale(1.05);
+}
+
+.sidebar-divider {
+  width: 28px;
+  height: 1px;
+  background: var(--mailcopilot-border);
+  margin: 2px 0;
+  flex-shrink: 0;
+}
+
+/* Кнопка папки в sidebar */
+.folder-btn {
+  width: 40px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  gap: 0;
+  position: relative;
+  transition: background 0.15s, color 0.15s;
+}
+
+.folder-btn:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.folder-btn.folder-active {
+  background: var(--mail-selected-bg);
+  color: var(--btn-primary-bg);
+}
+
+.folder-custom-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  line-height: 1;
+}
+
+.folder-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: var(--btn-primary-bg);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  line-height: 1;
+}
+
+/* Секция аккаунтов в sidebar */
+.account-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.account-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  position: relative;
+  border: 2px solid transparent;
+  transition: border-color 0.15s, transform 0.1s;
+  flex-shrink: 0;
+}
+
+.account-avatar:hover {
+  transform: scale(1.08);
+}
+
+.account-avatar.account-active {
+  border-color: var(--btn-primary-bg);
+}
+
+.account-badge {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  background: var(--btn-primary-bg);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  line-height: 1;
+}
+
+.connection-dot {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--sidebar-bg);
+}
+.connection-dot-ok { background: #22c55e; }
+.connection-dot-error { background: #ef4444; }
+.connection-dot-syncing { background: #f59e0b; }
+
+.unified-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.unified-btn:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.unified-btn.account-active {
+  border-color: var(--btn-primary-bg);
+  color: var(--btn-primary-bg);
+}
+
+/* Scrollable folder area */
+.sidebar-folders {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.sidebar-folders::-webkit-scrollbar {
+  width: 3px;
+}
+
+.sidebar-folders::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-folders::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+/* Раскрывающийся sidebar */
+.sidebar-expanded {
+  align-items: stretch;
+  padding: 8px;
+}
+
+.sidebar-expanded .sidebar-compose-btn {
+  width: 100%;
+  gap: 8px;
+  border-radius: 10px;
+}
+
+.sidebar-expanded .account-section {
+  align-items: stretch;
+}
+
+.sidebar-expanded .sidebar-folders {
+  align-items: stretch;
+}
+
+.sidebar-expanded .account-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sidebar-expanded .account-avatar-row:hover {
+  background: var(--btn-bg-hover);
+}
+
+.sidebar-expanded .account-avatar-row.account-active {
+  background: var(--mail-selected-bg);
+}
+
+.sidebar-expanded .unified-btn {
+  width: 100%;
+  border-radius: 8px;
+  gap: 8px;
+  justify-content: flex-start;
+  padding: 4px 6px;
+  border: none;
+}
+
+.sidebar-expanded .folder-btn {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 8px;
+}
+
+.sidebar-expanded .sidebar-bottom-btn {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 8px;
+}
+
+.sidebar-label {
+  display: none;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-expanded .sidebar-label {
+  display: inline;
+}
+
+/* Группа: имя + email для аккаунта в sidebar */
+.sidebar-label-group {
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.sidebar-expanded .sidebar-label-group {
+  display: flex;
+}
+
+.sidebar-label-group .sidebar-label {
+  display: inline;
+}
+
+.sidebar-email {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-toggle-btn {
+  width: 36px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-toggle-btn:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.sidebar-expanded .sidebar-toggle-btn {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 8px;
+  height: 32px;
+}
+
+.sidebar-bottom-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  gap: 0;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-bottom-btn:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+/* ===== uiaudit.14: Sidebar compact mode for narrow viewports (innerHeight < 720px) =====
+   Applied via JS (useSidebarCompactMode hook) because @media query cannot
+   target window.innerHeight reliably in Electron frameless windows. */
+.sidebar-compact .sidebar-compose-btn {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 0;
+}
+
+.sidebar-compact .folder-btn {
+  height: 28px;
+}
+
+.sidebar-compact .account-avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 11px;
+}
+
+.sidebar-compact .unified-btn {
+  width: 30px;
+  height: 30px;
+}
+
+.sidebar-compact .sidebar-bottom-btn {
+  width: 32px;
+  height: 30px;
+}
+
+.sidebar-compact .sidebar-toggle-btn {
+  height: 24px;
+}
+
+.sidebar-compact .sidebar-divider {
+  margin: 1px 0;
+}
+
+/* Compact + expanded: keep text rows but reduce vertical padding */
+.sidebar-compact.sidebar-expanded .account-avatar-row {
+  padding: 2px 6px;
+}
+
+.sidebar-compact.sidebar-expanded .folder-btn {
+  height: 28px;
+}
+
+.sidebar-compact.sidebar-expanded .sidebar-bottom-btn {
+  height: 30px;
+}
+
+.sidebar-compact.sidebar-expanded .sidebar-toggle-btn {
+  height: 26px;
+}
+
+/* uiaudit.14 specificity fix: compact mode overrides width for icon-only layout,
+   but when sidebar is also expanded the full-width text layout must be preserved.
+   The compact rules above apply equal-specificity selectors that win by document
+   order, collapsing compose/unified/folder/bottom buttons to icon-only widths in
+   expanded+compact mode. These overrides restore width: 100% with higher specificity
+   so the expanded layout is not broken at narrow window heights. */
+.sidebar-compact.sidebar-expanded .sidebar-compose-btn {
+  width: 100%;
+}
+
+.sidebar-compact.sidebar-expanded .unified-btn {
+  width: 100%;
+}
+
+.sidebar-compact.sidebar-expanded .sidebar-bottom-btn {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* ===== Inbox Zero (empty state) ===== */
+.inbox-zero-icon {
+  color: #22c55e;
+}
+
+/* ===== Список писем ===== */
+.mail-list {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--mailcopilot-border);
+  min-height: 0;
+}
+
+.mail-list-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mail-list-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mail-list-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.mail-list-account {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+  vertical-align: middle;
+}
+
+.search-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-bar .search-icon {
+  position: absolute;
+  left: 8px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.search-bar input {
+  width: 100%;
+  padding-left: 30px;
+  padding-right: 28px;
+  box-sizing: border-box;
+}
+
+.search-bar.search-active input {
+  border-color: var(--btn-primary-bg);
+  background: var(--mail-selected-bg);
+}
+
+.search-clear {
+  position: absolute;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.search-clear:hover {
+  color: var(--fg);
+  background: var(--btn-bg-hover);
+}
+
+/* Search scope bar */
+.search-scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  flex-wrap: wrap;
+}
+.search-scope-buttons {
+  display: flex;
+  gap: 4px;
+}
+.scope-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.scope-chip:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+.scope-chip.scope-active {
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-bg);
+  color: #fff;
+}
+.search-index-status {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* Status bar (VS Code-style) */
+.statusbar {
+  height: 22px;
+  min-height: 22px;
+  background: var(--titlebar-bg);
+  border-top: 1px solid var(--mailcopilot-border);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  -webkit-app-region: no-drag;
+}
+.statusbar:empty { display: none; }
+.statusbar-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.statusbar-remote { color: var(--btn-primary-bg); white-space: nowrap; }
+@media print { .statusbar { display: none; } }
+.mail-folder-tag {
+  opacity: 0.6;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.quick-filter-toolbar {
+  display: flex;
+  gap: 8px;
+  padding-top: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-chip {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.filter-chip:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+
+.filter-chip.chip-on {
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-bg);
+  color: #fff;
+}
+
+.select-sm {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+  color: var(--fg);
+  min-width: 0;
+  max-width: 150px;
+}
+
+.btn-link {
+  background: transparent;
+  border: none;
+  color: var(--btn-primary-bg);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.btn-link:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.list-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+}
+
+.list-actions .btn-icon:disabled,
+.list-actions .select-sm:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Элемент письма в списке */
+.mail-item {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  transition: background 0.1s;
+  align-items: flex-start;
+  user-select: none;
+}
+
+.mail-item:hover {
+  background: var(--btn-bg);
+}
+
+.mail-item.mail-selected {
+  background: var(--mail-selected-bg);
+}
+
+.mail-item.mail-selected.mail-unread {
+  background: var(--mail-selected-bg);
+}
+
+.mail-item.mail-active {
+  box-shadow: inset 2px 0 0 var(--btn-primary-bg);
+}
+
+.mail-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
+  overflow: hidden;
+}
+.mail-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mail-avatar-clickable {
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+
+.mail-avatar-clickable:hover {
+  transform: translateY(-1px);
+  opacity: 0.95;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.12);
+}
+
+.mail-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.mail-top-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mail-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.star-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.star-btn:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.star-btn.star-on {
+  color: var(--btn-primary-bg);
+}
+
+.mail-from {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mail-date {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 80px;
+  text-align: right;
+}
+
+.mail-account-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.mail-thread-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 999px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
+
+.mail-pin-icon {
+  color: var(--accent);
+  margin-left: 4px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+/* uiaudit.2 — hover-action chips removed from mail list items.
+   Context menu (right-click) is the discoverability surface instead.
+   CSS rules retained as stubs for a brief transition period so any lingering
+   class references do not cause layout regressions. */
+
+.mail-subject {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.mail-unread .mail-subject {
+  font-weight: 600;
+}
+/* Unread indicator: small blue dot before the subject text */
+.mail-unread .mail-subject::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--btn-primary-bg);
+  margin-right: 5px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+/* ===== Resize handle ===== */
+.resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.2s;
+  position: relative;
+}
+
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -2px;
+  right: -2px;
+}
+
+.resize-handle:hover {
+  background: var(--btn-primary-bg);
+}
+
+/* ===== Просмотр письма ===== */
+.mail-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mail-viewer-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  flex-shrink: 0;
+}
+
+.mail-viewer-from {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mail-viewer-subject-row {
+  /* Stacked layout: subject on its own line, actions on the next row.
+   * Most real subjects do not fit next to the 8+ action buttons in the
+   * available viewer width, so we always stack instead of ellipsising
+   * the subject. Reported 2026-04-21: "заголовок перекрывается кнопками". */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.mail-viewer-subject {
+  font-weight: 700;
+  font-size: 18px;
+  line-height: 1.3;
+  /* Allow up to 2 lines before clipping — typical long subjects (forwarded
+   * or re:re:re: threads) fit comfortably; anything longer is still clipped
+   * so the viewer layout stays bounded. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.mail-viewer-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  /* uiaudit.3 PR B4: right-align toolbar actions (Gmail / Spark / Apple Mail
+     UX). Subject still flows full-width on its own row above. */
+  justify-content: flex-end;
+}
+
+/* uiaudit.3 PR B4: standalone mail-window layout. The window reuses
+   .mail-viewer-* styles for header / meta / body so the standalone view
+   matches the in-app viewer; this rule just gives the body container a
+   column flex layout with the iframe filling remaining height. */
+.mail-window-root {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 32px); /* minus titlebar */
+  overflow: hidden;
+}
+.mail-window-root .mail-viewer-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+}
+.mail-window-root .mail-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--panel-bg, #fff);
+}
+
+.mail-viewer-meta {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 16px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── Thread action button (shared by thread-view header) ────────────── */
+.thread-action-btn {
+  padding: 3px 6px;
+  background: var(--btn-bg-hover, #f0f0f0);
+  border: 1px solid var(--mailcopilot-border, #ddd);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  color: var(--muted, #666);
+  transition: background 0.15s;
+}
+
+.thread-action-btn:hover {
+  background: var(--bg-active, #e0e0e0);
+  color: var(--fg, #333);
+}
+
+/* ── Stack-of-cards thread view ──────────────────────────────────────── */
+.thread-view {
+  flex-shrink: 0;
+}
+
+.thread-view-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+}
+
+.thread-view-title {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.thread-view-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.thread-cards {
+  display: flex;
+  flex-direction: column;
+}
+
+/* §3.3 B2 Thread AI Summary strip — sits above the stack-of-cards. */
+.thread-summary-strip {
+  padding: 8px 16px 10px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  background: var(--mail-unread-bg);
+  font-size: 13px;
+}
+
+.thread-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.thread-summary-icon {
+  color: var(--btn-primary-bg);
+  flex-shrink: 0;
+}
+
+.thread-summary-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.thread-summary-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+/*
+ * The one-line summary IS the expand/collapse control (a real <button> for
+ * native keyboard operability). Reset the button chrome so it reads as inline
+ * text with a trailing disclosure chevron, but keep a hover/focus affordance so
+ * its interactivity is discoverable.
+ */
+.thread-summary-oneline {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thread-summary-oneline:hover {
+  background: var(--hover-bg, rgba(127, 127, 127, 0.08));
+}
+
+.thread-summary-oneline:focus-visible {
+  outline: 2px solid var(--btn-primary-bg);
+  outline-offset: 1px;
+}
+
+.thread-summary-oneline-text {
+  flex: 1 1 auto;
+}
+
+.thread-summary-chevron {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--btn-primary-bg);
+}
+
+.thread-summary-bullets {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--fg);
+  line-height: 1.4;
+}
+
+.thread-summary-refusal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--muted);
+}
+
+.thread-summary-refusal-text {
+  color: var(--muted);
+}
+
+.thread-summary-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--btn-border);
+  border-radius: 4px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.thread-summary-retry:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* --- B4 Compose Quick Actions toolbar --- */
+.compose-quick-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.compose-quick-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.compose-quick-actions-icon {
+  color: var(--btn-primary-bg);
+  flex-shrink: 0;
+}
+
+.compose-quick-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--btn-border);
+  border-radius: 12px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.compose-quick-action-btn:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.compose-quick-action-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.compose-quick-actions-refusal {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* --- B4 Quick Action diff preview --- */
+.quick-action-diff {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-action-diff-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quick-action-diff-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.quick-action-diff-preset {
+  font-size: 12px;
+  color: var(--btn-primary-bg);
+}
+
+.quick-action-diff-close {
+  margin-left: auto;
+}
+
+.quick-action-diff-panes {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.quick-action-diff-pane {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quick-action-diff-pane-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.quick-action-diff-text {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 4px;
+  background: var(--mail-unread-bg);
+  color: var(--fg);
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.quick-action-diff-after .quick-action-diff-text {
+  border-color: var(--btn-primary-bg);
+}
+
+.quick-action-diff-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* --- B4 Instant Reply strip (active card) --- */
+.instant-reply-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  margin-bottom: 8px;
+}
+
+.instant-reply-trigger {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--btn-border);
+  border-radius: 12px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.instant-reply-trigger:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.instant-reply-trigger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.instant-reply-refusal {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.instant-reply-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.instant-reply-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.instant-reply-option:hover {
+  background: var(--btn-bg-hover);
+  border-color: var(--btn-primary-bg);
+}
+
+.instant-reply-option-tone {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--btn-primary-bg);
+}
+
+.instant-reply-option-preview {
+  line-height: 1.4;
+}
+
+/* Individual card */
+.thread-card {
+  border-bottom: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+}
+
+.thread-card:last-child {
+  border-bottom: none;
+}
+
+/* Collapsed card gets a subtle hover tint */
+.thread-card-collapsed:hover {
+  background: var(--btn-bg-hover, rgba(0, 0, 0, 0.03));
+}
+
+/* Active (currently-open) card gets a start-side accent bar (RTL-safe) */
+.thread-card-active > .thread-card-header {
+  border-inline-start: 3px solid var(--btn-primary-bg, #4f46e5);
+}
+
+/* Unread indicator — bold sender name via descendant selector */
+.thread-card-unread .thread-card-from {
+  font-weight: 600;
+}
+
+/* Card header — the clickable row showing avatar / from / date / chevron */
+.thread-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+  color: var(--fg);
+}
+
+.thread-card-header:focus-visible {
+  outline: 2px solid var(--btn-primary-bg, #4f46e5);
+  outline-offset: -2px;
+}
+
+.thread-card-header-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.thread-card-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.thread-card-from {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.thread-card-date {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.thread-card-snippet {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thread-card-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+}
+
+/* Expanded body slot — renders meta-rows + attachments + body iframe */
+.thread-card-body {
+  padding: 0;
+}
+
+/* Inside thread-card-body the .mail-viewer-body does not need flex:1
+   because the parent (.mail-viewer) already scrolls as a whole. */
+.thread-card-body .mail-viewer-body {
+  flex: none;
+  overflow: visible;
+  /* Provide a minimum comfortable reading height so short bodies don't look cramped */
+  min-height: 200px;
+}
+
+/* In thread mode the viewer itself must scroll to encompass header + cards + body */
+.mail-viewer:has(.thread-view) {
+  overflow-y: auto;
+}
+
+/* Ensure the iframe inside a thread card has a sensible height */
+.thread-card-body .mail-html-wrap {
+  height: auto;
+  min-height: 0;
+}
+
+.thread-card-body .mail-iframe {
+  /* Override base .mail-iframe { flex: 1; min-height: 0 } — in thread mode
+   * the iframe is not the flex grower and needs an explicit height to render.
+   * Without flex:none the iframe collapses to ~150px because flex:1 resets
+   * flex-basis to 0% and the auto-height parent has no constraint to grow into. */
+  flex: none;
+  height: 600px;
+  width: 100%;
+  border: none;
+  background: var(--bg);
+}
+
+.meta-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.meta-key {
+  width: 44px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.meta-val {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+/* §3.3.C-uiaudit.22 — RecipientList rows: override nowrap so chips can wrap */
+.meta-row--recipients {
+  align-items: flex-start;
+}
+
+/* ── RecipientList ────────────────────────────────────────────────────────── */
+.recipient-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+  position: relative;
+}
+
+.recipient-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--btn-bg-hover, rgba(0, 0, 0, 0.06));
+  color: var(--fg);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: default;
+  outline: none;
+}
+
+.recipient-chip:focus-visible {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 1px;
+}
+
+.recipient-more-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--mailcopilot-border, #ddd);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.recipient-more-btn:hover,
+.recipient-more-btn:focus-visible {
+  background: var(--btn-bg-hover, rgba(0, 0, 0, 0.06));
+  color: var(--fg);
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 1px;
+}
+
+.recipient-more-btn--collapse {
+  /* Collapse button shown after expand: subtle visual distinction */
+  border-style: dashed;
+}
+
+.mail-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 16px 12px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  flex-shrink: 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 6px 10px;
+}
+
+.attachment-icon {
+  display: inline-flex;
+  align-items: center;
+  color: currentColor;
+  flex-shrink: 0;
+}
+
+.attachment-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-size {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.attachment-preview-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--chip-bg, rgba(99, 102, 241, 0.15));
+  color: var(--chip-fg, #4f46e5);
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
+.mail-viewer-body {
+  flex: 1;
+  overflow: auto;
+  padding: 0 16px 16px;
+  min-height: 0;
+}
+
+.mail-html-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.privacy-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-radius: 10px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.privacy-banner button {
+  flex-shrink: 0;
+}
+
+.mail-iframe {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border: none;
+  background: var(--bg);
+}
+
+.mail-text {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ===== Empty state ===== */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 200px;
+  color: var(--muted);
+  gap: 8px;
+  padding: 32px;
+  text-align: center;
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.empty-state small {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* ===== Пагинация (ручная подкачка) ===== */
+.load-more-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--mailcopilot-border);
+}
+
+.load-more-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ===== Error banner ===== */
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border: 1px solid var(--error-border);
+  border-radius: 8px;
+  font-size: 12px;
+  margin: 8px;
+}
+
+/* ===== Mail actions toolbar (MailActionsToolbar component) ===== */
+.mail-actions-toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.toolbar-divider {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+/* ===== Undo banner (deferred destructive action) ===== */
+.undo-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--accent-bg, var(--hover-bg));
+  color: var(--fg);
+  border: 1px solid var(--accent-border, var(--border));
+  border-radius: 8px;
+  font-size: 12px;
+  margin: 8px;
+}
+
+.undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent, var(--link));
+  cursor: pointer;
+  text-decoration: underline;
+  flex-shrink: 0;
+}
+
+.undo-btn:hover {
+  opacity: 0.8;
+}
+
+/* Tooltip: нативный title через data-tooltip, стилизация не нужна */
+
+/* ===== Окно Compose ===== */
+.compose-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.compose-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 20px 0;
+}
+
+.compose-form textarea {
+  flex: 1;
+  min-height: 120px;
+  /* Use the system font stack instead of the browser's monospace default */
+  font-family: inherit;
+}
+
+.compose-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--mailcopilot-panel-bg);
+}
+
+.compose-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.compose-attachment-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compose-footer {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 20px 16px;
+}
+
+.compose-footer > button,
+.compose-footer > .compose-send-split,
+.compose-footer > .compose-template-wrap {
+  flex-shrink: 0;
+}
+
+.compose-status-bar {
+  padding: 0 20px 8px;
+  font-size: 12px;
+  min-height: 20px;
+  line-height: 20px;
+}
+
+.compose-footer .status-text,
+.compose-status-bar .status-text {
+  font-size: 12px;
+}
+
+.compose-send-split {
+  position: relative;
+  display: inline-flex;
+  margin-left: auto;
+}
+
+.compose-send-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.compose-send-chevron {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 6px 4px;
+  min-width: unset;
+}
+
+.compose-send-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  overflow: visible;
+  z-index: 20;
+}
+
+.compose-send-menu button:first-child {
+  border-radius: 10px 10px 0 0;
+}
+
+.compose-send-menu button:last-child {
+  border-radius: 0 0 10px 10px;
+}
+
+.compose-send-menu button {
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  padding: 8px 14px;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.compose-send-menu button:hover {
+  background: var(--btn-bg-hover);
+}
+
+.compose-send-menu-divider {
+  margin: 0;
+  border: none;
+  border-top: 1px solid var(--mailcopilot-border);
+}
+
+.compose-schedule-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--mailcopilot-border);
+}
+
+.compose-schedule-custom label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.compose-schedule-custom input[type="datetime-local"] {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  background: var(--mailcopilot-panel-bg);
+  color: var(--fg);
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.compose-schedule-custom-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.compose-schedule-custom-actions button {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--mailcopilot-panel-bg);
+  color: var(--fg);
+}
+
+.compose-schedule-custom-actions button:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Шаблоны в Compose */
+.compose-template-wrap {
+  position: relative;
+}
+
+.compose-template-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+}
+
+.compose-template-menu button {
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.compose-template-menu button:first-child {
+  border-radius: 10px 10px 0 0;
+}
+
+.compose-template-menu button:last-child {
+  border-radius: 0 0 10px 10px;
+}
+
+.compose-template-menu button:hover {
+  background: var(--btn-bg-hover);
+}
+
+.compose-template-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.template-shortcut {
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.outbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.outbox-item {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--mailcopilot-panel-bg);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.outbox-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.outbox-item-subject {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.outbox-item-status {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.outbox-item-status-failed {
+  color: var(--error-fg);
+}
+
+.outbox-item-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.outbox-item-error {
+  font-size: 12px;
+  color: var(--error-fg);
+}
+
+.outbox-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ===== Sync indicator in list header ===== */
+.sync-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.search-pagination-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle, transparent);
+}
+
+.search-pagination-footer svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* ===== Контекстное меню ===== */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 260px;
+  max-width: 320px;
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+}
+
+.ctx-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  justify-content: flex-start;
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: var(--fg);
+}
+
+.ctx-item:hover {
+  background: var(--btn-bg-hover);
+}
+
+.ctx-item.danger {
+  color: var(--error-fg);
+}
+
+.ctx-sep {
+  height: 1px;
+  background: var(--mailcopilot-border);
+  margin: 6px 6px;
+}
+
+.ctx-header {
+  display: block;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ctx-sublist {
+  margin: 6px 0 8px;
+  padding: 6px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--mailcopilot-panel-bg);
+  max-height: 260px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ctx-subitem {
+  width: 100%;
+  border: none;
+  background: transparent;
+  justify-content: flex-start;
+  padding: 8px 8px;
+  border-radius: 8px;
+  color: var(--fg);
+}
+
+.ctx-subitem:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* ===== Settings/Account окна ===== */
+/* ===== Settings: двухколоночный layout с вкладками ===== */
+.settings-layout {
+  display: flex;
+  height: calc(100% - 36px);
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.settings-tabs {
+  display: flex;
+  flex-direction: column;
+  width: 200px;
+  flex-shrink: 0;
+  padding: 12px 8px;
+  gap: 2px;
+  border-right: 1px solid var(--mailcopilot-border);
+  background: var(--panel-bg);
+}
+
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+}
+.settings-tab svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.settings-tab:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.settings-tab-active {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.settings-content {
+  min-width: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.settings-content:not(.settings-content-folders) {
+  max-width: 600px;
+  /* Center the card on wide viewports without stretching it edge-to-edge */
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.settings-content-folders {
+  max-width: 900px;
+}
+
+.settings-save-btn {
+  margin-top: 16px;
+}
+
+.badges-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.badges-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.badges-item input[type="checkbox"] {
+  flex-shrink: 0;
+}
+
+.badges-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-container {
+  padding: 20px 24px;
+  max-width: 720px;
+  -webkit-app-region: no-drag;
+}
+
+.window-container h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.window-container .hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.form-section {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.form-section h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/* Provider picker (account wizard step 1) */
+.provider-picker {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.provider-card {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  grid-template-areas:
+    "icon label badge"
+    "icon desc  badge";
+  column-gap: 12px;
+  row-gap: 2px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.provider-card:hover:not(.provider-card--disabled) {
+  background: var(--btn-bg-hover);
+  border-color: color-mix(in srgb, var(--btn-primary-bg) 40%, var(--mailcopilot-border));
+}
+
+.provider-card:focus-visible {
+  outline: 2px solid var(--btn-primary-bg);
+  outline-offset: 2px;
+}
+
+.provider-card:active:not(.provider-card--disabled) {
+  transform: translateY(1px);
+}
+
+.provider-card--disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.provider-card__icon {
+  grid-area: icon;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--btn-bg);
+  color: var(--fg);
+}
+
+.provider-card__label {
+  grid-area: label;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.25;
+}
+
+.provider-card__desc {
+  grid-area: desc;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.provider-card__badge {
+  grid-area: badge;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--btn-bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Identity picker (Compose "From" selector) */
+.identity-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.identity-picker-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.identity-picker-select {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--fg);
+  min-width: 220px;
+  cursor: pointer;
+}
+
+.identity-picker-select:focus-visible {
+  outline: 2px solid var(--btn-primary-bg);
+  outline-offset: 1px;
+}
+
+.identity-picker-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.compose-identity-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+/* Identities tab (Settings) */
+.identities-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.identities-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.identities-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+}
+
+.identities-row-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.identities-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.identities-row-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.identities-row-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--btn-bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.identities-row-email {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identities-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.identities-row-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.identities-row-actions button:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+  border-color: var(--mailcopilot-border);
+  color: var(--fg);
+}
+
+.identities-row-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.identities-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+}
+
+.identities-editor > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.identities-editor > label > span {
+  font-weight: 500;
+}
+
+.identities-editor input[type="text"],
+.identities-editor input[type="email"],
+.identities-editor textarea {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--fg);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.identities-editor-default-toggle {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.identities-editor-default-toggle input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+.identities-editor-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.form-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.form-grid input,
+.form-grid textarea,
+.form-grid select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Чекбоксы не должны растягиваться на 100% */
+.form-grid input[type="checkbox"] {
+  width: auto;
+}
+
+/* Убираем лишний margin у setting-row внутри form-grid (gap уже задаёт отступ) */
+.form-grid .setting-row {
+  margin-bottom: 0;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.setting-row label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Shared inline-checkbox label used in Settings → About and Compose footer
+   (uiaudit.17a — must match other Compose/Settings controls). */
+.setting-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.signature-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.ai-memory-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  background: var(--bg, #fff);
+  color: var(--text, #333);
+}
+
+.ai-memory-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.ai-memory-counter {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.ai-memory-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.status-ok {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+  animation: status-fade-in 0.2s ease;
+}
+.status-err { color: var(--error-fg); font-size: 13px; }
+
+/* AI Settings — provider wizard */
+.ai-provider-buttons { display: flex; gap: 8px; margin-top: 8px; }
+.ai-provider-label { font-weight: 500; }
+.ai-back-link { margin-left: 8px; font-size: 0.85em; }
+.ai-reset-link { margin-left: 8px; font-size: 0.85em; color: var(--color-danger, #d33); }
+.ai-check-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+
+/* ===== AI egress confirm modal (AiPanel — §3.10 P2) ===== */
+.ai-egress-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--mailcopilot-border);
+  background: rgba(251, 191, 36, 0.08);
+  /* Sibling of .ai-body in .ai-panel flex column — never shrink. */
+  flex-shrink: 0;
+}
+
+.ai-egress-confirm-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.ai-egress-confirm-action {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.ai-egress-confirm-detail {
+  font-style: italic;
+  word-break: break-all;
+  max-width: 100%;
+}
+
+.ai-egress-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Shield icon in header — non-interactive indicator */
+.ai-egress-shield {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* ===== AI mutating-action confirmation cards (AiActionConfirmation) =====
+   Rendered inside .ai-messages > .ai-pending-actions when the AI proposes
+   destructive operations that need user click before *_apply MCP tools fire. */
+.ai-pending-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ai-action-confirmation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--btn-bg);
+}
+
+.ai-action-confirmation-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-action-confirmation-verb {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.ai-action-confirmation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ai-action-confirmation-meta-item {
+  white-space: nowrap;
+}
+
+.ai-action-confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.ai-action-confirmation-actions .btn {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+@keyframes status-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ===== Индикатор вложений в списке писем ===== */
+.mail-attachment-icon {
+  color: var(--muted);
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+/* ===== Кастомные тултипы для sidebar ===== */
+/* ::after pseudo-element removed — replaced by .tooltip-portal (position:fixed React portal)
+   that escapes .mailcopilot-sidebar overflow:hidden stacking context. */
+
+/* Tooltip portal — rendered as a sibling to <aside> in mailcopilot-root */
+.tooltip-portal {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: pre;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  /* Below modals (10000) and command palette (9800), above ordinary content */
+  z-index: 5000;
+}
+
+/* ===== Модалка горячих клавиш ===== */
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.45);
+}
+
+/* ===== Command palette ===== */
+.command-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9800;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+
+.command-palette {
+  width: min(640px, 90vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.24);
+  overflow: hidden;
+}
+
+.command-palette-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  color: var(--muted);
+}
+
+.command-palette-input-wrap input {
+  border: none;
+  outline: none;
+  width: 100%;
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.command-palette-list {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 6px;
+}
+
+.command-palette-item {
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+  gap: 10px;
+}
+
+.command-palette-item:hover,
+.command-palette-item.command-palette-item-active {
+  background: var(--btn-bg-hover);
+}
+
+.command-palette-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-item-shortcut {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.command-palette-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px;
+}
+
+.shortcuts-modal {
+  background: var(--bg);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.25);
+  width: 440px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.shortcuts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+}
+.shortcuts-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.shortcuts-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.shortcuts-close:hover {
+  color: var(--fg);
+  background: var(--btn-bg-hover);
+}
+.shortcuts-body {
+  padding: 12px 20px 20px;
+}
+.shortcuts-group {
+  margin-bottom: 16px;
+}
+.shortcuts-group:last-child {
+  margin-bottom: 0;
+}
+.shortcuts-group h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+.shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+.shortcut-keys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.shortcut-keys kbd {
+  display: inline-block;
+  padding: 2px 7px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--btn-bg-hover);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 4px;
+  min-width: 20px;
+  text-align: center;
+}
+.shortcut-then {
+  font-size: 11px;
+  color: var(--muted);
+}
+.shortcut-label {
+  font-size: 13px;
+  color: var(--fg);
+}
+
+/* ===== Undo-bar ===== */
+.undo-bar {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--fg);
+  color: var(--bg);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  z-index: 9000;
+  animation: undo-slide-up 0.2s ease-out;
+}
+
+.undo-bar button {
+  background: transparent;
+  border: none;
+  color: var(--btn-primary-bg);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.undo-bar button:hover {
+  background: rgba(255,255,255,0.15);
+}
+
+.undo-countdown {
+  opacity: 0.5;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 16px;
+  text-align: center;
+}
+
+.send-undo-bar {
+  bottom: 72px;
+}
+
+@keyframes undo-slide-up {
+  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ===== Update bar (уведомление об обновлении) ===== */
+.update-bar {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--fg);
+  color: var(--bg);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  z-index: 8500;
+  animation: undo-slide-up 0.2s ease-out;
+}
+
+.update-bar button {
+  background: transparent;
+  border: none;
+  color: var(--btn-primary-bg);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.update-bar button:hover {
+  background: rgba(255,255,255,0.15);
+}
+
+.update-bar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.update-bar button.btn-primary {
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+}
+
+/* ===== Confirm dialog (модальное подтверждение) ===== */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-dialog {
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 14px;
+  padding: 24px;
+  min-width: 340px;
+  max-width: 440px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+  text-align: center;
+}
+
+.confirm-dialog p {
+  margin: 0 0 20px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.link-dialog {
+  text-align: left;
+}
+
+.link-prompt-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--fg);
+  border-radius: 10px;
+  word-break: break-all;
+  margin: 0 0 12px;
+}
+
+.link-prompt-text {
+  margin: 0 0 10px;
+}
+
+.link-prompt-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.link-prompt-value {
+  font-size: 13px;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.link-warnings {
+  margin: 10px 0 18px;
+  padding-left: 18px;
+  color: var(--warn-fg);
+  font-size: 13px;
+}
+
+.link-warnings li + li {
+  margin-top: 6px;
+}
+
+/* ===== Compose: To row + Cc/Bcc toggle ===== */
+.compose-to-row {
+  position: relative;
+}
+
+.compose-address-field {
+  position: relative;
+}
+
+.compose-to-row .compose-address-field {
+  padding-right: 72px;
+}
+
+.compose-address-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 38px;
+  box-sizing: border-box;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 6px 8px;
+}
+
+.compose-address-chips input {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  min-width: 140px;
+  flex: 1 1 140px;
+  padding: 4px 0;
+}
+
+.compose-address-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  background: var(--btn-bg-hover);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 2px 6px 2px 8px;
+}
+
+.compose-address-chip-label {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compose-address-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.compose-address-chip-remove:hover {
+  color: var(--fg);
+  background: var(--btn-bg-hover);
+}
+
+.compose-contact-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+  max-height: 260px;
+  overflow: auto;
+}
+
+.compose-contact-suggest-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.compose-contact-suggest-item:hover {
+  background: var(--btn-bg-hover);
+}
+
+.compose-contact-suggest-name {
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.compose-contact-suggest-email {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.compose-cc-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  /* Adequate hit target: min 32px tall, generous horizontal padding */
+  padding: 6px 10px;
+  border-radius: 6px;
+  line-height: 1;
+  transition: background 0.1s, color 0.1s;
+}
+
+.compose-cc-toggle:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+.compose-cc-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring, #6366f1);
+  outline-offset: 1px;
+  color: var(--fg);
+}
+
+/* ===== Child window titlebar ===== */
+.child-titlebar {
+  height: 36px;
+  box-sizing: border-box;
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--mailcopilot-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  -webkit-app-region: drag;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.child-titlebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  padding-left: 8px;
+  color: var(--muted);
+}
+
+/* ===== Утилитарные классы для форм ===== */
+
+/* Автоматический отступ между соседними секциями формы */
+.form-section + .form-section {
+  margin-top: 16px;
+}
+
+/* Двухколоночная сетка формы (Account IMAP/SMTP) */
+.form-grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* Кнопки действий должны занимать обе колонки */
+.form-grid-2col > .form-actions {
+  grid-column: 1 / -1;
+}
+
+/* Checkbox-ряд: выравнивание по началу */
+.setting-row-start {
+  justify-content: flex-start;
+}
+
+/* Ряд настройки роли папки */
+.role-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.role-row label {
+  min-width: 120px;
+}
+
+.role-row select {
+  flex: 1;
+}
+
+.role-row button {
+  min-width: 96px;
+  justify-content: center;
+}
+
+/* Вкладка Folders */
+.settings-folders-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-folders-tab .setting-row {
+  margin-bottom: 0;
+}
+
+.folder-role-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.folder-role-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-role-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.folder-policy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.folder-policy-list-scroll {
+  /* Let the parent .settings-content scrollbar handle vertical scroll;
+     no inner scrollbar needed here (uiaudit.15 — triple-scrollbar fix). */
+  padding-right: 4px;
+}
+
+.folder-policy-card {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  padding: 10px 12px;
+}
+
+.folder-policy-head {
+  margin-bottom: 8px;
+}
+
+.folder-policy-path {
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.folder-policy-role {
+  margin-top: 2px;
+}
+
+.folder-policy-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.folder-policy-controls .setting-row {
+  margin-bottom: 0;
+}
+
+.folder-policy-hidden-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.folder-policy-check {
+  min-width: 160px;
+}
+
+.folder-policy-select label {
+  min-width: 120px;
+}
+
+.folder-policy-days-input {
+  width: 72px;
+}
+
+@media (max-width: 960px) {
+  .folder-role-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .folder-role-row button {
+    width: fit-content;
+  }
+}
+
+/* Inline-статус в форме (загрузка/подсказка) */
+.form-status-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Кнопка «Сохранить» под секциями формы */
+.form-section + .btn-primary {
+  margin-top: 16px;
+}
+
+/* ===== Модальный диалог (создание папки и т.д.) ===== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-dialog {
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 14px;
+  padding: 24px;
+  min-width: 340px;
+  max-width: 440px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+}
+
+.modal-dialog h3 {
+  margin: 0 0 16px;
+  font-size: 15px;
+}
+
+.modal-dialog input[type="text"] {
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* Скрытый элемент, доступный только для скринридеров */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Snooze Dropdown --- */
+
+.snooze-dropdown-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+}
+
+.snooze-dropdown {
+  position: fixed;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  z-index: 201;
+}
+
+.snooze-preset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.snooze-preset:hover {
+  background: var(--btn-bg-hover);
+}
+
+.snooze-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+
+.snooze-custom input[type="datetime-local"] {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.snooze-apply {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Virtual folder items (Snoozed, Follow-up, Read Later) */
+.vfolder-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+}
+
+.vfolder-item-clickable {
+  cursor: pointer;
+}
+
+.vfolder-item-clickable:hover {
+  background: var(--btn-bg-hover);
+}
+
+.vfolder-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.vfolder-item-subject {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vfolder-item-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.vfolder-item-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Follow-up Reminders */
+.compose-followup {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.compose-followup select {
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--mailcopilot-border);
+  background: var(--bg, #ffffff);
+  color: var(--mailcopilot-fg);
+}
+
+.followup-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.followup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+}
+
+.followup-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.followup-item-subject {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.followup-item-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.followup-item-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Templates — форма создания/редактирования */
+.settings-template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 16px 0;
+}
+
+.settings-template-form label {
+  font-size: 13px;
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+.settings-template-form label:first-child {
+  margin-top: 0;
+}
+
+.settings-template-form input[type="text"],
+.settings-template-form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  box-sizing: border-box;
+}
+
+.settings-template-form textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.settings-template-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* Templates — список */
+.settings-template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.settings-template-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+}
+
+.settings-template-item-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-template-item-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-template-item-shortcut {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--btn-bg-hover);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.settings-template-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ===== TLS Pins таблица ===== */
+.tls-pins-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.tls-pins-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+}
+
+.tls-pins-table td {
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  vertical-align: middle;
+}
+
+.tls-pins-table tr:last-child td {
+  border-bottom: none;
+}
+
+.fingerprint-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ряд аккаунта в настройках */
+.account-row {
+  flex-wrap: nowrap;
+}
+
+.account-row button {
+  min-width: auto;
+}
+
+/* ===== Редактор аватара аккаунта ===== */
+.avatar-editor {
+  padding: 12px 0 8px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.avatar-editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.avatar-editor-section > label {
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.avatar-mode-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.avatar-mode-toggle button {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  border: 1px solid var(--mailcopilot-border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.avatar-mode-toggle button:hover {
+  background: var(--btn-bg-hover);
+}
+
+.avatar-mode-toggle button.active {
+  background: var(--btn-primary-bg);
+  color: #fff;
+  border-color: var(--btn-primary-bg);
+}
+
+.avatar-initials-input {
+  width: 48px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  text-transform: uppercase;
+}
+
+.avatar-color-palette {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.avatar-color-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.15s;
+  padding: 0;
+}
+
+.avatar-color-btn:hover {
+  transform: scale(1.15);
+}
+
+.avatar-color-btn.active {
+  border-color: var(--fg);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+}
+
+.avatar-icon-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.avatar-icon-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--mailcopilot-border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  padding: 0;
+}
+
+.avatar-icon-btn:hover {
+  background: var(--btn-bg-hover);
+}
+
+.avatar-icon-btn.active {
+  background: var(--btn-primary-bg);
+  color: #fff;
+  border-color: var(--btn-primary-bg);
+}
+
+/* --- Notification Center --- */
+.notification-center {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.notification-bell-btn {
+  position: relative;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  color: var(--fg, #0f172a);
+  opacity: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.notification-bell-btn:hover {
+  background: var(--btn-bg-hover);
+}
+.notification-badge {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+}
+.notification-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  width: 360px;
+  max-height: 420px;
+  background: var(--bg, #ffffff);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.notification-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  flex-shrink: 0;
+}
+.notification-panel-title {
+  font-weight: 700;
+  font-size: 13px;
+}
+.notification-mark-all-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--accent, #3b82f6);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.notification-mark-all-btn:hover {
+  background: var(--btn-bg-hover);
+}
+.notification-panel-list {
+  overflow-y: auto;
+  flex: 1;
+}
+.notification-empty {
+  padding: 32px 14px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.notification-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--mailcopilot-border);
+  transition: background 0.1s;
+}
+.notification-item:last-child {
+  border-bottom: none;
+}
+.notification-item:hover {
+  background: var(--btn-bg-hover);
+}
+.notification-unread {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 6%, transparent);
+}
+.notification-unread .notification-item-title {
+  font-weight: 700;
+}
+.notification-item-icon {
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.notif-icon-error {
+  color: var(--error, #ef4444);
+}
+.notif-icon-info {
+  color: var(--accent, #3b82f6);
+}
+.notification-item-content {
+  flex: 1;
+  min-width: 0;
+}
+.notification-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notification-item-body {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+.notification-item-time {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.notification-item-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.notification-item:hover .notification-item-actions {
+  opacity: 1;
+}
+.notification-item-actions button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+}
+.notification-item-actions button:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+/* ===== Custom <Select> component (uiaudit.11) ===== */
+.mc-select {
+  position: relative;
+  display: inline-block;
+  min-width: 80px;
+}
+
+.mc-select__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 400;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+  line-height: 1.4;
+}
+
+.mc-select__trigger:focus-visible {
+  outline: none;
+  border-color: rgba(59, 130, 246, 0.55);
+  background: var(--input-bg-focus);
+}
+
+.mc-select__trigger:hover:not(:disabled) {
+  background: var(--input-bg-focus);
+}
+
+.mc-select--open .mc-select__trigger {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: var(--input-bg-focus);
+}
+
+.mc-select--disabled .mc-select__trigger {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mc-select__value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-select__chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.15s;
+  display: flex;
+  align-items: center;
+}
+
+.mc-select--open .mc-select__chevron {
+  transform: rotate(180deg);
+}
+
+.mc-select__listbox {
+  /* position:fixed + top/left/minWidth are set via inline style by the portal logic in Select.tsx */
+  position: fixed;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  /* Must sit above .modal-overlay / .confirm-overlay (z-index 10000): Select is
+     used inside modal dialogs (e.g. the mail-rule / AI-rule editor). At 9999 the
+     portal listbox rendered behind the modal backdrop, so options were invisible
+     and not clickable. Regression covered by select-component.spec.ts. */
+  z-index: 10001;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.mc-select__option {
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fg);
+  transition: background 0.1s;
+  user-select: none;
+}
+
+.mc-select__option--active {
+  background: var(--btn-bg-hover);
+}
+
+.mc-select__option--selected {
+  color: var(--btn-primary-bg);
+  font-weight: 500;
+}
+
+.mc-select__option--active.mc-select__option--selected {
+  background: color-mix(in srgb, var(--btn-primary-bg) 10%, transparent);
+}
+
+/* ===== §2.22 InviteCard — inline calendar invitation RSVP card ===== */
+.invite-card {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  padding: 14px 16px;
+  margin: 8px 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.invite-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.invite-card-icon {
+  color: var(--btn-primary-bg);
+  flex-shrink: 0;
+}
+
+.invite-card-summary {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.invite-card-summary-cancelled {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.invite-cancelled-badge {
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--warn-bg, #fef3cd);
+  color: var(--warn-fg, #856404);
+  border: 1px solid var(--warn-border, #ffd700);
+  border-radius: 4px;
+  padding: 2px 7px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.invite-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.invite-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.invite-meta-icon {
+  color: var(--muted);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.invite-meta-label {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.invite-meta-value {
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.invite-meta-organizer {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invite-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.invite-btn {
+  font-size: 13px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--mailcopilot-border);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.invite-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.invite-btn-secondary {
+  background: transparent;
+  color: var(--fg);
+}
+
+.invite-btn-secondary:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.invite-btn-decline {
+  background: transparent;
+  color: var(--error, #dc2626);
+  border-color: color-mix(in srgb, var(--error, #dc2626) 40%, var(--mailcopilot-border));
+}
+
+.invite-btn-decline:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error, #dc2626) 8%, transparent);
+}
+
+.invite-sending {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.invite-error {
+  font-size: 12px;
+  color: var(--error, #dc2626);
+  background: color-mix(in srgb, var(--error, #dc2626) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--error, #dc2626) 30%, transparent);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.invite-response-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 4px 0;
+}
+
+.invite-status-accepted {
+  color: var(--success, #16a34a);
+}
+
+.invite-status-tentative {
+  color: var(--warning-text, #ca8a04);
+}
+
+.invite-status-declined {
+  color: var(--muted);
+}
+
+/* Print styles — hide chrome, show only the email body */
+@media print {
+  .sidebar, .list-actions, .toolbar, .thread-view-actions, .ai-panel,
+  .filter-chips, .search-container, .titlebar,
+  .resize-edge, .compose-footer { display: none !important; }
+  .app-layout { display: block !important; }
+  .mail-detail { width: 100% !important; max-width: 100% !important; }
+  .mail-list-pane { display: none !important; }
+}

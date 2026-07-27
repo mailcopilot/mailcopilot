@@ -1,0 +1,1381 @@
+{
+  "common": {
+    "save": "Save",
+    "close": "Close",
+    "cancel": "Cancel",
+    "ok": "OK",
+    "error": "error"
+  },
+  "folders": {
+    "inbox": "Inbox",
+    "sent": "Sent",
+    "drafts": "Drafts",
+    "trash": "Trash",
+    "junk": "Spam",
+    "archive": "Archive",
+    "outbox": "Outbox",
+    "snoozed": "Snoozed",
+    "followUp": "Follow-ups",
+    "readLater": "Read Later",
+    "menu": {
+      "syncFull": "Sync all headers",
+      "syncOnOpen": "Sync on open",
+      "syncOff": "Do not sync",
+      "addToBadges": "Show in unread badges",
+      "removeFromBadges": "Hide from unread badges",
+      "hideFromSidebar": "Hide from sidebar",
+      "showInSidebar": "Show in sidebar",
+      "changeIcon": "Change icon",
+      "includeInSearch": "Include in search",
+      "excludeFromSearch": "Exclude from search",
+      "rename": "Rename folder",
+      "delete": "Delete folder",
+      "renamePrompt": "New name for folder {{current}}",
+      "deleteConfirm": "Delete folder {{folder}} from server?",
+      "iconPrompt": "Enter emoji/icon for folder"
+    }
+  },
+  "app": {
+    "sidebar": {
+      "compose": "Compose",
+      "sync": "Sync",
+      "settings": "Settings",
+      "connectAccount": "Connect email",
+      "unifiedInbox": "All accounts",
+      "expand": "Expand sidebar",
+      "collapse": "Collapse sidebar",
+      "workOffline": "Work offline"
+    },
+    "syncing": "Syncing...",
+    "statusbar": {
+      "syncing": "Syncing…",
+      "headersCoverage": "Headers: {{covered}}/{{total}} folders",
+      "bodyIndex": "Body index: {{percent}}%"
+    },
+    "search": {
+      "placeholder": "Search...",
+      "clear": "Clear search",
+      "scopeFolder": "Current folder",
+      "scopeAccount": "All folders",
+      "scopeAll": "All accounts",
+      "sortDate": "Newest",
+      "sortRelevance": "Relevance",
+      "sortRelevanceUnavailable": "Relevance ranking is only available for plain-text queries",
+      "searching": "Searching…",
+      "loadingMore": "Loading more results…",
+      "indexPartial": "Full-text search: {{percent}}% indexed",
+      "headersCoverage": "Headers: {{covered}}/{{total}} folders synced",
+      "remoteResults": "+{{count}} from server"
+    },
+    "empty": {
+      "loading": {
+        "title": "Loading..."
+      },
+      "noAccount": {
+        "title": "Connect your email",
+        "hint": "Click the mail icon in the bottom left"
+      },
+      "noMessages": {
+        "title": "No messages",
+        "hint": "This folder is empty"
+      },
+      "selectMessage": {
+        "title": "Select a message",
+        "hint": "Click a message on the left to view it",
+        "rightClickTip": "Right-click any message for quick actions"
+      },
+      "loadingMessage": {
+        "title": "Loading message..."
+      },
+      "messageNotFound": {
+        "title": "Message not found"
+      }
+    },
+    "errors": {
+      "sync": "Sync error: {{error}}",
+      "load": "Load error: {{error}}",
+      "loadMessage": "Message load error: {{error}}",
+      "bodyNotAvailableOffline": "Message body is not available offline. Only headers are cached.",
+      "delete": "Delete error: {{error}}",
+      "archive": "Archive error: {{error}}",
+      "search": "Search error: {{error}}",
+      "move": "Move error: {{error}}",
+      "queue": "Send queue error: {{error}}",
+      "markSeen": "Read status error: {{error}}",
+      "flag": "Flag error: {{error}}",
+      "pin": "Pin error: {{error}}",
+      "compose": "Compose error: {{error}}",
+      "attachment": "Attachment error: {{error}}",
+      "openExternal": "Open link error: {{error}}"
+    },
+    "authRecovery": {
+      "googlePrompt": "Google authorization for {{account}} is broken. Reconnect now?",
+      "googleRequired": "Google reauthorization is required for {{account}}.",
+      "googleStarting": "Opening Google sign-in flow for {{account}}...",
+      "googleSuccess": "Google account {{account}} reconnected.",
+      "googleFailed": "Google reauthorization failed: {{error}}",
+      "googleFailedHelp": "Google reauthorization failed: {{error}}. Account window opened to retry.",
+      "outlookPrompt": "Outlook authorization for {{account}} is broken. Reconnect now?",
+      "outlookRequired": "Outlook reauthorization is required for {{account}}.",
+      "outlookStarting": "Opening Outlook sign-in flow for {{account}}...",
+      "outlookSuccess": "Outlook account {{account}} reconnected.",
+      "outlookFailedHelp": "Outlook reauthorization failed: {{error}}. Account window opened to retry.",
+      "passwordPrompt": "Authentication for {{account}} failed. Open account window to enter IMAP/SMTP password?",
+      "passwordRequired": "IMAP/SMTP password is required for {{account}}.",
+      "passwordOpen": "Account window opened for {{account}}. Enter password and save the account."
+    },
+    "confirm": {
+      "deleteForever": "Permanently delete {{count}} message(s)? This cannot be undone.",
+      "yes": "Delete",
+      "no": "Cancel",
+      "ariaTitle": "Confirmation"
+    },
+    "undo": {
+      "deleted": "Moved to Trash",
+      "archived": "Archived",
+      "spammed": "Marked as spam",
+      "sendScheduled": "Send is delayed",
+      "undo": "Undo"
+    },
+    "sentCopyFailed": {
+      "message": "Message delivered, but saving a copy to the Sent folder failed",
+      "messageWithFolder": "Message delivered, but saving a copy to \"{{folder}}\" failed",
+      "dismiss": "Dismiss"
+    },
+    "certRecovery": {
+      "title": "The server presented a different certificate",
+      "serverLabel": "Server",
+      "issuerLabel": "Issuer",
+      "issuerUnknown": "unknown",
+      "subjectLabel": "Issued to",
+      "fingerprintLabel": "Fingerprint (SHA-256)",
+      "fingerprintUnknown": "could not be determined",
+      "copy": "Copy",
+      "copyFingerprint": "Copy the SHA-256 fingerprint",
+      "copied": "Copied",
+      "detailsLabel": "Details",
+      "interception": "It looks like this connection is being inspected by an antivirus or proxy ({{issuer}}).",
+      "trust": "Trust and continue",
+      "readCertificate": "Read the certificate",
+      "trusting": "Trusting…",
+      "trustingHint": "Checking the server’s certificate — this can take a few seconds.",
+      "reprobing": "Checking…",
+      "cancel": "Cancel",
+      "dismissing": "Dismissing…",
+      "review": {
+        "fetched": "These details were read from the server just now. Check them and confirm only if they are what you expect.",
+        "updated": "The server’s certificate changed after this window opened, so nothing was trusted. Below is the certificate the server presents right now — check it and confirm only if you expected the change."
+      },
+      "error": {
+        "trustFailed": "Could not save trust for this certificate. Please try again.",
+        "trustFingerprintMismatch": "The server’s certificate changed after this window opened, so nothing was trusted — and the new certificate could not be read. Trusting is unavailable.",
+        "trustPinWriteFailed": "Could not remember this certificate as trusted. Please try again.",
+        "trustNotOffered": "This warning is out of date, so the confirmation was not accepted. Close it and wait for the next warning about this server.",
+        "reprobeFailed": "Could not read the certificate from the server. Trusting is unavailable.",
+        "dismissFailed": "Could not dismiss this prompt. Please try again.",
+        "dismissNotPending": "This warning is no longer current — you can close it."
+      },
+      "notice": {
+        "message": "The connection to {{host}} is being inspected.",
+        "messageWithIssuer": "The connection to {{host}} is being inspected by {{issuer}}.",
+        "dismiss": "Dismiss"
+      }
+    },
+    "update": {
+      "available": "New version {{version}} available",
+      "download": "Download",
+      "downloading": "Downloading…",
+      "later": "Later",
+      "ready": "Update ready to install",
+      "restart": "Restart",
+      "adminRequired": "New version {{version}} is available. Please contact your system administrator to update."
+    }
+  },
+  "unified": {
+    "title": "Unified Inbox",
+    "allAccounts": "All accounts",
+    "filterByAccount": "Filter by account",
+    "openInAccount": "Open in account"
+  },
+  "outbox": {
+    "empty": {
+      "title": "Outbox is empty",
+      "hint": "Scheduled and delayed messages will appear here"
+    },
+    "noSubject": "(no subject)",
+    "status": {
+      "queued": "queued",
+      "sending": "sending",
+      "failed": "failed"
+    },
+    "actions": {
+      "sendNow": "Send now",
+      "edit": "Edit",
+      "cancel": "Cancel",
+      "postpone15": "+15 min"
+    }
+  },
+  "snooze": {
+    "snooze": "Snooze",
+    "laterToday": "Later today",
+    "tomorrowMorning": "Tomorrow morning",
+    "nextWeek": "Next week",
+    "custom": "Pick date & time",
+    "apply": "Apply",
+    "cancel": "Cancel",
+    "wakeNotification": "Snoozed message reminder",
+    "wakeAt": "Wake at: {{time}}",
+    "empty": {
+      "title": "No snoozed messages",
+      "hint": "Snooze messages to be reminded later"
+    }
+  },
+  "followUp": {
+    "remind": "Remind if no reply",
+    "reminderDays": "Reminder delay",
+    "days2": "After 2 days",
+    "days3": "After 3 days",
+    "days7": "After 7 days",
+    "title": "Follow-ups",
+    "empty": "No pending follow-ups",
+    "dismiss": "Dismiss",
+    "dueSince": "Due since {{date}}",
+    "to": "To: {{address}}",
+    "notificationTitle": "Follow-up Reminder",
+    "notificationBody": "No reply from {{address}} on: {{subject}}"
+  },
+  "readLater": {
+    "add": "Read later",
+    "remove": "Remove from list",
+    "empty": {
+      "title": "No read later items",
+      "hint": "Save articles and emails to read later"
+    }
+  },
+  "inboxZero": {
+    "processedToday": "Processed today: {{count}}",
+    "congrats": "Inbox Zero!"
+  },
+  "mcpExport": {
+    "title": "MCP Server Export",
+    "hint": "Expose mail tools to external MCP clients (Claude Code, Obsidian, etc.) via localhost.",
+    "enable": "Enable MCP server (localhost only)",
+    "port": "Port",
+    "status": "Status",
+    "running": "Running",
+    "stopped": "Stopped",
+    "start": "Start",
+    "stop": "Stop",
+    "url": "Connection URL",
+    "token": "Token",
+    "copy": "Copy",
+    "copyConfig": "Copy MCP Config"
+  },
+  "mcpClient": {
+    "title": "MCP Connections",
+    "hint": "Connect to external MCP servers (Obsidian, task managers, calendars) to extend AI capabilities.",
+    "addConnection": "+ Add Connection",
+    "name": "Name",
+    "transport": "Transport",
+    "command": "Command",
+    "args": "Arguments",
+    "enableStdio": "Stdio transport (local processes)",
+    "stdioWarning": "Stdio MCP servers launch local child processes with your user privileges. They can read files, access the network, and run further commands. Enabling requires a native confirmation dialog.",
+    "stdioEnabled": "Stdio MCP is enabled. Each connection still needs its own approval below.",
+    "requestStdioEnable": "Enable stdio MCP…",
+    "needsApproval": "Needs approval — review command and args before connecting",
+    "approved": "Approved",
+    "approve": "Approve…",
+    "env": "Environment variables",
+    "autoConnect": "Auto-connect on startup",
+    "testConnection": "Test Connection",
+    "save": "Save",
+    "cancel": "Cancel",
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "connected": "Connected",
+    "connecting": "Connecting",
+    "disconnected": "Disconnected",
+    "error": "Error",
+    "testSuccess": "OK — {{count}} tools",
+    "saveError": {
+      "forbiddenEnvKey": "Environment variable {{keys}} is not allowed for security reasons.",
+      "unapprovedCommand": "This command is not in the built-in allowlist. Contact support to request its addition.",
+      "generic": "Failed to save MCP connection: {{reason}}"
+    },
+    "testError": {
+      "notApproved": "Connection is not approved. Open the connection editor and approve it before testing.",
+      "envDisabled": "Stdio MCP is disabled. Enable it in Settings before testing a stdio connection.",
+      "generic": "Connection test failed: {{reason}}"
+    }
+  },
+  "mail": {
+    "actions": {
+      "editDraft": "Edit draft",
+      "reply": "Reply",
+      "replyAll": "Reply all",
+      "forward": "Forward",
+      "flag": "Star",
+      "unflag": "Unstar",
+      "delete": "Delete",
+      "archive": "Archive",
+      "markRead": "Mark as read",
+      "markUnread": "Mark as unread",
+      "moveToFolder": "Move to folder",
+      "spam": "Mark as spam",
+      "spamTo": "Move to Spam ({{junk}})",
+      "deleteToTrash": "Move to Trash ({{trash}})",
+      "deleteForever": "Delete permanently",
+      "archiveTo": "Move to Archive ({{archive}})",
+      "archiveNotFound": "Archive folder not found",
+      "junkNotFound": "Spam folder not found",
+      "trashNotFound": "Trash folder not found",
+      "selectToAct": "Select emails to perform actions",
+      "moveNotInUnified": "Move is not available in unified inbox",
+      "pin": "Pin to top",
+      "unpin": "Unpin",
+      "print": "Print",
+      "retry": "Retry",
+      "openInWindow": "Open in window",
+      "snooze": "Snooze",
+      "confirmPermanentDelete": "This will permanently delete the message. This action cannot be undone.",
+      "actionFailed": "Action failed. Please try again.",
+      "archived": "Archived. Undo",
+      "movedToTrash": "Moved to trash. Undo",
+      "undo": "Undo",
+      "undoFailed": "Undo failed.",
+      "toolbarLabel": "Mail actions"
+    },
+    "headers": {
+      "from": "From",
+      "to": "To",
+      "cc": "Cc",
+      "bcc": "Bcc",
+      "date": "Date"
+    },
+    "recipients": {
+      "moreCount": "+{{count}} more"
+    },
+    "privacy": {
+      "imagesBlocked": "External images are blocked for privacy protection.",
+      "showImages": "Show images"
+    },
+    "links": {
+      "title": "This link looks suspicious",
+      "textLabel": "Link text",
+      "cancel": "Cancel",
+      "openAnyway": "Open anyway",
+      "warningIdn": "The domain uses IDN/punycode: {{unicode}} (punycode: {{ascii}}).",
+      "warningIdnSimple": "The domain uses IDN/punycode: {{ascii}}.",
+      "warningHttp": "The link uses http (not encrypted).",
+      "warningMismatch": "The link text shows {{shown}}, but it actually goes to {{real}}.",
+      "warningRawExternalLink": "This link bypassed the standard URL rewriter — proceed only if you trust the source."
+    },
+    "attachments": {
+      "download": "Download attachment",
+      "unnamed": "Attachment"
+    },
+    "list": {
+      "filter": "Filter",
+      "sort": "Sort",
+      "loadMore": "Load more",
+      "autoPagingDisabled": "Auto loading is disabled in filtered/sorted view"
+    },
+    "filters": {
+      "all": "All",
+      "unread": "Unread",
+      "attachments": "With attachments",
+      "flagged": "Starred",
+      "fromTooltip": "Show all emails from {{from}}"
+    },
+    "date": {
+      "yesterday": "Yesterday"
+    },
+    "sort": {
+      "date": "Date",
+      "from": "From",
+      "subject": "Subject"
+    },
+    "bulk": {
+      "selected": "{{count}} selected",
+      "clear": "Clear selection"
+    },
+    "thread": {
+      "count": "+{{count}}",
+      "countTitle": "{{count}} messages in thread",
+      "inConversation": "Conversation ({{count}})",
+      "confirmAction": "Apply to all {{count}} messages in this thread?",
+      "confirmYes": "Apply to all",
+      "markAllRead": "Mark thread read",
+      "archiveThread": "Archive thread",
+      "deleteThread": "Delete thread",
+      "reply": "Reply",
+      "replyAll": "Reply all",
+      "forward": "Forward",
+      "snooze": "Snooze",
+      "bulkConfirm": "Apply to all {{count}} messages in this thread?",
+      "expandCard": "Expand message",
+      "collapseCard": "Collapse message",
+      "snippetEmpty": "(no preview)",
+      "showQuoted": "Show quoted text"
+    },
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "pinned": "Pinned",
+    "print": "Print",
+    "context": {
+      "selected": "{{count}} messages selected"
+    }
+  },
+  "settings": {
+    "title": "Settings",
+    "unsavedWarning": "You have unsaved changes. Close without saving?",
+    "hint": "Customize the appearance and behavior of the app",
+    "tabs": {
+      "accounts": "Accounts",
+      "general": "General",
+      "productivity": "Productivity",
+      "folders": "Folders",
+      "signature": "Signature",
+      "templates": "Templates",
+      "rules": "Rules",
+      "about": "About"
+    },
+    "accounts": {
+      "title": "Accounts",
+      "hint": "Manage connected mail accounts and choose the current one.",
+      "empty": "No accounts connected yet",
+      "add": "Add account",
+      "edit": "Edit",
+      "openManager": "Open account manager",
+      "remove": "Remove",
+      "makeCurrent": "Make current",
+      "current": "Current",
+      "confirmRemove": "Remove account {{label}}? Local cache for this account will be deleted.",
+      "statusOnline": "online",
+      "statusOffline": "offline",
+      "customizeAvatar": "Customize avatar",
+      "avatarMode": "Display mode",
+      "avatarInitials": "Letters",
+      "avatarIcon": "Icon",
+      "avatarInitialsLabel": "Custom initials",
+      "avatarInitialsHint": "1–2 characters",
+      "avatarIconLabel": "Choose icon",
+      "avatarColor": "Color",
+      "avatarPreview": "Preview",
+      "gravatarHint": "Uses your profile photo from gravatar.com for {{email}}",
+      "gravatarNotFound": "No Gravatar found for {{email}}. Create one at gravatar.com"
+    },
+    "sections": {
+      "general": "General"
+    },
+    "badges": {
+      "title": "Unread badges",
+      "hint": "Choose which folders show unread message count"
+    },
+    "folderPolicy": {
+      "title": "Folder sync policy",
+      "hint": "Configure visibility, unread badges, header sync and offline behavior for each folder.",
+      "visible": "Show in sidebar",
+      "hiddenNoSync": "Hidden folders are fully excluded from header sync, offline storage, and badges.",
+      "badges": "Include in unread badges",
+      "headerSync": "Header sync",
+      "syncFull": "All messages",
+      "syncOnOpen": "On open",
+      "syncPeriod": "By period",
+      "syncOff": "Disabled",
+      "offline": "Offline mode",
+      "offlineOff": "Disabled",
+      "offlinePeriod": "By period",
+      "offlineFull": "All messages",
+      "days": "Days"
+    },
+    "theme": {
+      "label": "Theme",
+      "light": "Light",
+      "dark": "Dark"
+    },
+    "language": {
+      "label": "Language",
+      "en": "English",
+      "ru": "Русский",
+      "fr": "Français",
+      "de": "Deutsch",
+      "es": "Español",
+      "it": "Italiano"
+    },
+    "general": {
+      "defaultMailApp": "Set as default email app",
+      "defaultMailAppHint": "Handle mailto: links from browsers and other apps"
+    },
+    "bodyRetentionDays": {
+      "label": "Keep full message copy for",
+      "hint": "Applies to folders set to download full bodies. Older messages remain searchable but their .eml files are deleted to save disk space.",
+      "option30": "30 days",
+      "option90": "90 days",
+      "option180": "180 days",
+      "option365": "1 year",
+      "optionForever": "Forever",
+      "confirmShrink": "{{count}} message bodies (~{{mb}} MB) will be deleted from disk. Headers and search index stay. Continue?",
+      "confirmShrinkUnknown": "Unable to estimate the impact of this change. Some message bodies will be deleted from disk. Continue anyway?"
+    },
+    "productivity": {
+      "title": "Productivity",
+      "hint": "Optional features for faster inbox processing",
+      "groupConversations": "Group messages into conversations",
+      "sortMode": "Sort emails by",
+      "autoAdvance": "After archive/delete",
+      "autoAdvanceOlder": "Open older email",
+      "autoAdvanceNewer": "Open newer email",
+      "autoAdvanceBackToList": "Return to list",
+      "autoAdvanceOff": "Stay (do nothing)",
+      "trustedDomains": "Trusted domains",
+      "trustedDomainsHint": "Domains that won't trigger misdirection warnings (one per line)"
+    },
+    "privacy": {
+      "alwaysLoadImages": "Always load external images",
+      "gravatarInMail": "Show sender photos (Gravatar)",
+      "gravatarInMailHint": "Loads profile photos from gravatar.com for senders who have one",
+      "darkModeEmails": "Dark mode for email content",
+      "darkModeEmailsHint": "Inverts colors of HTML emails in dark theme for comfortable reading"
+    },
+    "appearance": {
+      "conversationOrder": {
+        "label": "Conversation order",
+        "newestTop": "Newest first",
+        "oldestTop": "Oldest first"
+      }
+    },
+    "hotkeys": {
+      "preset": "Hotkeys preset",
+      "gmail": "Gmail",
+      "outlook": "Outlook"
+    },
+    "sendDelay": {
+      "label": "Send delay",
+      "off": "Off",
+      "seconds": "{{count}} sec"
+    },
+    "notifications": {
+      "enabled": "Desktop notifications for new mail"
+    },
+    "sync": {
+      "imapIdle": "IMAP IDLE (push updates)",
+      "interval": "Sync interval",
+      "intervalMinutes": "{{count}} min",
+      "periodicSync": "Periodic folder sync",
+      "periodicSyncHint": "Background sync interval for folders with full/periodic sync mode"
+    },
+    "drafts": {
+      "sync": "Sync drafts with IMAP Drafts"
+    },
+    "folders": {
+      "title": "Folders",
+      "hint": "Map standard roles to server folders. If not selected, auto-detect is used.",
+      "account": "Account",
+      "loading": "Loading folders...",
+      "loadFailed": "Failed to load folders: {{error}}",
+      "noAccount": "Connect an account to configure folders",
+      "onlyInbox": "Only INBOX is visible on the server. Create the folders you need, then select them here.",
+      "notSet": "— not set —",
+      "auto": "Auto: {{path}}",
+      "create": "Create",
+      "createNew": "Create new folder...",
+      "createNewTitle": "Create new folder",
+      "folderNamePlaceholder": "Folder name",
+      "creating": "Creating...",
+      "createFolder": "Create folder {{path}}",
+      "createExists": "Folder already exists"
+    },
+    "signature": {
+      "title": "Signature",
+      "hint": "Automatically appended to new messages",
+      "placeholder": "Enter your signature..."
+    },
+    "identities": {
+      "tabLabel": "Identities",
+      "empty": "No identities yet",
+      "add": "Add identity",
+      "edit": "Edit",
+      "delete": "Delete",
+      "setDefault": "Set as default",
+      "defaultBadge": "Default",
+      "displayNameLabel": "Display name",
+      "emailLabel": "Email",
+      "signatureLabel": "Signature",
+      "defaultBccLabel": "Default Bcc",
+      "saveError": "Failed to save identities"
+    },
+    "templates": {
+      "title": "Templates",
+      "hint": "Create reusable message templates. Use {name}, {email}, {date} as variables.",
+      "name": "Template name",
+      "subject": "Subject",
+      "body": "Message body",
+      "shortcut": "Shortcut (optional)",
+      "add": "Add template",
+      "edit": "Edit",
+      "delete": "Delete",
+      "save": "Save",
+      "confirmDelete": "Delete template \"{{name}}\"?",
+      "variables": "Available variables: {name}, {email}, {date}",
+      "empty": "No templates yet. Click \"Add template\" to create one.",
+      "namePlaceholder": "e.g. Quick follow-up",
+      "subjectPlaceholder": "e.g. Re: {subject}",
+      "bodyPlaceholder": "e.g. Hi {name}, thanks for reaching out…"
+    },
+    "offline": {
+      "title": "Offline mode",
+      "hint": "Download messages for reading without internet. Originals (EML) are stored as separate files.",
+      "perFolderHint": "Offline mode is configured per folder in the Folders tab. Only the global size limit is set here.",
+      "enabled": "Enable offline mode",
+      "syncDays": "Download messages for the last (days)",
+      "syncDaysAll": "0 = all messages",
+      "maxSizeKB": "Max message size (KB)",
+      "maxSizeHint": "0 = no limit",
+      "folders": "Folders to sync offline",
+      "syncNow": "Sync now",
+      "syncing": "Syncing…",
+      "syncStarted": "Sync started"
+    },
+    "rules": {
+      "title": "Mail Rules",
+      "hint": "Automatically sort incoming mail using rules",
+      "add": "Add Rule",
+      "name": "Rule name",
+      "conditions": "Conditions",
+      "actions": "Actions",
+      "field": {
+        "from": "From",
+        "to": "To",
+        "cc": "CC",
+        "subject": "Subject",
+        "has_attachment": "Has attachment"
+      },
+      "op": {
+        "contains": "contains",
+        "not_contains": "does not contain",
+        "equals": "equals",
+        "starts_with": "starts with",
+        "ends_with": "ends with",
+        "matches_regex": "matches regex"
+      },
+      "action": {
+        "move": "Move to folder",
+        "archive": "Archive",
+        "trash": "Move to trash",
+        "mark_read": "Mark as read",
+        "mark_starred": "Star",
+        "mark_spam": "Mark as spam"
+      },
+      "stopProcessing": "Stop processing further rules",
+      "enabled": "Enabled",
+      "empty": "No rules yet. Add a rule to automatically sort incoming mail.",
+      "deleteConfirm": "Delete this rule?",
+      "priority": "Priority",
+      "account": "Account",
+      "allAccounts": "All accounts",
+      "andHint": "All conditions must match (AND logic). For OR, create separate rules.",
+      "test": "Test on existing emails",
+      "testNoMatch": "No emails match these conditions",
+      "testMatches": "{{count}} emails would match:",
+      "applyToExisting": "Apply to existing emails in inbox",
+      "aiSection": "AI Rules",
+      "aiRequiresProvider": "Configure an AI provider in the AI tab to use AI rules",
+      "addCondition": "Add condition",
+      "addAction": "Add action",
+      "folderPlaceholder": "Folder name",
+      "saveFailed": "Failed to save or apply the rule. Please try again.",
+      "conditionField": "Condition field",
+      "conditionOp": "Condition operator",
+      "actionType": "Action type"
+    },
+    "aiRules": {
+      "title": "AI Rules",
+      "hint": "Use AI to sort emails that don't match static rules",
+      "add": "Add AI Rule",
+      "name": "Rule name",
+      "prompt": "Prompt (describe how to sort emails)",
+      "promptPlaceholder": "e.g. If the email is from a recruiter, archive it. Newsletters go to Newsletters folder.",
+      "allowedActions": "Allowed actions",
+      "budget": "Daily budget (USD)",
+      "log": "Action log",
+      "logEmpty": "No AI rule actions yet",
+      "enabled": "Enabled",
+      "empty": "No AI rules yet",
+      "deleteConfirm": "Delete this AI rule?",
+      "budgetPerDay": "${{amount}}/day",
+      "enabledLimit": "You can enable at most {{max}} AI rules per account. Disable another rule first."
+    },
+    "about": {
+      "title": "About MailCopilot",
+      "version": "Version",
+      "website": "Website",
+      "docs": "Documentation",
+      "sentryEnabled": "Send anonymous diagnostics and usage data",
+      "sentryHint": "Includes crash reports, performance metrics, and anonymous product usage events (e.g. which features are used). Never includes message content, addresses, subjects, or folder names.",
+      "debugLogging": "Enable debug logging",
+      "debugLoggingHint": "Writes detailed logs to a file for troubleshooting. Logs are stored locally and never sent automatically.",
+      "system": {
+        "title": "System info",
+        "appVersion": "App version",
+        "channel": {
+          "dev": "dev",
+          "nightly": "nightly",
+          "stable": "stable"
+        },
+        "electron": "Electron",
+        "chromium": "Chromium",
+        "node": "Node.js",
+        "platform": "Platform",
+        "installPath": "Install path",
+        "readOnly": "read-only",
+        "latestAvailable": "latest available {{version}}"
+      },
+      "update": {
+        "title": "Updates",
+        "autoDownload": "Automatically download updates in the background",
+        "autoDownloadHint": "When enabled, new versions download silently and prompt you to restart. When disabled, you choose to download every update.",
+        "cannotSelfUpdateHint": "This installation is read-only (system-wide install). Updates require an administrator.",
+        "checkNow": "Check for updates",
+        "checking": "Checking…",
+        "upToDate": "You're on the latest version",
+        "downloadVersion": "Download {{version}}",
+        "downloadingPercent": "Downloading… {{percent}}%",
+        "restartToInstall": "Restart to install",
+        "errorNetwork": "Network error — try again when you're online",
+        "errorPermission": "Permission denied — administrator required",
+        "errorUnknown": "Update failed — see logs for details",
+        "unsupportedDev": "Updates are disabled in this build"
+      }
+    }
+  },
+  "account": {
+    "title": "Connect email",
+    "editTitle": "Edit account",
+    "hint": "Enter IMAP/SMTP settings. Passwords are stored in the system keychain (keytar).",
+    "editHint": "Edit IMAP/SMTP settings for this account.",
+    "tlsHint": "TLS certificate verification is always enabled. If your mail server uses a custom certificate, a trust prompt will appear during connection test.",
+    "tls": {
+      "unknown": "unknown",
+      "pinConfirm": "Trust this TLS certificate?\n\nHost: {{host}}:{{port}}\nSubject: {{subject}}\nIssuer: {{issuer}}\nSHA-256: {{fingerprint}}\n\nUse this only if you trust this mail server.",
+      "title": "TLS Certificate Pinning",
+      "hint": "Pin server certificates for enhanced security",
+      "noPins": "No pinned certificates",
+      "host": "Host",
+      "port": "Port",
+      "fingerprint": "SHA-256 Fingerprint",
+      "trustAnchor": "Trust anchor",
+      "anchorStored": "Anchor stored",
+      "anchorStoredHint": "The certificate itself is stored, so this server is trusted even when its certificate is self-signed.",
+      "fingerprintOnly": "Fingerprint only",
+      "fingerprintOnlyHint": "Pins marked “Fingerprint only” store the fingerprint but not the certificate itself. That is not enough for a self-signed server: it only becomes trusted through the certificate warning that appears when connecting.",
+      "created": "Added",
+      "addPin": "Add pin",
+      "addPinTitle": "Pin Server Certificate",
+      "addPinHint": "Enter server hostname and port to fetch and pin its certificate.",
+      "addPinAnchorWarning": "A pin added here stores the fingerprint only. A self-signed server will still not connect — confirm it in the certificate warning that appears when connecting instead.",
+      "fetchAndPin": "Fetch & Pin",
+      "fetchError": "Failed to fetch certificate: {{error}}"
+    },
+    "sections": {
+      "imap": "IMAP",
+      "smtp": "SMTP"
+    },
+    "fields": {
+      "account": "Account",
+      "displayName": "Your name",
+      "email": "Email address (From)",
+      "host": "Host",
+      "port": "Port",
+      "user": "User",
+      "emailAddress": "Email",
+      "smtpUser": "SMTP user",
+      "password": "Password",
+      "smtpPassword": "SMTP password",
+      "ssl": "SSL/TLS"
+    },
+    "actions": {
+      "new": "New account",
+      "googleSignIn": "Sign in with Google",
+      "googleReauth": "Reconnect Google",
+      "microsoftSignIn": "Sign in with Microsoft",
+      "microsoftReauth": "Reconnect Microsoft",
+      "save": "Save",
+      "saveAndClose": "Save & close",
+      "setCurrent": "Make current",
+      "remove": "Remove",
+      "test": "Test connection",
+      "autoconfig": "Autoconfigure",
+      "back": "Back",
+      "next": "Next",
+      "manual": "Manual setup",
+      "connect": "Connect"
+    },
+    "status": {
+      "ok": "Connection successful",
+      "saved": "Saved",
+      "removed": "Removed",
+      "current": "Current account set",
+      "googleConnected": "Google connected: {{email}}",
+      "microsoftConnected": "Microsoft connected: {{email}}",
+      "tlsPinned": "Trusted certificate saved for {{host}}:{{port}}",
+      "currentLabel": "current",
+      "autoconfigApplied": "Server settings detected automatically ({{source}})",
+      "autoconfigManual": "Automatic setup was not found. Please enter server settings manually."
+    },
+    "errors": {
+      "enterPassword": "Enter IMAP and SMTP passwords to test the connection",
+      "enterEmailPassword": "Enter email and password first",
+      "imapSmtp": "IMAP: {{imap}}, SMTP: {{smtp}}",
+      "tlsPinFetch": "Failed to fetch TLS certificate: {{error}}",
+      "enterEmailForAutoconfig": "Enter email first to run autoconfiguration",
+      "autoconfigNotFound": "Could not detect server settings automatically",
+      "autoconfigFailed": "Autoconfig error: {{error}}",
+      "googleOAuthFailed": "Google OAuth failed",
+      "microsoftOAuthFailed": "Microsoft OAuth failed"
+    },
+    "wizard": {
+      "actions": {
+        "imapSmtp": "IMAP/SMTP account"
+      },
+      "stepProvider": {
+        "title": "Add mail account",
+        "hint": "Choose your email provider"
+      },
+      "stepType": {
+        "title": "Add mail account",
+        "hint": "Choose sign-in method"
+      },
+      "stepCredentials": {
+        "title": "Email and password"
+      },
+      "stepDetected": {
+        "title": "Server settings detected"
+      },
+      "provider": {
+        "gmail": {
+          "label": "Gmail",
+          "desc": "Sign in with Google OAuth"
+        },
+        "outlook": {
+          "label": "Outlook / Microsoft 365",
+          "desc": "Sign in with Microsoft OAuth"
+        },
+        "generic": {
+          "label": "Generic IMAP/SMTP",
+          "desc": "Any email provider with IMAP/SMTP access"
+        },
+        "comingSoon": "Coming soon"
+      },
+      "smtpSeparate": "SMTP login/password is different",
+      "imapDetected": "IMAP: {{host}}:{{port}}",
+      "smtpDetected": "SMTP: {{host}}:{{port}}"
+    },
+    "confirm": {
+      "remove": "Remove account {{label}}? Local cache for this account will be deleted.",
+      "removeDetailed": "Remove account {{label}}?\n\nLocal data to be deleted:\n- Cached messages: {{count}}\n- Local files: {{size}}\n\nMessages on the server will not be deleted."
+    }
+  },
+  "compose": {
+    "title": "New message",
+    "from": "From",
+    "to": "To",
+    "cc": "Cc",
+    "bcc": "Bcc",
+    "showCcBcc": "Cc/Bcc",
+    "subject": "Subject",
+    "text": "Message text...",
+    "identity": {
+      "selectorLabel": "From identity",
+      "autoMatched": "Auto-matched from recipient"
+    },
+    "contacts": {
+      "removeRecipient": "Remove recipient"
+    },
+    "actions": {
+      "attach": "Attach",
+      "removeAttachment": "Remove attachment",
+      "send": "Send",
+      "schedule": "Schedule",
+      "sending": "Sending...",
+      "sendAndArchive": "Send & Archive",
+      "moreOptions": "More options"
+    },
+    "status": {
+      "sent": "Sent!",
+      "scheduled": "Message queued ({{seconds}} sec)",
+      "scheduledAt": "Message scheduled for {{at}}",
+      "draftRestored": "Draft restored",
+      "draftSynced": "Draft synced",
+      "sentAndArchived": "Sent and archived!"
+    },
+    "schedule": {
+      "laterToday": "Later today",
+      "tomorrowMorning": "Tomorrow morning (09:00)",
+      "mondayMorning": "Monday morning (09:00)",
+      "custom": "Pick date and time...",
+      "prompt": "Enter date and time in YYYY-MM-DDTHH:mm format",
+      "dateTime": "Date and time",
+      "apply": "Schedule",
+      "cancel": "Cancel"
+    },
+    "templates": {
+      "unknownSender": "Unknown sender",
+      "unknownDate": "unknown date",
+      "replyIntro": "On {{date}}, {{from}} wrote:",
+      "replyIntroNoDate": "{{from}} wrote:",
+      "forwardHeader": "---------- Forwarded message ----------",
+      "forwardFrom": "From: {{from}}",
+      "forwardDate": "Date: {{date}}",
+      "forwardSubject": "Subject: {{subject}}",
+      "forwardTo": "To: {{to}}",
+      "title": "Templates",
+      "empty": "No templates. Create them in Settings."
+    },
+    "errors": {
+      "noAccount": "Account is not configured",
+      "sendFailed": "Send error: {{error}}",
+      "invalidDate": "Invalid date/time",
+      "fileTooLarge": "File \"{{name}}\" is too large ({{size}}). Maximum: {{max}}",
+      "archiveFailed": "Archive error: {{error}}"
+    },
+    "misdirection": {
+      "externalDomain": "You are sending to an external domain ({{domains}}). Are you sure?",
+      "newRecipients": "You added new recipients not in the original message: {{recipients}}. Are you sure?",
+      "confirm": "Send anyway",
+      "cancel": "Cancel"
+    }
+  },
+  "notifications": {
+    "newMail": "New mail",
+    "sendFailed": "Send failed"
+  },
+  "notificationCenter": {
+    "title": "Notifications",
+    "markAllRead": "Mark all read",
+    "empty": "No notifications",
+    "followUpDue": "Follow-up reminder",
+    "sendFailed": "Send failed",
+    "dismiss": "Dismiss"
+  },
+  "shortcuts": {
+    "title": "Keyboard shortcuts",
+    "navigation": "Navigation",
+    "actions": "Actions",
+    "general": "General",
+    "nextPrev": "Next / previous message",
+    "open": "Open message",
+    "backToList": "Back to list",
+    "focusSearch": "Focus search",
+    "goInbox": "Go to Inbox",
+    "goSent": "Go to Sent",
+    "goDrafts": "Go to Drafts",
+    "goStarred": "Go to Starred",
+    "compose": "Compose message",
+    "reply": "Reply",
+    "replyAll": "Reply all",
+    "forward": "Forward",
+    "star": "Star / unstar",
+    "archive": "Archive",
+    "markUnread": "Mark as unread",
+    "markRead": "Mark as read",
+    "spam": "Mark as spam",
+    "selectToggle": "Select / deselect",
+    "move": "Move to folder",
+    "undo": "Undo last action",
+    "delete": "Delete",
+    "pin": "Pin / unpin",
+    "print": "Print",
+    "clearSelection": "Clear selection",
+    "commandPalette": "Open command palette",
+    "showHelp": "Show keyboard shortcuts",
+    "contextMenuTitle": "Context menu",
+    "contextMenuHint": "Quick actions on message (reply, archive, move…)"
+  },
+  "commandPalette": {
+    "placeholder": "Type a command...",
+    "ariaLabel": "Command palette",
+    "empty": "No commands found",
+    "commands": {
+      "compose": "Compose message",
+      "sync": "Sync current view",
+      "focusSearch": "Focus search",
+      "openSettings": "Open settings",
+      "goInbox": "Go to Inbox",
+      "goSent": "Go to Sent",
+      "goDrafts": "Go to Drafts",
+      "goOutbox": "Go to Outbox",
+      "goSnoozed": "Go to Snoozed",
+      "goFollowUps": "Go to Follow-ups",
+      "goReadLater": "Go to Read Later",
+      "goStarred": "Show starred",
+      "goUnified": "Go to Unified Inbox",
+      "enableThreads": "Enable conversation grouping",
+      "disableThreads": "Disable conversation grouping",
+      "switchAccount": "Switch to {{account}}",
+      "aiSummarize": "AI: Summarize",
+      "aiReply": "AI: Prepare reply",
+      "aiNewChat": "AI: New chat",
+      "aiOpenPanel": "AI: Open panel"
+    }
+  },
+  "ai": {
+    "panel": {
+      "title": "AI Assistant",
+      "newChat": "New chat",
+      "close": "Close",
+      "stop": "Stop",
+      "thinking": "Thinking...",
+      "usingTool": "Using tool: {{tool}}...",
+      "streaming": "Generating...",
+      "placeholder": "Ask about your mail...",
+      "send": "Send",
+      "sources": "Sources",
+      "costTooltip": "Request cost: {{cost}}",
+      "sessionCostTooltip": "Session cost: {{cost}}"
+    },
+    "onboarding": {
+      "title": "AI Assistant",
+      "description": "The built-in assistant will help with your mail:",
+      "features": {
+        "summarize": "Email summarization",
+        "drafts": "Draft replies",
+        "search": "Search and analysis",
+        "digest": "Mail digest"
+      },
+      "chooseProvider": "Choose connection method:",
+      "subscription": "Claude subscription",
+      "subscriptionHint": "Pro/Max — if you are already authorized via CLI",
+      "apiKey": "API key",
+      "apiKeyHint": "Pay-per-token billing",
+      "configure": "Configure in Settings"
+    },
+    "privacy": {
+      "audit": {
+        "title": "Privacy & Audit",
+        "hint": "Per-request log of AI activity: provider, tokens, untrusted-content wrapping, and egress blocks. Soft-deleted entries are hidden from this view but stay physically in the database until the rotation cap (10,000 rows) removes the oldest.",
+        "period": "Period",
+        "periodToday": "Today",
+        "periodWeek": "Last 7 days",
+        "periodMonth": "Last 30 days",
+        "refresh": "Refresh",
+        "aggregateTitle": "Usage by provider",
+        "aggregateEmpty": "No AI requests in this period. Once you use the AI assistant, each provider (e.g. Claude, OpenAI) appears here with token usage and cost.",
+        "logTitle": "Recent requests",
+        "logEmpty": "No audit entries yet. Each time you send a message to the AI assistant an entry is recorded here showing the provider, model, token counts, and whether any email content was wrapped for privacy.",
+        "exportJson": "Export JSON",
+        "exportCsv": "Export CSV",
+        "clearAll": "Clear All",
+        "deleteRow": "Soft-delete this entry",
+        "prev": "Previous",
+        "next": "Next",
+        "pageOf": "Page {{page}} of {{total}}",
+        "notAvailable": "n/a",
+        "col": {
+          "timestamp": "Time",
+          "provider": "Provider",
+          "model": "Model",
+          "goal": "Goal",
+          "tool": "Tool",
+          "tokensIn": "Input tokens",
+          "tokensOut": "Output tokens",
+          "cost": "Cost",
+          "wrapped": "Wrapped",
+          "wrappedTooltip": "Number of times untrusted email content was wrapped with prompt-injection boundary markers in this request.",
+          "blocked": "Blocked",
+          "blockedTooltip": "Number of outbound egress tool attempts blocked by the privacy gate in this request.",
+          "outcome": "Outcome",
+          "requests": "Requests",
+          "actions": "Actions"
+        },
+        "outcome": {
+          "ok": "OK",
+          "error": "Error",
+          "aborted": "Aborted"
+        }
+      },
+      "title": "AI Privacy Notice",
+      "description": "MailCopilot AI processes your email content securely. By accepting, you agree to share necessary email data with the configured AI provider for assistance only. You can revoke this at any time in Settings.",
+      "accept": "Accept",
+      "cancel": "Cancel"
+    },
+    "confirmation": {
+      "apply": "Apply",
+      "applied": "Applied",
+      "cancel": "Cancel",
+      "account": "{{email}}",
+      "accountFallback": "Account #{{accountId}}",
+      "crossAccount_one": "{{count}} account",
+      "crossAccount_other": "{{count}} accounts",
+      "folder": "Folder: {{folder}}",
+      "emailCount_one": "{{count}} email",
+      "emailCount_other": "{{count}} emails",
+      "folderCount_one": "{{count}} folder",
+      "folderCount_other": "{{count}} folders",
+      "errorPreviewMissing": "This action is no longer available. It may have expired or already been processed. Ask the AI to prepare it again.",
+      "proceedPrompt": "I confirmed the action. Please proceed using confirmation_token={{token}}.",
+      "kinds": {
+        "mail_action": {
+          "archive": "Archive emails",
+          "trash": "Move emails to Trash",
+          "mark_read": "Mark emails as read"
+        },
+        "unsubscribe": "Unsubscribe from mailing lists",
+        "send_email": "Send email",
+        "move_email": "Move emails",
+        "snooze_email": "Snooze emails",
+        "unsnooze_email": "Remove snooze",
+        "flag_email": {
+          "star": "Star emails",
+          "unstar": "Unstar emails"
+        },
+        "mark_read_later": {
+          "add": "Add to Read Later",
+          "remove": "Remove from Read Later"
+        },
+        "add_followup": "Add follow-up reminder",
+        "dismiss_followup": "Dismiss follow-up reminder",
+        "create_mail_rule": "Create mail rule",
+        "update_mail_rule": "Update mail rule",
+        "delete_mail_rule": "Delete mail rule"
+      }
+    },
+    "egress": {
+      "policy_label": "AI web access",
+      "blocked": "Web access disabled while email content is in scope",
+      "allow_once": "Allow web access for this turn",
+      "allowed_this_turn": "Web access allowed for this turn",
+      "policy_section_hint": "Controls when the AI can use external tools (web search, fetch, external MCP) while email content is in scope.",
+      "policy_deny": "Deny by default (recommended)",
+      "policy_deny_hint": "Block web access whenever email content is in scope. Allow per-turn from the confirm dialog.",
+      "policy_ask": "Ask each turn",
+      "policy_ask_hint": "Same as default-deny: explicit per-turn opt-in via the confirm dialog.",
+      "policy_allow": "Always allow",
+      "policy_allow_hint": "AI may freely call web tools even with email content in scope.",
+      "policy_allow_warning": "Warning: AI may send email content to external services.",
+      "shieldTooltip": "AI web access is intercepted — you will be asked to approve each outbound call",
+      "confirmTitle": "AI wants to access the internet",
+      "confirmAllow": "Allow",
+      "confirmDeny": "Deny",
+      "action": {
+        "webSearch": "Web search:",
+        "webFetch": "Fetch URL:",
+        "externalTool": "External tool call"
+      },
+      "timeout": "Request timed out — access denied"
+    },
+    "chips": {
+      "summarize": "Summarize",
+      "reply": "Reply",
+      "summarizeThread": "Summarize thread",
+      "keyDecisions": "Key decisions",
+      "digest": "Today's digest",
+      "needsReply": "Needs reply?",
+      "tasksDeadlines": "Tasks & deadlines",
+      "nlSearch": "Smart search",
+      "triage": "Prioritize",
+      "snooze": "Snooze",
+      "flag": "Star/Unstar",
+      "followup": "Follow-up",
+      "triageInbox": "Prioritize inbox",
+      "gtdClassify": "What to do?",
+      "gtdTriage": "GTD triage",
+      "weeklyReview": "Weekly review",
+      "cleanupAll": "Cleanup all",
+      "scopeFolder": "Folder actions",
+      "scopeEmail": "Email actions"
+    },
+    "errors": {
+      "authCheck": "Authorization check failed",
+      "errorPrefix": "Error",
+      "notConfigured": "AI provider is not configured. Set it up in Settings.",
+      "invalidKey": "Invalid API key. Check your key in Settings → AI.",
+      "noSubscription": "Authorize via `claude login` in the terminal.",
+      "quotaExceeded": "Message limit reached. Try later or switch to an API key.",
+      "requestBudgetStopped": "Request stopped: the per-request cost limit was reached. Raise it in Settings → AI.",
+      "offline": "AI assistant is not available offline.",
+      "timeout": "Request timed out. Try again.",
+      "changeProvider": "Change provider"
+    },
+    "prompts": {
+      "summarize": "Summarize this email",
+      "reply": "Prepare a reply to this email",
+      "summarizeThread": "Summarize this email thread",
+      "keyDecisions": "Extract key decisions from this thread",
+      "digest": "Make a digest of today's unread emails",
+      "needsReply": "Which emails need a reply?",
+      "tasksDeadlines": "Extract tasks, owners and deadlines from this context",
+      "nlSearch": "Find emails by natural-language request and explain which query operators were used",
+      "triage": "Prioritize this email: categorize, suggest actions (archive, snooze, flag, follow-up)",
+      "triageThread": "Prioritize this thread: summarize and suggest actions for each message",
+      "snooze": "Should I snooze this email? Suggest when to come back to it",
+      "flag": "Should I star this email? Explain why or why not",
+      "followup": "Set a follow-up reminder for this email if it needs a reply",
+      "triageInbox": "Prioritize my inbox: categorize unread emails and suggest actions for each",
+      "gtdClassify": "Classify this email by GTD methodology: is it actionable? If under 2 minutes, suggest a quick action. Otherwise: defer (snooze), delegate (forward + follow-up), archive, star for action, or mark for read later.",
+      "gtdTriage": "Review all unread emails in this folder using GTD methodology. Classify each email: archive newsletters and notifications, star actionable items, snooze time-bound items, set follow-ups for delegated items, and mark long reads for later. Show the full plan grouped by action type before executing anything.",
+      "weeklyReview": "GTD weekly review: check overdue follow-ups, due snoozed emails, starred but unread items, unread counts by folder, and suggest cleanup actions. Scan all accounts.",
+      "cleanupAll": "Scan all accounts' inboxes and suggest a cleanup plan: archive old newsletters and notifications, flag spam-like items, show the plan grouped by action type. Do not act without my confirmation."
+    },
+    "settings": {
+      "tab": "AI",
+      "provider": "Provider",
+      "providerSubscription": "Claude subscription",
+      "providerApi": "Anthropic API key",
+      "providerOpenAI": "OpenAI API key",
+      "providerGemini": "Google Gemini API key",
+      "providerRag": "Corporate RAG backend",
+      "apiKey": "API key",
+      "apiKeyPlaceholder": "sk-ant-...",
+      "apiKeyPlaceholderOpenAI": "sk-...",
+      "apiKeyPlaceholderGemini": "AIza...",
+      "openAiBaseUrl": "Base URL",
+      "openAiBaseUrlPlaceholder": "https://openrouter.ai/api",
+      "openAiBaseUrlHint": "Leave empty for api.openai.com",
+      "customModelPlaceholder": "e.g. gpt-4o, claude-3.5-sonnet",
+      "model": "Model",
+      "modelCorpDefault": "Corporate default",
+      "modelCorpFast": "Corporate fast",
+      "modelCorpReasoning": "Corporate reasoning",
+      "checkConnection": "Check connection",
+      "connectionOk": "Connected",
+      "connectionFailed": "Connection failed: {{error}}",
+      "sendKey": "Send key",
+      "sendKeyEnter": "Enter",
+      "sendKeyCtrlEnter": "Ctrl+Enter",
+      "locale": "Response language",
+      "localeAuto": "Auto",
+      "localeRu": "Russian",
+      "localeEn": "English",
+      "showSources": "Show sources in responses",
+      "dailyBudgetUsd": "Daily budget (USD)",
+      "monthlyBudgetUsd": "Monthly budget (USD)",
+      "maxTurns": "Max steps per request",
+      "maxBudgetPerRequest": "Max budget per request (USD)",
+      "proxyUrl": "HTTP Proxy",
+      "proxyUrlPlaceholder": "http://proxy.company.local:3128",
+      "proxyUrlHint": "Optional. Used for all AI requests.",
+      "title": "AI Assistant",
+      "hint": "Configure the AI assistant provider and preferences",
+      "chooseProvider": "Choose connection method:",
+      "back": "Back",
+      "resetProvider": "Reset configuration",
+      "resetConfirm": "Reset AI configuration? API key will be deleted.",
+      "checkRequired": "Check the connection first",
+      "memory": {
+        "title": "AI Memory",
+        "hint": "Personal context the AI will remember across conversations (max 4000 characters).",
+        "placeholder": "Example:\n- I work at Acme Corp as a Project Manager\n- My timezone is UTC+3\n- I prefer concise emails\n- Key contacts: alice@corp.com (CEO), bob@corp.com (CTO)",
+        "clear": "Clear"
+      },
+      "threadSummary": {
+        "title": "Thread AI Summary",
+        "label": "Summarize long threads with AI",
+        "help": "When you open a thread with three or more messages, show a one-line AI summary above the messages, expandable to five key points. Off by default; enabled per account."
+      },
+      "instantReply": {
+        "title": "Instant Reply",
+        "label": "Suggest quick reply drafts with AI",
+        "help": "Add an Instant Reply button on the open message that drafts two or three ready-to-edit replies. Nothing is sent automatically. Off by default; enabled per account."
+      }
+    },
+    "threadSummary": {
+      "title": "AI Summary",
+      "loading": "Summarizing thread…",
+      "expand": "Show key points",
+      "collapse": "Hide key points",
+      "retry": "Retry",
+      "refusal": {
+        "budget": "Daily AI budget reached — summary paused until it resets.",
+        "noProvider": "Configure an AI provider in Settings to summarize threads.",
+        "providerError": "Couldn't summarize this thread right now."
+      }
+    },
+    "quickAction": {
+      "preset": {
+        "improve": "Improve",
+        "shorter": "Shorter",
+        "formal": "Formal",
+        "grammar": "Fix grammar"
+      },
+      "diff": {
+        "title": "Review AI rewrite",
+        "before": "Before",
+        "after": "After",
+        "replace": "Replace",
+        "insert": "Insert at cursor",
+        "cancel": "Cancel"
+      },
+      "refusal": {
+        "budget": "Daily AI budget reached — rewrite paused until it resets.",
+        "noProvider": "Configure an AI provider in Settings to rewrite drafts.",
+        "providerError": "Couldn't rewrite this draft right now.",
+        "emptyInput": "Write some text first, then pick a quick action."
+      }
+    },
+    "instantReply": {
+      "trigger": "Instant Reply",
+      "useThisDraft": "Use this draft",
+      "refusal": {
+        "budget": "Daily AI budget reached — instant replies paused until it resets.",
+        "noProvider": "Configure an AI provider in Settings to draft replies.",
+        "providerError": "Couldn't draft replies right now."
+      }
+    },
+    "sidebar": {
+      "ai": "AI Assistant"
+    },
+    "sessions": {
+      "title": "Chat History",
+      "history": "History",
+      "empty": "No saved conversations",
+      "untitled": "Untitled Chat",
+      "delete": "Delete conversation",
+      "clearAll": "Clear all"
+    }
+  },
+  "feedback": {
+    "title": "Report a Problem",
+    "hint": "Help improve MailCopilot by reporting issues to the developers.",
+    "reportBug": "Report a bug",
+    "placeholder": "Describe the problem...",
+    "emailPlaceholder": "Your email (optional)",
+    "send": "Send",
+    "thanks": "Thank you for your feedback!",
+    "disabledHint": "Error reporting is disabled. Visit our website for support."
+  },
+  "attachments": {
+    "previewAvailable": "Preview available",
+    "downloadAction": "Download attachment: {{name}}",
+    "iconLabel": {
+      "pdf": "PDF document",
+      "image": "Image",
+      "archive": "Archive",
+      "doc": "Document",
+      "spreadsheet": "Spreadsheet",
+      "presentation": "Presentation",
+      "text": "Text file",
+      "eml": "Email",
+      "generic": "File"
+    }
+  },
+  "invite": {
+    "title": "Meeting invitation",
+    "organizer": "Organizer",
+    "location": "Location",
+    "when": "When",
+    "accept": "Accept",
+    "tentative": "Tentative",
+    "decline": "Decline",
+    "responding": "Sending response…",
+    "responseAccepted": "You accepted this invitation",
+    "responseTentative": "You marked this as tentative",
+    "responseDeclined": "You declined this invitation",
+    "responseFailed": "Failed to send response: {{error}}",
+    "noOrganizer": "No organizer specified",
+    "cancelled": "This event has been cancelled",
+    "notActionable": "This is not an actionable invitation",
+    "originalTimezone": "Originally scheduled in {{tzid}}"
+  }
+}

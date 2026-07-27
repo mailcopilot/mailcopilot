@@ -1,0 +1,9 @@
+mailcopilot-public-mirror-snapshot
+
+This tree is a published snapshot of the MailCopilot source, produced by the
+mirror export pipeline. Internal-only files (CI plumbing, planning documents,
+agent instructions) are stripped from it by design — their absence is
+intentional, and this file is what declares it.
+
+The content is intentionally static; see MIRROR_EXPORT_MARKER in
+scripts/check-mirror-exclude.mjs.

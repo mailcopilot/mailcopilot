@@ -1,0 +1,78 @@
+# Source of truth for the GitHub public mirror EXCLUDE list.
+# Consumed by scripts/mirror-github.sh, scripts/trigger-github-macos.sh,
+# scripts/trigger-github-build.sh, and scripts/check-mirror-exclude.mjs (guard).
+#
+# Format: one path per line. Everything from the first `#` to the end of the
+# line is stripped as a comment — at column 0, after whitespace, or directly
+# after an entry (`docs/qa  # internal checklists`). A path containing a literal
+# `#` therefore cannot be expressed here. Blank lines are ignored. Leading /
+# trailing whitespace is trimmed per line.
+#
+# Path semantics match the mirror scripts:
+#   - patterns containing `/` are repo-root-relative exact paths;
+#   - patterns without `/` match by basename at any depth.
+#
+# Adding a new internal-only document? Add it here. The guard enforces that
+# the critical-paths subset (see check-mirror-exclude.mjs `CRITICAL_PATHS`)
+# is always present in this file.
+
+# GitLab CI/CD
+.gitlab-ci.yml
+.releaserc.json
+CHANGELOG.md
+
+# Internal scripts (GitLab registry, test infra, mirroring)
+scripts/publish-packages.sh
+scripts/test-mail.mjs
+scripts/test-mcp-virustotal.mjs
+scripts/mirror-github.sh
+scripts/trigger-github-macos.sh
+scripts/trigger-github-build.sh
+
+# The export guard spells out the internal hostnames and developer paths it
+# scans for, so publishing it would leak exactly what it protects. It is
+# mirroring machinery like the scripts above and stays internal.
+# (scripts/check-mirror-exclude.mjs and mirror-exclude.list carry no such
+# markers and are published, so `npm run check:mirror-exclude` keeps working.)
+scripts/check-mirror-export.mjs
+
+# NOT excluded, on purpose: scripts/mirror-export-marker.txt. It used to be
+# listed here, while its bytes were nevertheless published verbatim as
+# `.mirror-export` — an entry that contradicted the one invariant this file has
+# ("an excluded file's content does not reach the mirror") and framed a plainly
+# public, self-describing notice as internal. The template is public data; the
+# machinery that copies it (mirror-github.sh, trigger-github-build.sh,
+# check-mirror-export.mjs) is what stays internal. It is allowlisted as a public
+# scripts/ entry in PUBLIC_TREE_ALLOWLIST.
+
+# Tests whose subject is itself excluded from the mirror. Keeping them would
+# make `npm run test:scripts` fail in the exported tree (missing .sh /
+# .claude/hooks). They stay in the internal repo, where they really do exercise
+# their subject — see scripts/check-mirror-export.mjs for the export-side guard
+# that keeps the remaining tooling honest.
+scripts/check-mirror-exclude.test.mjs
+scripts/check-mirror-export.test.mjs
+scripts/trigger-github-build.test.mjs
+scripts/enforce-e2e-wrapper.test.mjs
+
+# AI agents and internal instructions
+CLAUDE.md
+AGENTS.md
+
+# Internal planning / architecture documents (not user-facing)
+BACKLOG.md
+BACKLOG-ARCHIVE.md
+docs/PRD.md
+docs/ARCHITECTURE.md
+docs/HEALTH_REPORT.md
+docs/.health-baseline.json
+# Internal manual-QA checklists (Russian, team-internal, outside docs/docs Docusaurus site)
+docs/qa
+
+# Local configs (.gitignore also blocks these, belt-and-suspenders)
+.codex
+.claude
+.mcp.json
+.env
+.env.test
+.env.integration

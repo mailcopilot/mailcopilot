@@ -1,0 +1,768 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+:root {
+  /* Base typography */
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* Light theme (default) */
+  --bg: #ffffff;
+  --fg: #0f172a;
+  --muted: #64748b;
+  --border: rgba(148, 163, 184, 0.35);
+  --panel-bg: rgba(2, 6, 23, 0.02);
+  --sidebar-bg: rgba(2, 6, 23, 0.04);
+  --input-bg: rgba(255, 255, 255, 0.9);
+  --input-bg-focus: rgba(255, 255, 255, 1);
+  --btn-bg: rgba(15, 23, 42, 0.06);
+  --btn-bg-hover: rgba(15, 23, 42, 0.1);
+  --btn-border: rgba(15, 23, 42, 0.15);
+  --btn-primary-bg: #3b82f6;
+  --btn-primary-hover: #2563eb;
+  --btn-primary-fg: #ffffff;
+
+  --mail-selected-bg: rgba(59, 130, 246, 0.12);
+  --mail-unread-bg: rgba(59, 130, 246, 0.06);
+
+  --titlebar-bg: rgba(2, 6, 23, 0.06);
+  --titlebar-btn-hover: rgba(15, 23, 42, 0.1);
+  --titlebar-close-hover: #e11d48;
+  --titlebar-close-fg: #ffffff;
+
+  --error-bg: rgba(239, 68, 68, 0.1);
+  --error-fg: #dc2626;
+  --error-border: rgba(239, 68, 68, 0.3);
+
+  --warn-bg: rgba(234, 179, 8, 0.12);
+  --warn-fg: #a16207;
+  --warn-border: rgba(234, 179, 8, 0.3);
+
+  --success-fg: #16a34a;
+
+  /* Aliases */
+  --mailcopilot-border: var(--border);
+  --mailcopilot-panel-bg: var(--panel-bg);
+
+  color-scheme: light;
+  color: var(--fg);
+  background-color: var(--bg);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0b1020;
+  --fg: #e2e8f0;
+  --muted: #94a3b8;
+  --border: rgba(148, 163, 184, 0.22);
+  --panel-bg: rgba(148, 163, 184, 0.06);
+  --sidebar-bg: rgba(148, 163, 184, 0.04);
+  --input-bg: rgba(15, 23, 42, 0.6);
+  --input-bg-focus: rgba(15, 23, 42, 0.8);
+  --btn-bg: rgba(148, 163, 184, 0.08);
+  --btn-bg-hover: rgba(148, 163, 184, 0.12);
+  --btn-border: rgba(148, 163, 184, 0.22);
+  --btn-primary-bg: #2563eb;
+  --btn-primary-hover: #1d4ed8;
+  --btn-primary-fg: #ffffff;
+
+  --mail-selected-bg: rgba(59, 130, 246, 0.18);
+  --mail-unread-bg: rgba(59, 130, 246, 0.1);
+
+  --titlebar-bg: rgba(148, 163, 184, 0.06);
+  --titlebar-btn-hover: rgba(148, 163, 184, 0.15);
+  --titlebar-close-hover: #e11d48;
+  --titlebar-close-fg: #ffffff;
+
+  --error-bg: rgba(239, 68, 68, 0.15);
+  --error-fg: #f87171;
+  --error-border: rgba(239, 68, 68, 0.3);
+
+  --warn-bg: rgba(234, 179, 8, 0.16);
+  --warn-fg: #fbbf24;
+  --warn-border: rgba(234, 179, 8, 0.35);
+
+  --success-fg: #4ade80;
+
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 320px;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+a {
+  font-weight: 600;
+  color: #2563eb;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid var(--btn-border);
+  padding: 0.45em 0.8em;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  background: var(--btn-bg);
+  color: var(--fg);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s;
+}
+
+button:hover {
+  background: var(--btn-bg-hover);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input,
+textarea,
+select {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--fg);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  background: var(--input-bg-focus);
+  border-color: rgba(59, 130, 246, 0.55);
+}
+
+textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+/* Utilities */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+.btn-primary {
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  border-color: transparent;
+}
+
+.btn-primary:hover {
+  background: var(--btn-primary-hover);
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.14);
+  color: rgb(239, 68, 68);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: rgb(239, 68, 68);
+}
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  padding: 6px;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.btn-icon:hover {
+  background: var(--btn-bg-hover);
+  color: var(--fg);
+}
+
+/* --- AI Panel --- */
+
+.ai-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.ai-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  min-height: 40px;
+  flex-shrink: 0;
+}
+
+.ai-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.ai-panel-title svg { color: var(--btn-primary-bg); }
+
+.ai-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ai-panel-actions .btn-icon.active { color: var(--btn-primary-bg); }
+
+/* Session list */
+.ai-session-list {
+  border-bottom: 1px solid var(--border);
+  max-height: 250px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.ai-session-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ai-session-clear-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.ai-session-clear-all:hover { color: var(--danger); background: var(--bg-hover); }
+
+.ai-session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  cursor: pointer;
+  gap: 8px;
+}
+.ai-session-item:hover { background: var(--bg-hover); }
+.ai-session-item.active { background: var(--bg-active); }
+
+.ai-session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ai-session-title {
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-session-date {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.ai-session-delete {
+  opacity: 0;
+  flex-shrink: 0;
+}
+.ai-session-item:hover .ai-session-delete { opacity: 0.7; }
+.ai-session-delete:hover { opacity: 1 !important; color: var(--danger); }
+
+.ai-session-empty {
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* uiaudit.7: scrollable body area containing messages + chips + status.
+   The input row stays outside this wrapper so it is always pinned to the
+   bottom of the panel regardless of content height. */
+.ai-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.ai-messages {
+  /* No flex sizing: we want .ai-messages to grow to its content height so
+     the scroll lives on the parent .ai-body (overflow-y:auto). status/chips/
+     egress are siblings of .ai-body inside .ai-panel, not children of it,
+     so they remain visible at the panel bottom regardless of message scroll. */
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+}
+
+.ai-empty-icon { color: var(--btn-primary-bg); opacity: 0.5; }
+
+.ai-message {
+  max-width: 100%;
+}
+
+.ai-message-user {
+  align-self: flex-end;
+}
+
+.ai-message-user .ai-message-content {
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  padding: 8px 12px;
+  border-radius: 12px 12px 2px 12px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-message-assistant .ai-message-content {
+  background: var(--panel-bg);
+  padding: 8px 12px;
+  border-radius: 12px 12px 12px 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+  text-align: left;
+}
+
+.ai-message-assistant .ai-message-content p { margin: 0 0 8px; }
+.ai-message-assistant .ai-message-content p:last-child { margin-bottom: 0; }
+.ai-message-assistant .ai-message-content ul,
+.ai-message-assistant .ai-message-content ol { margin: 0 0 8px; padding-left: 20px; }
+.ai-message-assistant .ai-message-content code {
+  background: var(--btn-bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.ai-message-assistant .ai-message-content pre {
+  background: var(--btn-bg);
+  padding: 8px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.ai-message-assistant .ai-message-content pre code {
+  background: none;
+  padding: 0;
+}
+.ai-message-assistant .ai-message-content h1,
+.ai-message-assistant .ai-message-content h2,
+.ai-message-assistant .ai-message-content h3,
+.ai-message-assistant .ai-message-content h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.ai-message-assistant .ai-message-content h1 { font-size: 16px; }
+.ai-message-assistant .ai-message-content h2 { font-size: 15px; }
+.ai-message-assistant .ai-message-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.ai-message-assistant .ai-message-content th,
+.ai-message-assistant .ai-message-content td {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+}
+.ai-message-assistant .ai-message-content th {
+  text-align: left;
+  font-weight: 600;
+  background: var(--btn-bg);
+}
+
+.ai-sources {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.ai-sources-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.ai-sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-source-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--btn-border);
+  border-radius: 6px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 4px 8px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.ai-source-link:hover {
+  background: var(--btn-bg-hover);
+}
+
+.ai-source-num {
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ai-source-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-source-from {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-left: 8px;
+}
+
+.ai-source-fallback {
+  color: var(--muted);
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.ai-inline-mail-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  display: inline;
+  text-align: left;
+}
+
+.ai-inline-mail-link:hover {
+  color: var(--accent-hover, #2563eb);
+}
+
+/* flex-shrink:0 restored: status row must not collapse when message content overflows .ai-body. */
+.ai-status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  /* Inside .ai-body — no longer needs flex-shrink:0; body scroll handles overflow */
+}
+
+.ai-stop-btn { margin-left: auto; }
+
+.ai-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  /* Restored from 5676d2c: chips must not shrink in a flex column when
+     message content overflows .ai-body (overflow-y:auto handles scroll). */
+  flex-shrink: 0;
+}
+
+.ai-chip {
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ai-chip:hover {
+  background: var(--btn-bg-hover);
+}
+
+.ai-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ai-chip-scope {
+  background: transparent;
+  border-style: dashed;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+}
+.ai-chip-scope:hover {
+  color: var(--fg);
+}
+
+.ai-input-area {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.ai-input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--input-bg);
+  color: var(--fg);
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.ai-input:focus {
+  outline: none;
+  border-color: var(--btn-primary-bg);
+  background: var(--input-bg-focus);
+}
+
+.ai-send-btn {
+  color: var(--btn-primary-bg);
+  flex-shrink: 0;
+}
+
+.ai-send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Onboarding */
+.ai-onboarding,
+.ai-auth-error,
+.ai-privacy-dialog {
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+}
+
+.ai-onboarding p,
+.ai-auth-error p,
+.ai-privacy-dialog p {
+  font-size: 13px;
+  color: var(--fg);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.ai-auth-error-detail { font-size: 12px; color: var(--muted); }
+.ai-auth-error-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.ai-onboarding-features {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-onboarding-features li {
+  font-size: 13px;
+  color: var(--muted);
+  padding-left: 16px;
+  position: relative;
+}
+
+.ai-onboarding-features li::before {
+  content: '•';
+  position: absolute;
+  left: 4px;
+  color: var(--btn-primary-bg);
+}
+
+.ai-onboarding-choose {
+  font-weight: 600;
+  margin-top: 8px;
+}
+
+.ai-onboarding-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-onboarding-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s;
+}
+
+.ai-onboarding-option:hover {
+  border-color: var(--btn-primary-bg);
+}
+
+.ai-onboarding-option svg {
+  color: var(--btn-primary-bg);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.ai-onboarding-option strong {
+  display: block;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.ai-onboarding-option small {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.ai-onboarding-settings-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--btn-primary-bg);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  margin-top: 4px;
+}
+
+.ai-onboarding-settings-link:hover {
+  text-decoration: underline;
+}
+
+.ai-privacy-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Drag handle for the AI panel */
+.ai-drag-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.ai-drag-handle:hover {
+  background: var(--btn-primary-bg);
+}
+
+/* AI cost badges */
+.ai-cost-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+.ai-session-cost {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  margin-left: 6px;
+}
