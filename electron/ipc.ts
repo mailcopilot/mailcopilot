@@ -29,6 +29,7 @@
 import { ipcMain } from 'electron'
 import * as perfHooks from 'node:perf_hooks'
 import { createLogger } from './logger'
+import { reportIpcHandlerError } from './sentry'
 import { recordEvent, recordHistogram, recordGauge, bucketDuration } from './metrics'
 import { METRIC_EVENTS, DOMAINS, type MetricKind, type TagSpec, type DomainName } from './metricsSchema'
 import { markFeatureReachFromEvent } from './featureReach'
@@ -82,8 +83,9 @@ let ipcSeq = 0
  *   - inflight-IPC tracking (so freeze reporters can show what's stuck);
  *   - slow-IPC warnings + `ipc.slow_ms` histogram for channels that finish
  *     above `SLOW_IPC_THRESHOLD_MS` and aren't on the long-running allowlist;
- *   - a uniform error funnel that logs via electron-log and re-throws so the
- *     renderer still sees the rejection.
+ *   - a uniform error funnel that logs via electron-log, reports a PII-free
+ *     synthetic event to Sentry, and re-throws so the renderer still sees the
+ *     rejection unchanged.
  *
  * Every IPC handler in the main process MUST go through this wrapper. Raw
  * `ipcMain.handle(...)` is banned by ESLint project-wide; the only exception
@@ -99,6 +101,15 @@ export function handleIpc(channel: string, handler: Parameters<typeof ipcMain.ha
       return await handler(event, ...args)
     } catch (err) {
       logIpc.error(`[${channel}]`, err instanceof Error ? err.message : err)
+      // electron-log has NO Sentry bridge (CLAUDE.md §8), so before this the
+      // entire IPC surface — every handler in the app — was invisible in error
+      // monitoring. reportIpcHandlerError sends a PII-free synthetic event
+      // (channel + instanceof-derived error class only; never the raw error,
+      // whose message routinely carries bodies, addresses, queries and paths)
+      // and drops transient network noise at the source. It never throws; the
+      // extra guard here is belt-and-braces so telemetry can never convert a
+      // handled rejection into an unhandled one.
+      try { reportIpcHandlerError(channel, err) } catch { /* telemetry must never throw */ }
       throw err // re-throw so the renderer receives the error
     } finally {
       const dur = Date.now() - start

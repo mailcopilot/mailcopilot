@@ -59,6 +59,15 @@ vi.mock('./featureReach', () => ({
   markFeatureReachFromEvent: (...args: unknown[]) => markFeatureReachFromEventMock(...args),
 }))
 
+// Sentry sink for the handleIpc error funnel. Mocked here so this unit test
+// never pulls @sentry/node (and the vite-injected __SENTRY_DSN__ global) into
+// its module graph; the PII/throttle behaviour of the real reporter is covered
+// in electron/sentry.test.ts.
+const reportIpcHandlerErrorMock = vi.fn()
+vi.mock('./sentry', () => ({
+  reportIpcHandlerError: (...args: unknown[]) => reportIpcHandlerErrorMock(...args),
+}))
+
 // Import AFTER mocks so the module picks them up.
 import {
   handleIpc,
@@ -83,6 +92,7 @@ beforeEach(() => {
   recordHistogramMock.mockClear()
   recordGaugeMock.mockClear()
   markFeatureReachFromEventMock.mockClear()
+  reportIpcHandlerErrorMock.mockReset()
 })
 
 afterEach(() => {
@@ -115,6 +125,90 @@ describe('handleIpc', () => {
     expect(logCalls.error).toHaveLength(1)
     expect(logCalls.error[0]?.[0]).toBe('[test:fail]')
     expect(logCalls.error[0]?.[1]).toBe('boom')
+  })
+
+  // --- Sentry error funnel -------------------------------------------------
+  // Before this, electron/ipc.ts had zero captureException call sites: every
+  // handler failure went to electron-log only, which has no Sentry bridge
+  // (CLAUDE.md §8). Measured cost: 80 error-level lines in a user's local log
+  // over 4 days (including TLS failures that broke their mailbox) against zero
+  // events in Sentry over 30 days.
+
+  it('reports exactly one Sentry event per handler failure, with the channel and without the arguments', async () => {
+    const failure = new Error('550 5.1.1 <victim@example.com>: Recipient address rejected')
+    handleIpc('net:sendMail', async () => {
+      throw failure
+    })
+    const wrapped = handleRegistrations.get('net:sendMail')!
+
+    // The renderer passes the full draft — body, recipients, subject.
+    const draft = { accountId: 1, to: ['victim@example.com'], subject: 'Q3 payroll', body: 'secret contents' }
+    await expect(wrapped(null, draft)).rejects.toThrow('550 5.1.1')
+
+    expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
+    const call = reportIpcHandlerErrorMock.mock.calls[0]!
+    // EXACTLY two arguments — the channel name and the raw error, nothing else.
+    // The handler's IPC arguments are structurally excluded here, so no
+    // downstream sanitizer has to be trusted to strip the draft.
+    expect(call).toHaveLength(2)
+    expect(call[0]).toBe('net:sendMail')
+    expect(call[1]).toBe(failure)
+    expect(call).not.toContain(draft)
+  })
+
+  it('does not report anything when the handler succeeds', async () => {
+    handleIpc('test:ok', async () => 'fine')
+    await handleRegistrations.get('test:ok')!(null)
+    expect(reportIpcHandlerErrorMock).not.toHaveBeenCalled()
+  })
+
+  it('reports non-Error throws too (the funnel must not depend on the thrown shape)', async () => {
+    handleIpc('test:throwString', async () => {
+      throw 'plain string failure'
+    })
+    await expect(handleRegistrations.get('test:throwString')!(null)).rejects.toBe('plain string failure')
+
+    expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
+    expect(reportIpcHandlerErrorMock.mock.calls[0]![0]).toBe('test:throwString')
+  })
+
+  it('still rejects toward the renderer when the Sentry reporter itself throws', async () => {
+    // CLAUDE.md §8: a broken telemetry sink must never break the feature. The
+    // ORIGINAL error has to win — not the telemetry failure.
+    reportIpcHandlerErrorMock.mockImplementation(() => {
+      throw new Error('sentry transport exploded')
+    })
+
+    const original = new Error('original handler failure')
+    handleIpc('test:sentryBroken', async () => {
+      throw original
+    })
+
+    await expect(handleRegistrations.get('test:sentryBroken')!(null)).rejects.toBe(original)
+    expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the slow-IPC accounting intact when the Sentry reporter throws', async () => {
+    // The reporter is called inside the catch block; the `finally` block that
+    // owns inflight cleanup + the slow-IPC histogram must still run.
+    reportIpcHandlerErrorMock.mockImplementation(() => {
+      throw new Error('sentry transport exploded')
+    })
+    let t = 6_000_000
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => t)
+
+    handleIpc('test:slowFail', async () => {
+      t += 800
+      throw new Error('boom')
+    })
+    await expect(handleRegistrations.get('test:slowFail')!(null)).rejects.toThrow('boom')
+
+    expect(recordHistogramMock).toHaveBeenCalledWith(
+      'ipc.slow_ms',
+      800,
+      expect.objectContaining({ channel: 'test:slowFail' }),
+    )
+    dateSpy.mockRestore()
   })
 
   it('emits slow-IPC warning and ipc.slow_ms histogram above threshold', async () => {

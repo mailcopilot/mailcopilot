@@ -96,6 +96,122 @@ export function __resetKeychainReportStateForTest(): void {
   _keychainReported = false
 }
 
+// --- IPC handler error reporting -------------------------------------------
+
+// Throttle window per (channel, error class). The FIRST failure of a given
+// kind is always reported immediately; repeats inside the window are counted
+// and ride along as `suppressed_since_last` on the next report, so a tight
+// renderer retry loop cannot turn one broken handler into thousands of events
+// while the true frequency stays visible (CLAUDE.md §8 "не шумит").
+const IPC_ERROR_THROTTLE_MS = 60_000
+// Hard cap on distinct throttle keys. Channel names are compile-time string
+// literals at every handleIpc call site (raw `ipcMain.handle` is banned
+// project-wide by ESLint), so the real bound is ~#channels × #error classes.
+// The cap exists purely so a future dynamic channel name can never grow this
+// map without bound; on overflow we drop the whole window state rather than
+// evict selectively — losing throttle history is harmless.
+const IPC_ERROR_KEYS_CAP = 512
+const _ipcErrorState = new Map<string, { last: number; suppressed: number }>()
+
+// Channel names that may appear in a Sentry message/tag. Everything outside
+// this shape collapses to a constant. Defense in depth only: today all 170+
+// handleIpc call sites pass literals, but `handleIpc(channel: string, ...)`
+// cannot enforce that at the type level, and a channel assembled from
+// user-controlled input (a folder name, an address) must never reach Sentry.
+const IPC_CHANNEL_RE = /^[A-Za-z0-9:._-]{1,64}$/
+
+/**
+ * Classify a caught IPC-handler error into an allowlisted, PII-free class name.
+ *
+ * SECURITY: `Error.name` in JS is a *mutable public property*, not a guaranteed
+ * class identity — an arbitrary throw can carry `err.name = '<PII>'`, which
+ * would then flow into Sentry verbatim. We classify by `instanceof`
+ * (prototype-chain check, not spoofable by assigning `.name`) and return ONLY a
+ * fixed string literal from this function. We never read `err.name` /
+ * `err.message` / `err.code`.
+ *
+ * Deliberately a local copy of the same discipline used by
+ * `classifyComposeErrorName` in electron/services/ai.ts: that one is
+ * module-private, and importing it here would pull the whole AI service graph
+ * into the IPC/telemetry boundary. Collapsing both onto one helper in
+ * packages/core is a followup, not a prerequisite.
+ */
+function classifyIpcErrorName(err: unknown): string {
+  if (err instanceof TypeError) return 'TypeError'
+  if (err instanceof RangeError) return 'RangeError'
+  if (err instanceof SyntaxError) return 'SyntaxError'
+  if (err instanceof ReferenceError) return 'ReferenceError'
+  if (err instanceof Error) return 'Error'
+  return 'UnknownError'
+}
+
+/**
+ * Report a failed IPC handler to Sentry. Called from the single `handleIpc`
+ * error funnel in electron/ipc.ts, which is the ONE place every main-process
+ * IPC handler passes through.
+ *
+ * Why central and not per-handler: there are 170+ handlers and the per-handler
+ * approach left literally zero of them reporting — the local `log.error` in
+ * handleIpc goes to electron-log only, which has no Sentry bridge (CLAUDE.md
+ * §8). One funnel also means the next handler added is covered by construction.
+ *
+ * Privacy (CLAUDE.md §8): the raw `err` is NEVER sent. IPC handlers fail on
+ * user data — draft bodies, addresses, folder names, search queries, AI
+ * prompts, file paths, server hostnames — and all of that lands in
+ * `err.message` (zod validation errors, imapflow server responses, fs errors)
+ * and in `err.stack` (whose header line is the message). We capture a SYNTHETIC
+ * exception whose message is derived only from the channel name, plus the
+ * instanceof-derived error class. Nothing else about the failure leaves the
+ * process. The raw error is still fully available for local diagnosis via the
+ * handleIpc log line on the user's own machine, and is still re-thrown to the
+ * renderer unchanged — this function has no effect on either.
+ *
+ * Noise (CLAUDE.md §8): transient network conditions are dropped here, at the
+ * source, using the single shared classifier in packages/core/transientErrors.ts.
+ * This has to happen before sanitization: `beforeSend`'s filter matches on the
+ * event's exception message, and by the time our synthetic message reaches it
+ * the original `ECONNRESET` / `Socket timeout` text is gone. Applying the
+ * predicate to the raw error also lets it walk `cause` chains, which is how
+ * imapflow/nodemailer failures actually arrive on `net:*` channels — without
+ * this gate every IMAP disconnect would emit one event per in-flight channel.
+ *
+ * Fire-and-forget: the whole body is wrapped so a broken SDK can never turn a
+ * handled IPC rejection into an unhandled one. The caller wraps again.
+ */
+export function reportIpcHandlerError(channel: string, err: unknown): void {
+  try {
+    if (isTransientNetworkError(err)) return
+    const safeChannel = IPC_CHANNEL_RE.test(channel) ? channel : 'unknown_channel'
+    const errorName = classifyIpcErrorName(err)
+    const key = `${safeChannel}|${errorName}`
+    const now = Date.now()
+    const prev = _ipcErrorState.get(key)
+    if (prev && now - prev.last < IPC_ERROR_THROTTLE_MS) {
+      prev.suppressed += 1
+      return
+    }
+    const suppressed = prev?.suppressed ?? 0
+    if (!prev && _ipcErrorState.size >= IPC_ERROR_KEYS_CAP) _ipcErrorState.clear()
+    _ipcErrorState.set(key, { last: now, suppressed: 0 })
+    // Synthetic, attacker-uncontrolled signature. `name` is set explicitly so
+    // Sentry's title reads as an IPC failure rather than a generic Error.
+    const sanitized = new Error(`ipc_${safeChannel}`)
+    sanitized.name = 'IpcHandlerError'
+    Sentry.captureException(sanitized, {
+      tags: { category: 'ipc_handler_error', ipc_channel: safeChannel },
+      // Group per channel + error class: one issue per broken handler, not one
+      // per capture site (every event shares the same stack — this function).
+      fingerprint: ['ipc-handler-error', safeChannel, errorName],
+      extra: { source: 'handleIpc', error_name: errorName, suppressed_since_last: suppressed },
+    })
+  } catch { /* telemetry must never throw */ }
+}
+
+/** Test-only: clear the per-channel IPC error throttle window. */
+export function __resetIpcErrorReportStateForTest(): void {
+  _ipcErrorState.clear()
+}
+
 // Error reporting toggle. Default is true (enabled).
 // Updated from main.ts BEFORE initSentry() via setSentryUserEnabled(), so the
 // very first events (including session envelopes that bypass beforeSend)

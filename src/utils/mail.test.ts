@@ -916,6 +916,27 @@ describe('external image hardening', () => {
     expect(sanitized).toContain('href="/login"')
   })
 
+  // ALLOWED_URI_REGEXP character-class integrity (CodeQL: overly permissive
+  // range). The hyphens in `[a-z+.\-]` / `[^a-z+.\-:]` must stay escaped: an
+  // unescaped `.-:` is the range 0x2E–0x3A, which swallows `/` and `0-9` and
+  // silently rejects scheme-less relative URLs. Harmless in mail (relative
+  // URLs have no base to resolve against) but the regexp then means something
+  // other than what it reads as, so lock the intended reading down here.
+  it('sanitizer keeps dangerous schemes out while accepting scheme-less relative hrefs', () => {
+    for (const dangerous of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'vbscript:msgbox(1)']) {
+      const sanitized = sanitizeMailHtml(`<a href="${dangerous}">x</a>`)
+      expect(sanitized.toLowerCase()).not.toContain('javascript:')
+      expect(sanitized.toLowerCase()).not.toContain('vbscript:')
+    }
+    for (const allowed of ['https://example.test/x', 'mailto:a@b.test', 'cid:img001', '/login', '#anchor']) {
+      expect(sanitizeMailHtml(`<a href="${allowed}">x</a>`)).toContain(`href="${allowed}"`)
+    }
+    // Scheme-less relative hrefs: rejected before the fix by the accidental range.
+    for (const relative of ['path/page', 'page1']) {
+      expect(sanitizeMailHtml(`<a href="${relative}">x</a>`)).toContain(`href="${relative}"`)
+    }
+  })
+
   // BLOCKER 4e — <meta http-equiv="refresh"> (codex-security-review HIGH B4).
   //
   // FORBID_TAGS already includes 'meta', this test locks the invariant

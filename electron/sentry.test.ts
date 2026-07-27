@@ -568,3 +568,242 @@ describe('§2.34 — reportKeychainUnavailable', () => {
     expect(ctx.extra!.surface).toBe('imap_smtp')
   })
 })
+
+/**
+ * reportIpcHandlerError — the Sentry sink for the single `handleIpc` error
+ * funnel in electron/ipc.ts.
+ *
+ * Context: electron/ipc.ts had zero captureException call sites, so every
+ * main-process IPC handler failure went to electron-log only (no Sentry bridge,
+ * CLAUDE.md §8) — 80 error-level lines in a user's local log over 4 days versus
+ * zero events in Sentry over 30 days.
+ *
+ * The invariant under test is that closing that hole does NOT open a PII hole:
+ * IPC arguments and error messages are exactly where bodies, addresses, search
+ * queries, draft text, prompts, file paths and server hostnames live.
+ */
+describe('reportIpcHandlerError', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  it('captures a SYNTHETIC exception keyed on the channel, with tag + fingerprint', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    const err = new TypeError('cannot read property x of undefined')
+    reportIpcHandlerError('net:folderPage', err)
+
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(1)
+    const [capturedErr, ctx] = vi.mocked(sentry.captureException).mock.calls[0] as [
+      Error,
+      { tags?: Record<string, unknown>; fingerprint?: string[]; extra?: Record<string, unknown> },
+    ]
+
+    expect(capturedErr).not.toBe(err)
+    expect(capturedErr).toBeInstanceOf(Error)
+    expect(capturedErr.name).toBe('IpcHandlerError')
+    expect(capturedErr.message).toBe('ipc_net:folderPage')
+
+    expect(ctx.tags).toEqual({ category: 'ipc_handler_error', ipc_channel: 'net:folderPage' })
+    // One Sentry issue per (channel, error class), not one per capture site —
+    // every event from this function shares the same stack.
+    expect(ctx.fingerprint).toEqual(['ipc-handler-error', 'net:folderPage', 'TypeError'])
+    expect(Object.keys(ctx.extra ?? {}).sort()).toEqual(['error_name', 'source', 'suppressed_since_last'])
+    expect(ctx.extra!.source).toBe('handleIpc')
+    expect(ctx.extra!.error_name).toBe('TypeError')
+    expect(ctx.extra!.suppressed_since_last).toBe(0)
+  })
+
+  it('never forwards the raw error — body, address, query, path and hostname stay local', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    // A realistic composite: zod echoes payload fragments, imapflow echoes the
+    // server response, fs echoes the path.
+    const raw = new Error(
+      'ENOENT: no such file or directory, open ' +
+      "'/home/alice/Downloads/Q3 payroll.pdf' — folder=Входящие query=\"invoice from bob@example.com\" " +
+      'host=mail.internal.example.com body="secret contents"',
+    ) as Error & { cause?: unknown }
+    raw.cause = new Error('inner: alice@example.com')
+    reportIpcHandlerError('net:saveAttachment', raw)
+
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(1)
+    const [capturedErr, ctx] = vi.mocked(sentry.captureException).mock.calls[0] as [
+      Error & { cause?: unknown },
+      Record<string, unknown>,
+    ]
+    expect(capturedErr).not.toBe(raw)
+    expect(capturedErr.cause).toBeUndefined()
+
+    const serialized = JSON.stringify({
+      message: capturedErr.message,
+      stack: capturedErr.stack,
+      name: capturedErr.name,
+      ctx,
+    })
+    for (const secret of [
+      '/home/alice',
+      'Q3 payroll',
+      'Входящие',
+      'invoice from',
+      'bob@example.com',
+      'alice@example.com',
+      'mail.internal.example.com',
+      'secret contents',
+      'ENOENT',
+    ]) {
+      expect(serialized).not.toContain(secret)
+    }
+  })
+
+  it('classifies by prototype chain — a spoofed err.name cannot smuggle PII', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    // `Error.name` is a mutable public property: anything that reads it as a
+    // "class" would forward attacker/user-controlled text straight to Sentry.
+    const spoofed = new RangeError('boom')
+    spoofed.name = 'alice@example.com'
+    reportIpcHandlerError('db:search', spoofed)
+
+    const [, ctx] = vi.mocked(sentry.captureException).mock.calls[0] as [
+      Error,
+      { fingerprint?: string[]; extra?: Record<string, unknown> },
+    ]
+    expect(ctx.extra!.error_name).toBe('RangeError')
+    expect(JSON.stringify(ctx)).not.toContain('alice@example.com')
+  })
+
+  it('collapses a non-Error throw to the UnknownError class without reading its fields', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    reportIpcHandlerError('db:search', { name: 'alice@example.com', message: 'secret body' })
+
+    const [, ctx] = vi.mocked(sentry.captureException).mock.calls[0] as [Error, Record<string, unknown>]
+    expect((ctx.extra as Record<string, unknown>).error_name).toBe('UnknownError')
+    expect(JSON.stringify(ctx)).not.toContain('alice@example.com')
+    expect(JSON.stringify(ctx)).not.toContain('secret body')
+  })
+
+  it('sanitizes a channel name that is not a plain identifier (defense in depth)', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    // Today every handleIpc call site passes a string literal, but the
+    // signature is `channel: string` — a channel ever assembled from user input
+    // must not become a Sentry message or tag value.
+    reportIpcHandlerError('net:folder:Входящие <alice@example.com>', new Error('boom'))
+
+    const [capturedErr, ctx] = vi.mocked(sentry.captureException).mock.calls[0] as [
+      Error,
+      { tags?: Record<string, unknown>; fingerprint?: string[] },
+    ]
+    expect(capturedErr.message).toBe('ipc_unknown_channel')
+    expect(ctx.tags!.ipc_channel).toBe('unknown_channel')
+    expect(JSON.stringify(ctx)).not.toContain('alice@example.com')
+  })
+
+  // --- Noise gate ----------------------------------------------------------
+  // Rationale (CLAUDE.md §8): the filter has to run HERE, on the raw error.
+  // beforeSend matches the event's exception message, and by then our synthetic
+  // `ipc_<channel>` message has replaced the original ECONNRESET / Socket
+  // timeout text — so beforeSend alone would let every IMAP disconnect through,
+  // once per in-flight channel.
+
+  it('drops transient network failures, including wrapped ones', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    const wrapped = new Error('IMAP sync failed') as Error & { cause?: unknown }
+    wrapped.cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+
+    reportIpcHandlerError('net:syncFolderHeaders', new Error('Socket timeout'))
+    reportIpcHandlerError('net:inboxSummaries', new Error('Connection not available'))
+    reportIpcHandlerError('net:idleStart', Object.assign(new Error('connect failed'), { code: 'ETIMEDOUT' }))
+    reportIpcHandlerError('net:folderPage', wrapped)
+
+    expect(vi.mocked(sentry.captureException)).not.toHaveBeenCalled()
+  })
+
+  it('keeps non-transient failures on the same channels visible (TLS trust must not be silenced)', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    // The incident that motivated this work: TLS failures broke a user's
+    // mailbox and never reached Sentry. They are NOT transient network noise.
+    reportIpcHandlerError('net:syncFolderHeaders', new Error('TLS pin mismatch'))
+    reportIpcHandlerError('net:testImap', new Error('unable to verify the first certificate'))
+
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(2)
+  })
+
+  // --- Throttle ------------------------------------------------------------
+
+  it('throttles repeats per (channel, error class) and reports the suppressed count on the next window', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    let t = 1_000_000
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => t)
+
+    // A renderer retry loop: same handler failing over and over.
+    for (let i = 0; i < 50; i++) reportIpcHandlerError('db:search', new Error('disk I/O error'))
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(1)
+
+    // Past the window — the next failure reports again and carries the true
+    // frequency of what was suppressed, so throttling never hides the volume.
+    t += 60_001
+    reportIpcHandlerError('db:search', new Error('disk I/O error'))
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(2)
+    const [, ctx] = vi.mocked(sentry.captureException).mock.calls[1] as [Error, { extra?: Record<string, unknown> }]
+    expect(ctx.extra!.suppressed_since_last).toBe(49)
+
+    dateSpy.mockRestore()
+  })
+
+  it('throttles per key — a different channel or error class is reported immediately', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    const t = 2_000_000
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => t)
+
+    reportIpcHandlerError('db:search', new Error('disk I/O error'))
+    reportIpcHandlerError('db:search', new Error('disk I/O error')) // throttled
+    reportIpcHandlerError('db:search', new TypeError('other class')) // different class
+    reportIpcHandlerError('net:move', new Error('disk I/O error')) // different channel
+
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(3)
+    dateSpy.mockRestore()
+  })
+
+  it('the throttle window can be reset between tests/sessions (test hook)', async () => {
+    const sentry = await import('@sentry/node')
+    const { reportIpcHandlerError, __resetIpcErrorReportStateForTest } = await import('./sentry')
+
+    const t = 3_000_000
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => t)
+
+    reportIpcHandlerError('db:search', new Error('boom'))
+    reportIpcHandlerError('db:search', new Error('boom'))
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(1)
+
+    __resetIpcErrorReportStateForTest()
+    reportIpcHandlerError('db:search', new Error('boom'))
+    expect(vi.mocked(sentry.captureException)).toHaveBeenCalledTimes(2)
+
+    dateSpy.mockRestore()
+  })
+
+  it('never throws when the Sentry SDK is broken', async () => {
+    const sentry = await import('@sentry/node')
+    vi.mocked(sentry.captureException).mockImplementationOnce(() => { throw new Error('sentry broken') })
+    const { reportIpcHandlerError } = await import('./sentry')
+
+    expect(() => reportIpcHandlerError('net:sendMail', new Error('boom'))).not.toThrow()
+  })
+})
