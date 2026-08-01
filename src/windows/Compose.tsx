@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Loader2, Paperclip, X, Minus, Square, Copy, FileText, Bell, Archive, ChevronDown, Clock, Calendar } from 'lucide-react'
+import { Send, Loader2, Paperclip, X, FileText, Bell, Archive, ChevronDown, Clock, Calendar } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { AccountMeta, ComposeAttachment, ComposeInit, FolderRoles, Identity } from '../../packages/net/types'
 import { formatBytes } from '../utils/mail'
 import { resolveFromEmailFromMeta } from '../utils/composeFromEmail'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
 import { useIdentitySelection } from '../hooks/useIdentitySelection'
 import { useIdentityDefaultBcc } from '../hooks/useIdentityDefaultBcc'
 import IdentityPicker from '../components/IdentityPicker'
@@ -326,7 +326,6 @@ function gcDrafts() {
 
 export default function Compose() {
   const { t } = useTranslation()
-  const maximized = useMaximized()
   // Do not restart init logic on language change (t identity changes), otherwise compose:getInit may
   // be "consumed" and the Reply/Forward prefill will be overwritten by the restored last draft.
   const tRef = useRef(t)
@@ -1445,20 +1444,7 @@ export default function Compose() {
   return (
     <div className="compose-window" onDragOver={onDragOver} onDrop={onDrop}>
       {/* Custom titlebar for frameless window */}
-      <div className="child-titlebar">
-        <span className="child-titlebar-title">{t('compose.title')}</span>
-        <div className="titlebar-controls">
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')}>
-            <Minus size={14} />
-          </button>
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')}>
-            {maximized ? <Copy size={12} /> : <Square size={12} />}
-          </button>
-          <button className="titlebar-btn titlebar-btn-close" onClick={() => window.close()}>
-            <X size={14} />
-          </button>
-        </div>
-      </div>
+      <WindowTitlebar title={t('compose.title')} />
       <div className="compose-form">
         {accounts.length > 1 && (
           <Select

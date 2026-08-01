@@ -279,7 +279,16 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
           res.end(oauthHtml(pageMessages.cancelTitle, pageMessages.cancelText))
           const oauthErr = new Error(errDesc || err)
           log.error('Microsoft OAuth error callback:', err, errDesc)
-          captureException(oauthErr, { source: 'MicrosoftOAuth', error_code: err, error_description: errDesc ?? undefined })
+          // §2.82 iter2 — `error_description` is Azure-authored free text and
+          // routinely inlines the UPN (the same hazard this file already
+          // documents on the refresh path). Neither it nor `oauthErr`, whose
+          // message IS that text, may reach Sentry: send a synthetic error
+          // carrying only the classified code. `oauthErr` is still what the
+          // local log and the rejected promise see.
+          captureException(
+            new Error(`oauth_callback_error: ${summarizeOAuthErrorForSentry(errDesc || err)}`),
+            { source: 'MicrosoftOAuth', stage: 'callback' },
+          )
           reject(oauthErr)
           return
         }
@@ -418,7 +427,13 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
     ) as typeof tokenJson
   } catch (e) {
     log.error('Microsoft OAuth: token exchange failed:', e instanceof Error ? e.message : e)
-    captureException(e, { source: 'MicrosoftOAuth' })
+    // Same rule as the refresh path below: the token endpoint's failure body
+    // is Azure free text that can name the account. Only the classified code
+    // leaves the process.
+    captureException(
+      new Error(`token_exchange_failed: ${summarizeOAuthErrorForSentry(e)}`),
+      { source: 'MicrosoftOAuth', stage: 'token_exchange' },
+    )
     throw e
   }
 
@@ -461,7 +476,13 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
     return { email: emailFromGraph, accessToken, expiresAt, refreshToken: freshestRefreshToken }
   } catch (e) {
     log.error('Microsoft OAuth: MS Graph /me failed:', e instanceof Error ? e.message : e)
-    captureException(e, { source: 'MicrosoftOAuth' })
+    // The Graph identity lookup is the one call whose response body is the
+    // user's profile — a failure message can echo the mail / userPrincipalName
+    // it was resolving. Synthetic error only.
+    captureException(
+      new Error(`graph_identity_failed: ${summarizeOAuthErrorForSentry(e)}`),
+      { source: 'MicrosoftOAuth', stage: 'graph_identity' },
+    )
     throw e instanceof Error ? e : new Error(String(e))
   }
 }

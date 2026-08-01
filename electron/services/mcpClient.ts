@@ -224,7 +224,15 @@ export class McpClientManager {
 
       transport.onerror = (err: Error) => {
         log.error(`MCP connection "${config.name}" error: ${err.message}`)
-        captureException(err, { source: 'mcpClient', stage: 'transport', connectionName: config.name })
+        // §2.82 iter2 — `config.name` is free text the user typed when adding
+        // the connection, and `err` is transport-authored (a stdio server can
+        // put anything on stderr, an SSE endpoint anything in its body). Send
+        // neither: the connection is identified by its opaque id, the failure
+        // by the error class. Both full values stay in the local log line above.
+        captureException(
+          new Error(`mcp_transport_error: ${err?.constructor?.name ?? 'Error'}`),
+          { source: 'mcpClient', stage: 'transport', transport: config.transport },
+        )
         conn.status = 'error'
         conn.error = err.message
       }
@@ -251,7 +259,10 @@ export class McpClientManager {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       log.error(`MCP connection "${config.name}" failed: ${msg}`)
-      captureException(err, { source: 'mcpClient', stage: 'connect', connectionName: config.name })
+      captureException(
+        new Error(`mcp_connect_failed: ${(err as { constructor?: { name?: string } })?.constructor?.name ?? 'Error'}`),
+        { source: 'mcpClient', stage: 'connect', transport: config.transport },
+      )
       conn.status = 'error'
       conn.error = msg
       // Clean up partial connection

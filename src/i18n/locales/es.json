@@ -712,8 +712,9 @@
       "version": "Versión",
       "website": "Sitio web",
       "docs": "Documentación",
-      "sentryEnabled": "Enviar diagnósticos y datos de uso anónimos",
-      "sentryHint": "Incluye informes de fallos, métricas de rendimiento y eventos de uso anónimos (por ejemplo, qué funciones se utilizan). Nunca incluye el contenido de los mensajes, direcciones, asuntos o nombres de carpetas.",
+      "sentryEnabled": "Enviar diagnósticos y datos de uso",
+      "sentryHint": "Incluye informes de fallos, mediciones de rendimiento, eventos de uso (qué funciones se utilizan, qué proveedor y modelo de IA, el coste estimado de una petición) y un identificador aleatorio de la instalación que vincula sus sesiones. El contenido de los mensajes, los asuntos y los nombres de carpetas no se recopilan: nada de lo que se envía se compone de ellos, y las direcciones y las rutas de archivo se eliminan automáticamente del texto de error que devuelve su servidor de correo, en la medida en que se reconocen. La única dirección que se envía es la que usted escriba en el formulario de comentarios de abajo, para que puedan responderle.",
+      "sentryConsentPending": "Los diagnósticos permanecen desactivados mientras no se responda a la pregunta de consentimiento. MailCopilot lo preguntará una vez en el próximo inicio; hasta entonces este interruptor no tiene efecto.",
       "debugLogging": "Activar registro de depuración",
       "debugLoggingHint": "Escribe registros detallados en un archivo para la resolución de problemas. Los registros se almacenan localmente y nunca se envían automáticamente.",
       "system": {
@@ -749,6 +750,31 @@
         "unsupportedDev": "Las actualizaciones están desactivadas en esta compilación"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "¿Enviar datos de diagnóstico?",
+    "intro": "MailCopilot puede enviar datos de diagnóstico y de uso para que los fallos y las ralentizaciones puedan detectarse y corregirse. Nunca contienen el contenido de su correo, pero sí un identificador aleatorio de esta instalación, por lo que no son totalmente anónimos. No se envía nada sin su permiso. Su correo y el asistente de IA funcionan igual con cualquiera de las dos respuestas: si no lo permite, el formulario de comentarios de los ajustes se sustituye por un enlace a nuestro sitio web.",
+    "sentTitle": "Si lo permite, MailCopilot envía:",
+    "sent": {
+      "errors": "Errores y fallos: el tipo de error y la traza de la pila que indica en qué punto del código ocurrió",
+      "versions": "La versión de MailCopilot, su sistema operativo y la versión de este",
+      "performance": "La duración de las operaciones: sincronización de correo, búsqueda, envío, peticiones a la IA",
+      "usage": "Qué funciones ha usado y con qué frecuencia (búsqueda, redacción de mensajes, IA, reglas, plantillas, posponer), además del proveedor y el modelo de IA utilizados y el coste estimado de una petición",
+      "setup": "Datos básicos de configuración: cuántas cuentas tiene, el tipo de servicio de correo (por ejemplo, Gmail u Outlook), el método de inicio de sesión, el idioma de la interfaz y el tema",
+      "installId": "Un identificador aleatorio de esta instalación, creado en el primer arranque. No está vinculado a su dirección de correo, pero sí conecta los datos de sus distintas sesiones con la misma instalación."
+    },
+    "neverTitle": "MailCopilot nunca envía:",
+    "never": {
+      "bodies": "El texto de los mensajes, los asuntos y los nombres de sus carpetas no se recopilan: nada de lo que se envía se compone de ellos y en los datos solo aparece el tipo de carpeta, como Bandeja de entrada o Papelera. El único texto que no escribimos nosotros es el mensaje de error de un servidor de correo; las direcciones y las rutas de archivo se eliminan de él automáticamente antes del envío, en la medida en que se reconocen",
+      "addresses": "Direcciones de correo, ni las suyas ni las de nadie. La única excepción es el formulario de comentarios en Ajustes → Acerca de: la dirección que usted escriba allí se envía junto con su mensaje, para que puedan responderle",
+      "attachments": "Los archivos adjuntos ni sus nombres",
+      "searchQueries": "Lo que escribe en la búsqueda: solo se cuentan la longitud de la consulta y el número de resultados",
+      "aiPrompts": "El texto de las peticiones a la IA y de sus respuestas"
+    },
+    "changeLater": "Puede cambiar esta decisión en cualquier momento: Ajustes → Acerca de.",
+    "learnMore": "Qué se recopila — página de privacidad",
+    "allow": "Permitir",
+    "deny": "No permitir"
   },
   "account": {
     "title": "Conectar correo",
@@ -1377,5 +1403,11 @@
     "cancelled": "Este evento ha sido cancelado",
     "notActionable": "Esta invitación no requiere respuesta",
     "originalTimezone": "Programado originalmente en {{tzid}}"
+  },
+  "window": {
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
+    "close": "Cerrar"
   }
 }

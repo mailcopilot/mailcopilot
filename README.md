@@ -56,9 +56,33 @@ MailCopilot is a modern desktop email client built with Electron, React, and Typ
 # Install dependencies
 npm install
 
+# Optional: local environment (Google OAuth, Sentry, updater)
+cp .env.example .env
+
 # Start in dev mode (hot reload)
 npm run dev
 ```
+
+### Gmail sign-in in a self-built app
+
+This repository ships **no Google OAuth credentials**, so an app you build
+yourself cannot sign in with Gmail until you supply your own client. Everything
+else — IMAP/SMTP accounts, including Gmail via app password — works without it.
+
+1. Open [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials).
+2. *Create Credentials → OAuth client ID*, application type **Desktop app**.
+3. On the OAuth consent screen grant the scopes
+   `https://mail.google.com/`, `openid`, `email`, `profile`.
+4. Put the client ID and secret into `.env` (or the build environment):
+
+   ```bash
+   MAILCOPILOT_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+   MAILCOPILOT_GOOGLE_CLIENT_SECRET=...
+   ```
+
+The values are read from the environment at runtime and, failing that, from
+values baked into the main bundle at build time. Without either, the Gmail
+button reports that the build has no credentials instead of failing obscurely.
 
 ### Build
 

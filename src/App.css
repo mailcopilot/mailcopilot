@@ -3227,6 +3227,88 @@
   margin-top: 6px;
 }
 
+/* ===== §2.82 first-run telemetry consent screen =====
+   Layout, not decoration. The disclosure is deliberately long (six "sent"
+   categories, five "never" ones, a withdrawal line and a link) and has to stay
+   that way — an incomplete list is not informed consent. Its rendered height is
+   1031px in en and up to 1206px in fr, while the window is 800px tall by
+   default and may legally be 600px (minHeight, electron/main.ts).
+
+   Capping and scrolling the WHOLE dialog therefore put both answers below the
+   fold in all six locales: the first thing a new user saw was an enumeration of
+   what we collect and no way to answer it. Equal weight between the two buttons
+   (GDPR art. 4(11), EDPB Guidelines 03/2022) is worth nothing while neither is
+   on screen.
+
+   So the box is a column capped to the viewport: the title is a fixed header,
+   the prose is the only scroller, and the two answers are a footer that never
+   shrinks and never scrolls away. The buttons keep sharing one flex row, one
+   markup and one (absent) class — this file must not give either of them a
+   size, a colour or an order of its own. */
+.consent-overlay {
+  /* The screen renders its own titlebar, `position: fixed` at the top edge one
+     stacking level above this backdrop (.child-titlebar-overlay, 36px tall).
+     Clearing it here is what keeps a viewport-tall dialog from sliding under
+     the drag region and the close button. */
+  padding: 44px 16px 16px;
+  box-sizing: border-box;
+}
+
+.consent-dialog {
+  /* Scroll-shadow ink. Declared here rather than in index.css because it is
+     local to this screen: a dark wash is invisible against the dark theme's
+     near-black dialog, so the dark value is a light one. */
+  --consent-scroll-shadow: rgba(15, 23, 42, 0.22);
+  display: flex;
+  flex-direction: column;
+  /* Percentage of the overlay's content box — the viewport minus the titlebar
+     clearance above, so the cap follows the window down to its minimum. */
+  max-height: 100%;
+  box-sizing: border-box;
+  /* The box itself never scrolls; .consent-dialog-body does. */
+  overflow: hidden;
+}
+
+:root[data-theme='dark'] .consent-dialog {
+  --consent-scroll-shadow: rgba(148, 163, 184, 0.35);
+}
+
+.consent-dialog-title {
+  flex: 0 0 auto;
+}
+
+.consent-dialog-body {
+  flex: 1 1 auto;
+  /* Without min-height a flex item refuses to shrink below its content, which
+     is exactly how the footer got pushed out of the box in the first place. */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Keeps the scrollbar off the text. */
+  padding-right: 6px;
+  /* Scroll shadows: the two `local` layers travel with the text and mask the
+     fixed ones at whichever edge the text currently rests against, so a shadow
+     shows only while there is more to read in that direction. Without a cue,
+     prose cut flat above a pinned footer reads as the end of the text — and on
+     this screen "the end of the text" is a claim about what we collect. */
+  background:
+    linear-gradient(var(--bg), rgba(0, 0, 0, 0)) top,
+    linear-gradient(rgba(0, 0, 0, 0), var(--bg)) bottom,
+    radial-gradient(farthest-side at 50% 0, var(--consent-scroll-shadow), rgba(0, 0, 0, 0)) top,
+    radial-gradient(farthest-side at 50% 100%, var(--consent-scroll-shadow), rgba(0, 0, 0, 0)) bottom;
+  background-repeat: no-repeat;
+  background-size: 100% 20px, 100% 20px, 100% 8px, 100% 8px;
+  background-attachment: local, local, scroll, scroll;
+}
+
+/* The answer row. `flex: 0 0 auto` is the invariant the regression test guards:
+   it must never be compressed or scrolled out of view. */
+.consent-dialog .confirm-dialog-actions {
+  flex: 0 0 auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--mailcopilot-border);
+}
+
 /* ===== Compose: To row + Cc/Bcc toggle ===== */
 .compose-to-row {
   position: relative;
@@ -3390,6 +3472,19 @@
   font-weight: 600;
   padding-left: 8px;
   color: var(--muted);
+}
+
+/* Titlebar for a screen that IS a modal overlay (telemetry consent gate, §2.82).
+   .confirm-overlay is `position: fixed; inset: 0; z-index: 10000`, so an
+   in-flow titlebar would sit underneath it — the backdrop would dim it and,
+   worse, swallow the pointer, taking away both the drag region and the close
+   button we render it for. Fixed to the top edge, one level above the overlay. */
+.child-titlebar-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10001;
 }
 
 /* ===== Утилитарные классы для форм ===== */

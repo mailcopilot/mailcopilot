@@ -66,11 +66,13 @@ Wenn MailCopilot systemweit installiert wurde (z. B. über einen Paketmanager, d
 
 Aktualisieren Sie die Anwendung über Ihren Paketmanager oder mit Administratorrechten.
 
-## Anonyme Fehlerberichte
+## Diagnose- und Nutzungsdaten
 
-Wenn aktiviert, sendet MailCopilot anonyme Absturzberichte, um den Entwicklern zu helfen, Fehler zu finden und zu beheben. Es werden keine persönlichen Daten, E-Mail-Inhalte oder Kontoinformationen erfasst — nur technische Fehlerdetails.
+Wenn aktiviert, sendet MailCopilot Absturzberichte, Leistungsmessungen, Nutzungsereignisse (welche Funktionen verwendet werden, welcher KI-Anbieter und welches Modell, die geschätzten Kosten einer Anfrage) sowie eine zufällige Installationskennung, die Ihre Sitzungen verbindet. Nachrichteninhalte und Ihr Suchtext sind darin nie enthalten; Adressen, Betreffzeilen und Ordnernamen sind vollständig ausgeschlossen, wo die Diagnose eine geschlossene Feldliste verwendet (wie bei der Sent-Kopie-Diagnose), und werden andernorts durch eine formbasierte Bereinigung nach bestem Bemühen abgefangen -- ein Sicherheitsnetz, keine Garantie. Das Feedback-Formular unten ist die einzige Stelle, an der absichtlich eine Adresse gesendet wird, damit Sie eine Antwort erhalten können; überall sonst wird eine Adresse nur bereinigt, nicht garantiert ausgeschlossen -- und weil die Installationskennung enthalten ist, sind diese Daten nicht vollständig anonym. Die vollständige Liste dessen, was gesendet wird und was nie gesendet wird, finden Sie unter [Telemetrie](../privacy/telemetry).
 
-Diese Einstellung ist standardmäßig aktiviert. Sie können sie jederzeit deaktivieren, indem Sie das Kontrollkästchen deaktivieren.
+Diese Einstellung spiegelt die Antwort wider, die Sie beim ersten Start von MailCopilot auf dem Zustimmungsbildschirm gegeben haben, und ist **standardmäßig deaktiviert** — es wird nichts gesendet, bis Sie aktiv zugestimmt haben. Sie können Ihre Entscheidung jederzeit ändern, indem Sie das Kontrollkästchen aktivieren oder deaktivieren.
+
+Wenn MailCopilot keine Antwort auf die anfängliche Zustimmungsfrage vorliegen hat — zum Beispiel unmittelbar nachdem sich die Liste der erhobenen Daten geändert hat und eine erneute Nachfrage fällig wird —, wird das Kontrollkästchen hier deaktiviert und nicht angehakt angezeigt, mit einem Hinweis, dass die Diagnose ausgeschaltet bleibt, bis Sie beim nächsten Start auf dem Zustimmungsbildschirm antworten.
 
 ## Debug-Protokollierung
 
@@ -82,6 +84,6 @@ Die Debug-Protokollierung ist standardmäßig deaktiviert. Aktivieren Sie sie nu
 
 Klicken Sie auf die Schaltfläche **Einen Fehler melden**, um Feedback direkt an die MailCopilot-Entwickler zu senden. Beschreiben Sie das aufgetretene Problem — das hilft uns, Fehler schneller zu identifizieren und zu beheben.
 
-Ihr Feedback wird sicher über dasselbe anonyme Fehlerberichtssystem gesendet. Wenn Fehlerberichte deaktiviert sind, sehen Sie einen Link zur MailCopilot-Website, wo Sie den Support kontaktieren können.
+Ihr Feedback wird sicher über dasselbe oben beschriebene Diagnose-Meldesystem gesendet. Wenn Fehlerberichte deaktiviert sind, sehen Sie einen Link zur MailCopilot-Website, wo Sie den Support kontaktieren können.
 
 Wenn die Anwendung auf einen unerwarteten Fehler stößt, erscheint auf dem Fehlerbildschirm ebenfalls ein Feedback-Formular, in dem Sie beschreiben können, was Sie vor dem Fehler getan haben.

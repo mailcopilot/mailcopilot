@@ -92,8 +92,36 @@ export type Settings = {
   workOffline?: boolean
   /** Extended debug logging in main/electron-log */
   debugLogging?: boolean
-  /** Send anonymous error reports to Sentry */
+  /**
+   * Send diagnostic and usage data to Sentry. NOT anonymous: every event
+   * carries the stable per-install identifier (electron/installId.ts), which
+   * is pseudonymisation, not anonymisation.
+   *
+   * This is the Settings → About switch — the GDPR art. 7(3) withdrawal path,
+   * so it stays renderer-writable. It is NOT by itself permission to send:
+   * telemetry flows only when this is not `false` AND `telemetryConsent`
+   * records an active grant for the current disclosure version (see
+   * `isTelemetryAllowed` in electron/telemetryConsent.ts).
+   */
   sentryEnabled?: boolean
+  /**
+   * §2.82 — proof of the user's answer on the first-run telemetry consent
+   * screen.
+   *
+   * Main-only writable. The renderer asks for the state and reports the click
+   * through `telemetry:consentState` / `telemetry:setConsent`; `version` and
+   * `at` are stamped by the main process, never taken from the renderer
+   * payload, and `settings:save` rejects this field outright
+   * (`MAIN_ONLY_SETTINGS_FIELDS`). A renderer that could write it would be
+   * able to manufacture consent it never obtained.
+   *
+   * Absent means "not answered yet" → nothing is sent and the screen runs
+   * once. `version` pins the answer to the DISCLOSED COMPOSITION of collected
+   * data (`TELEMETRY_CONSENT_VERSION`); widening the composition bumps it and
+   * re-asks exactly once, which is the only lawful reason to show the screen
+   * again (ePrivacy art. 5(3), GDPR art. 4(11)).
+   */
+  telemetryConsent?: { granted: boolean; version: number; at: string }
   /** Background polling sync interval (minutes, 1-30). With IMAP IDLE, this is just a safety net. */
   syncIntervalMinutes?: number
   /** Periodic folder sync interval (minutes, 1-60). Syncs folders with headerSyncMode full/period. */
@@ -924,6 +952,17 @@ export const settingsSchema = z.object({
   workOffline: z.boolean().default(false),
   debugLogging: z.boolean().default(false),
   sentryEnabled: z.boolean().default(true),
+  /**
+   * §2.82 — persisted first-run telemetry consent. Main-only writable; see the
+   * `Settings.telemetryConsent` JSDoc for the contract. `.optional()` with no
+   * default on purpose: "no record" is a meaningful state (not answered yet →
+   * send nothing, ask once) and a default would erase it.
+   */
+  telemetryConsent: z.object({
+    granted: z.boolean(),
+    version: z.number().int(),
+    at: z.string().min(1),
+  }).optional(),
   syncIntervalMinutes: z.number().int().min(1).max(30).default(1),
   periodicSyncIntervalMin: z.number().int().min(1).max(60).default(5),
   darkModeEmails: z.boolean().default(true),
@@ -990,6 +1029,10 @@ export const settingsSchema = z.object({
  *     `mcp:removeConnection` IPC, never via a raw `settings:save`. Leaving
  *     it off this schema prevents a compromised renderer from bypassing the
  *     command-allowlist gate by writing connections directly to settings.
+ *   - `telemetryConsent` (§2.82) — the record of the user's answer on the
+ *     consent screen. Written only by the `telemetry:setConsent` handler,
+ *     which stamps `version` and `at` itself. A renderer able to write it
+ *     could fabricate consent that was never given.
  */
 export const rendererWritableSettingsSchema = z.object({
   theme: z.enum(['light', 'dark']).optional(),
@@ -1077,6 +1120,9 @@ export const MAIN_ONLY_SETTINGS_FIELDS = [
   'mcpEnableStdio',
   'stdioApproved',
   'mcpConnections',
+  // §2.82 — consent record. Renderer signals its click through
+  // `telemetry:setConsent`; main stamps the version and timestamp.
+  'telemetryConsent',
 ] as const
 
 export type MainOnlySettingsField = typeof MAIN_ONLY_SETTINGS_FIELDS[number]
@@ -2084,6 +2130,28 @@ export function deleteMcpConnection(id: string): void {
  * throws because the disk is full).
  */
 let mcpEnvSanitizationAuditedThisLaunch = false
+
+/**
+ * The persisted settings record EXACTLY as stored — no schema parse, no
+ * defaults, no migrations.
+ *
+ * `getSettings()` cannot answer "was this key ever written?", because zod
+ * substitutes a default for every absent field. §2.82's one-time consent
+ * migration needs precisely that distinction: `sentryEnabled: false` on disk
+ * is a user who found the About switch and turned it off (an expressed
+ * refusal, seed it as one), while an ABSENT key is a user who was simply never
+ * asked (leave the record empty so the consent screen runs). Reading the
+ * parsed value would conflate the two the moment anyone changes
+ * `sentryEnabled`'s default — see electron/services/telemetryConsentService.ts.
+ *
+ * Returns `undefined` when nothing has been persisted yet (fresh install) or
+ * the stored value is not an object.
+ */
+export function getRawPersistedSettings(): Record<string, unknown> | undefined {
+  const raw = store.get('settings')
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  return raw as Record<string, unknown>
+}
 
 export function getSettings(): Settings {
   ensureMigratedSingleAccountToAccounts()

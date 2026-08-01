@@ -1,7 +1,7 @@
 // Sentry initialization for the renderer process (React).
 
 import * as Sentry from '@sentry/react'
-import { isTransientNetworkError } from '@mailcopilot/core'
+import { isTransientNetworkError, scrubUserPathsShape, scrubEventPiiWith } from '@mailcopilot/core'
 
 // Flag controlling error reporting. Default is true (enabled).
 // Updated from main.tsx BEFORE initSentry() and later from App.tsx after
@@ -16,11 +16,14 @@ let _sentryUserEnabled = true
 let _cachedInstallIdHash: string | null = null
 
 /**
- * Attach a stable anonymous identity for the renderer's Sentry client.
- * Identical contract to electron/sentry.ts:setSentryUserId — the id is the
- * 16-hex install-id hash passed from main via additionalArguments. Without
- * this call, renderer-originated events share count_unique(user) = 0 with
- * the rest of the dataset and Release Health adoption stays permanently 0.
+ * Attach the stable PSEUDONYMOUS install identity for the renderer's Sentry
+ * client. Identical contract to electron/sentry.ts:setSentryUserId — the id is
+ * the 16-hex install-id hash passed from main via additionalArguments. Not
+ * "anonymous": it is stable and rides on everything, so an install's stream is
+ * joinable (electron/installId.ts spells this out, and the consent screen
+ * discloses it). Without this call, renderer-originated events share
+ * count_unique(user) = 0 with the rest of the dataset and Release Health
+ * adoption stays permanently 0.
  */
 export function setSentryUserId(installIdHash: string): void {
   if (!installIdHash) return
@@ -54,6 +57,11 @@ function clearSentryUser(): void {
  * Note: directly mutating client.getOptions().enabled is not a publicly
  * documented runtime toggle in @sentry/react — any SDK upgrade should
  * re-verify that the transport still honors the flag per-event.
+ *
+ * §2.82 — the value handed in is the EFFECTIVE permission published by main
+ * (`clampTelemetryForRenderer`), not the raw `sentryEnabled` field: with no
+ * consent record the renderer is told `false` even though the settings schema
+ * defaults that field to `true`.
  */
 export function setSentryUserEnabled(enabled: boolean) {
   const wasEnabled = _sentryUserEnabled
@@ -62,10 +70,63 @@ export function setSentryUserEnabled(enabled: boolean) {
   if (!wasEnabled && enabled && _cachedInstallIdHash) {
     try { Sentry.setUser({ id: _cachedInstallIdHash }) } catch { /* ignore */ }
   }
+  if (wasEnabled !== enabled) {
+    // Breadcrumbs accumulate regardless of the `enabled` flag (clicks, console
+    // output, fetch/XHR, navigation — the renderer is where most of them come
+    // from). Without this the first event after an opt-in would carry a trail
+    // of pre-consent activity; on a withdrawal it would leave one behind for a
+    // later re-opt-in to ship.
+    try { Sentry.getCurrentScope().clearBreadcrumbs() } catch { /* ignore */ }
+    try { Sentry.getIsolationScope().clearBreadcrumbs() } catch { /* ignore */ }
+  }
   try {
     const client = Sentry.getClient()
     if (client) client.getOptions().enabled = enabled && import.meta.env.PROD && Boolean(__SENTRY_DSN__)
   } catch { /* telemetry must never throw */ }
+}
+
+// --- PII scrubbing (§2.82 AC (g)) ------------------------------------------
+//
+// Two things ride along with an event by default that are personal data under
+// GDPR art. 4(1):
+//
+//   1. The IP address. `sendDefaultPii: false` tells the SDK not to attach one,
+//      but the server can still infer it from the envelope's connection unless
+//      the event explicitly carries `ip_address: null` — Sentry's documented
+//      "do not infer" signal. We set it on every event and transaction.
+//   2. The OS account name, embedded in exception text and in path-bearing
+//      fields. In production the renderer's frames are bundle URLs, but
+//      source-mapped frames, dev builds, file:// paths and any path forwarded
+//      from main through an IPC rejection message carry the real home
+//      directory.
+//
+// Both rules — the shape regexes and the list of event fields that may carry a
+// path — live in packages/core/piiScrub.ts and are shared verbatim with
+// electron/sentry.ts. They used to be an independent copy here, which drifted
+// invisibly: each side only tested itself. The main process layers one extra
+// rule on top (literal `os.homedir()` substitution) that the sandboxed
+// renderer has no way to compute, which is why the shared entry point takes
+// the string rewriter as a parameter.
+
+/**
+ * Remove the OS account name from a path-bearing string.
+ *
+ * Pure and idempotent — running it twice yields the same string. Exported for
+ * unit tests; production callers go through `scrubEventPii`.
+ */
+export function scrubUserPaths(value: string): string {
+  return scrubUserPathsShape(value)
+}
+
+/**
+ * Strip the IP address and the OS account name from an outgoing event.
+ *
+ * Mutates in place and returns the same object (Sentry's beforeSend contract
+ * expects the event back). Wrapped end-to-end: an unanticipated shape must
+ * never turn telemetry into a crash (CLAUDE.md §8).
+ */
+export function scrubEventPii<T>(event: T): T {
+  return scrubEventPiiWith(event, scrubUserPathsShape)
 }
 
 /**
@@ -121,12 +182,15 @@ function doInit() {
       // update:install, which also hid real install_failed / permission /
       // corrupt-artifact errors. Only the transient classifier decides.
       if (isTransientNetworkError(msg)) return null
-      return event
+      // §2.82 AC (g): last stop before the transport — drop the IP and the OS
+      // account name embedded in stack frame paths.
+      return scrubEventPii(event)
     },
     beforeSendTransaction(event) {
       // If the user disabled Sentry, don't send traces either.
       if (!_sentryUserEnabled) return null
-      return event
+      // Transactions carry a `user` too — same IP rule applies.
+      return scrubEventPii(event)
     },
   })
 }

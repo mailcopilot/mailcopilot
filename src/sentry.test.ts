@@ -11,6 +11,9 @@ vi.mock('@sentry/react', () => {
     captureException: vi.fn(),
     setUser: vi.fn(),
     getClient: vi.fn(() => client),
+    // §2.82: a consent transition drops the breadcrumb buffer.
+    getCurrentScope: vi.fn(() => ({ clearBreadcrumbs: vi.fn() })),
+    getIsolationScope: vi.fn(() => ({ clearBreadcrumbs: vi.fn() })),
     withScope: vi.fn((cb: (scope: { setTag: ReturnType<typeof vi.fn>; setExtras: ReturnType<typeof vi.fn> }) => void) => {
       cb({ setTag: vi.fn(), setExtras: vi.fn() })
     }),
@@ -406,5 +409,171 @@ describe('sentry renderer', () => {
     expect(handle).not.toBeNull()
     expect(() => handle!.setAttribute('k', 1)).not.toThrow()
     expect(() => handle!.end()).not.toThrow()
+  })
+})
+
+// §2.82 AC (g) / AC10 — the renderer must not ship the OS account name or let
+// the server infer an IP address. Mirrors electron/sentry.test.ts.
+describe('sentry renderer — PII scrubbing', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  it('replaces the OS account name in all three platform path shapes', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('/home/ivan/apps/mailcopilot/dist/assets/index.js'))
+      .toBe('/home/<user>/apps/mailcopilot/dist/assets/index.js')
+    expect(scrubUserPaths('/Users/ivan/Applications/MailCopilot.app/index.js'))
+      .toBe('/Users/<user>/Applications/MailCopilot.app/index.js')
+    expect(scrubUserPaths('C:\\Users\\Иван\\AppData\\Local\\MailCopilot\\index.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Local\\MailCopilot\\index.js')
+    // Forward-slash Windows form and a non-C: drive.
+    expect(scrubUserPaths('D:/Users/ivan/app/index.js')).toBe('D:/Users/<user>/app/index.js')
+  })
+
+  it('is idempotent — a scrubbed path does not get scrubbed again', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+    const once = scrubUserPaths('/home/ivan/app/index.js')
+    expect(scrubUserPaths(once)).toBe(once)
+  })
+
+  it('leaves paths without a user segment alone', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+    expect(scrubUserPaths('/opt/mailcopilot/resources/app.asar/index.js'))
+      .toBe('/opt/mailcopilot/resources/app.asar/index.js')
+    expect(scrubUserPaths('')).toBe('')
+  })
+
+  it('beforeSend nulls the IP and scrubs every stack frame path field', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const event = {
+      user: { id: 'abc123', ip_address: '203.0.113.7' },
+      exception: {
+        values: [{
+          value: 'boom',
+          stacktrace: {
+            frames: [
+              {
+                filename: '/home/ivan/app/src/App.tsx',
+                abs_path: 'C:\\Users\\Иван\\app\\src\\App.tsx',
+                module: '/Users/ivan/app/src/App',
+              },
+              { filename: 'app:///assets/index.js' },
+            ],
+          },
+        }],
+      },
+    }
+
+    const out = beforeSend(event as never, {} as never) as typeof event | null
+    expect(out).toBeTruthy()
+    expect(out!.user.ip_address).toBeNull()
+    // The install id survives — stripping the IP must not strip the identity
+    // the whole dataset is keyed by. It is pseudonymous, NOT anonymous, and
+    // therefore still personal data (GDPR recital 26): stable per install and
+    // attached to everything, so one install's stream is joinable. That is
+    // exactly why the consent screen discloses it.
+    expect(out!.user.id).toBe('abc123')
+    const frames = out!.exception.values[0].stacktrace!.frames!
+    expect(frames[0].filename).toBe('/home/<user>/app/src/App.tsx')
+    expect(frames[0].abs_path).toBe('C:\\Users\\<user>\\app\\src\\App.tsx')
+    expect(frames[0].module).toBe('/Users/<user>/app/src/App')
+    expect(frames[1].filename).toBe('app:///assets/index.js')
+  })
+
+  it('beforeSend nulls the IP even when the event carries no user object', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const out = beforeSend({ exception: { values: [{ value: 'boom' }] } } as never, {} as never) as
+      { user?: { ip_address?: string | null } } | null
+    expect(out?.user?.ip_address).toBeNull()
+  })
+
+  it('beforeSendTransaction nulls the IP too', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const beforeSendTransaction = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSendTransaction!
+
+    const out = beforeSendTransaction({ user: { ip_address: '203.0.113.7' } } as never, {} as never) as
+      { user?: { ip_address?: string | null } } | null
+    expect(out?.user?.ip_address).toBeNull()
+  })
+
+  it('scrubEventPii never throws on a hostile shape (telemetry must not crash the UI)', async () => {
+    const { scrubEventPii } = await import('./sentry')
+    const frozen = Object.freeze({ user: { ip_address: '1.2.3.4' } })
+    expect(() => scrubEventPii(frozen)).not.toThrow()
+    expect(() => scrubEventPii(null)).not.toThrow()
+    expect(() => scrubEventPii({ exception: { values: 'not-an-array' } })).not.toThrow()
+  })
+})
+
+// §2.82 iter2 findings 2 and 3 — the renderer half. The scrubbing rules now
+// live in packages/core/piiScrub.ts and are shared with electron/sentry.ts, so
+// these cases pin the renderer's use of them (the rules themselves are covered
+// in packages/core/piiScrub.test.ts).
+describe('sentry renderer — consent transitions and exception text', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  it('scrubs the exception TEXT, not only stack frames', async () => {
+    const { scrubEventPii } = await import('./sentry')
+
+    const out = scrubEventPii({
+      exception: {
+        values: [{ value: "EACCES: permission denied, open '/home/ivan/.config/x'" }],
+      },
+    }) as { exception: { values: Array<{ value: string }> } }
+
+    expect(out.exception.values[0]!.value)
+      .toBe("EACCES: permission denied, open '/home/<user>/.config/x'")
+  })
+
+  it('scrubs a name containing spaces', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+    expect(scrubUserPaths('C:\\Users\\John Doe\\AppData\\Local\\app.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Local\\app.js')
+  })
+
+  it('scrubs breadcrumbs, extra and contexts', async () => {
+    const { scrubEventPii } = await import('./sentry')
+    const out = scrubEventPii({
+      breadcrumbs: [{ message: 'navigated to file:///home/ivan/index.html' }],
+      extra: { file: '/home/ivan/a.js' },
+      contexts: { app: { app_path: '/home/ivan/b.js' } },
+    })
+    expect(JSON.stringify(out)).not.toContain('ivan')
+  })
+
+  it('clears the breadcrumb buffer on a consent transition', async () => {
+    const sentry = await import('@sentry/react')
+    const clearBreadcrumbs = vi.fn()
+    vi.mocked(sentry.getCurrentScope).mockReturnValue({ clearBreadcrumbs } as never)
+    vi.mocked(sentry.getIsolationScope).mockReturnValue({ clearBreadcrumbs } as never)
+
+    const { setSentryUserEnabled } = await import('./sentry')
+    // Renderer breadcrumbs (clicks, console, fetch) accumulate regardless of
+    // the enabled flag; a post-consent event must not carry a pre-consent trail.
+    setSentryUserEnabled(false)
+    clearBreadcrumbs.mockClear()
+    setSentryUserEnabled(true)
+    expect(clearBreadcrumbs).toHaveBeenCalled()
+
+    // No transition, no reset.
+    clearBreadcrumbs.mockClear()
+    setSentryUserEnabled(true)
+    expect(clearBreadcrumbs).not.toHaveBeenCalled()
   })
 })

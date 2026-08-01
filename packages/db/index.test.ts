@@ -4250,4 +4250,218 @@ PmzvC1E/Xy2DSACclKcSo2N8JqtEHDZqj75aK7S2pA0dZAn5xa5HxbAYvwcdyrg=
       cleanup(dir, mod, prevDataDir)
     }
   })
+
+  // --- mail_rules_state: the rule-pipeline watermark (2026-07-30) ---
+
+  testDb('mail rules state is absent until the runner writes it, then round-trips', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      expect(mod.getMailRulesState(1, 'INBOX')).toBeUndefined()
+
+      mod.setMailRulesState(1, 'INBOX', 42, 7)
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 42, uidValidity: 7 })
+
+      // Same (account, folder) updates in place rather than accumulating rows.
+      mod.setMailRulesState(1, 'INBOX', 43, 7)
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 43, uidValidity: 7 })
+
+      // Scoped per folder and per account.
+      expect(mod.getMailRulesState(1, 'Archive')).toBeUndefined()
+      expect(mod.getMailRulesState(2, 'INBOX')).toBeUndefined()
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('mail rules state stores a null uidValidity when the server value is unknown', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.setMailRulesState(1, 'INBOX', 5, null)
+      // Must be a real null, not undefined — the runner compares it against the
+      // live UIDVALIDITY to decide whether to re-baseline.
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 5, uidValidity: null })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('getUidsForRulesSince returns unevaluated UIDs ascending, scoped and capped', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 5, subject: 's5', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+        { uid: 7, subject: 's7', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+        { uid: 6, subject: 's6', fromAddr: 'c@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(1, 'Archive', [
+        { uid: 9, subject: 's9', fromAddr: 'd@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(2, 'INBOX', [
+        { uid: 8, subject: 's8', fromAddr: 'e@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      // Ascending order is load-bearing: the runner advances the watermark per
+      // message, so an interrupted pass must leave a contiguous tail.
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 0, 10)).toEqual([5, 6, 7])
+      // Strictly greater than the watermark — the watermark itself is done.
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 5, 10)).toEqual([6, 7])
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 7, 10)).toEqual([])
+      // Cap applies to the oldest end, so the next pass resumes contiguously.
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 0, 2)).toEqual([5, 6])
+      // Other folders and accounts are invisible to this pass.
+      expect(mod.getUidsForRulesSince(1, 'Archive', 0, 10)).toEqual([9])
+      expect(mod.getUidsForRulesSince(2, 'INBOX', 0, 10)).toEqual([8])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache anchors every cached folder at MAX(uid) with its recorded UIDVALIDITY', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 5, subject: 's5', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+        { uid: 9, subject: 's9', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(1, 'Archive', [
+        { uid: 3, subject: 's3', fromAddr: 'c@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(2, 'INBOX', [
+        { uid: 100, subject: 's100', fromAddr: 'd@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      // INBOX of account 1 has been synced; Archive has not.
+      mod.upsertSyncState(1, 'INBOX', null, 42)
+
+      const seeded = mod.seedMailRulesStateFromCache()
+
+      expect(seeded).toBe(3)
+      // Anchored at the highest cached UID, per (account, folder) pair — this is
+      // what stops the first launch of the fix from sweeping an existing mailbox
+      // and, more importantly, is done BEFORE any sync so the runner's own lazy
+      // baseline never sees mail that just arrived.
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 9, uidValidity: 42 })
+      // No sync_state row yet → uidValidity unknown, stored as a real NULL. The
+      // runner adopts it on the first sync instead of reading it as a bump.
+      expect(mod.getMailRulesState(1, 'Archive')).toEqual({ watermarkUid: 3, uidValidity: null })
+      expect(mod.getMailRulesState(2, 'INBOX')).toEqual({ watermarkUid: 100, uidValidity: null })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache is idempotent — a repeat call never moves an existing watermark', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 5, subject: 's5', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      expect(mod.seedMailRulesStateFromCache()).toBe(1)
+
+      // The runner has since evaluated nothing new, but mail arrived and a
+      // pass advanced the watermark by hand.
+      mod.setMailRulesState(1, 'INBOX', 7, 42)
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 20, subject: 's20', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      // Second launch: the seed must not re-anchor to MAX(uid)=20, which would
+      // declare uid 20 old and hide it from every rule forever.
+      expect(mod.seedMailRulesStateFromCache()).toBe(0)
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 7, uidValidity: 42 })
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 7, 10)).toEqual([20])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache anchors a KNOWN but EMPTY folder at 0 (§2.86 iter3)', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      // Each of these folders is known to this install through a different
+      // table and has NO cached message. A seed driven by `messages` alone
+      // skipped all of them, and their first arriving message then met the
+      // runner's LAZY baseline — which runs after the fetch persisted it, so
+      // `MAX(uid)` already included it and it was declared pre-existing
+      // forever. That is the original §2.86 defect, one folder at a time.
+      mod.upsertSyncState(1, 'Drafts', null, 11)
+      mod.upsertFolderPref(1, 'Newsletters', { headerSyncMode: 'period' })
+      mod.upsertFolderCrawlState(1, 'Receipts', { status: 'not_started' })
+
+      expect(mod.seedMailRulesStateFromCache()).toBe(3)
+
+      // Anchored at 0, not skipped: uid 1 arriving next is above the watermark
+      // and therefore gets evaluated.
+      expect(mod.getMailRulesState(1, 'Drafts')).toEqual({ watermarkUid: 0, uidValidity: 11 })
+      expect(mod.getMailRulesState(1, 'Newsletters')).toEqual({ watermarkUid: 0, uidValidity: null })
+      expect(mod.getMailRulesState(1, 'Receipts')).toEqual({ watermarkUid: 0, uidValidity: null })
+
+      mod.upsertMessages(1, 'Drafts', [
+        { uid: 1, subject: 's1', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      expect(mod.getUidsForRulesSince(1, 'Drafts', 0, 10)).toEqual([1])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache counts a folder known through several tables once', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      // The union must de-duplicate: `messages` + `folder_prefs` + `sync_state`
+      // all name the same pair, and a per-source row would collide on the
+      // primary key (INSERT OR IGNORE would hide it, but the count would lie).
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 4, subject: 's4', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertFolderPref(1, 'INBOX', { headerSyncMode: 'full' })
+      mod.upsertSyncState(1, 'INBOX', null, 3)
+      mod.upsertFolderCrawlState(1, 'INBOX', { status: 'covered_full' })
+
+      expect(mod.seedMailRulesStateFromCache()).toBe(1)
+      // A folder that does have mail is still anchored at MAX(uid), not 0 —
+      // seeding it at 0 would sweep the whole mailbox on first launch.
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 4, uidValidity: 3 })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache leaves a known-empty folder alone on a repeat call', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      // Idempotence has to hold for the 0-anchored rows too: re-anchoring them
+      // to MAX(uid) on the next launch would swallow everything that arrived in
+      // between, which is the defect this seed exists to prevent.
+      mod.upsertFolderPref(1, 'Newsletters', { headerSyncMode: 'period' })
+      expect(mod.seedMailRulesStateFromCache()).toBe(1)
+
+      mod.upsertMessages(1, 'Newsletters', [
+        { uid: 12, subject: 's12', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      expect(mod.seedMailRulesStateFromCache()).toBe(0)
+      expect(mod.getMailRulesState(1, 'Newsletters')).toEqual({ watermarkUid: 0, uidValidity: null })
+      expect(mod.getUidsForRulesSince(1, 'Newsletters', 0, 10)).toEqual([12])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('deleting an account drops its rule watermark rows', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.setMailRulesState(3, 'INBOX', 11, 1)
+      mod.setMailRulesState(4, 'INBOX', 12, 1)
+      expect(mod.getMailRulesState(3, 'INBOX')).toBeDefined()
+
+      mod.deleteAccountData(3)
+
+      // A stale watermark surviving account removal would silently suppress
+      // rules for a re-added account until its next re-baseline.
+      expect(mod.getMailRulesState(3, 'INBOX')).toBeUndefined()
+      expect(mod.getMailRulesState(4, 'INBOX')).toEqual({ watermarkUid: 12, uidValidity: 1 })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
 })

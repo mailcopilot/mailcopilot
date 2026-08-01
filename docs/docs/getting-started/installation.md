@@ -65,7 +65,7 @@ You can move the AppImage to any convenient location, such as `~/Applications/`.
 
 ## First Launch
 
-When you start MailCopilot for the first time, you will see the account setup wizard. The application will guide you through connecting your first email account.
+When you start MailCopilot for the first time, you first see a consent screen titled **Send diagnostic data?**, asking whether MailCopilot may send diagnostic and usage data -- see [Telemetry](../privacy/telemetry) for exactly what that means. Nothing is sent until you answer, and your choice does not affect mail sync or the AI assistant. It does change one thing in Settings → About: with diagnostics off, the built-in feedback form is replaced with a link to the MailCopilot website instead. After you respond, the account setup wizard opens and guides you through connecting your first email account.
 
 Your passwords are securely stored in the system keychain (via keytar) and are never written to plain-text configuration files.
 

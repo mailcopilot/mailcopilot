@@ -2,8 +2,16 @@
 // Must be imported FIRST in main.ts, before any other modules.
 
 import * as Sentry from '@sentry/node'
-import { isTransientNetworkError, isLinuxInstallerError } from '@mailcopilot/core'
+import os from 'node:os'
+import {
+  isTransientNetworkError,
+  isLinuxInstallerError,
+  scrubUserPathsShape,
+  scrubEventPiiWith,
+  scrubLogPiiWith,
+} from '@mailcopilot/core'
 import { recordEvent } from './metrics'
+import { setTelemetryCollectionAllowed } from './telemetryGate'
 
 // §2.33 (M3) — `isKeychainUnavailableError` + the underlying regex were
 // relocated to @mailcopilot/core (packages/core/keychainErrors.ts) so the
@@ -94,6 +102,93 @@ export function reportKeychainUnavailable(_err: unknown, surface: SecretStoreSur
 /** Test-only: reset the per-session keychain dedup latch. */
 export function __resetKeychainReportStateForTest(): void {
   _keychainReported = false
+}
+
+// --- PII scrubbing (§2.82 AC (g)) ------------------------------------------
+//
+// Two things ride along with a Sentry event by default that are personal data
+// under GDPR art. 4(1) and would make the "we only send aggregates" claim in
+// CLAUDE.md §8 untrue:
+//
+//   1. The IP address. `sendDefaultPii: false` already tells the SDK not to
+//      attach one, but the SERVER can still infer it from the envelope's
+//      transport connection unless the event explicitly says `ip_address: null`
+//      (the Sentry-side convention for "do not infer"). We set it on every
+//      event and transaction rather than relying on the SDK option alone.
+//   2. The OS account name, which is embedded in almost every path the app
+//      touches — stack frames, but above all the TEXT of fs/OS exceptions
+//      (`EACCES: permission denied, open '/home/ivan/...'`), which is the most
+//      common real leak path and is also what Sentry shows as the issue title.
+//      Packaged installs live under the user's home on all three platforms, so
+//      this is the common case, not an edge case.
+//
+// The shape-based rules and the list of event fields we rewrite live in
+// packages/core/piiScrub.ts, shared verbatim with the renderer copy in
+// src/sentry.ts — two independent copies drifted silently, and the drift is
+// invisible to each side's own tests. What stays here is the one rule the
+// renderer cannot have: substituting the literal `os.homedir()`, which covers
+// relocated / non-standard home directories that no shape rule can recognise.
+
+const HOME_PLACEHOLDER = '<home>'
+
+// Non-standard home directories (`/var/root`, a relocated $HOME, a domain
+// profile outside C:\Users) are not covered by the shape-based patterns above,
+// so we also replace the literal home path. Resolved once — os.homedir() reads
+// env/passwd and can throw in exotic sandboxes.
+const HOME_DIRS: string[] = (() => {
+  try {
+    const home = os.homedir()
+    if (!home || home === '/' || home.length < 4) return []
+    const alt = home.replace(/\\/g, '/')
+    return alt !== home ? [home, alt] : [home]
+  } catch {
+    return []
+  }
+})()
+
+/**
+ * Remove the OS account name from a path-bearing string.
+ *
+ * Two layers: the literal home directory (main-process only — see HOME_DIRS)
+ * first, then the platform-independent shape rules shared with the renderer.
+ * Pure and idempotent — running it twice yields the same string. Exported for
+ * unit tests; production callers go through `scrubEventPii`.
+ */
+export function scrubUserPaths(value: string): string {
+  if (!value) return value
+  let out = value
+  for (const home of HOME_DIRS) {
+    if (out.includes(home)) out = out.split(home).join(HOME_PLACEHOLDER)
+  }
+  return scrubUserPathsShape(out)
+}
+
+/**
+ * Strip the IP address and the OS account name from an outgoing event.
+ *
+ * The field list (exception values and their text, thread stacks, message,
+ * logentry, breadcrumbs, extra, contexts, tags) lives in
+ * packages/core/piiScrub.ts so main and renderer cannot disagree about what
+ * "scrubbed" means. Mutates in place and returns the same object (Sentry's
+ * beforeSend contract expects the event back). Wrapped end-to-end: a shape we
+ * did not anticipate must never turn telemetry into a crash (CLAUDE.md §8).
+ */
+export function scrubEventPii<T>(event: T): T {
+  return scrubEventPiiWith(event, scrubUserPaths)
+}
+
+/**
+ * The same treatment for a structured log (`beforeSendLog`).
+ *
+ * §2.82 iter4 (security finding 3): logs are their own envelope type and never
+ * reach `beforeSend`, so before this they left the process unscrubbed while
+ * carrying free-form attributes — the AI model id (typed by the user in
+ * Settings), MCP tool names, and the SDK-added `sentry.message.parameter.N`
+ * values of a `fmt` template. Field list and walk bounds live in
+ * packages/core/piiScrub.ts alongside the event version.
+ */
+export function scrubLogPii<T>(logRecord: T): T {
+  return scrubLogPiiWith(logRecord, scrubUserPaths)
 }
 
 // --- IPC handler error reporting -------------------------------------------
@@ -225,11 +320,14 @@ let _sentryUserEnabled = true
 let _cachedInstallIdHash: string | null = null
 
 /**
- * Attach a stable anonymous identity to every event and span. The id is a
- * 16-hex-char SHA-256 hash of a per-install UUID (see electron/installId.ts)
- * — never an email, never a device fingerprint. Without setUser, Sentry's
- * count_unique(user) and Release Health adoption % are permanently 0,
- * because sendDefaultPii:false strips every implicit user hint.
+ * Attach the stable PSEUDONYMOUS install identity to every event and span. The
+ * id is a 16-hex-char SHA-256 hash of a per-install UUID (see
+ * electron/installId.ts) — never an email, never a device fingerprint. It is
+ * deliberately NOT called anonymous: being stable and attached to everything,
+ * it makes an install's whole stream joinable, which is exactly what the
+ * consent screen discloses. Without setUser, Sentry's count_unique(user) and
+ * Release Health adoption % are permanently 0, because sendDefaultPii:false
+ * strips every implicit user hint.
  *
  * Privacy invariants:
  *   - Called only when _sentryUserEnabled is true (the Settings toggle).
@@ -251,18 +349,26 @@ function clearSentryUser(): void {
 }
 
 /**
- * Set the sentryEnabled value from user settings.
+ * Apply the effective telemetry permission — an active consent record for the
+ * current disclosure version AND the Settings → About switch not being off
+ * (`isTelemetryAllowed` in electron/telemetryConsent.ts). It is NOT "the user
+ * did not turn the switch off": with no answer on record the value is `false`.
  *
  * Call flow:
- *   - main.ts applies the persisted flag BEFORE initSentry so the SDK is
+ *   - main.ts applies the persisted verdict BEFORE initSentry so the SDK is
  *     initialized with the correct `enabled` state from the first event.
- *   - A later Settings toggle calls this function again; on off→on we
- *     mutate the live client's `enabled` flag (undocumented but
+ *   - The consent screen handler and `settings:save` call it again on a flip;
+ *     on off→on we mutate the live client's `enabled` flag (undocumented but
  *     honored per-event by @sentry/node's transport) and re-attach the
  *     cached install-id so user.id isn't null for post-opt-in events.
  *   - Session tracking started at init time does not retroactively
  *     recover from a runtime opt-in — a full SDK re-init mid-session is
  *     not supported. An app restart is the canonical path.
+ *
+ * §2.82 — this is also the single driver of the COLLECTION gate
+ * (electron/telemetryGate.ts). Every site that decides whether telemetry is
+ * permitted already funnels through here, so routing the gate from this one
+ * function keeps "what we send" and "what we accumulate" from ever disagreeing.
  */
 export function setSentryUserEnabled(enabled: boolean) {
   const wasEnabled = _sentryUserEnabled
@@ -271,6 +377,24 @@ export function setSentryUserEnabled(enabled: boolean) {
   if (!wasEnabled && enabled && _cachedInstallIdHash) {
     try { Sentry.setUser({ id: _cachedInstallIdHash }) } catch { /* ignore */ }
   }
+  if (wasEnabled !== enabled) {
+    // Breadcrumbs are an accumulator like any other: the SDK keeps the last
+    // ~100 regardless of the `enabled` flag, so without this the first event
+    // after an opt-in would carry a trail of pre-consent activity. Dropped in
+    // both directions (a withdrawal must not leave a trail either).
+    try { Sentry.getCurrentScope().clearBreadcrumbs() } catch { /* ignore */ }
+    try { Sentry.getIsolationScope().clearBreadcrumbs() } catch { /* ignore */ }
+    // The two per-session latches in this module are accumulators too: the IPC
+    // throttle map carries `suppressed_since_last` counts of failures that
+    // happened under the previous answer, and the keychain latch would
+    // suppress the first post-consent report because a pre-consent one was
+    // already dropped. Both start fresh.
+    _ipcErrorState.clear()
+    _keychainReported = false
+  }
+  // Drop the metric aggregate window, the feature-reach bitmap, and re-origin
+  // the session clock. Internally a no-op when the value did not change.
+  try { setTelemetryCollectionAllowed(enabled) } catch { /* telemetry must never throw */ }
   try {
     const client = Sentry.getClient()
     if (client) client.getOptions().enabled = enabled && Boolean(__SENTRY_DSN__) && !IS_E2E
@@ -309,7 +433,9 @@ function doInit() {
     enableLogs: true,
     beforeSendLog(log) {
       if (!_sentryUserEnabled) return null
-      return log
+      // §2.82 AC (g) — logs are a transmission surface of their own and do
+      // NOT pass through beforeSend, so the scrub has to be applied here too.
+      return scrubLogPii(log)
     },
     // Session tracking is enabled automatically in @sentry/node v10.
     integrations(defaults) {
@@ -339,7 +465,7 @@ function doInit() {
       if (event.tags?.category === 'keychain_unavailable' || event.extra?.source === 'keychain.read') {
         event.tags = { ...event.tags, category: 'keychain_unavailable' }
         event.fingerprint = ['keychain-unavailable']
-        return event
+        return scrubEventPii(event)
       }
       // Filter out noisy transient errors that provide no actionable info.
       // Covers autoUpdater net::ERR_* codes, Node syscall codes, imapflow,
@@ -349,12 +475,15 @@ function doInit() {
       // Linux .deb installer failures (pkexec/dpkg/apt-get) — surfaced to
       // the user via dialog, not actionable from code.
       if (isLinuxInstallerError(msg)) return null
-      return event
+      // §2.82 AC (g): last stop before the transport — drop the IP and the OS
+      // account name embedded in stack frame paths.
+      return scrubEventPii(event)
     },
     beforeSendTransaction(event) {
       // If user has disabled Sentry, don't send traces either.
       if (!_sentryUserEnabled) return null
-      return event
+      // Transactions carry a `user` too — same IP rule applies.
+      return scrubEventPii(event)
     },
   })
 }

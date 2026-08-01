@@ -36,6 +36,7 @@ import {
   saveAccount,
   getAccountMeta,
   getSettings,
+  getRawPersistedSettings,
   saveSettings,
   deleteAccount,
   getAccountConfig,
@@ -250,6 +251,48 @@ describe('packages/net/config', () => {
     it('settingsSchema — sentryEnabled accepts false', () => {
       const result = settingsSchema.parse({ theme: 'light', cacheDays: 30, sentryEnabled: false })
       expect(result.sentryEnabled).toBe(false)
+    })
+
+    // §2.82 — the raw settingsSchema shape for the consent record. The
+    // renderer-writable rejection is covered separately in
+    // electron/telemetryConsent.test.ts (AC9); this pins the parse contract
+    // itself, which nothing else exercises.
+    it('settingsSchema — telemetryConsent is absent by default (no record means "not answered yet")', () => {
+      const result = settingsSchema.parse({ theme: 'light', cacheDays: 30 })
+      expect(result.telemetryConsent).toBeUndefined()
+    })
+
+    it('settingsSchema — telemetryConsent accepts a well-formed record', () => {
+      const result = settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { granted: true, version: 1, at: '2026-07-27T10:00:00.000Z' },
+      })
+      expect(result.telemetryConsent).toEqual({ granted: true, version: 1, at: '2026-07-27T10:00:00.000Z' })
+    })
+
+    it('settingsSchema — telemetryConsent rejects a non-integer version', () => {
+      expect(() => settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { granted: true, version: 1.5, at: '2026-07-27T10:00:00.000Z' },
+      })).toThrow()
+    })
+
+    it('settingsSchema — telemetryConsent rejects an empty timestamp', () => {
+      expect(() => settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { granted: true, version: 1, at: '' },
+      })).toThrow()
+    })
+
+    it('settingsSchema — telemetryConsent rejects a missing `granted`', () => {
+      expect(() => settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { version: 1, at: '2026-07-27T10:00:00.000Z' },
+      })).toThrow()
     })
 
     it('settingsSchema — aiMaxTurns default=30', () => {
@@ -3874,5 +3917,48 @@ describe('§2.33 PR2a — default backend error semantics (no config-local telem
 
     const result = await getOauthRefreshTokenWithSource('gmail', 1)
     expect(result).toEqual({ token: 'legacy-token-value', source: 'legacy' })
+  })
+})
+
+// §2.82 iter2 finding 4 — the consent migration must be able to tell "the key
+// was never written" from "the user explicitly turned it off". `getSettings()`
+// cannot: zod substitutes a default for every absent field, so the distinction
+// currently survives only because `sentryEnabled` happens to default to `true`.
+// `getRawPersistedSettings` is the explicit answer.
+describe('§2.82 — getRawPersistedSettings', () => {
+  beforeEach(() => {
+    storeData.clear()
+    vi.clearAllMocks()
+  })
+
+  it('returns undefined when nothing has been persisted yet', () => {
+    expect(getRawPersistedSettings()).toBeUndefined()
+  })
+
+  it('reports an absent key as absent, while getSettings() shows the default', () => {
+    storeData.set('settings', { theme: 'dark' })
+
+    expect(getRawPersistedSettings()).toEqual({ theme: 'dark' })
+    expect(getRawPersistedSettings()!.sentryEnabled).toBeUndefined()
+    // The parsed view cannot make the distinction — that is the whole point.
+    expect(getSettings().sentryEnabled).toBe(settingsSchema.parse({ theme: 'dark' }).sentryEnabled)
+  })
+
+  it('reports an explicitly persisted false as false', () => {
+    storeData.set('settings', { theme: 'dark', sentryEnabled: false })
+    expect(getRawPersistedSettings()!.sentryEnabled).toBe(false)
+  })
+
+  it('applies no defaults and no migrations', () => {
+    storeData.set('settings', { sentryEnabled: false })
+    // Byte-for-byte what is on disk: no cacheDays, no language, no theme.
+    expect(getRawPersistedSettings()).toEqual({ sentryEnabled: false })
+  })
+
+  it('returns undefined for a non-object stored value', () => {
+    for (const bogus of ['string', 42, [], null]) {
+      storeData.set('settings', bogus)
+      expect(getRawPersistedSettings()).toBeUndefined()
+    }
   })
 })

@@ -1,14 +1,24 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import {
   featureReach,
   markFeatureReachFromEvent,
   markFeatureUsed,
   resetFeatureReach,
 } from './featureReach'
+import {
+  setTelemetryCollectionAllowed,
+  __resetTelemetryGateForTest,
+} from './telemetryGate'
 
 describe('featureReach', () => {
   beforeEach(() => {
+    // §2.82: the bitmap only accumulates while consent is on record. Every
+    // pre-existing case below describes the consented state.
+    setTelemetryCollectionAllowed(true)
     resetFeatureReach()
+  })
+  afterEach(() => {
+    __resetTelemetryGateForTest()
   })
 
   describe('initial state', () => {
@@ -104,6 +114,42 @@ describe('featureReach', () => {
       markFeatureUsed('ai')
       markFeatureUsed('ai')
       expect(featureReach.ai).toBe(true)
+    })
+  })
+
+  // §2.82 finding 2 — the bitmap used to accumulate for the whole session
+  // regardless of consent, so a user who declined, worked, and later opted in
+  // from Settings → About shipped that whole pre-consent period in
+  // usage.session_summary. These cases fail against that behaviour.
+  describe('consent gate', () => {
+    it('does not accumulate while collection is not allowed', () => {
+      setTelemetryCollectionAllowed(false)
+      markFeatureReachFromEvent('search.executed')
+      markFeatureReachFromEvent('compose.opened')
+      markFeatureUsed('ai')
+      for (const v of Object.values(featureReach)) {
+        expect(v).toBe(false)
+      }
+    })
+
+    it('drops bits collected before a grant', () => {
+      // Pre-consent activity...
+      setTelemetryCollectionAllowed(false)
+      markFeatureUsed('ai')
+      // ...then the user grants consent. Nothing from before may survive.
+      setTelemetryCollectionAllowed(true)
+      expect(featureReach.ai).toBe(false)
+      markFeatureUsed('search')
+      expect(featureReach.search).toBe(true)
+    })
+
+    it('drops bits on withdrawal so a later re-grant cannot flush them', () => {
+      markFeatureUsed('ai')
+      expect(featureReach.ai).toBe(true)
+      setTelemetryCollectionAllowed(false)
+      expect(featureReach.ai).toBe(false)
+      setTelemetryCollectionAllowed(true)
+      expect(featureReach.ai).toBe(false)
     })
   })
 

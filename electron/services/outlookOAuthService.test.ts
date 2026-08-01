@@ -64,6 +64,7 @@ import {
   clearOutlookTokenCache,
   forceRefreshOutlookAccessToken,
   connectOutlookAccount,
+  classifyConnectionTestFailure,
 } from './outlookOAuthService'
 import { getOauthRefreshTokenWithSource } from '../../packages/net/index'
 import { refreshMicrosoftAccessToken, runMicrosoftOAuthFlow, isMicrosoftOAuthBusy } from '../microsoftOAuth'
@@ -904,5 +905,56 @@ describe('connectOutlookAccount', () => {
   it('uses IMAP result error message in thrown error', async () => {
     mockTestImapConnection.mockResolvedValue({ ok: false, error: '' })
     await expect(connectOutlookAccount(defaultParams())).rejects.toThrow('IMAP: error')
+  })
+})
+
+// §2.82 iter2 finding 1 (audit half) — the Outlook connection test used to
+// interpolate `imapRes.error` / `smtpRes.error` straight into the message it
+// captured, and to forward the raw thrown error. Both are verbatim server text;
+// Exchange names the mailbox in its authentication failures, and the consent
+// screen promises addresses are never sent.
+describe('classifyConnectionTestFailure', () => {
+  it('buckets by cause and returns only closed-set literals', () => {
+    expect(classifyConnectionTestFailure('AUTHENTICATE failed for ivan@contoso.com')).toBe('auth')
+    expect(classifyConnectionTestFailure('AADSTS50076: MFA required')).toBe('auth')
+    expect(classifyConnectionTestFailure(new Error('IMAP timeout (30s)'))).toBe('timeout')
+    expect(classifyConnectionTestFailure('connect ECONNREFUSED 40.99.1.1:993')).toBe('refused')
+    expect(classifyConnectionTestFailure('getaddrinfo ENOTFOUND outlook.office365.com')).toBe('network')
+    expect(classifyConnectionTestFailure('SELF_SIGNED_CERT_IN_CHAIN')).toBe('cert')
+    expect(classifyConnectionTestFailure('something else entirely')).toBe('unknown')
+  })
+
+  it('never returns any part of its input', () => {
+    const hostile = 'LOGIN failed for ivan@contoso.com in mailbox "Отправленные"'
+    const out = classifyConnectionTestFailure(hostile)
+    expect(out).toBe('auth')
+    expect(out).not.toContain('ivan')
+    expect(out).not.toContain('Отправленные')
+  })
+
+  it('is total over degenerate input', () => {
+    for (const e of [null, undefined, 0, {}, [], new Error('')]) {
+      expect(['auth', 'network', 'timeout', 'cert', 'refused', 'unknown'])
+        .toContain(classifyConnectionTestFailure(e))
+    }
+  })
+})
+
+describe('connectOutlookAccount — telemetry PII boundary', () => {
+  it('sends only the bucket when the IMAP test fails, never the server text', async () => {
+    captureExceptionMock.mockClear()
+    mockTestImapConnection.mockResolvedValue({
+      ok: false,
+      error: 'AUTHENTICATE failed for ivan@contoso.com in mailbox "Отправленные"',
+    })
+    await expect(connectOutlookAccount(defaultParams())).rejects.toThrow(/^IMAP:/)
+
+    expect(captureExceptionMock).toHaveBeenCalled()
+    const [captured, ctx] = captureExceptionMock.mock.calls[0] as [Error, Record<string, unknown>]
+    const outgoing = `${captured.message} ${JSON.stringify(ctx)}`
+    expect(outgoing).not.toContain('ivan@contoso.com')
+    expect(outgoing).not.toContain('Отправленные')
+    expect(captured.message).toBe('outlook_imap_test_failed: auth')
+    expect(ctx).toMatchObject({ source: 'MicrosoftOAuth', stage: 'imap_test' })
   })
 })

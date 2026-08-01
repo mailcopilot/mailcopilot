@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Minus, Square, Copy, X, Loader2, AlertTriangle, WifiOff, Undo2 } from 'lucide-react'
+import { Loader2, AlertTriangle, WifiOff, Undo2 } from 'lucide-react'
 import type { AccountMeta, ComposeInit, FolderRoles, MessageDetails } from '@mailcopilot/types'
 import { addrListToString } from '@mailcopilot/core'
 import RecipientList from '../components/RecipientList'
 import { computeReplyRecipients, prefixSubject, htmlToText, quoteText } from '../utils/mail'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
 import { sanitizeMailHtml } from '../utils/mail'
 import { rewriteMailHtmlLinks } from '../utils/mailLinks'
 import { useMailLinkClick } from '../hooks/useMailLinkClick'
@@ -44,7 +44,6 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
   const { t } = useTranslation()
   const tRef = useRef(t)
   tRef.current = t
-  const maximized = useMaximized()
   const [details, setDetails] = useState<MessageDetails | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -515,20 +514,7 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
 
   return (
     <>
-      <div className="child-titlebar">
-        <span className="child-titlebar-title">{subject || t('mail.actions.openInWindow')}</span>
-        <div className="titlebar-controls">
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')} title={t('window.minimize', { defaultValue: 'Minimize' })}>
-            <Minus size={14} />
-          </button>
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')} title={t('window.maximize', { defaultValue: 'Maximize' })}>
-            {maximized ? <Copy size={12} /> : <Square size={12} />}
-          </button>
-          <button className="titlebar-btn titlebar-btn-close" onClick={() => window.close()} title={t('window.close', { defaultValue: 'Close' })}>
-            <X size={14} />
-          </button>
-        </div>
-      </div>
+      <WindowTitlebar title={subject || t('mail.actions.openInWindow')} />
       <div className="mail-window-root">
         <MailActionsToolbar
           flagged={flagged}

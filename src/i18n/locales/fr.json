@@ -712,8 +712,9 @@
       "version": "Version",
       "website": "Site web",
       "docs": "Documentation",
-      "sentryEnabled": "Envoyer les diagnostics et données d'utilisation anonymes",
-      "sentryHint": "Inclut les rapports de plantage, les métriques de performance et les événements d'utilisation anonymes (par exemple, quelles fonctionnalités sont utilisées). N'inclut jamais le contenu des messages, les adresses, les objets ou les noms de dossiers.",
+      "sentryEnabled": "Envoyer les diagnostics et les données d'utilisation",
+      "sentryHint": "Inclut les rapports de plantage, les mesures de performance, les événements d'utilisation (quelles fonctionnalités sont utilisées, quel fournisseur et quel modèle d'IA, le coût estimé d'une requête) et un identifiant aléatoire d'installation qui relie vos sessions. Le contenu des messages, les objets et les noms de dossiers ne sont pas collectés : rien de ce qui est envoyé n'en est constitué, et les adresses et les chemins de fichiers sont retirés automatiquement du texte d'erreur renvoyé par votre serveur de messagerie, dans la mesure où ils peuvent être reconnus. La seule adresse envoyée est celle que vous saisissez vous-même dans le formulaire de retour ci-dessous, afin qu'on puisse vous répondre.",
+      "sentryConsentPending": "Les diagnostics restent désactivés tant que la question du consentement n'a pas reçu de réponse. MailCopilot la posera une fois au prochain démarrage ; d'ici là, ce commutateur reste sans effet.",
       "debugLogging": "Activer la journalisation détaillée",
       "debugLoggingHint": "Écrit des journaux détaillés dans un fichier pour le dépannage. Les journaux sont stockés localement et ne sont jamais envoyés automatiquement.",
       "system": {
@@ -749,6 +750,31 @@
         "unsupportedDev": "Les mises à jour sont désactivées dans cette version"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "Envoyer des données de diagnostic ?",
+    "intro": "MailCopilot peut envoyer des données de diagnostic et d'utilisation afin que les plantages et les lenteurs puissent être identifiés et corrigés. Elles ne contiennent jamais le contenu de votre courrier, mais elles comportent un identifiant aléatoire de cette installation : elles ne sont donc pas totalement anonymes. Rien n'est envoyé sans votre accord. Votre courrier et l'assistant IA fonctionnent de la même façon quelle que soit votre réponse — si vous refusez, le formulaire de retour dans les paramètres est remplacé par un lien vers notre site.",
+    "sentTitle": "Si vous l'autorisez, MailCopilot envoie :",
+    "sent": {
+      "errors": "Les erreurs et les plantages : le type d'erreur et la pile d'appels indiquant l'endroit du code concerné",
+      "versions": "La version de MailCopilot, votre système d'exploitation et sa version",
+      "performance": "La durée des opérations : synchronisation du courrier, recherche, envoi, requêtes à l'IA",
+      "usage": "Les fonctionnalités que vous avez utilisées et à quelle fréquence — recherche, rédaction de messages, IA, règles, modèles, report — ainsi que le fournisseur et le modèle d'IA utilisés et le coût estimé d'une requête",
+      "setup": "Des informations générales de configuration : le nombre de comptes, le type de service de messagerie (par exemple Gmail ou Outlook), la méthode de connexion, la langue de l'interface et le thème",
+      "installId": "Un identifiant aléatoire de cette installation, créé au premier lancement. Il n'est pas lié à votre adresse e-mail, mais il rattache les données de vos différentes sessions à la même installation."
+    },
+    "neverTitle": "MailCopilot n'envoie jamais :",
+    "never": {
+      "bodies": "Le corps des messages, les objets et les noms de vos dossiers ne sont pas collectés : rien de ce qui est envoyé n'en est constitué, et seul le type de dossier, par exemple Boîte de réception ou Corbeille, figure dans les données. Le seul texte que nous n'écrivons pas nous-mêmes est le message d'erreur d'un serveur de messagerie ; les adresses et les chemins de fichiers en sont retirés automatiquement avant l'envoi, dans la mesure où ils peuvent être reconnus",
+      "addresses": "Les adresses e-mail, ni les vôtres ni celles des autres. Seule exception : le formulaire de retour dans Paramètres → À propos ; l'adresse que vous y saisissez vous-même est envoyée avec votre message, afin qu'on puisse vous répondre",
+      "attachments": "Les pièces jointes et leurs noms de fichiers",
+      "searchQueries": "Ce que vous saisissez dans la recherche : seuls la longueur de la requête et le nombre de résultats sont comptés",
+      "aiPrompts": "Le texte des requêtes à l'IA et de ses réponses"
+    },
+    "changeLater": "Vous pouvez modifier cette décision à tout moment : Paramètres → À propos.",
+    "learnMore": "Ce qui est collecté — page de confidentialité",
+    "allow": "Autoriser",
+    "deny": "Ne pas autoriser"
   },
   "account": {
     "title": "Connecter un e-mail",
@@ -1377,5 +1403,11 @@
     "cancelled": "Cet événement a été annulé",
     "notActionable": "Cette invitation ne nécessite pas de réponse",
     "originalTimezone": "Initialement planifié dans {{tzid}}"
+  },
+  "window": {
+    "minimize": "Réduire",
+    "maximize": "Agrandir",
+    "restore": "Restaurer",
+    "close": "Fermer"
   }
 }

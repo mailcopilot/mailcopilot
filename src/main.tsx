@@ -25,10 +25,10 @@ setSentryUserEnabled(initialSentryEnabled)
 
 // Sentry is initialized before rendering the React tree.
 initSentry()
-// Attach the anonymous install-id passed from main via additionalArguments,
+// Attach the pseudonymous install-id passed from main via additionalArguments,
 // so renderer events share the same user identity as main-process events.
 // Only attach when telemetry is actually enabled — otherwise we would bind
-// the stable anonymous id to a client that should be silent.
+// the stable per-install id to a client that should be silent.
 if (initialSentryEnabled && window.api?.installIdHash) {
   setSentryUserId(window.api.installIdHash)
 }

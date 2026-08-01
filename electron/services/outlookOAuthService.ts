@@ -19,6 +19,33 @@ import { z } from 'zod'
 
 const log = createLogger('OutlookOAuth')
 
+/**
+ * §2.82 iter2 — collapse an IMAP/SMTP connection-test failure into a closed set
+ * of buckets fit for telemetry.
+ *
+ * The inputs are `testImapConnection` / `testSmtpConnection` error strings and
+ * raw thrown errors, i.e. verbatim server text. Exchange names the mailbox in
+ * its authentication failures ("LOGIN failed for ivan@contoso.com"), and the
+ * consent screen promises addresses are never sent — so the text may not be
+ * forwarded, interpolated into a synthetic message, or attached as context.
+ * The return value is always one of six literals.
+ *
+ * Deliberately local and small: `classifyImapError` in packages/net covers the
+ * live-connection error taxonomy but is not re-exported from the package index,
+ * and widening that seam for one call site is not worth the coupling.
+ */
+export function classifyConnectionTestFailure(e: unknown): 'auth' | 'network' | 'timeout' | 'cert' | 'refused' | 'unknown' {
+  const raw = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e ?? '')
+  const msg = raw.toLowerCase()
+  if (!msg) return 'unknown'
+  if (/self.signed|unable_to_verify|cert_has_expired|depth_zero|cert_untrusted|cert_rejected|cert_altname_invalid|err_tls_cert/.test(msg)) return 'cert'
+  if (/auth|credential|password|login|xoauth|token|unauthorized|aadsts/.test(msg)) return 'auth'
+  if (/timeout|timed out|etimedout/.test(msg)) return 'timeout'
+  if (/econnrefused|refused/.test(msg)) return 'refused'
+  if (/enotfound|eai_again|econnreset|epipe|ehostunreach|enetunreach|network|dns|socket|offline/.test(msg)) return 'network'
+  return 'unknown'
+}
+
 // ---------------------------------------------------------------------------
 // Token cache
 // ---------------------------------------------------------------------------
@@ -336,14 +363,24 @@ async function doConnectOutlookAccount(
         tlsCertImap = { host: imapMeta.host, port: imapMeta.port }
         log.warn('Microsoft IMAP TLS cert error (account will be saved, user can accept the certificate):', imapRes.error)
       } else {
-        captureException(new Error(`Microsoft IMAP test failed: ${imapRes.error}`), { source: 'MicrosoftOAuth' })
+        // §2.82 iter2 — `imapRes.error` is verbatim server text. Exchange
+        // spells the mailbox out in an authentication failure, so only the
+        // bucketed class may leave the process; the full text still goes to the
+        // local log and to the renderer-facing error below.
+        captureException(
+          new Error(`outlook_imap_test_failed: ${classifyConnectionTestFailure(imapRes.error)}`),
+          { source: 'MicrosoftOAuth', stage: 'imap_test' },
+        )
         throw new Error(`IMAP: ${imapRes.error || 'error'}`)
       }
     }
   } catch (e) {
     if (e instanceof Error && (e.message.startsWith('IMAP:') || e.message.includes('TLS'))) throw e
     log.error('Microsoft IMAP test error:', e instanceof Error ? e.message : e)
-    captureException(e, { source: 'MicrosoftOAuth' })
+    captureException(
+      new Error(`outlook_imap_test_threw: ${classifyConnectionTestFailure(e)}`),
+      { source: 'MicrosoftOAuth', stage: 'imap_test' },
+    )
     throw e
   }
 
@@ -358,12 +395,18 @@ async function doConnectOutlookAccount(
         log.warn('Microsoft SMTP TLS cert error (user can accept the certificate):', smtpRes.error)
       } else {
         log.warn('Microsoft SMTP test failed (account will be saved):', smtpRes.error)
-        captureException(new Error(`Microsoft SMTP test failed: ${smtpRes.error}`), { source: 'MicrosoftOAuth' })
+        captureException(
+          new Error(`outlook_smtp_test_failed: ${classifyConnectionTestFailure(smtpRes.error)}`),
+          { source: 'MicrosoftOAuth', stage: 'smtp_test' },
+        )
       }
     }
   } catch (e) {
     log.warn('Microsoft SMTP test failed with error (account will be saved):', e instanceof Error ? e.message : e)
-    captureException(e, { source: 'MicrosoftOAuth' })
+    captureException(
+      new Error(`outlook_smtp_test_threw: ${classifyConnectionTestFailure(e)}`),
+      { source: 'MicrosoftOAuth', stage: 'smtp_test' },
+    )
   }
 
   const existingMeta = typeof existingId === 'number' ? getAccountMeta(existingId) : undefined

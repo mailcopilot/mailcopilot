@@ -712,8 +712,9 @@
       "version": "Version",
       "website": "Webseite",
       "docs": "Dokumentation",
-      "sentryEnabled": "Anonyme Diagnose- und Nutzungsdaten senden",
-      "sentryHint": "Umfasst Absturzberichte, Leistungsmetriken und anonyme Nutzungsereignisse (z. B. welche Funktionen verwendet werden). Enthält niemals Nachrichteninhalte, Adressen, Betreffzeilen oder Ordnernamen.",
+      "sentryEnabled": "Diagnose- und Nutzungsdaten senden",
+      "sentryHint": "Umfasst Absturzberichte, Leistungsmessungen, Nutzungsereignisse (welche Funktionen verwendet werden, welcher KI-Anbieter und welches Modell, die geschätzten Kosten einer Anfrage) sowie eine zufällige Installationskennung, die Ihre Sitzungen verbindet. Nachrichteninhalte, Betreffzeilen und Ordnernamen werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf, und aus dem Fehlertext, den Ihr Mailserver zurückgibt, werden Adressen und Dateipfade automatisch entfernt, soweit sie erkannt werden. Die einzige Adresse, die gesendet wird, ist die, die Sie unten selbst in das Feedback-Formular eintragen, damit Sie eine Antwort erhalten können.",
+      "sentryConsentPending": "Die Diagnose bleibt aus, solange die Einwilligungsfrage nicht beantwortet ist. MailCopilot fragt beim nächsten Start einmal nach; bis dahin hat dieser Schalter keine Wirkung.",
       "debugLogging": "Debug-Protokollierung aktivieren",
       "debugLoggingHint": "Schreibt detaillierte Protokolle in eine Datei zur Fehlerbehebung. Protokolle werden lokal gespeichert und nie automatisch gesendet.",
       "system": {
@@ -749,6 +750,31 @@
         "unsupportedDev": "Updates sind in dieser Version deaktiviert"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "Diagnosedaten senden?",
+    "intro": "MailCopilot kann Diagnose- und Nutzungsdaten senden, damit Abstürze und Verzögerungen gefunden und behoben werden können. Inhalte Ihrer E-Mails sind darin nie enthalten, wohl aber eine zufällige Kennung dieser Installation — vollständig anonym sind die Daten daher nicht. Ohne Ihre Zustimmung wird nichts gesendet. Ihre E-Mails und der KI-Assistent funktionieren bei beiden Antworten gleich — lehnen Sie ab, wird das Feedback-Formular in den Einstellungen durch einen Link auf unsere Website ersetzt.",
+    "sentTitle": "Wenn Sie zustimmen, sendet MailCopilot:",
+    "sent": {
+      "errors": "Fehler und Abstürze: die Art des Fehlers und den Stacktrace, der zeigt, an welcher Stelle im Code er auftrat",
+      "versions": "Die MailCopilot-Version, Ihr Betriebssystem und dessen Version",
+      "performance": "Die Dauer von Vorgängen — Mail-Synchronisierung, Suche, Versand, KI-Anfragen",
+      "usage": "Welche Funktionen Sie wie oft genutzt haben — Suche, Verfassen von E-Mails, KI, Regeln, Vorlagen, Zurückstellen — sowie den verwendeten KI-Anbieter, das Modell und die geschätzten Kosten einer Anfrage",
+      "setup": "Grunddaten zur Einrichtung: wie viele Konten Sie haben, die Art des Maildienstes (zum Beispiel Gmail oder Outlook), die Anmeldemethode, die Sprache der Oberfläche und das Design",
+      "installId": "Eine zufällige Kennung dieser Installation, die beim ersten Start erzeugt wird. Sie ist nicht mit Ihrer E-Mail-Adresse verknüpft, verbindet aber die Daten Ihrer verschiedenen Sitzungen mit derselben Installation."
+    },
+    "neverTitle": "MailCopilot sendet niemals:",
+    "never": {
+      "bodies": "Nachrichtentexte, Betreffzeilen und die Namen Ihrer Ordner werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf, und in den Daten steht nur die Art des Ordners, etwa Posteingang oder Papierkorb. Der einzige Text, den nicht wir verfassen, ist die Fehlermeldung eines Mailservers; Adressen und Dateipfade werden vor dem Senden automatisch daraus entfernt, soweit sie erkannt werden",
+      "addresses": "E-Mail-Adressen, weder Ihre noch die anderer. Die einzige Ausnahme ist das Feedback-Formular unter Einstellungen → Über: Eine Adresse, die Sie dort selbst eintragen, wird zusammen mit Ihrer Nachricht gesendet, damit Sie eine Antwort erhalten können",
+      "attachments": "Anhänge und deren Dateinamen",
+      "searchQueries": "Was Sie in die Suche eingeben — gezählt werden nur die Länge der Anfrage und die Anzahl der Treffer",
+      "aiPrompts": "Den Text von KI-Anfragen und -Antworten"
+    },
+    "changeLater": "Sie können diese Entscheidung jederzeit ändern: Einstellungen → Über.",
+    "learnMore": "Was erfasst wird — Datenschutzseite",
+    "allow": "Zulassen",
+    "deny": "Nicht zulassen"
   },
   "account": {
     "title": "E-Mail verbinden",
@@ -1377,5 +1403,11 @@
     "cancelled": "Diese Veranstaltung wurde abgesagt",
     "notActionable": "Dies ist keine Einladung, die eine Antwort erfordert",
     "originalTimezone": "Ursprünglich geplant in {{tzid}}"
+  },
+  "window": {
+    "minimize": "Minimieren",
+    "maximize": "Maximieren",
+    "restore": "Wiederherstellen",
+    "close": "Schließen"
   }
 }

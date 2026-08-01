@@ -230,6 +230,14 @@ const ALLOWED_INVOKE_CHANNELS = [
   // writable.
   'mcp:requestStdioEnable',
   'mcp:approveStdioConnection',
+  // §2.82 — first-run telemetry consent. `telemetry:consentState` is a
+  // read-only "should I show the screen" query; `telemetry:setConsent` carries
+  // ONLY `{ granted: boolean }` — main stamps the disclosure version and the
+  // timestamp itself, and the resulting `telemetryConsent` record is a
+  // main-only settings field, so a compromised renderer can neither fabricate
+  // consent through `settings:save` nor backdate a decision here.
+  'telemetry:consentState',
+  'telemetry:setConsent',
   'notifications:list',
   'notifications:unreadCount',
   'notifications:markRead',
@@ -320,7 +328,7 @@ function channelMap(channel: ListenChannel) {
 // Detect initial theme from additionalArguments (synchronous, no IPC round-trip).
 const initialTheme = process.argv.includes('--theme=dark') ? 'dark' : 'light'
 
-// Read the anonymous install-id hash that main passed via
+// Read the pseudonymous install-id hash that main passed via
 // additionalArguments. Must be available synchronously before Sentry.init
 // in the renderer runs — that's why we route it through argv, not IPC.
 function readInstallIdHash(): string {

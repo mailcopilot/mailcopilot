@@ -36,6 +36,7 @@ docs/qa/
 .env
 .env.*
 !.env.integration.example
+!.env.example
 .env.test
 .env.local
 

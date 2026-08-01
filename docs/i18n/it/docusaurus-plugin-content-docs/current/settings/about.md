@@ -66,11 +66,13 @@ Se MailCopilot è stato installato per tutto il sistema (ad esempio, tramite un 
 
 Aggiornate l'applicazione tramite il gestore di pacchetti o con privilegi di amministratore.
 
-## Rapporti di errore anonimi
+## Diagnostica e dati di utilizzo
 
-Quando abilitato, MailCopilot invia rapporti di crash anonimi per aiutare gli sviluppatori a trovare e correggere i bug. Non vengono raccolti dati personali, contenuti delle email o informazioni sugli account — vengono trasmessi solo i dettagli tecnici degli errori.
+Quando abilitato, MailCopilot invia rapporti sui crash, misurazioni delle prestazioni, eventi di utilizzo (quali funzioni vengono usate, quale fornitore e modello di IA, il costo stimato di una richiesta) e un identificatore casuale dell'installazione che collega le tue sessioni. Il contenuto dei messaggi e il testo delle tue ricerche non vengono mai inclusi; indirizzi, oggetti e nomi delle cartelle sono esclusi del tutto ovunque la diagnostica usi un elenco chiuso di campi (come nella diagnostica della copia inviata), e altrove vengono intercettati da una pulizia con il miglior sforzo di forme riconoscibili di indirizzi e percorsi -- una rete di sicurezza, non una garanzia. Il modulo di feedback qui sotto è l'unico posto in cui un indirizzo viene inviato di proposito, così puoi ricevere una risposta; ovunque altro, un indirizzo viene solo ripulito se riconosciuto, non garantito assente -- e, poiché include quell'identificatore dell'installazione, questi dati non sono del tutto anonimi. Per l'elenco completo di cosa viene inviato e cosa non viene mai inviato, vedete [Telemetria](../privacy/telemetry).
 
-Questa impostazione è abilitata per impostazione predefinita. Potete disabilitarla in qualsiasi momento deselezionando la casella.
+Questa impostazione riflette la risposta data nella schermata di consenso mostrata al primo avvio di MailCopilot, ed è **disabilitata per impostazione predefinita** — non viene inviato nulla finché non avete dato attivamente il consenso. Potete cambiare la vostra decisione in qualsiasi momento selezionando o deselezionando la casella.
+
+Se MailCopilot non dispone di una risposta alla domanda di consenso iniziale — ad esempio, subito dopo che l'elenco dei dati raccolti è cambiato e una nuova richiesta diventa dovuta — la casella qui viene mostrata deselezionata e disabilitata, con una nota che spiega che la diagnostica resta disattivata finché non rispondete alla schermata di consenso al prossimo avvio.
 
 ## Registrazione di debug
 
@@ -82,6 +84,6 @@ La registrazione di debug è disabilitata per impostazione predefinita. Abilitat
 
 Fate clic sul pulsante **Segnala un bug** per inviare feedback direttamente agli sviluppatori di MailCopilot. Descrivete il problema riscontrato — questo ci aiuta a identificare e risolvere i problemi più rapidamente.
 
-Il vostro feedback viene inviato in modo sicuro attraverso lo stesso sistema anonimo di segnalazione errori. Se la segnalazione errori è disattivata, vedrete un link al sito web di MailCopilot dove potete contattare il supporto.
+Il vostro feedback viene inviato in modo sicuro attraverso lo stesso sistema di diagnostica descritto sopra. Se la segnalazione errori è disattivata, vedrete un link al sito web di MailCopilot dove potete contattare il supporto.
 
 Quando l'applicazione incontra un errore imprevisto, un modulo di feedback apparirà anche nella schermata di errore, permettendovi di descrivere cosa stavate facendo prima dell'errore.

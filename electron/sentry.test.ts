@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // Mock @sentry/node before importing the module.
 vi.mock('@sentry/node', () => {
@@ -9,6 +9,10 @@ vi.mock('@sentry/node', () => {
     flush: vi.fn(),
     setUser: vi.fn(),
     getClient: vi.fn(() => client),
+    // §2.82: a consent transition drops the breadcrumb buffer (see
+    // setSentryUserEnabled). Shared spy so both scopes are assertable.
+    getCurrentScope: vi.fn(() => ({ clearBreadcrumbs: vi.fn() })),
+    getIsolationScope: vi.fn(() => ({ clearBreadcrumbs: vi.fn() })),
     startInactiveSpan: vi.fn(),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), trace: vi.fn(), fatal: vi.fn(), fmt: vi.fn() },
     wrapMcpServerWithSentry: vi.fn((s: unknown) => s),
@@ -805,5 +809,372 @@ describe('reportIpcHandlerError', () => {
     const { reportIpcHandlerError } = await import('./sentry')
 
     expect(() => reportIpcHandlerError('net:sendMail', new Error('boom'))).not.toThrow()
+  })
+})
+
+// §2.82 AC3 — nothing captured before the answer may be delivered afterwards.
+describe('telemetry consent gating', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  it('AC3: opting in later replays nothing captured while telemetry was off', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry, setSentryUserEnabled, captureException } = await import('./sentry')
+
+    // Production ordering: the preflight verdict is applied before init.
+    setSentryUserEnabled(false)
+    initSentry()
+    const initCall = vi.mocked(sentry.init).mock.calls[0][0]!
+    expect(initCall.enabled).toBe(false)
+
+    // Something fails before the user has answered the consent screen.
+    expect(initCall.beforeSend!({ exception: { values: [{ value: 'pre-consent boom' }] } } as never, {} as never))
+      .toBeNull()
+    expect(initCall.beforeSendTransaction!({ contexts: {} } as never, {} as never)).toBeNull()
+    expect((initCall.beforeSendLog as (l: unknown) => unknown)({ level: 'info', message: 'x' })).toBeNull()
+    captureException(new Error('pre-consent boom'))
+    vi.mocked(sentry.captureException).mockClear()
+
+    // The user grants consent. There is no queue to drain — enabling only
+    // flips the client flag and re-attaches the pseudonymous install id. If someone ever
+    // adds a "buffer until consent, then flush" mechanism, this fails: that
+    // would be transmission of data collected without consent.
+    setSentryUserEnabled(true)
+    expect(vi.mocked(sentry.captureException)).not.toHaveBeenCalled()
+    expect(vi.mocked(sentry.flush)).not.toHaveBeenCalled()
+  })
+})
+
+// §2.82 AC10 — client-side PII scrubbing before the transport.
+describe('sentry PII scrubbing', () => {
+  beforeEach(async () => {
+    vi.resetModules()
+    vi.clearAllMocks()
+    // Pin the home directory so assertions do not depend on the machine
+    // running the suite (a CI runner's $HOME could otherwise overlap the
+    // fixture paths). Installed BEFORE importing sentry.ts, which resolves
+    // os.homedir() once at module load.
+    const os = await import('node:os')
+    vi.spyOn(os.default, 'homedir').mockReturnValue('/nonexistent-home-fixture')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('AC10: strips the OS account name from Linux, macOS and Windows paths', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('/home/ivan/app/dist-electron/main.js')).toBe('/home/<user>/app/dist-electron/main.js')
+    expect(scrubUserPaths('/Users/ivan/Library/Application Support/MailCopilot/main.js'))
+      .toBe('/Users/<user>/Library/Application Support/MailCopilot/main.js')
+    expect(scrubUserPaths('C:\\Users\\ivan\\AppData\\Local\\MailCopilot\\main.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Local\\MailCopilot\\main.js')
+  })
+
+  it('AC10: handles non-ASCII account names and non-C drives', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('C:\\Users\\Иван\\AppData\\Roaming\\app.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Roaming\\app.js')
+    expect(scrubUserPaths('D:/Users/Иван/app.js')).toBe('D:/Users/<user>/app.js')
+    expect(scrubUserPaths('/home/иван/app.js')).toBe('/home/<user>/app.js')
+  })
+
+  it('is idempotent — scrubbing an already-scrubbed path is a no-op', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    const once = scrubUserPaths('/home/ivan/app.js')
+    expect(scrubUserPaths(once)).toBe(once)
+  })
+
+  it('leaves paths without an account name alone', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('/usr/lib/electron/resources/app.asar/main.js'))
+      .toBe('/usr/lib/electron/resources/app.asar/main.js')
+    expect(scrubUserPaths('node:internal/modules/cjs/loader')).toBe('node:internal/modules/cjs/loader')
+    expect(scrubUserPaths('')).toBe('')
+  })
+
+  it('replaces a relocated home directory that the shape patterns miss', async () => {
+    const os = await import('node:os')
+    // Resolved at module load, so the override must be in place before import.
+    vi.mocked(os.default.homedir).mockReturnValue('/var/lib/mailcopilot-user')
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('/var/lib/mailcopilot-user/app/main.js')).toBe('<home>/app/main.js')
+  })
+
+  it('AC10: beforeSend nulls the IP address and rewrites stack frame paths', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry } = await import('./sentry')
+
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const event = {
+      user: { id: 'abc123', ip_address: '203.0.113.7' },
+      exception: {
+        values: [{
+          value: 'boom',
+          stacktrace: {
+            frames: [
+              {
+                filename: '/home/ivan/app/main.js',
+                abs_path: 'C:\\Users\\ivan\\app\\main.js',
+                module: '/Users/ivan/app/main',
+              },
+            ],
+          },
+        }],
+      },
+    }
+
+    const out = beforeSend(event as never, {} as never) as typeof event
+    expect(out).toBeTruthy()
+    expect(out.user.ip_address).toBeNull()
+    // The pseudonymous install id survives — it is the whole point of setUser.
+    expect(out.user.id).toBe('abc123')
+    const frame = out.exception.values[0].stacktrace.frames[0]
+    expect(frame.filename).toBe('/home/<user>/app/main.js')
+    expect(frame.abs_path).toBe('C:\\Users\\<user>\\app\\main.js')
+    expect(frame.module).toBe('/Users/<user>/app/main')
+  })
+
+  it('AC10: the keychain bypass branch is scrubbed too', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry } = await import('./sentry')
+
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const event = {
+      tags: { category: 'keychain_unavailable' },
+      user: { ip_address: '203.0.113.7' },
+      exception: {
+        values: [{
+          value: 'Timeout was reached',
+          stacktrace: { frames: [{ filename: '/home/ivan/app/main.js' }] },
+        }],
+      },
+    }
+
+    const out = beforeSend(event as never, {} as never) as unknown as typeof event
+    expect(out.user.ip_address).toBeNull()
+    expect(out.exception.values[0].stacktrace.frames[0].filename).toBe('/home/<user>/app/main.js')
+  })
+
+  it('AC10: beforeSendTransaction nulls the IP address', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry } = await import('./sentry')
+
+    initSentry()
+    const beforeSendTransaction = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSendTransaction!
+
+    const out = beforeSendTransaction({ user: { ip_address: '203.0.113.7' } } as never, {} as never) as {
+      user: { ip_address: string | null }
+    }
+    expect(out.user.ip_address).toBeNull()
+  })
+
+  it('adds a null ip_address even when the event carries no user object', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry } = await import('./sentry')
+
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const out = beforeSend({ exception: { values: [{ value: 'boom' }] } } as never, {} as never) as {
+      user: { ip_address: string | null }
+    }
+    expect(out.user.ip_address).toBeNull()
+  })
+
+  it('never throws on a malformed event shape', async () => {
+    const { scrubEventPii } = await import('./sentry')
+
+    expect(() => scrubEventPii({ exception: { values: 'not an array' } })).not.toThrow()
+    expect(() => scrubEventPii(null)).not.toThrow()
+  })
+
+  // §2.82 iter2 finding 3 — the previous implementation only touched frame
+  // paths, so the exception TEXT (which carries the path in every real fs
+  // error, and is what Sentry renders as the issue title) went out verbatim.
+  it('scrubs the exception text, not only stack frames', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry } = await import('./sentry')
+
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const out = beforeSend({
+      exception: {
+        values: [{
+          value: "EACCES: permission denied, open '/home/ivan/.config/MailCopilot/settings.json'",
+        }],
+      },
+    } as never, {} as never) as { exception: { values: Array<{ value: string }> } }
+
+    expect(out.exception.values[0]!.value)
+      .toBe("EACCES: permission denied, open '/home/<user>/.config/MailCopilot/settings.json'")
+  })
+
+  it('scrubs breadcrumbs, extra and contexts', async () => {
+    const { scrubEventPii } = await import('./sentry')
+
+    const out = scrubEventPii({
+      breadcrumbs: [{ message: 'read /home/ivan/a.js', data: { path: 'C:\\Users\\ivan\\b.js' } }],
+      extra: { source: 'bodyIndexer', file: '/home/ivan/c.js' },
+      contexts: { app: { app_path: '/Users/ivan/d.js' } },
+    })
+
+    expect(JSON.stringify(out)).not.toContain('ivan')
+  })
+
+  it('scrubs a name containing spaces', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('C:\\Users\\John Doe\\AppData\\Local\\MailCopilot\\main.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Local\\MailCopilot\\main.js')
+    expect(scrubUserPaths("open '/Users/John Doe/Library/Logs/main.log'"))
+      .toBe("open '/Users/<user>/Library/Logs/main.log'")
+  })
+
+  it('applies the main-only home-directory rule on top of the shared shape rules', async () => {
+    const os = await import('node:os')
+    vi.mocked(os.default.homedir).mockReturnValue('/var/lib/mailcopilot-user')
+    const { scrubUserPaths } = await import('./sentry')
+
+    // Both layers in one string: the relocated home (main-only) and a
+    // shape-matched path (shared with the renderer).
+    expect(scrubUserPaths('/var/lib/mailcopilot-user/a.js and /home/ivan/b.js'))
+      .toBe('<home>/a.js and /home/<user>/b.js')
+  })
+})
+
+// §2.82 iter2 finding 2 — telemetry permission drives COLLECTION, not just
+// transmission. setSentryUserEnabled is the single funnel every decision site
+// already calls, so it is where the gate and the breadcrumb buffer are reset.
+describe('telemetry collection gate wiring', () => {
+  beforeEach(async () => {
+    vi.resetModules()
+    vi.clearAllMocks()
+    const gate = await import('./telemetryGate')
+    gate.__resetTelemetryGateForTest()
+  })
+
+  it('arms the collection gate from setSentryUserEnabled', async () => {
+    const { setSentryUserEnabled } = await import('./sentry')
+    const { isTelemetryCollectionAllowed } = await import('./telemetryGate')
+
+    expect(isTelemetryCollectionAllowed()).toBe(false)
+    setSentryUserEnabled(true)
+    expect(isTelemetryCollectionAllowed()).toBe(true)
+    setSentryUserEnabled(false)
+    expect(isTelemetryCollectionAllowed()).toBe(false)
+  })
+
+  it('clears the breadcrumb buffer on a consent transition', async () => {
+    const sentry = await import('@sentry/node')
+    const clearBreadcrumbs = vi.fn()
+    vi.mocked(sentry.getCurrentScope).mockReturnValue({ clearBreadcrumbs } as never)
+    vi.mocked(sentry.getIsolationScope).mockReturnValue({ clearBreadcrumbs } as never)
+
+    const { setSentryUserEnabled } = await import('./sentry')
+    // The SDK keeps the last ~100 breadcrumbs regardless of `enabled`, so
+    // without this the first post-consent event would carry a trail of
+    // pre-consent activity.
+    setSentryUserEnabled(false)
+    clearBreadcrumbs.mockClear()
+    setSentryUserEnabled(true)
+
+    expect(clearBreadcrumbs).toHaveBeenCalled()
+  })
+
+  it('does not reset anything when the verdict is unchanged', async () => {
+    const { setSentryUserEnabled } = await import('./sentry')
+    const { setTelemetryCollectionAllowed, telemetryCollectionStartedAtMs } = await import('./telemetryGate')
+
+    setTelemetryCollectionAllowed(true)
+    setSentryUserEnabled(true)
+    const origin = telemetryCollectionStartedAtMs()
+    setSentryUserEnabled(true)
+
+    expect(telemetryCollectionStartedAtMs()).toBe(origin)
+  })
+})
+
+// §2.82 iter4 (security finding 3) — structured logs are a transmission
+// surface of their own: they never reach `beforeSend`, so before this the
+// event scrubbing did not apply to them at all. Their attributes carry
+// free-form strings (the AI model id is typed by the user in Settings, tool
+// names come from MCP servers) and the SDK adds the interpolated values of a
+// `fmt` template as `sentry.message.parameter.N`.
+describe('beforeSendLog scrubbing', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  async function getBeforeSendLog() {
+    const sentry = await import('@sentry/node')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const initCall = vi.mocked(sentry.init).mock.calls[0][0]!
+    return initCall.beforeSendLog!
+  }
+
+  it('scrubs the OS account name and addresses out of string attributes', async () => {
+    const beforeSendLog = await getBeforeSendLog()
+
+    const out = beforeSendLog({
+      level: 'info',
+      message: 'AI chat completed',
+      attributes: {
+        'ai.model': 'local-model at /home/ivan/models/q4.gguf',
+        'ai.tools_used': 'send_email,move_email',
+        'user.email': 'ivan.petrov@example.com',
+        'sentry.message.parameter.0': "open 'C:\\Users\\John Doe\\AppData\\Local\\MailCopilot\\log'",
+        'ai.tool_call_count': 3,
+      },
+    } as never)!
+
+    const attrs = out.attributes as Record<string, unknown>
+    expect(attrs['ai.model']).toBe('local-model at /home/<user>/models/q4.gguf')
+    expect(attrs['user.email']).toBe('<email>')
+    expect(attrs['sentry.message.parameter.0']).toBe("open 'C:\\Users\\<user>\\AppData\\Local\\MailCopilot\\log'")
+    // Non-PII values are left alone, including non-strings.
+    expect(attrs['ai.tools_used']).toBe('send_email,move_email')
+    expect(attrs['ai.tool_call_count']).toBe(3)
+  })
+
+  it('scrubs the message itself', async () => {
+    const beforeSendLog = await getBeforeSendLog()
+
+    const out = beforeSendLog({
+      level: 'warn',
+      message: "EACCES: permission denied, open '/home/ivan/.config/mailcopilot/config.json' for ivan@example.com",
+    } as never)!
+
+    expect(out.message).toBe("EACCES: permission denied, open '/home/<user>/.config/mailcopilot/config.json' for <email>")
+  })
+
+  it('still drops every log when the user has not consented', async () => {
+    const sentry = await import('@sentry/node')
+    const { initSentry, setSentryUserEnabled } = await import('./sentry')
+    initSentry()
+    const beforeSendLog = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSendLog!
+
+    setSentryUserEnabled(false)
+    expect(beforeSendLog({ level: 'info', message: 'x' } as never)).toBeNull()
+  })
+
+  it('never throws on an unexpected log shape', async () => {
+    const beforeSendLog = await getBeforeSendLog()
+    expect(() => beforeSendLog({ level: 'info', message: 'x', attributes: null } as never)).not.toThrow()
+    expect(() => beforeSendLog({} as never)).not.toThrow()
   })
 })

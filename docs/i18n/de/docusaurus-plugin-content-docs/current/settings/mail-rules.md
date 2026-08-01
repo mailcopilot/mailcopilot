@@ -5,7 +5,7 @@ title: E-Mail-Regeln
 
 # E-Mail-Regeln
 
-Mit E-Mail-Regeln können Sie eingehende E-Mails automatisch sortieren und organisieren, basierend auf von Ihnen definierten Bedingungen. Die Regeln werden bei jedem Eingang neuer Nachrichten ausgewertet.
+Mit E-Mail-Regeln können Sie eingehende E-Mails automatisch sortieren und organisieren, basierend auf von Ihnen definierten Bedingungen. Die Regeln laufen immer dann, wenn MailCopilot E-Mails vom Server abruft — nicht zwingend in dem Moment, in dem eine Nachricht dort eintrifft.
 
 ## Eine Regel erstellen
 
@@ -19,9 +19,9 @@ Mit E-Mail-Regeln können Sie eingehende E-Mails automatisch sortieren und organ
 Jede Regel hat eine oder mehrere Bedingungen. Alle Bedingungen müssen zutreffen, damit die Regel ausgelöst wird (UND-Logik). Wenn Sie eine ODER-Logik benötigen, erstellen Sie separate Regeln.
 
 Verfügbare Bedingungsfelder:
-- **Von** — Name oder Adresse des Absenders.
-- **An** — Empfängeradresse.
-- **CC** — CC-Adresse.
+- **Absender** — wird mit dem Anzeigenamen des Absenders verglichen, sofern die Nachricht einen hat, und nur bei dessen Fehlen mit der Adresse. Eine Regel, die auf eine Adresse abzielt, kann aufhören zu greifen, sobald dieser Absender einen Anzeigenamen verwendet — testen Sie die Regel nach dem Einrichten und achten Sie darauf, ob sie plötzlich nicht mehr auslöst.
+- **Empfänger** — Empfängeradresse.
+- **Cc** — im Regeleditor vorhanden, aber MailCopilot speichert das Cc-Feld für zwischengespeicherte E-Mails nicht, sodass jede Nachricht für eine Regel wie eine mit leerem Cc-Feld aussieht. Dadurch verhält sich die Bedingung unberechenbar statt einfach nur „funktioniert nicht": Eine bestimmte Adresse im Cc trifft nie zu, aber ein ausschließender Operator wie **enthält nicht** oder ein regulärer Ausdruck, der auf eine leere Zeichenfolge passt, trifft stattdessen auf **jede** Nachricht zu. Verwenden Sie eine Cc-Bedingung nicht in einer Regel, die E-Mails in den Papierkorb verschiebt, als Spam markiert oder in einen anderen Ordner verschiebt — mit dem falschen Operator kann sie sich auf Ihr gesamtes Postfach auswirken.
 - **Betreff** — die Betreffzeile der E-Mail.
 - **Hat Anhang** — ob die E-Mail Anhänge enthält.
 
@@ -29,34 +29,42 @@ Verfügbare Operatoren:
 - **enthält** / **enthält nicht** — teilweise Übereinstimmung.
 - **ist gleich** — exakte Übereinstimmung.
 - **beginnt mit** / **endet mit** — Präfix- oder Suffix-Übereinstimmung.
-- **stimmt mit regulärem Ausdruck überein** — erweiterte Mustersuche mit regulären Ausdrücken.
+- **entspricht Regex** — erweiterte Mustersuche mit regulären Ausdrücken.
 
 ### Aktionen
 
 Wenn eine Regel zutrifft, werden eine oder mehrere Aktionen ausgeführt:
 
 - **Archivieren** — in den Archiv-Ordner verschieben.
-- **In den Papierkorb verschieben** — in den Papierkorb verschieben.
+- **In Papierkorb verschieben** — in den Papierkorb verschieben.
 - **In Ordner verschieben** — in einen bestimmten Ordner Ihrer Wahl verschieben.
 - **Als gelesen markieren** — die E-Mail automatisch als gelesen markieren.
-- **Markieren** — die E-Mail mit einem Stern versehen.
+- **Stern hinzufügen** — die E-Mail mit einem Stern versehen.
 - **Als Spam markieren** — in den Spam-Ordner verschieben.
 
 ### Verarbeitung stoppen
 
-Wenn Sie **„Keine weiteren Regeln verarbeiten"** aktivieren, werden nach dem Auslösen dieser Regel keine weiteren Regeln ausgewertet. Dies ist nützlich, wenn Sie eine allgemeine Regel haben und verhindern möchten, dass sie spezifischere Regeln überschreibt.
+Wenn Sie **„Weitere Regeln nicht mehr verarbeiten"** aktivieren, werden nach dem Auslösen dieser Regel keine weiteren Regeln ausgewertet. Dies ist nützlich, wenn Sie eine allgemeine Regel haben und verhindern möchten, dass sie spezifischere Regeln überschreibt.
 
 ## Regeln testen
 
-Bevor Sie eine Regel speichern, klicken Sie auf **„An vorhandenen E-Mails testen"**, um zu sehen, welche Ihrer bestehenden E-Mails den Bedingungen entsprechen. So können Sie überprüfen, ob die Regel wie erwartet funktioniert, bevor sie auf neue E-Mails angewendet wird.
+Bevor Sie eine Regel speichern, klicken Sie auf **„An vorhandenen E-Mails testen"**, um vorab zu sehen, welche Ihrer aktuellen Posteingangs-E-Mails den Bedingungen entsprechen würden. Der Test prüft bis zu 500 Posteingangs-E-Mails, die bereits auf dieses Gerät heruntergeladen wurden, und zeigt bis zu 20 Treffer an — das ist eine schnelle Stichprobe, keine vollständige Durchsuchung Ihres gesamten Postfachs. Bei einer Regel für ein einzelnes Konto sind das Ihre neuesten E-Mails; bei einer Regel für alle Konten stammen die geprüften 500 aus all Ihren Konten zusammen, sind aber nicht zwangsläufig insgesamt die neuesten. Ältere E-Mails und noch nicht heruntergeladene E-Mails werden nicht einbezogen.
 
 ## Auf vorhandene E-Mails anwenden
 
-Aktivieren Sie beim Speichern einer Regel **„Auf vorhandene E-Mails im Posteingang anwenden"**, um die Regel sofort auf E-Mails anzuwenden, die sich bereits in Ihrem Posteingang befinden.
+Aktivieren Sie beim Speichern einer Regel **„Auf vorhandene E-Mails im Posteingang anwenden"**, um sie sofort auf E-Mails anzuwenden, die Sie bereits haben. Dies erfasst bis zu 1.000 Posteingangs-E-Mails, die bereits auf dieses Gerät heruntergeladen wurden — bei einer Regel für ein einzelnes Konto Ihre neuesten solchen E-Mails; bei einer Regel für alle Konten bis zu 1.000 aus all Ihren Konten zusammen, nicht zwangsläufig insgesamt die neuesten. Es reicht nicht weiter in Ihren E-Mail-Verlauf auf dem Server zurück und umfasst nur den Posteingang, keine anderen Ordner. Schlägt eine einzelne Aktion fehl, wird nur diese Aktion übersprungen — die übrigen Aktionen derselben Regel werden für diese E-Mail trotzdem ausgeführt, und der Rest des Durchlaufs wird ebenfalls abgeschlossen.
+
+## Nur neue E-Mails
+
+Regeln greifen bei neuer E-Mail, sobald sie auf Ihrem Gerät ankommt — unabhängig davon, auf welchem Weg das geschieht: per Push-Benachrichtigung, regelmäßige Synchronisierung oder eine Seite mit E-Mails, die neuer sind als die, die Sie schon gesehen haben. Früher konnte es eine Rolle spielen, auf welchem dieser Wege eine Nachricht ankam, und eine Regel konnte sie dadurch übersehen; diese Lücke gibt es jetzt nicht mehr. Beim Zurückscrollen zu älteren Seiten werden diese älteren E-Mails den Regeln allerdings nicht zugeführt — das ist beabsichtigt, dasselbe „kein Verlaufs-Scan"-Verhalten wie weiter unten beschrieben, keine übrig gebliebene Lücke.
+
+Diese Garantie für neue E-Mails ist allerdings nicht für jede Situation absolut: Schlägt die Aktion für dieselbe E-Mail drei Versuche in Folge fehl (zum Beispiel wegen einer unterbrochenen Verbindung), wird sie endgültig aufgegeben — MailCopilot überspringt sie und macht in diesem Ordner weiter, sodass ein späterer Neustart sie nicht zurückbringt. Was ein Neustart tatsächlich zurücksetzt, ist ein Zähler, der die drei noch nicht erreicht hat: Startet die App neu, bevor eine E-Mail dreimal in Folge fehlgeschlagen ist, beginnt die Zählung wieder bei null — eine Aktion, die aus einem dauerhaften Grund immer wieder fehlschlägt, kann die Verarbeitung eines Ordners dadurch unbegrenzt aufhalten, ohne dieses Dreifach-Limit je tatsächlich zu erreichen.
+
+Regeln durchsuchen den Verlauf eines Ordners zudem nie von sich aus. Jeder Ordner, den MailCopilot beim Start bereits kennt, erhält sofort einen Startpunkt, noch bevor synchronisiert wird — ein leerer Ordner erhält den Startpunkt null, sodass seine allererste E-Mail ganz normal ausgewertet wird; ein Ordner mit bereits zwischengespeicherten E-Mails erhält einen Startpunkt hinter diesen E-Mails, sodass die vorhandene Post nicht nachträglich erfasst wird, alles danach Eintreffende aber schon. Ein Ordner, der erst nach diesem Startzeitpunkt entsteht — neu angelegt oder neu abonniert —, wird anders behandelt: Darin wird nichts ausgewertet, bis MailCopilot ihn einmal synchronisiert hat, und nur E-Mails, die nach dieser ersten Synchronisierung eintreffen, zählen. Derselbe Neustart erfolgt, wenn der Server die Nummerierung der Nachrichten in einem Ordner zurücksetzt (selten, kann aber nach bestimmten serverseitigen Migrationen vorkommen). Verwenden Sie **„Auf vorhandene E-Mails im Posteingang anwenden"** (siehe oben), wenn eine Regel auch bereits vorhandene E-Mails auswerten soll.
 
 ## Regelpriorität
 
-Regeln werden in der Reihenfolge ihrer Priorität ausgewertet (niedrigere Zahl = höhere Priorität). Sie können die Priorität beim Bearbeiten einer Regel anpassen. Haben zwei Regeln die gleiche Priorität, werden sie in der Erstellungsreihenfolge ausgewertet.
+Regeln werden in der Reihenfolge ihrer Priorität ausgewertet (niedrigere Zahl = höhere Priorität). Die Priorität wird beim Erstellen einer Regel automatisch vergeben — im Regeleditor gibt es derzeit keine Möglichkeit, sie anzupassen. Haben zwei Regeln dieselbe Priorität, ist nicht definiert, welche zuerst ausgewertet wird.
 
 ## KI-Regeln
 
@@ -81,7 +89,7 @@ Sie können höchstens **20 aktivierte KI-Regeln pro Konto** haben (globale Rege
 
 ### Destruktive Aktionen erfordern eine Überprüfung
 
-Umkehrbare Aktionen -- Archivieren, in Ordner verschieben, als gelesen markieren, mit Stern markieren -- werden automatisch angewendet, wenn eine KI-Regel zutrifft. **In den Papierkorb verschieben** und **Als Spam markieren** werden niemals automatisch angewendet: Stattdessen zeichnet die KI die vorgeschlagene Aktion als ausstehenden Eintrag im Aktionsprotokoll der Regel auf. Um eine vorgeschlagene Papierkorb- oder Spam-Aktion auszuführen, müssen Sie den Eintrag öffnen und sie ausdrücklich anwenden -- es wird nichts gelöscht oder als Spam markiert, bevor Sie das tun. So wird verhindert, dass die KI E-Mails ohne Ihre Bestätigung dauerhaft aus Ihrem Posteingang entfernt.
+Umkehrbare Aktionen -- Archivieren, in Ordner verschieben, als gelesen markieren, mit Stern markieren -- werden automatisch angewendet, wenn eine KI-Regel zutrifft. **In Papierkorb verschieben** und **Als Spam markieren** werden niemals automatisch angewendet: Stattdessen zeichnet die KI die vorgeschlagene Aktion als ausstehenden Eintrag im Aktionsprotokoll der Regel auf. Um eine vorgeschlagene Papierkorb- oder Spam-Aktion auszuführen, müssen Sie den Eintrag öffnen und sie ausdrücklich anwenden -- es wird nichts gelöscht oder als Spam markiert, bevor Sie das tun. So wird verhindert, dass die KI E-Mails ohne Ihre Bestätigung dauerhaft aus Ihrem Posteingang entfernt.
 
 ### Regeln sehen nur ihr eigenes Konto
 

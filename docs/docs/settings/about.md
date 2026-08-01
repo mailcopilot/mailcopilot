@@ -66,11 +66,13 @@ If MailCopilot was installed system-wide (for example, via a package manager tha
 
 Update the application through your package manager or with administrator privileges.
 
-## Anonymous Error Reports
+## Diagnostics and Usage Data
 
-When enabled, MailCopilot sends anonymous crash reports to help the developers find and fix bugs. No personal data, email content, or account information is ever collected -- only technical error details.
+When enabled, MailCopilot sends crash reports, performance measurements, product usage events (which features are used, which AI provider and model, the estimated cost of a request), and a random install identifier that links your sessions. Message content and your search text are never included; addresses, subjects, and folder names are ruled out entirely wherever the diagnostics use a closed field list (as in the sent-copy failure diagnostics), and elsewhere caught by best-effort scrubbing of recognizable address and path shapes -- a safety net, not a guarantee. The feedback form below is the only place an address is sent on purpose, so that you can get a reply; everywhere else it is only ever scrubbed, not guaranteed absent -- and because the install identifier is included, this data is not fully anonymous. See [Telemetry](../privacy/telemetry) for the full list of what is and is not sent.
 
-This setting is enabled by default. You can disable it at any time by unchecking the checkbox.
+This setting reflects the answer you gave on the consent screen shown the first time you started MailCopilot, and is **off by default** -- nothing is sent unless you actively allowed it. You can change your decision at any time by checking or unchecking the checkbox.
+
+If MailCopilot has no record of an answer to the consent question -- for example, right after the list of collected data changes and a re-ask becomes due -- the checkbox here is shown unchecked and disabled, with a note that diagnostics stay off until you respond to the consent screen on the next start.
 
 ## Debug Logging
 
@@ -82,6 +84,6 @@ Debug logging is disabled by default. Enable it only when investigating an issue
 
 Click the **Report a bug** button to send feedback directly to the MailCopilot developers. Describe the issue you encountered -- this helps us identify and fix problems faster.
 
-Your feedback is sent securely through the same anonymous error reporting system. If error reporting is disabled, you will see a link to the MailCopilot website where you can contact support.
+Your feedback is sent securely through the same diagnostics reporting system described above. If error reporting is disabled, you will see a link to the MailCopilot website where you can contact support.
 
 When the application encounters an unexpected error, a feedback form will also appear on the error screen, allowing you to describe what you were doing before the error occurred.

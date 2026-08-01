@@ -712,8 +712,9 @@
       "version": "Version",
       "website": "Website",
       "docs": "Documentation",
-      "sentryEnabled": "Send anonymous diagnostics and usage data",
-      "sentryHint": "Includes crash reports, performance metrics, and anonymous product usage events (e.g. which features are used). Never includes message content, addresses, subjects, or folder names.",
+      "sentryEnabled": "Send diagnostics and usage data",
+      "sentryHint": "Includes crash reports, performance measurements, product usage events (which features are used, which AI provider and model, the estimated cost of a request) and a random install identifier that links your sessions. Message content, subjects and folder names are not collected: nothing that is sent is built from them, and addresses and file paths are removed automatically from the error text a mail server returns, wherever they can be recognised. The only address that is sent is the one you type into the feedback form below yourself, so that you can get a reply.",
+      "sentryConsentPending": "Diagnostics stay off until the consent question is answered. MailCopilot asks once on the next start; this switch has no effect before then.",
       "debugLogging": "Enable debug logging",
       "debugLoggingHint": "Writes detailed logs to a file for troubleshooting. Logs are stored locally and never sent automatically.",
       "system": {
@@ -749,6 +750,31 @@
         "unsupportedDev": "Updates are disabled in this build"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "Send diagnostic data?",
+    "intro": "MailCopilot can send diagnostic and usage data so that crashes and slowdowns can be found and fixed. It never contains the content of your mail, but it does include a random identifier for this installation, so it is not fully anonymous. Nothing is sent unless you choose to allow it. Your mail and the AI assistant work the same either way — if you decline, the feedback form in Settings becomes a link to our website.",
+    "sentTitle": "If you allow it, MailCopilot sends:",
+    "sent": {
+      "errors": "Errors and crashes: the type of error and the stack trace showing where in the code it happened",
+      "versions": "The MailCopilot version, your operating system and its version",
+      "performance": "How long operations took — mail synchronisation, search, sending, AI requests",
+      "usage": "Which features you used and how often — search, writing mail, AI, rules, templates, snoozing — plus the AI provider and model used and the estimated cost of a request",
+      "setup": "Basic setup facts: how many accounts you have, the kind of mail service (for example Gmail or Outlook), the sign-in method, the interface language and the theme",
+      "installId": "A random identifier for this installation, created on first run. It is not tied to your email address, but it does link the data from your different sessions to the same installation."
+    },
+    "neverTitle": "MailCopilot never sends:",
+    "never": {
+      "bodies": "Message bodies, subjects and your folder names are not collected: nothing we send is built from them, and only the general kind of folder, such as Inbox or Trash, appears in the data. The one text we do not write ourselves is a mail server's error message; addresses and file paths are removed from it automatically before it is sent, wherever they can be recognised",
+      "addresses": "Email addresses, yours or anyone else's. The only exception is the feedback form in Settings → About: an address you type there yourself is sent along with your message, so that you can get a reply",
+      "attachments": "Attachments and their file names",
+      "searchQueries": "What you type into search — only the length of the query and the number of results are counted",
+      "aiPrompts": "The text of AI requests and answers"
+    },
+    "changeLater": "You can change this decision at any time: Settings → About.",
+    "learnMore": "What is collected — privacy page",
+    "allow": "Allow",
+    "deny": "Don't allow"
   },
   "account": {
     "title": "Connect email",
@@ -1377,5 +1403,11 @@
     "cancelled": "This event has been cancelled",
     "notActionable": "This is not an actionable invitation",
     "originalTimezone": "Originally scheduled in {{tzid}}"
+  },
+  "window": {
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
+    "close": "Close"
   }
 }

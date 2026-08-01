@@ -831,7 +831,7 @@ export default function App() {
       if (!s) return
       const sentryNow = s.sentryEnabled !== false
       setSentryUserEnabled(sentryNow)
-      // Re-attach the anonymous install-id if the user toggles Sentry back
+      // Re-attach the pseudonymous install-id if the user toggles Sentry back
       // on (setSentryUserEnabled handles the off → null path internally).
       if (sentryNow && window.api?.installIdHash) {
         setSentryUserId(window.api.installIdHash)

@@ -800,6 +800,41 @@ describe('microsoftOAuth', { timeout: 30_000 }, () => {
       ).rejects.toThrow('User canceled')
     })
 
+    // §2.82 iter2 finding 1 (audit half) — the error-callback branch used to
+    // capture `new Error(errDesc)` AND attach `error_description` as context.
+    // Azure authors that string and routinely inlines the UPN, which is the
+    // exact hazard the refresh path in this same file already guards against
+    // (test C1 above). The consent screen promises addresses are never sent.
+    it('does not forward Azure error_description to Sentry from the callback branch', async () => {
+      vi.mocked(captureException).mockClear()
+      const upnDesc = 'AADSTS65004: User alice.smith@contoso.onmicrosoft.com declined to consent.'
+      await expect(
+        runMicrosoftOAuthFlow({
+          clientId: 'test',
+          openExternal: (url) => {
+            const parsed = new URL(url)
+            const redirectUri = parsed.searchParams.get('redirect_uri')!
+            const port = new URL(redirectUri).port
+            simulateCallback(port, `error=access_denied&error_description=${encodeURIComponent(upnDesc)}`)
+          },
+          timeoutMs: 20_000,
+          loopbackPort: 0,
+        }),
+        // The REJECTION still carries the full text — that is local UI, not
+        // telemetry, and the user needs to see what Microsoft said.
+      ).rejects.toThrow(upnDesc)
+
+      expect(captureException).toHaveBeenCalledTimes(1)
+      const [capturedErr, capturedCtx] = vi.mocked(captureException).mock.calls[0]
+      const outgoing = `${(capturedErr as Error).message} ${JSON.stringify(capturedCtx)}`
+      expect(outgoing).not.toMatch(/@/)
+      expect(outgoing).not.toMatch(/alice/i)
+      expect(outgoing).not.toMatch(/contoso/i)
+      expect(outgoing).not.toContain('declined to consent')
+      expect((capturedErr as Error).message).toBe('oauth_callback_error: AADSTS65004')
+      expect(capturedCtx).toMatchObject({ source: 'MicrosoftOAuth', stage: 'callback' })
+    })
+
     it('rejects on token exchange failure', async () => {
       const fetchMock = vi.fn().mockResolvedValueOnce({
         ok: false,
@@ -827,6 +862,46 @@ describe('microsoftOAuth', { timeout: 30_000 }, () => {
       ).rejects.toThrow('The code has expired')
 
       expect(captureException).toHaveBeenCalled()
+      vi.unstubAllGlobals()
+    })
+
+    // Same rule on the token-exchange leg: the endpoint's failure body is
+    // Azure free text and can name the account.
+    it('does not forward the token-exchange failure body to Sentry', async () => {
+      vi.mocked(captureException).mockClear()
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: () => Promise.resolve(JSON.stringify({
+          error: 'invalid_grant',
+          error_description: 'AADSTS50173: The user alice.smith@contoso.onmicrosoft.com changed their password.',
+        })),
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      await expect(
+        runMicrosoftOAuthFlow({
+          clientId: 'test',
+          openExternal: (url) => {
+            const parsed = new URL(url)
+            const redirectUri = parsed.searchParams.get('redirect_uri')!
+            const state = parsed.searchParams.get('state')!
+            const port = new URL(redirectUri).port
+            simulateCallback(port, `code=stale-code&state=${state}`)
+          },
+          timeoutMs: 20_000,
+          loopbackPort: 0,
+        }),
+      ).rejects.toThrow()
+
+      const outgoing = vi.mocked(captureException).mock.calls
+        .map(([err, ctx]) => `${(err as Error).message} ${JSON.stringify(ctx)}`)
+        .join(' ')
+      expect(outgoing).not.toMatch(/@/)
+      expect(outgoing).not.toMatch(/alice/i)
+      expect(outgoing).not.toMatch(/contoso/i)
+      expect(outgoing).not.toContain('changed their password')
+      expect(outgoing).toContain('token_exchange_failed: AADSTS50173')
       vi.unstubAllGlobals()
     })
 

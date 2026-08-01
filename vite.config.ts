@@ -1,3 +1,10 @@
+// Load `.env` from the repository root into process.env before anything below
+// reads it. Existing environment variables always win (dotenv never
+// overrides), so shell and CI values take precedence over the local file.
+// This is what makes `MAILCOPILOT_GOOGLE_CLIENT_ID` / `_SECRET` (and
+// SENTRY_DSN) available both to the `define` blocks and to the Electron
+// process spawned by `onstart` in dev.
+import 'dotenv/config'
 import { defineConfig, type Plugin } from 'vite'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -80,6 +87,16 @@ export default defineConfig(({ mode }) => ({
           define: {
             __SENTRY_DSN__: JSON.stringify(process.env.SENTRY_DSN || ''),
             __APP_VERSION__: JSON.stringify(process.env.npm_package_version || '0.0.0-dev'),
+            // Google OAuth Desktop client, baked in at build time. Injected
+            // into the MAIN bundle only — deliberately not into the renderer
+            // `define` above: the OAuth flow runs entirely in the main process
+            // (electron/googleOAuth.ts), so putting the credentials into the
+            // renderer bundle would widen their exposure surface (web context,
+            // DevTools, any future content-injection bug) for zero benefit.
+            // Empty when the build has no credentials — Gmail sign-in then
+            // fails with an actionable message, everything else still works.
+            __GOOGLE_OAUTH_CLIENT_ID__: JSON.stringify(process.env.MAILCOPILOT_GOOGLE_CLIENT_ID || ''),
+            __GOOGLE_OAUTH_CLIENT_SECRET__: JSON.stringify(process.env.MAILCOPILOT_GOOGLE_CLIENT_SECRET || ''),
           },
           build: {
             sourcemap: sentryUploadEnabled ? 'hidden' : false,

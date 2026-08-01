@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Save, Loader2, Minus, Square, Copy, X, Settings as SettingsIcon, Gauge, Folder, FileText, LayoutTemplate, Download, Users, Plus, Trash2, Pencil, CheckCircle, Sparkles, Shield, Info, ExternalLink, MessageSquare, Send, Palette, Type, Image, Globe, Filter, UserCircle } from 'lucide-react'
+import { Save, Loader2, X, Settings as SettingsIcon, Gauge, Folder, FileText, LayoutTemplate, Download, Users, Plus, Trash2, Pencil, CheckCircle, Sparkles, Shield, Info, ExternalLink, MessageSquare, Send, Palette, Type, Image, Globe, Filter, UserCircle } from 'lucide-react'
 import { AI_RULE_MAX_ENABLED_PER_ACCOUNT } from '@mailcopilot/core'
 import { useTranslation } from 'react-i18next'
 import i18n, { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, type Language } from '../i18n'
@@ -12,7 +12,8 @@ import IdentitiesTab, { type IdentityDraft } from '../components/IdentitiesTab'
 import SystemInfo from '../components/Settings/SystemInfo'
 import AiPrivacyPanel from '../components/Settings/AiPrivacyPanel'
 import { buildAccountSavePayloadPatch, buildAvatarSavePayloadPatch } from '../utils/accountSavePayload'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
+import { useTelemetryConsentNeeded } from '../hooks/useTelemetryConsent'
 import { AVATAR_ICONS, getAvatarIcon } from '../utils/avatarIcons'
 import { parseShellArgs } from '../utils/parseShellArgs'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
@@ -187,7 +188,6 @@ function defaultFolderPref(role: string | null): Pick<FolderPreference, 'visible
 
 export default function Settings() {
   const { t } = useTranslation()
-  const maximized = useMaximized()
   const [tab, setTab] = useState<Tab>('general')
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [language, setLanguage] = useState<Language>(DEFAULT_LANGUAGE)
@@ -273,6 +273,10 @@ export default function Settings() {
   // account's entry is not `true`.
   const [aiInstantReplyEnabled, setAiInstantReplyEnabled] = useState<Record<string, boolean>>({})
   const [sentryEnabled, setSentryEnabled] = useState(true)
+  // §2.82 — while no consent record exists, main clamps `sentryEnabled` to
+  // false on save (applyAboutToggle), so an enabled switch here would silently
+  // bounce back. Render the reason instead of a dead control.
+  const telemetryConsentNeeded = useTelemetryConsentNeeded()
   const [debugLogging, setDebugLogging] = useState(false)
   // §2.19 — auto-update opt-in. Default false (the schema default) so users
   // see every download surface in the UI before installing. Persisted via
@@ -1212,24 +1216,15 @@ export default function Settings() {
 
   return (
     <>
-    {/* Custom titlebar for frameless window */}
-    <div className="child-titlebar">
-      <span className="child-titlebar-title">{t('settings.title')}</span>
-      <div className="titlebar-controls">
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')}>
-          <Minus size={14} />
-        </button>
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')}>
-          {maximized ? <Copy size={12} /> : <Square size={12} />}
-        </button>
-        <button className="titlebar-btn titlebar-btn-close" onClick={() => {
-          if (hasUnsavedChanges && !window.confirm(t('settings.unsavedWarning'))) return
-          window.close()
-        }}>
-          <X size={14} />
-        </button>
-      </div>
-    </div>
+    {/* Custom titlebar for frameless window. Close keeps the unsaved-changes
+        guard, hence the explicit handler. */}
+    <WindowTitlebar
+      title={t('settings.title')}
+      onClose={() => {
+        if (hasUnsavedChanges && !window.confirm(t('settings.unsavedWarning'))) return
+        window.close()
+      }}
+    />
     <div className="settings-layout">
       {/* Vertical tabs */}
       <nav className="settings-tabs">
@@ -3666,12 +3661,18 @@ export default function Settings() {
               <input
                 type="checkbox"
                 data-testid="settings-about-sentry"
-                checked={sentryEnabled}
+                checked={sentryEnabled && !telemetryConsentNeeded}
+                disabled={telemetryConsentNeeded}
                 onChange={e => setSentryEnabled(e.target.checked)}
               />
               {t('settings.about.sentryEnabled')}
             </label>
             <p className="hint">{t('settings.about.sentryHint')}</p>
+            {telemetryConsentNeeded && (
+              <p className="hint" data-testid="settings-about-consent-pending">
+                {t('settings.about.sentryConsentPending')}
+              </p>
+            )}
 
             <label className="setting-check">
               <input

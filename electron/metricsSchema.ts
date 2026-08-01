@@ -13,7 +13,12 @@
  *   - Only structural fields: enums, counts, durations, buckets, booleans,
  *     canonical folder roles (inbox/sent/archive/...), provider kinds.
  *   - Account identity, if needed, is an integer id — never the email.
- *   - Install identity is a hashed UUID emitted ONLY in session events.
+ *   - Install identity is a hashed UUID. The `install_id_hash` TAG belongs on
+ *     the three session events only (cardinality) — but note that the same
+ *     hash is attached SDK-wide as the Sentry `user.id`, so it accompanies
+ *     every event and transaction regardless. Unlinkability is not a property
+ *     this pipeline has; the content rules above are what protect the user.
+ *     See electron/installId.ts.
  */
 
 // --- Low-cardinality enum domains ------------------------------------------
@@ -1287,6 +1292,42 @@ export const METRIC_EVENTS = {
     },
     mainOnly: true,
   },
+  // §2.82 — the user pressed "allow" on the consent screen. That is the ONLY
+  // emitter: the metric is recorded by
+  // electron/services/telemetryConsentService.ts on `telemetry:setConsent`,
+  // which is the screen's own channel. Flipping the Settings → About switch
+  // back on does NOT write this event — that path goes through `settings:save`
+  // / `applyAboutToggle` and emits nothing. (The screen does re-appear after a
+  // disclosure-version bump, and answering it there does emit — but through
+  // the screen, not through the switch, which stays disabled while an answer
+  // is pending.) So this counts ANSWERS TO THE SCREEN, not opt-ins.
+  //
+  // Emitted ONLY on a grant. A refusal produces no event at all: sending one
+  // would itself be a transmission from a user who just said no, which is
+  // exactly what ePrivacy art. 5(3) forbids. Accepted consequence, decided
+  // deliberately — we cannot measure the refusal rate, only the absolute
+  // number of installs that opted in. Do not "fix" this by adding a
+  // consent_denied counter.
+  //
+  // Ordering matters at the call site: the metric is recorded AFTER the
+  // consent state has been applied to the SDK, otherwise the very first
+  // post-consent event would be dropped by the still-disabled client.
+  //
+  // `version` is the disclosure-composition version (TELEMETRY_CONSENT_VERSION),
+  // an integer — not the app version, and never a timestamp (which would be a
+  // per-install identifier).
+  //
+  // `mainOnly: true` — only electron/services/telemetryConsentService.ts emits
+  // it; a compromised renderer must not be able to fabricate a consent signal
+  // through the `metrics:record` bridge.
+  'telemetry.consent_granted': {
+    kind: 'event',
+    purpose: 'The user pressed "allow" on the consent screen, tagged with the disclosure version they saw. Answers "how many installs accepted the screen, and under which disclosure". Not a general opt-in counter: re-enabling the Settings → About switch emits nothing.',
+    tags: {
+      version: 'number',
+    },
+    mainOnly: true,
+  },
 } as const satisfies Record<string, MetricDefinition>
 
 export type MetricName = keyof typeof METRIC_EVENTS
@@ -1378,6 +1419,31 @@ export const ELECTRON_SPANS = {
       cache_hit_level: 'cache_hit_level',
       body_size_bucket: 'string',
       attachments_count: 'number',
+    },
+  },
+  // §2.82 iter2 — the AI chat request span. It predates the typed span registry
+  // and used to be opened with a direct `startInactiveSpan` call in
+  // electron/services/ai.ts, which is exactly the shape the consent gate exists
+  // to make impossible: a collection point the gate does not know about. Now it
+  // goes through `startMetricSpan`, so it is registered here and inherits the
+  // gate and the `parentSpan: null` sampling guard like every other span.
+  //
+  // Attribute keys keep their historical dotted `ai.*` form so existing Sentry
+  // queries and dashboards continue to resolve. Values are aggregates only:
+  // provider/model identifiers and the context KIND — never the prompt, the
+  // answer, the thread, or any address.
+  'ai.chat': {
+    purpose: 'One AI chat request lifecycle (§3.3): provider stream open → tool calls → completion or abort. Opened once per aiChat() invocation that passed budget admission.',
+    attributes: {
+      'ai.provider': 'string',
+      'ai.model': 'string',
+      'ai.context_type': 'string',
+      'ai.has_history': 'boolean',
+      'ai.session_resumed': 'boolean',
+      'ai.tool_call_count': 'number',
+      'ai.tools_used': 'string',
+      'ai.aborted': 'boolean',
+      'ai.cost_usd': 'number',
     },
   },
   // §3.3 B2 Thread AI Summary — one span per ACTUAL generation (never on a
@@ -1507,6 +1573,7 @@ export const METRIC_SPAN_OP: Record<MetricSpanName, string> = {
   'offline.replay': 'offline.replay',
   'search.fts': 'search.fts',
   'net.message_details': 'net.message_details',
+  'ai.chat': 'ai.chat',
   'ai.thread_summary.generate': 'ai.thread_summary.generate',
   'ai.quick_action.rewrite': 'ai.quick_action.rewrite',
   'ai.instant_reply.generate': 'ai.instant_reply.generate',

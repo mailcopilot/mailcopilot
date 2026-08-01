@@ -66,11 +66,13 @@ Si MailCopilot a été installé pour l'ensemble du système (par exemple, via u
 
 Mettez à jour l'application via votre gestionnaire de paquets ou avec des privilèges d'administrateur.
 
-## Rapports d'erreurs anonymes
+## Diagnostics et données d'usage
 
-Lorsque cette option est activée, MailCopilot envoie des rapports de plantage anonymes pour aider les développeurs à trouver et corriger les bugs. Aucune donnée personnelle, contenu d'e-mail ou information de compte n'est collecté — seuls les détails techniques des erreurs sont transmis.
+Lorsque cette option est activée, MailCopilot envoie des rapports de plantage, des mesures de performance, des événements d'utilisation (quelles fonctionnalités sont utilisées, quel fournisseur et quel modèle d'IA, le coût estimé d'une requête) et un identifiant aléatoire d'installation qui relie vos sessions. Le contenu des messages et le texte de vos recherches ne sont jamais inclus ; les adresses, les objets et les noms de dossiers sont entièrement exclus partout où le diagnostic utilise une liste fermée de champs (comme dans le diagnostic de la copie envoyée), et rattrapés ailleurs par un nettoyage au mieux des formes reconnaissables d'adresses et de chemins -- un filet de sécurité, pas une garantie. Le formulaire de retour ci-dessous est le seul endroit où une adresse est envoyée volontairement, afin qu'on puisse vous répondre ; partout ailleurs, une adresse n'est que nettoyée si elle est reconnue, jamais garantie absente -- et, comme il inclut cet identifiant d'installation, ces données ne sont pas totalement anonymes. Consultez [Télémétrie](../privacy/telemetry) pour la liste complète de ce qui est envoyé et de ce qui ne l'est jamais.
 
-Ce paramètre est activé par défaut. Vous pouvez le désactiver à tout moment en décochant la case.
+Ce paramètre reflète la réponse que vous avez donnée sur l'écran de consentement affiché au premier démarrage de MailCopilot, et il est **désactivé par défaut** — rien n'est envoyé tant que vous n'avez pas donné votre consentement actif. Vous pouvez modifier votre décision à tout moment en cochant ou décochant la case.
+
+Si MailCopilot n'a aucune trace d'une réponse à la question de consentement initiale — par exemple, juste après que la liste des données collectées a changé et qu'une nouvelle demande devient nécessaire — la case est affichée décochée et désactivée ici, avec une note indiquant que le diagnostic reste désactivé tant que vous n'avez pas répondu sur l'écran de consentement au prochain démarrage.
 
 ## Journalisation détaillée
 
@@ -82,6 +84,6 @@ La journalisation détaillée est désactivée par défaut. Activez-la uniquemen
 
 Cliquez sur le bouton **Signaler un bug** pour envoyer vos commentaires directement aux développeurs de MailCopilot. Décrivez le problème rencontré — cela nous aide à identifier et corriger les problèmes plus rapidement.
 
-Vos commentaires sont envoyés de manière sécurisée via le même système anonyme de rapports d'erreurs. Si les rapports d'erreurs sont désactivés, vous verrez un lien vers le site web de MailCopilot où vous pouvez contacter le support.
+Vos commentaires sont envoyés de manière sécurisée via ce même système de diagnostics décrit ci-dessus. Si les rapports d'erreurs sont désactivés, vous verrez un lien vers le site web de MailCopilot où vous pouvez contacter le support.
 
 Lorsque l'application rencontre une erreur inattendue, un formulaire de commentaires apparaîtra également sur l'écran d'erreur, vous permettant de décrire ce que vous faisiez avant l'erreur.

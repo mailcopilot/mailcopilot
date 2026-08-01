@@ -267,6 +267,30 @@ CREATE TABLE IF NOT EXISTS mail_rules(
 CREATE INDEX IF NOT EXISTS idx_mail_rules_account ON mail_rules(account_id, priority);
 `)
 
+// Static-rule evaluation watermark, one row per (account, folder).
+//
+// This is the Thunderbird `highestRecordedUID` property (nsImapMailFolder.cpp,
+// kHighestRecordedUIDPropertyName): the highest UID the RULE PIPELINE itself
+// has already looked at. It is deliberately NOT `MAX(uid) FROM messages` —
+// that value is a property of STORAGE and every writer advances it, including
+// paths that never evaluate rules (pagination, FLAGS-only sync, a sync that
+// threw after committing its batches). A message written by one of those paths
+// used to push the bar above itself and could then never be seen by a rule.
+//
+// Only the rule runner writes this table. `uid_validity` is stored alongside so
+// a UIDVALIDITY bump (server reassigned UIDs) is detected and the watermark is
+// re-baselined instead of comparing UIDs across two different numbering spaces.
+db.exec(`
+CREATE TABLE IF NOT EXISTS mail_rules_state(
+  account_id INTEGER NOT NULL,
+  folder_path TEXT NOT NULL,
+  watermark_uid INTEGER NOT NULL DEFAULT 0,
+  uid_validity INTEGER,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(account_id, folder_path)
+);
+`)
+
 // AI Rules (B2.24): AI-powered mail processing rules.
 db.exec(`
 CREATE TABLE IF NOT EXISTS ai_rules(
@@ -3624,6 +3648,7 @@ export function deleteAccountData(accountId: number) {
     db.prepare(`DELETE FROM folder_crawl_state WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM rule_log WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM mail_rules WHERE account_id=?`).run(id)
+    db.prepare(`DELETE FROM mail_rules_state WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM ai_rule_log WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM ai_rules WHERE account_id=?`).run(id)
     // §3.3 B2 Thread AI Summary cache. `ai_summaries.account_id` is TEXT (it
@@ -6042,6 +6067,121 @@ export function getMessagesForRuleTest(accountId?: number, limit = 500, folder =
     toAddr: (r.to_addr as string) || null,
     hasAttachments: (r.has_attachments as number) === 1,
   }))
+}
+
+// --- Static-rule evaluation watermark (mail_rules_state) ---
+
+/** Persisted rule-pipeline position for one folder. */
+export type MailRulesState = {
+  watermarkUid: number
+  uidValidity: number | null
+}
+
+/** Read the rule watermark for a folder. `undefined` = never evaluated yet. */
+export function getMailRulesState(accountId: number, folder: string): MailRulesState | undefined {
+  const row = db.prepare(
+    `SELECT watermark_uid as watermarkUid, uid_validity as uidValidity
+       FROM mail_rules_state WHERE account_id=? AND folder_path=?`
+  ).get(accountId, folder) as MailRulesState | undefined
+  return row
+}
+
+/**
+ * Advance (or re-baseline) the rule watermark for a folder.
+ * Only the rule runner may call this — see the table comment for why this must
+ * not be derived from `MAX(uid) FROM messages`.
+ */
+export function setMailRulesState(
+  accountId: number,
+  folder: string,
+  watermarkUid: number,
+  uidValidity: number | null,
+): void {
+  db.prepare(
+    `INSERT INTO mail_rules_state(account_id, folder_path, watermark_uid, uid_validity, updated_at)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(account_id, folder_path) DO UPDATE SET
+       watermark_uid=excluded.watermark_uid,
+       uid_validity=excluded.uid_validity,
+       updated_at=excluded.updated_at`
+  ).run(accountId, folder, watermarkUid, uidValidity, new Date().toISOString())
+}
+
+/**
+ * Give every folder this install already KNOWS ABOUT a starting position,
+ * without evaluating anything. Idempotent: folders that already have a row keep
+ * it untouched.
+ *
+ * This is the PRIMARY baseline path and it must run BEFORE any sync starts.
+ * The runner's own lazy baseline ("no row yet → anchor at MAX(uid)") cannot do
+ * this job on its own, because the runner is invoked AFTER a fetch has already
+ * persisted its messages: on the very first launch of the build that introduced
+ * `mail_rules_state`, `MAX(uid)` would already include mail that had just
+ * arrived, and that mail would be declared old forever — the exact defect
+ * §2.86 fixes, re-created at the moment the fix ships.
+ *
+ * "Knows about" is deliberately the UNION of every table that records an
+ * (account, folder) pair — `messages`, `folder_prefs`, `folder_crawl_state`,
+ * `sync_state` — and not just `messages` (§2.86 iter3, review finding). A
+ * folder that is known but currently EMPTY (nothing cached: never opened, or
+ * genuinely empty on the server) has no `messages` row, so a message-driven
+ * seed skipped it, and its first arriving message then hit the runner's lazy
+ * baseline AFTER the fetch had persisted it — swallowed exactly like the
+ * original bug. Such a folder is anchored at 0 (`COALESCE(MAX(uid), 0)`), so
+ * its first arrival is evaluated rather than declared pre-existing.
+ *
+ * `uid_validity` is copied from `sync_state` so the seeded watermark is tied to
+ * the UID numbering space it was measured in; a later UIDVALIDITY bump is then
+ * detected by the runner and re-baselined. NULL there means "not synced yet /
+ * unknown", which the runner treats as unknown rather than as a bump.
+ *
+ * @returns number of folders seeded (0 on a repeat call).
+ */
+export function seedMailRulesStateFromCache(): number {
+  const info = db.prepare(
+    `INSERT OR IGNORE INTO mail_rules_state(account_id, folder_path, watermark_uid, uid_validity, updated_at)
+     SELECT k.account_id,
+            k.folder_path,
+            COALESCE((SELECT MAX(m.uid) FROM messages m
+                       WHERE m.account_id = k.account_id AND m.folder_path = k.folder_path), 0),
+            (SELECT s.uid_validity FROM sync_state s
+               WHERE s.account_id = k.account_id AND s.folder = k.folder_path),
+            ?
+       FROM (
+              SELECT account_id, folder_path FROM messages
+              UNION
+              SELECT account_id, folder_path FROM folder_prefs
+              UNION
+              SELECT account_id, folder_path FROM folder_crawl_state
+              UNION
+              SELECT account_id, folder      FROM sync_state
+            ) k
+      WHERE NOT EXISTS (
+        SELECT 1 FROM mail_rules_state r
+         WHERE r.account_id = k.account_id AND r.folder_path = k.folder_path
+      )`
+  ).run(new Date().toISOString())
+  return info.changes
+}
+
+/**
+ * UIDs in a folder that the rule pipeline has not looked at yet, oldest first.
+ *
+ * Ascending order is load-bearing: the runner advances the watermark per
+ * message, so an interrupted pass must leave a contiguous unprocessed tail.
+ */
+export function getUidsForRulesSince(
+  accountId: number,
+  folder: string,
+  sinceUid: number,
+  limit: number,
+): number[] {
+  const rows = db.prepare(
+    `SELECT uid FROM messages
+      WHERE account_id=? AND folder_path=? AND uid > ?
+      ORDER BY uid ASC LIMIT ?`
+  ).all(accountId, folder, sinceUid, limit) as Array<{ uid: number }>
+  return rows.map(r => r.uid)
 }
 
 // --- AI Rules (B2.24) ---

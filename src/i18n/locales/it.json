@@ -712,8 +712,9 @@
       "version": "Versione",
       "website": "Sito web",
       "docs": "Documentazione",
-      "sentryEnabled": "Invia diagnostica e dati di utilizzo anonimi",
-      "sentryHint": "Include rapporti sui crash, metriche di prestazione ed eventi di utilizzo anonimi (ad esempio, quali funzioni vengono usate). Non include mai il contenuto dei messaggi, gli indirizzi, gli oggetti o i nomi delle cartelle.",
+      "sentryEnabled": "Invia dati diagnostici e di utilizzo",
+      "sentryHint": "Include rapporti sui crash, misurazioni delle prestazioni, eventi di utilizzo (quali funzioni vengono usate, quale fornitore e modello di IA, il costo stimato di una richiesta) e un identificatore casuale dell'installazione che collega le tue sessioni. Il contenuto dei messaggi, gli oggetti e i nomi delle cartelle non vengono raccolti: nulla di ciò che viene inviato si basa su di essi e gli indirizzi e i percorsi dei file vengono rimossi automaticamente dal testo di errore restituito dal tuo server di posta, nella misura in cui vengono riconosciuti. L'unico indirizzo che viene inviato è quello che scrivi tu stesso nel modulo di feedback qui sotto, così puoi ricevere una risposta.",
+      "sentryConsentPending": "La diagnostica resta disattivata finché non viene data una risposta alla richiesta di consenso. MailCopilot la porrà una volta al prossimo avvio; fino ad allora questo interruttore non ha effetto.",
       "debugLogging": "Attiva registrazione di debug",
       "debugLoggingHint": "Scrive registri dettagliati in un file per la risoluzione dei problemi. I registri vengono archiviati localmente e non vengono mai inviati automaticamente.",
       "system": {
@@ -749,6 +750,31 @@
         "unsupportedDev": "Gli aggiornamenti sono disabilitati in questa build"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "Inviare dati diagnostici?",
+    "intro": "MailCopilot può inviare dati diagnostici e di utilizzo per permettere di individuare e correggere arresti anomali e rallentamenti. Non contengono mai il contenuto della tua posta, ma includono un identificatore casuale di questa installazione: non sono quindi del tutto anonimi. Senza il tuo consenso non viene inviato nulla. La posta e l'assistente IA funzionano allo stesso modo con entrambe le risposte: se rifiuti, il modulo di feedback nelle impostazioni viene sostituito da un collegamento al nostro sito.",
+    "sentTitle": "Se lo consenti, MailCopilot invia:",
+    "sent": {
+      "errors": "Errori e arresti anomali: il tipo di errore e lo stack trace che indica in quale punto del codice è avvenuto",
+      "versions": "La versione di MailCopilot, il tuo sistema operativo e la sua versione",
+      "performance": "La durata delle operazioni: sincronizzazione della posta, ricerca, invio, richieste all'IA",
+      "usage": "Quali funzioni hai usato e con quale frequenza — ricerca, scrittura dei messaggi, IA, regole, modelli, posticipo — oltre al fornitore e al modello di IA utilizzati e al costo stimato di una richiesta",
+      "setup": "Informazioni generali sulla configurazione: quanti account hai, il tipo di servizio di posta (per esempio Gmail o Outlook), il metodo di accesso, la lingua dell'interfaccia e il tema",
+      "installId": "Un identificatore casuale di questa installazione, creato al primo avvio. Non è collegato al tuo indirizzo di posta, ma collega i dati delle tue diverse sessioni alla stessa installazione."
+    },
+    "neverTitle": "MailCopilot non invia mai:",
+    "never": {
+      "bodies": "Il testo dei messaggi, gli oggetti e i nomi delle tue cartelle non vengono raccolti: nulla di ciò che viene inviato si basa su di essi e nei dati compare solo il tipo di cartella, per esempio Posta in arrivo o Cestino. L'unico testo che non scriviamo noi è il messaggio di errore di un server di posta; gli indirizzi e i percorsi dei file vengono rimossi automaticamente prima dell'invio, nella misura in cui vengono riconosciuti",
+      "addresses": "Gli indirizzi e-mail, né i tuoi né quelli di altri. L'unica eccezione è il modulo di feedback in Impostazioni → Informazioni: l'indirizzo che scrivi lì tu stesso viene inviato insieme al tuo messaggio, così puoi ricevere una risposta",
+      "attachments": "Gli allegati e i nomi dei loro file",
+      "searchQueries": "Ciò che digiti nella ricerca: vengono conteggiate solo la lunghezza della richiesta e il numero di risultati",
+      "aiPrompts": "Il testo delle richieste all'IA e delle sue risposte"
+    },
+    "changeLater": "Puoi modificare questa decisione in qualsiasi momento: Impostazioni → Informazioni.",
+    "learnMore": "Cosa viene raccolto — pagina sulla privacy",
+    "allow": "Consenti",
+    "deny": "Non consentire"
   },
   "account": {
     "title": "Connetti e-mail",
@@ -1377,5 +1403,11 @@
     "cancelled": "Questo evento è stato annullato",
     "notActionable": "Questo invito non richiede una risposta",
     "originalTimezone": "Originariamente pianificato in {{tzid}}"
+  },
+  "window": {
+    "minimize": "Riduci a icona",
+    "maximize": "Ingrandisci",
+    "restore": "Ripristina",
+    "close": "Chiudi"
   }
 }

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Save, Plug, Loader2, Minus, Square, Copy, X, Plus, CheckCircle, LogIn, AlertCircle } from 'lucide-react'
+import { Save, Plug, Loader2, Plus, CheckCircle, LogIn, AlertCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { AccountConfig, AccountMeta, AutoconfigResult, TlsPin } from '../../packages/net/types'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
 import { recordEvent, providerFromHost } from '../utils/metrics'
 import { captureException } from '../sentry'
 
@@ -206,7 +206,6 @@ function mapMetaToForm(meta: AccountMeta): {
 
 export default function Account({ initialMode = 'new', initialEditId }: { initialMode?: 'new' | 'edit'; initialEditId?: number }) {
   const { t } = useTranslation()
-  const maximized = useMaximized()
   const [, setAccounts] = useState<AccountMeta[]>([])
   const [selected, setSelected] = useState<number | 'new'>(initialMode === 'edit' && initialEditId != null ? initialEditId : 'new')
   const [form, setForm] = useState<{
@@ -784,20 +783,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
   return (
     <>
     {/* Custom titlebar for frameless window */}
-    <div className="child-titlebar">
-      <span className="child-titlebar-title">{selected === 'new' ? t('account.title') : t('account.editTitle')}</span>
-      <div className="titlebar-controls">
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')}>
-          <Minus size={14} />
-        </button>
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')}>
-          {maximized ? <Copy size={12} /> : <Square size={12} />}
-        </button>
-        <button className="titlebar-btn titlebar-btn-close" onClick={() => window.close()}>
-          <X size={14} />
-        </button>
-      </div>
-    </div>
+    <WindowTitlebar title={selected === 'new' ? t('account.title') : t('account.editTitle')} />
     <div className="window-container">
       <h2>{selected === 'new' ? t('account.title') : t('account.editTitle')}</h2>
       <p className="hint">

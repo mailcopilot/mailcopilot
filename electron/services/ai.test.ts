@@ -269,6 +269,14 @@ vi.mock('../sentry', () => ({
   reportKeychainUnavailable: mockReportKeychainUnavailable,
 }))
 
+// §2.82 — metric spans (and every other telemetry sink) are gated on the
+// recorded consent decision, which defaults to "not allowed" in a fresh
+// process. This suite asserts on the spans the AI service opens, so it has to
+// describe the consented state explicitly; the gate itself is covered in
+// electron/telemetryGate.test.ts.
+import { setTelemetryCollectionAllowed } from '../telemetryGate'
+setTelemetryCollectionAllowed(true)
+
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import * as coreModule from '../../packages/core'
 import {

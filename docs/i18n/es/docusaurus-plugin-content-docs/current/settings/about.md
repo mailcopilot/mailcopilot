@@ -66,11 +66,13 @@ Si MailCopilot fue instalado para todo el sistema (por ejemplo, mediante un gest
 
 Actualice la aplicación a través de su gestor de paquetes o con privilegios de administrador.
 
-## Informes de errores anónimos
+## Diagnósticos y datos de uso
 
-Cuando está habilitado, MailCopilot envía informes de fallos anónimos para ayudar a los desarrolladores a encontrar y corregir errores. No se recopilan datos personales, contenido de correos electrónicos ni información de cuentas — solo se transmiten detalles técnicos de los errores.
+Cuando está habilitado, MailCopilot envía informes de fallos, mediciones de rendimiento, eventos de uso (qué funciones se utilizan, qué proveedor y modelo de IA, el coste estimado de una petición) y un identificador aleatorio de la instalación que vincula sus sesiones. El contenido de los mensajes y el texto de sus búsquedas nunca se incluyen; las direcciones, asuntos y nombres de carpetas quedan totalmente excluidos allí donde el diagnóstico usa una lista cerrada de campos (como en el diagnóstico de la copia enviada), y en el resto de los casos los atrapa una limpieza de mejor esfuerzo de formas reconocibles de direcciones y rutas -- una red de seguridad, no una garantía. El formulario de comentarios de abajo es el único lugar donde se envía una dirección a propósito, para que puedan responderle; en cualquier otro sitio, una dirección solo se elimina si se detecta, no se garantiza su ausencia -- y, como sí incluye ese identificador de instalación, estos datos no son totalmente anónimos. Consulte [Telemetría](../privacy/telemetry) para ver la lista completa de qué se envía y qué nunca se envía.
 
-Esta configuración está habilitada por defecto. Puede desactivarla en cualquier momento desmarcando la casilla.
+Esta configuración refleja la respuesta que dio en la pantalla de consentimiento mostrada la primera vez que inició MailCopilot, y está **deshabilitada de forma predeterminada** — no se envía nada a menos que haya dado su consentimiento activamente. Puede cambiar su decisión en cualquier momento marcando o desmarcando la casilla.
+
+Si MailCopilot no tiene registro de una respuesta a la pregunta de consentimiento inicial — por ejemplo, justo después de que la lista de datos recopilados cambie y sea necesario volver a preguntar — la casilla aquí se muestra desmarcada y deshabilitada, con una nota indicando que el diagnóstico permanece desactivado hasta que responda en la pantalla de consentimiento en el próximo inicio.
 
 ## Registro de depuración
 
@@ -82,6 +84,6 @@ El registro de depuración está deshabilitado por defecto. Actívelo solo cuand
 
 Haga clic en el botón **Reportar un error** para enviar comentarios directamente a los desarrolladores de MailCopilot. Describa el problema encontrado — esto nos ayuda a identificar y corregir problemas más rápidamente.
 
-Sus comentarios se envían de forma segura a través del mismo sistema anónimo de informes de errores. Si los informes de errores están desactivados, verá un enlace al sitio web de MailCopilot donde puede contactar con el soporte.
+Sus comentarios se envían de forma segura a través del mismo sistema de diagnósticos descrito arriba. Si los informes de errores están desactivados, verá un enlace al sitio web de MailCopilot donde puede contactar con el soporte.
 
 Cuando la aplicación encuentra un error inesperado, también aparecerá un formulario de comentarios en la pantalla de error, permitiéndole describir lo que estaba haciendo antes del error.

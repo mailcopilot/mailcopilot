@@ -130,6 +130,25 @@ export async function launchApp(
   extraEnv?: Record<string, string>,
 ): Promise<AppContext> {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), tmpPrefix))
+  const { proc, browser, page } = await spawnAndConnect(dataDir, extraEnv, 'launchApp')
+  await waitForMailList(page)
+  return { proc, browser, page, dataDir }
+}
+
+/**
+ * Spawn Electron against `dataDir` and attach over CDP, stopping at
+ * `domcontentloaded`.
+ *
+ * Shared by every launcher in this file. It deliberately does NOT wait for the
+ * mail list: `launchApp` / `launchAppReuse` add that wait, while the telemetry
+ * consent specs (§2.82) must observe a window where `<App/>` is not mounted at
+ * all, so waiting for `inbox-list` there would time out by design.
+ */
+async function spawnAndConnect(
+  dataDir: string,
+  extraEnv: Record<string, string> | undefined,
+  label: string,
+): Promise<{ proc: ChildProcessWithoutNullStreams; browser: Browser; page: Page }> {
   const require = createRequire(import.meta.url)
   const electronBinary = require('electron') as string
   const cdpPort = await getFreePort()
@@ -172,7 +191,7 @@ export async function launchApp(
       break
     } catch (err) {
       if (attempt >= 2) throw err
-      console.log(`[launchApp] CDP connect attempt ${attempt + 1} failed, retrying in 2s...`)
+      console.log(`[${label}] CDP connect attempt ${attempt + 1} failed, retrying in 2s...`)
       await sleep(2000)
     }
   }
@@ -181,11 +200,40 @@ export async function launchApp(
   const page = context.pages()[0] ?? await context.waitForEvent('page')
   await page.waitForLoadState('domcontentloaded')
 
-  // Wait for the mail list to appear (increased timeout for CI under load)
+  return { proc, browser, page }
+}
+
+/** Wait for the mail list to appear (increased timeout for CI under load). */
+async function waitForMailList(page: Page): Promise<void> {
   await expect(page.getByTestId('inbox-list')).toBeVisible({ timeout: IS_CI ? 45_000 : 30_000 })
   await expect(page.getByTestId('mail-item').first()).toBeVisible({ timeout: LAUNCH_TIMEOUT })
+}
 
-  return { proc, browser, page, dataDir }
+/**
+ * Launch with the §2.82 telemetry consent gate ARMED.
+ *
+ * The gate is bypassed for the whole e2e suite (`MAILCOPILOT_E2E=1` +
+ * unpackaged build, see electron/services/telemetryConsentService.ts); setting
+ * `MAILCOPILOT_E2E_CONSENT=1` opts a single spec back into the real screen so
+ * the consent flow itself can be tested. Returns as soon as the page loads —
+ * the caller decides whether it expects the consent screen or the mail list.
+ *
+ * `dataDir`: pass an existing directory to exercise the restart path (AC7); the
+ * returned context then omits `dataDir` so `cleanupApp` leaves it in place and
+ * the caller owns its lifecycle.
+ */
+export async function launchAppWithConsentGate(
+  options: { dataDir?: string; tmpPrefix?: string } = {},
+): Promise<AppContext> {
+  const reuse = Boolean(options.dataDir)
+  const dataDir = options.dataDir
+    ?? await fs.mkdtemp(path.join(os.tmpdir(), options.tmpPrefix ?? 'mailcopilot-e2e-consent-'))
+  const { proc, browser, page } = await spawnAndConnect(
+    dataDir,
+    { MAILCOPILOT_E2E_CONSENT: '1' },
+    'launchAppWithConsentGate',
+  )
+  return { proc, browser, page, dataDir: (reuse ? undefined : dataDir) as unknown as string }
 }
 
 /**
@@ -199,53 +247,8 @@ export async function launchAppReuse(
   dataDir: string,
   extraEnv?: Record<string, string>,
 ): Promise<AppContext> {
-  const require = createRequire(import.meta.url)
-  const electronBinary = require('electron') as string
-  const cdpPort = await getFreePort()
-
-  const env = {
-    ...process.env,
-    ...(extraEnv ?? {}),
-    MAILCOPILOT_E2E: '1',
-    MAILCOPILOT_DATA_DIR: dataDir,
-    MAILCOPILOT_E2E_CDP_PORT: String(cdpPort),
-  }
-  delete (env as NodeJS.ProcessEnv).ELECTRON_RUN_AS_NODE
-
-  const electronArgs = ['.', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
-  const proc = hasDisplayServer()
-    ? spawn(electronBinary, electronArgs, { env, stdio: 'pipe' })
-    : spawn('xvfb-run', ['-a', electronBinary, ...electronArgs], { env, stdio: 'pipe' })
-
-  proc.stdout.on('data', (d: Buffer) => console.log('[electron:stdout]', d.toString().trimEnd()))
-  proc.stderr.on('data', (d: Buffer) => {
-    const line = d.toString().trimEnd()
-    if (/libva error|dbus.*object_proxy|GetAddrInfoReqWrap|DISPLAY.*not.*set/i.test(line)) return
-    console.error('[electron:stderr]', line)
-  })
-  proc.on('exit', (code, signal) => console.log(`[electron:exit] code=${code} signal=${signal}`))
-
-  await waitForPortOpen(cdpPort)
-  const wsUrl = await waitForDevToolsWsUrl(cdpPort)
-  let browser: Browser | null = null
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      browser = await chromium.connectOverCDP(wsUrl)
-      break
-    } catch (err) {
-      if (attempt >= 2) throw err
-      console.log(`[launchAppReuse] CDP connect attempt ${attempt + 1} failed, retrying in 2s...`)
-      await sleep(2000)
-    }
-  }
-  if (!browser) throw new Error('Failed to connect via CDP')
-  const context = browser.contexts()[0]
-  const page = context.pages()[0] ?? await context.waitForEvent('page')
-  await page.waitForLoadState('domcontentloaded')
-
-  await expect(page.getByTestId('inbox-list')).toBeVisible({ timeout: IS_CI ? 45_000 : 30_000 })
-  await expect(page.getByTestId('mail-item').first()).toBeVisible({ timeout: LAUNCH_TIMEOUT })
-
+  const { proc, browser, page } = await spawnAndConnect(dataDir, extraEnv, 'launchAppReuse')
+  await waitForMailList(page)
   // Return context without dataDir so cleanupApp skips directory removal.
   // The caller manages the shared dataDir lifecycle.
   return { proc, browser, page, dataDir: undefined as unknown as string }

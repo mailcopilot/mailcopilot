@@ -2,7 +2,7 @@
   "name": "mailcopilot",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "1.24.0",
+  "version": "1.25.0",
   "description": "MailCopilot — современный кроссплатформенный почтовый клиент на Electron + React + TypeScript.",
   "author": {
     "name": "MailCopilot Team",
@@ -48,12 +48,15 @@
     "prepare": "husky"
   },
   "overrides": {
-    "@xmldom/xmldom": "^0.8.13"
+    "@xmldom/xmldom": "^0.8.13",
+    "@modelcontextprotocol/sdk": {
+      "@hono/node-server": "^2.0.5"
+    }
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.21",
     "@ai-sdk/openai-compatible": "^2.0.30",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@napi-rs/canvas": "^0.1.92",
     "ai": "^6.0.90",
     "better-sqlite3": "^12.6.2",

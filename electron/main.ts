@@ -1,8 +1,11 @@
-// Sentry is initialized as early as possible, with the persisted
-// sentryEnabled flag already applied, so session envelopes and early
-// events honor the user's telemetry toggle. The preflight reader uses
-// only electron + fs + path so we don't drag config.ts (better-sqlite3,
-// keytar, zod, electron-store) in front of this call.
+// Sentry is initialized as early as possible, with the persisted telemetry
+// CONSENT verdict already applied, so session envelopes and early events
+// cannot precede the user's answer. The verdict is not "the About switch is
+// not off" — it requires an active consent record for the current disclosure
+// version (§2.82, electron/telemetryConsent.ts); an install that has never
+// been asked reads as `false` and stays silent. The preflight reader uses only
+// electron + fs + path so we don't drag config.ts (better-sqlite3, keytar,
+// zod, electron-store) in front of this call.
 //
 // Caveat: ES imports are hoisted — the static `import`s further down
 // this file (packages/net, electron services) execute their side
@@ -15,7 +18,9 @@
 // architectural change, orthogonal to this fix, and not done here.
 // What IS fixed: the SDK's own `enabled` flag now starts in the
 // correct state, so session envelopes and all post-init events respect
-// the user's opt-out.
+// the recorded consent decision. The same call also arms the collection
+// gate (electron/telemetryGate.ts), so nothing ACCUMULATES before the
+// answer either.
 import { readSentryEnabledPreflight } from './sentryPreflight'
 import { initSentry, captureException, flushSentry, setSentryUserEnabled, setSentryUserId } from './sentry'
 setSentryUserEnabled(readSentryEnabledPreflight())
@@ -33,8 +38,17 @@ import { setNetTelemetrySink, setNetErrorReporter, setNetEventReporter } from '.
 // electron/services/* use the typed startMetricSpan for compile-time
 // safety on span names (see metrics.ts for the split rationale).
 setNetTelemetrySink((name, attributes) => startMetricSpanDynamic(name, attributes))
+// §2.82 iter4 (security finding 2): this seam is the PII boundary for network
+// errors, not a pass-through. Every string inside `err` is written by the mail
+// server (ImapFlow keeps the server's free text in `responseText` and the
+// executed command — including the MAILBOX NAME — in `executedCommand`), and a
+// folder name has no shape that the event-level scrub could recognise. The
+// service drops transient conditions against the raw error, then transmits a
+// synthetic exception carrying only a closed error class plus allowlisted
+// context; the raw error stays in the local log. See netErrorTelemetry.ts.
+import { reportSanitizedNetError } from './services/netErrorTelemetry'
 setNetErrorReporter((source, err, context) => {
-  captureException(err, { source, ...(context ?? {}) })
+  reportSanitizedNetError(source, err, context)
 })
 // Bridge typed discrete events from packages/net (e.g. auth refresh cooldown
 // suppression) into recordEvent. The registered schema entry validates tag
@@ -134,6 +148,9 @@ import {
   markFirstMessageOpened,
 } from './installId'
 import { featureReach, markFeatureUsed } from './featureReach'
+// §2.82 — the telemetry session clock. Re-origins on a consent transition, so
+// `app.session_ended` never reports a period the user had not agreed to.
+import { telemetryCollectionStartedAtMs } from './telemetryGate'
 
 // Single Instance Lock: prevent multiple app instances sharing the same DB.
 // Disabled in E2E mode — tests run multiple isolated instances in parallel.
@@ -231,6 +248,7 @@ import { domainToUnicode } from 'node:url'
 import tls from 'node:tls'
 import { z } from 'zod'
 import { refreshGoogleAccessToken, runGoogleOAuthFlow } from './googleOAuth'
+import { requireGoogleOAuthCredentials } from './googleOAuthConfig'
 // Microsoft OAuth low-level flows are now consumed via electron/services/outlookOAuthService.ts
 import {
   testImapConnection,
@@ -311,7 +329,11 @@ import { requestSafeRemoteBytes } from '../packages/net/safeRemoteFetch'
 // §2.33 PR2a: setSecretBackend is exported from packages/net/config but is NOT
 // re-exported from packages/net/index — import it directly from the config
 // module (same style as electron/services/ai.ts), keeping scope to main.ts.
-import { setSecretBackend } from '../packages/net/config'
+// `getRawPersistedSettings` is deliberately in the same bucket: it bypasses the
+// schema (defaults and all), so keeping it off the public index makes it hard
+// to reach for by accident. Its only two callers are the §2.82 consent
+// migration and the `settings:save` clamp-preservation below.
+import { setSecretBackend, getRawPersistedSettings } from '../packages/net/config'
 import type { AccountConfig, AccountMeta, AttachmentMeta, CalendarInvite, ComposeInit, FolderRoles, FolderPreference, ImapConfig, Mailbox, MessageDetails, UnsubscribeAttemptResult } from '../packages/net/types'
 import { queueItemToComposeInit } from './queueComposeBridge'
 import { quickActionRewriteSchema, instantReplyGenerateSchema } from './ipcSchemas'
@@ -415,6 +437,10 @@ import {
   updateMailRule,
   deleteMailRule,
   getMessagesForRuleTest,
+  getMailRulesState,
+  setMailRulesState,
+  getUidsForRulesSince,
+  seedMailRulesStateFromCache,
   listAiRules,
   createAiRule,
   updateAiRule,
@@ -477,12 +503,16 @@ import {
   processAiRuleBatch as pipelineProcessBatch,
   type AiRulesPipelineDeps,
 } from './services/aiRulesPipeline'
+import {
+  runMailRules,
+  type MailRulesRunnerDeps,
+} from './services/mailRulesRunner'
 import { startBodyIndexer, stopBodyIndexer, waitForIdle as waitForBodyIndexerIdle, type FetchBodyFn } from './services/bodyIndexer'
 import { replayOfflineOps } from './services/offlineReplay'
 import { searchWorkerClient } from './services/searchWorkerClient'
 import { canWriteAppDir, classifyUpdateError, detectUpdateChannel, type SystemInfo } from './services/updateCheck'
 import { computeOfflineSinceDate } from './services/offlineRetention'
-import { reportSentCopyAppendFailure } from './services/sentCopyFailure'
+import { reportSentCopyAppendFailure, buildSentCopyAppendDiag } from './services/sentCopyFailure'
 import { getOutlookAccessToken, getOutlookGraphSendAccessToken, clearOutlookTokenCache, forceRefreshOutlookAccessToken, connectOutlookAccount } from './services/outlookOAuthService'
 import { secretStore } from './services/secretStore'
 import { sendMailViaGraph } from '../packages/net/graphSend'
@@ -499,6 +529,11 @@ import {
   type InviteResolver,
   type RsvpSender,
 } from './services/inviteBridge'
+
+// §2.82 — telemetry consent. Decision logic is pure (electron/telemetryConsent.ts);
+// persistence, migration and the two IPC channels live in the service.
+import { applyAboutToggleFromOrigin, isTelemetryAllowed, clampTelemetryForRenderer } from './telemetryConsent'
+import { initTelemetryConsent } from './services/telemetryConsentService'
 
 // §3.10 P0 wave 3 reinforcement: bridge the packages/net settings-migration
 // audit hook into the main-side audit pipeline (electron-log + ai_audit_log +
@@ -579,8 +614,10 @@ if (process.env.MAILCOPILOT_DATA_DIR) {
   try {
     const s = getSettings()
     debugLogging = s?.debugLogging === true
-    setSentryUserEnabled(s?.sentryEnabled !== false)
-    // Attach the stable anonymous install identity as soon as settings
+    // §2.82: the About switch alone is not permission — an active consent
+    // record for the current disclosure version must back it.
+    setSentryUserEnabled(isTelemetryAllowed(s))
+    // Attach the stable pseudonymous install identity as soon as settings
     // are loaded — Sentry needs this to count unique installs. Safe to
     // call unconditionally because setSentryUserId no-ops when the user
     // toggle is off.
@@ -1643,7 +1680,7 @@ function themeArgs(): string[] {
 }
 
 /**
- * Pass the anonymous install-id hash into the renderer process via
+ * Pass the pseudonymous install-id hash into the renderer process via
  * Chromium additionalArguments so the renderer's Sentry.init can attach
  * the same identity as main without a first-paint IPC round-trip. The
  * flag is synchronous for preload (process.argv) and therefore available
@@ -1658,26 +1695,29 @@ function installIdArgs(): string[] {
 }
 
 /**
- * Propagate the persisted sentryEnabled flag to the renderer before its
- * Sentry.init runs. Without this there is a startup window where the
- * renderer uses the default "enabled" and can emit events (and attach the
- * stable anonymous install-id) even though the user has telemetry off in
- * settings. The renderer reads this flag synchronously from process.argv
- * in preload.
+ * Propagate the effective telemetry permission to the renderer before its
+ * Sentry.init runs. Not the persisted `sentryEnabled` field: §2.82 requires an
+ * active consent record for the current disclosure version behind it
+ * (`isTelemetryAllowed`), so an install that has never been asked yields
+ * `false` even though the settings schema defaults the field to `true`.
+ * Without this argument there is a startup window in which the renderer uses
+ * its own "enabled" default and can emit events (and attach the stable
+ * pseudonymous install-id) before anyone has answered. The renderer reads the
+ * flag synchronously from process.argv in preload.
  *
  * Tri-state so the renderer can apply symmetric fail-closed semantics:
- *   --sentry-enabled=true  → confirmed on
- *   --sentry-enabled=false → confirmed off
+ *   --sentry-enabled=true  → consent on record, send
+ *   --sentry-enabled=false → refused, withdrawn, stale, or never asked
  *   (absent)               → unknown, renderer treats as off
  *
  * If getSettings() throws (store broken, corrupted JSON), we emit neither
  * token and let the renderer default to fail-closed. Same policy as
  * sentryPreflight.ts for the main process: prefer silent loss of events
- * over silent leakage when we cannot verify the user's preference.
+ * over silent leakage when we cannot verify the user's decision.
  */
 function sentryEnabledArgs(): string[] {
   try {
-    return [getSettings().sentryEnabled === false ? '--sentry-enabled=false' : '--sentry-enabled=true']
+    return [isTelemetryAllowed(getSettings()) ? '--sentry-enabled=true' : '--sentry-enabled=false']
   } catch {
     return []
   }
@@ -1808,7 +1848,12 @@ app.on('before-quit', (event) => {
     // quit/update cycle would drop session-level events otherwise.
     try {
       flushAggregator()
-      const durMs = Date.now() - sessionStartedAtMs
+      // §2.82: measured from the telemetry session origin, not from process
+      // start. For a user who consented mid-session those differ, and
+      // reporting full uptime would describe a period they had not agreed to
+      // be measured over. Identical to `sessionStartedAtMs` when consent was
+      // already on record at launch.
+      const durMs = Date.now() - telemetryCollectionStartedAtMs()
       recordHistogram('app.session_ended', durMs, {
         reason: 'quit',
         install_id_hash: getInstallIdHash(),
@@ -1955,8 +2000,10 @@ app.whenReady().then(createWindow).then(() => {
     isInteractiveOperationActive: () => resizeState !== null,
     stopInteractiveOperation: () => stopActiveResize(),
   })
-  // Emit app.session_started. Carries install_id_hash — the ONLY event
-  // besides session_ended and session_summary that does.
+  // Emit app.session_started. It is one of only three events that carry the
+  // install_id_hash TAG (with session_ended and session_summary) — a
+  // cardinality rule, not an unlinkability one: the same hash is attached
+  // SDK-wide as the Sentry user.id. See electron/installId.ts.
   try {
     const s0 = getSettings()
     const accCount = (() => {
@@ -2420,6 +2467,20 @@ handleIpc('update:install', async () => {
  * "already shown" would drop the notice forever. Such callers must check the
  * count and retry instead. Ordinary fire-and-forget callers ignore it.
  */
+/**
+ * §2.82 — the ONE way a settings record reaches a renderer window.
+ *
+ * Every copy that leaves main goes through `clampTelemetryForRenderer`, which
+ * replaces the raw persisted `sentryEnabled` with the effective permission.
+ * The renderer starts its own Sentry client from that field alone, so a raw
+ * `true` with no consent record behind it (the schema default on a clean
+ * profile) would start renderer envelopes for a user who was never asked. Use
+ * this helper, never `broadcast('settings:changed', …)` directly.
+ */
+function broadcastSettingsChanged(settings: ReturnType<typeof getSettings>): number {
+  return broadcast('settings:changed', clampTelemetryForRenderer(settings))
+}
+
 function broadcast(channel: string, payload: unknown): number {
   let delivered = 0
   for (const w of BrowserWindow.getAllWindows()) {
@@ -2444,11 +2505,11 @@ async function readStreamToBuffer(stream: NodeJS.ReadableStream, maxBytes: numbe
   return Buffer.concat(chunks)
 }
 
-// Google OAuth (Desktop app, PKCE). Env var overrides for dev/CI.
-const GOOGLE_CLIENT_ID = (process.env.MAILCOPILOT_GOOGLE_CLIENT_ID || '').trim()
-  || '407178545885-08stok46n6sba3dp75mnul6h63ujubh5.apps.googleusercontent.com'
-const GOOGLE_CLIENT_SECRET = (process.env.MAILCOPILOT_GOOGLE_CLIENT_SECRET || '').trim()
-  || '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'
+// Google OAuth (Desktop app, PKCE). Credentials come from the environment
+// first and from the build-time `define` second — never from a source literal.
+// Resolution happens per call, not at module load, so that a build without
+// credentials still starts and only Gmail sign-in is unavailable.
+// See electron/googleOAuthConfig.ts.
 
 type GoogleTokenCacheEntry = { accessToken: string; expiresAt: number }
 const GOOGLE_TOKEN_CACHE = new Map<number, GoogleTokenCacheEntry>()
@@ -2456,12 +2517,13 @@ const GOOGLE_TOKEN_REFRESH_INFLIGHT = new Map<number, Promise<GoogleTokenCacheEn
 let googleOAuthBusy = false
 
 async function doGoogleOAuthFlow() {
+  const creds = requireGoogleOAuthCredentials()
   if (googleOAuthBusy) throw new Error('Google OAuth is already running in another window')
   googleOAuthBusy = true
   try {
     return await runGoogleOAuthFlow({
-      clientId: GOOGLE_CLIENT_ID,
-      clientSecret: GOOGLE_CLIENT_SECRET,
+      clientId: creds.clientId,
+      clientSecret: creds.clientSecret || undefined,
       openExternal: (url) => { void openExternalGated(url, 'oauth') },
     })
   } finally {
@@ -2482,7 +2544,8 @@ async function getGoogleAccessToken(accountId: number): Promise<string> {
     if (!found) throw new Error(`Google refresh token for account #${accountId} not found (re-authorization required)`)
     const refreshToken = found.token
 
-    const result = await refreshGoogleAccessToken({ clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET, refreshToken })
+    const creds = requireGoogleOAuthCredentials()
+    const result = await refreshGoogleAccessToken({ clientId: creds.clientId, clientSecret: creds.clientSecret || undefined, refreshToken })
     GOOGLE_TOKEN_CACHE.set(accountId, result)
 
     // Migrate-on-first-use: if we read from the legacy `google:refresh:${id}`
@@ -3820,36 +3883,26 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
     // size + Sentry capture. ImapFlow errors typically carry
     // `code`/`response`/`responseStatus`/`responseText`/`serverResponseCode`/
     // `command` — defensively extract whatever exists.
-    const err = e as {
-      code?: unknown
-      response?: unknown
-      responseStatus?: unknown
-      responseText?: unknown
-      serverResponseCode?: unknown
-      command?: unknown
-      message?: unknown
-    } | null | undefined
-    const pickStr = (v: unknown): string | undefined =>
-      typeof v === 'string' && v.length > 0 ? v.slice(0, 500) : undefined
-    // Cap the String(e) fallback the same way as every other field — an
-    // unbounded stringified error must not reach Sentry (codex §2.24 MEDIUM-3).
-    const diag = {
+    //
+    // §2.82 iter2 (finding 1) — the diagnostics are built by the service, which
+    // owns the PII boundary for this failure. The previous inline object put the
+    // Sent folder NAME, the Message-ID and up to 500 chars of raw server
+    // response into Sentry, contradicting the consent screen's unqualified
+    // promise about folder names and addresses. Both sinks below now take the
+    // SAME sanitized object, so a field cannot be added to one and not the other.
+    const diag = buildSentCopyAppendDiag(e, {
       accountId,
-      providerId: meta.providerId ?? null,
+      providerId: meta.providerId,
       sentFolder: sentFolderForDiag ?? null,
       rawSize: rawSizeForDiag ?? null,
       messageId: result.messageId ?? null,
-      errorMessage: pickStr(err?.message)
-        ?? (e instanceof Error ? e.message : String(e)).slice(0, 500),
-      errorCode: pickStr(err?.code),
-      errorResponse: pickStr(err?.response),
-      errorResponseStatus: pickStr(err?.responseStatus),
-      errorResponseText: pickStr(err?.responseText),
-      errorServerResponseCode: pickStr(err?.serverResponseCode),
-      errorCommand: pickStr(err?.command),
-    }
+    })
     logMail.warn('Could not save copy to Sent (diag):', diag)
-    captureException(e, { source: 'sendMail:appendToSent', ...diag })
+    // Synthetic exception, not `e`: an ImapFlow rejection message inlines the
+    // mailbox it failed on and whatever prose the server chose to attach.
+    const appendErr = new Error(`sent_copy_append_failed: ${diag.reason}`)
+    appendErr.name = 'SentCopyAppendError'
+    captureException(appendErr, { source: 'sendMail:appendToSent', ...diag })
     // §2.23 PR1 — fire-and-forget: typed `send_queue.append_failed` metric
     // (enum buckets only — see services/sentCopyFailure.ts for the PII
     // boundary) + `mail:sentCopyFailed` broadcast so the renderer can toast
@@ -4359,17 +4412,12 @@ handleIpc('net:inboxSummaries', async (_e, accountId: unknown, folder?: unknown,
   const { cfg } = await requireAccountConfig(id)
   assertImapAuth(id, cfg.imap)
 
-  // Snapshot max UID before fetch so we can detect truly new messages for rule evaluation.
-  const prevMaxUid = getMaxUidForFolder(id, parsedFolder)
   const result = await fetchInboxSummaries(cfg.imap, parsedFolder, 50, id, isLightweight)
 
-  // Evaluate mail rules on newly appeared messages (fire-and-forget).
-  const newUids = result.filter(m => m.uid > prevMaxUid).map(m => m.uid)
-  if (newUids.length > 0) {
-    processMailRules(id, parsedFolder, newUids).catch(err =>
-      logRules.error('Background processMailRules (inboxSummaries) failed:', err)
-    )
-  }
+  // Evaluate mail rules on anything the pipeline has not seen (fire-and-forget).
+  processMailRules(id, parsedFolder).catch(err =>
+    logRules.error('Background processMailRules (inboxSummaries) failed:', err)
+  )
 
   // §2.7: drop UIDs the renderer has optimistically moved out (undo window).
   return filterPendingMoves(result)
@@ -4413,8 +4461,18 @@ handleIpc('net:folderPage', async (_e, accountId: unknown, folder: unknown, limi
 
   const { cfg } = await requireAccountConfig(id)
   assertImapAuth(id, cfg.imap)
+  const page = await fetchFolderSummariesPage(cfg.imap, parsedFolder, lim, beforeUid, id)
+
+  // This path persists headers too (fetchFolderSummariesPage → upsertMessages),
+  // so it used to raise `MAX(uid)` above messages the rule pipeline had never
+  // seen — one of the leaks fixed on 2026-07-30 (§2.86). Now that discovery is
+  // watermark-based, triggering a pass here is cheap and closes the hole.
+  processMailRules(id, parsedFolder).catch(err =>
+    logRules.error('Background processMailRules (folderPage) failed:', err)
+  )
+
   // §2.7: drop UIDs the renderer has optimistically moved out (undo window).
-  return filterPendingMoves(await fetchFolderSummariesPage(cfg.imap, parsedFolder, lim, beforeUid, id))
+  return filterPendingMoves(page)
 })
 
 /**
@@ -4429,6 +4487,28 @@ function purgeVirtualFolderRefs(accountId: number, folder: string, uids: number[
 }
 
 // --- Static mail rules ---
+
+// Give every folder this install already knows about — cached mail, prefs,
+// crawl state or sync state, empty ones included — a rule-pipeline starting
+// point, BEFORE anything can sync. This is module scope on purpose: it must
+// happen ahead of the first `net:*` IPC call (windows open in `whenReady`) and
+// ahead of the periodic-sync timer, both of which persist messages.
+//
+// The runner's own lazy baseline cannot carry this job: the runner is invoked
+// AFTER a fetch has persisted its batch, so on the first launch of this build
+// `MAX(uid)` would already include mail that had just arrived — and that mail
+// would be declared old forever, which is precisely the §2.86 defect
+// re-created at the moment the fix ships. Idempotent: a second call leaves
+// existing rows alone (§2.86 iter2, review finding 2).
+try {
+  const seeded = seedMailRulesStateFromCache()
+  if (seeded > 0) logRules.info(`Seeded rule watermarks for ${seeded} known folder(s)`)
+} catch (err) {
+  // Never block startup on this: a folder that missed the seed still gets the
+  // runner's lazy baseline, which is the pre-fix behaviour, not a crash.
+  logRules.error('Seeding rule watermarks failed:', err)
+  captureException(err, { source: 'seedMailRulesStateFromCache' })
+}
 
 /**
  * Execute a single rule action on a message via IMAP.
@@ -4487,95 +4567,72 @@ async function executeRuleAction(accountId: number, folder: string, uid: number,
 }
 
 /**
- * Evaluate static mail rules on newly synced messages.
- * Called after folder header sync with UIDs that were not previously in the DB cache.
+ * In-flight guard for the rule runner, keyed `${accountId}:${folder}`.
+ * The pass is triggered from several sync paths and they do overlap.
  */
-async function processMailRules(accountId: number, folder: string, newUids: number[]): Promise<void> {
-  if (newUids.length === 0) return
+const mailRulesInflight = new Set<string>()
+
+/**
+ * Triggers that arrived while a pass held the key (same key shape). The running
+ * pass consumes this before releasing the slot, so a message persisted after
+ * that pass sampled its UID list is not left waiting for an unrelated trigger
+ * (§2.86 iter2 — lost wake-up).
+ */
+const mailRulesPendingRerun = new Set<string>()
+
+/**
+ * Consecutive action failures keyed `${accountId}:${folder}:${uid}`. Lives for
+ * the process lifetime: a restart deliberately grants a fresh retry budget,
+ * because a dead IMAP connection is exactly what a restart fixes.
+ */
+const mailRulesActionAttempts = new Map<string, number>()
+
+/** Wire the extracted runner to the real DB / IMAP / telemetry collaborators. */
+function buildMailRulesDeps(): MailRulesRunnerDeps {
+  return {
+    inFlight: mailRulesInflight,
+    pendingRerun: mailRulesPendingRerun,
+    actionAttempts: mailRulesActionAttempts,
+    listMailRules,
+    getMailRulesState,
+    setMailRulesState,
+    getUidValidity: (accountId, folder) => getSyncState(accountId, folder)?.uidValidity ?? null,
+    getMaxUidForFolder,
+    getUidsForRulesSince,
+    getMessageByUid,
+    executeRuleAction,
+    insertRuleLog,
+    enqueueForAiRules,
+    log: {
+      info: (msg) => logRules.info(msg),
+      warn: (msg) => logRules.warn(msg),
+      error: (msg, err) => logRules.error(msg, err),
+    },
+    captureException,
+  }
+}
+
+/**
+ * Evaluate static mail rules for everything in `folder` the pipeline has not
+ * looked at yet.
+ *
+ * Deliberately takes no UID list: the caller's idea of "new" (`uid > MAX(uid)`
+ * sampled before its own fetch) is what lost messages before 2026-07-30 — see
+ * the header of `services/mailRulesRunner.ts`. Discovery now lives inside the
+ * runner, against a watermark only the runner writes, so this is safe (and
+ * cheap) to call from any sync path.
+ */
+async function processMailRules(accountId: number, folder: string): Promise<void> {
   try {
-    const rows = listMailRules(String(accountId))
-    if (rows.length === 0) return
-
-    const parsedRules: MailRule[] = rows.filter(r => r.enabled).map(r => ({
-      id: r.id,
-      accountId: r.accountId,
-      name: r.name,
-      enabled: true,
-      priority: r.priority,
-      conditions: JSON.parse(r.conditions) as MailRule['conditions'],
-      actions: JSON.parse(r.actions) as MailRule['actions'],
-      stopProcessing: r.stopProcessing,
-    }))
-    if (parsedRules.length === 0) return
-
-    for (const uid of newUids) {
-      try {
-        const msg = getMessageByUid(accountId, folder, uid)
-        if (!msg) continue
-
-        const context: MailContext = {
-          from: msg.from,
-          fromAddr: msg.fromAddr,
-          to: msg.toAddr || '',
-          subject: msg.subject,
-          hasAttachments: msg.hasAttachments,
-          accountId,
-        }
-
-        // Evaluate rules and collect matched (rule, actions) pairs in one pass.
-        const sorted = [...parsedRules].sort((a, b) => a.priority - b.priority)
-        const matched: Array<{ rule: MailRule; actions: RuleAction[] }> = []
-        for (const rule of sorted) {
-          if (!rule.enabled) continue
-          if (rule.accountId !== null && String(rule.accountId) !== String(context.accountId)) continue
-          if (!matchRule(rule, context)) continue
-          matched.push({ rule, actions: rule.actions })
-          if (rule.stopProcessing) break
-        }
-
-        if (matched.length === 0) {
-          // No static rule matched — enqueue for AI rules pipeline
-          enqueueForAiRules({
-            accountId,
-            folder,
-            uid,
-            from: msg.from,
-            to: msg.toAddr || '',
-            subject: msg.subject,
-            bodyPreview: (msg.bodyText || '').substring(0, 500),
-            hasAttachment: msg.hasAttachments,
-          })
-          continue
-        }
-
-        const allActions = matched.flatMap(m => m.actions)
-        logRules.info(`Rule matched for uid=${uid} in ${folder}: ${allActions.map(a => a.type).join(',')}`)
-
-        for (const { rule, actions } of matched) {
-          for (const action of actions) {
-            await executeRuleAction(accountId, folder, uid, action)
-            try {
-              insertRuleLog({
-                ruleId: rule.id,
-                ruleName: rule.name,
-                accountId,
-                folder,
-                uid,
-                subject: msg.subject,
-                fromAddr: msg.fromAddr,
-                actionTaken: JSON.stringify(action),
-              })
-            } catch (logErr) {
-              logRules.error(`Failed to log rule execution:`, logErr)
-            }
-          }
-        }
-      } catch (err) {
-        logRules.error(`Failed to process rule for uid=${uid}:`, err)
-      }
-    }
+    await runMailRules(accountId, folder, buildMailRulesDeps())
   } catch (err) {
-    logRules.error('processMailRules error:', err)
+    logRules.error(`processMailRules error for ${folder}:`, err)
+    // No folder name in the Sentry payload — a mailbox name is user data and
+    // has no recognisable shape for the event-level scrub to catch
+    // (ARCHITECTURE.md, "Свободный текст третьей стороны не передаётся").
+    // Errors that reach here are our own (DB / wiring); per-message IMAP
+    // failures are handled and reported inside the runner.
+    captureException(err, { source: 'processMailRules' })
   }
 }
 
@@ -4775,10 +4832,6 @@ async function runSyncFolderHeaders(
     }
   } catch { /* non-critical */ }
 
-  // Snapshot the current max UID so we can detect truly new messages after sync.
-  const prevMaxUid = getMaxUidForFolder(id, parsedFolder)
-
-
   let fetched = 0
   let completed = false
   const allFetchedUids: number[] = []
@@ -4977,6 +5030,12 @@ async function runSyncFolderHeaders(
           } catch { /* non-critical */ }
 
           syncSucceeded = true
+          // This branch returns before the shared rule tail at the bottom of the
+          // function, so messages fetched here were never evaluated by static
+          // rules on non-CONDSTORE servers (2026-07-30 leak #1).
+          processMailRules(id, parsedFolder).catch(err =>
+            logRules.error('Background processMailRules (FLAGS-only sync) failed:', err)
+          )
           return { ok: true as const, fetched, completed }
         }
       } catch (err) {
@@ -5166,13 +5225,6 @@ async function runSyncFolderHeaders(
       logSync.warn(`slow post-sync writes ${parsedFolder} acc ${id}: ${postDt}ms`)
     }
 
-    // Evaluate static mail rules on newly appeared messages (fire-and-forget).
-    const newUids = allFetchedUids.filter(uid => uid > prevMaxUid)
-    if (newUids.length > 0) {
-      processMailRules(id, parsedFolder, newUids).catch(err =>
-        logRules.error('Background processMailRules failed:', err)
-      )
-    }
   } catch (syncErr) {
     // Force-close stale IMAP connection on timeout/error so next sync gets a fresh one
     const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr)
@@ -5191,6 +5243,18 @@ async function runSyncFolderHeaders(
       })
     } catch { /* non-critical */ }
     throw syncErr
+  } finally {
+    // Evaluate static mail rules on anything the pipeline has not seen
+    // (fire-and-forget). In `finally`, not at the tail of the `try`: a sync
+    // that throws after committing batches took the `catch` above and
+    // rethrew, so the tail never ran even though messages were already in the
+    // cache (§2.86 iter2, review finding 6). It also covers the FLAGS-only
+    // branch's early `return` — that branch keeps its own explicit call so the
+    // structural wiring test can pin it, and the duplicate costs one indexed
+    // query (the second call is folded into the first pass's rerun).
+    processMailRules(id, parsedFolder).catch(err =>
+      logRules.error('Background processMailRules failed:', err)
+    )
   }
 
   syncSucceeded = true
@@ -7003,6 +7067,14 @@ handleIpc('search:remoteSearch', async (_e, accountId: unknown, folder: unknown,
 
   // Hydrate UIDs into full summaries (also upserts into local cache)
   const summaries = await fetchSummariesByUids(cfg.imap, parsedFolder, uids, id)
+
+  // §2.86 iter2, review finding 7: hydration persists messages, so this is a
+  // message-persisting exit like the sync paths and owes the rule pipeline a
+  // trigger. Fire-and-forget — search latency must not wait on rule actions.
+  processMailRules(id, parsedFolder).catch(err =>
+    logRules.error('Background processMailRules (remoteSearch) failed:', err)
+  )
+
   return summaries
 })
 
@@ -7044,9 +7116,12 @@ handleIpc('cache:bodyTrimPreview', (_e, days: unknown) => {
 })
 
 // --- IPC: settings ---
-handleIpc('settings:get', () => getSettings())
+// §2.82: `sentryEnabled` is clamped to the effective permission on the way out
+// — see `clampTelemetryForRenderer`. The renderer must never see a `true` that
+// is merely the schema default with no consent record behind it.
+handleIpc('settings:get', () => clampTelemetryForRenderer(getSettings()))
 
-handleIpc('settings:save', async (_e, s: unknown) => {
+handleIpc('settings:save', async (event, s: unknown) => {
   const current = getSettings()
   // §3.10 P0: validate incoming renderer payload against the narrow writable
   // subset FIRST. `rendererWritableSettingsSchema` is `.strict()`, so any
@@ -7097,13 +7172,56 @@ handleIpc('settings:save', async (_e, s: unknown) => {
     (merged as any)[field] = (current as any)[field]
   }
   const parsed = settingsSchema.parse(merged)
-  const next = { ...parsed, mcpConnections: current.mcpConnections }
+  // §2.82: the About switch is the GDPR art. 7(3) withdrawal path, so a flip
+  // here moves the stored consent record too, and `sentryEnabled` is clamped to
+  // that record (a switch cannot be "on" without consent — see applyAboutToggle).
+  //
+  // iter2 (finding 3): the RAW persisted flag is handed in so that a save made
+  // while the consent answer is still pending preserves it instead of writing
+  // the clamped `false` the renderer echoed back. Raw, not `current.*`, for the
+  // same reason the consent migration reads raw: the parsed value cannot tell
+  // "never written" from "explicitly false" once a schema default fills it in.
+  //
+  // iter3 (finding 5): the failure branch falls back to the PARSED current
+  // value, not to `undefined`. `applyAboutToggle` reads anything other than
+  // `false` as "no expressed refusal on disk" and writes `true`, so an
+  // unreadable raw store used to promote a stored `false` — a real opt-out —
+  // into `true` on the next unrelated save, and the user would be asked again.
+  // `current.sentryEnabled` is the same value seen through the schema: it can
+  // only differ from the raw one when the key is ABSENT (default fills it in),
+  // and absent already means "not a refusal", so the substitution cannot invent
+  // one either.
+  const persistedSentryEnabled = (() => {
+    try { return getRawPersistedSettings()?.sentryEnabled } catch { return current.sentryEnabled }
+  })()
+  // iter4 (security finding 1): the SENDER decides whether a value that turns
+  // telemetry ON counts as an answer at all. Only the settings window shows
+  // the switch and its disclosure, so only it can carry a "yes"; turning it
+  // OFF stays accepted from every window (GDPR art. 7(3) — withdrawal must not
+  // be harder than consent). See `applyAboutToggleFromOrigin`.
+  const requestedSentryEnabled = parsed.sentryEnabled !== false
+  const aboutToggleOrigin = isSettingsWindowSender(event?.sender) ? 'settings-window' : 'other-window'
+  if (requestedSentryEnabled && !isTelemetryAllowed(current) && aboutToggleOrigin !== 'settings-window') {
+    // No sender identity, no payload echo — both are renderer-derived (CLAUDE.md §8).
+    logMain.warn('settings:save: telemetry enable ignored — sender is not the settings window')
+  }
+  const next = {
+    ...parsed,
+    mcpConnections: current.mcpConnections,
+    ...applyAboutToggleFromOrigin(
+      current,
+      requestedSentryEnabled,
+      new Date().toISOString(),
+      persistedSentryEnabled,
+      aboutToggleOrigin,
+    ),
+  }
   saveSettings(next)
   // Update Sentry state at runtime. Re-attach the identity if the user
   // is flipping the toggle back on — the reverse path (on → off) is
   // handled internally by setSentryUserEnabled via Sentry.setUser(null).
-  const wasEnabled = current.sentryEnabled !== false
-  const willBeEnabled = next.sentryEnabled !== false
+  const wasEnabled = isTelemetryAllowed(current)
+  const willBeEnabled = isTelemetryAllowed(next)
   setSentryUserEnabled(willBeEnabled)
   if (!wasEnabled && willBeEnabled) {
     setSentryUserId(getInstallIdHash())
@@ -7115,12 +7233,23 @@ handleIpc('settings:save', async (_e, s: unknown) => {
     app.removeAsDefaultProtocolClient('mailto')
   }
   // Notify all windows (main/settings etc.) about settings change so UI updates without restart.
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('settings:changed', next)
-  }
+  broadcastSettingsChanged(next)
   // Trigger main-process reactions (offline replay, periodic sync restart)
   onSettingsChangedMain(next)
   return { ok: true as const }
+})
+
+// §2.82 — seed the consent record for installs that had already opted out, then
+// register `telemetry:consentState` / `telemetry:setConsent`. Everything else
+// about consent (state, persistence, e2e bypass, the grant metric) lives in the
+// service; main only wires it.
+initTelemetryConsent({
+  broadcastSettings: settings => { broadcastSettingsChanged(settings) },
+  // §2.82 iter3 — the consent screen renders in the main window only, so a
+  // write from any other WebContents cannot be a click on it. Evaluated
+  // lazily: this runs at module scope, before `win` exists.
+  isMainWindowSender: sender =>
+    !!win && !win.isDestroyed() && sender === win.webContents,
 })
 
 handleIpc('e2e:localizeMails', (_e, language: unknown) => {
@@ -7299,6 +7428,25 @@ function openSettingsWindow() {
   if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); return }
   settingsWin = createChildWindow('settings', 720, 640, '/settings')
   settingsWin.on('closed', () => { settingsWin = null })
+}
+
+/**
+ * §2.82 iter4 — is this `IpcMainInvokeEvent.sender` the SETTINGS window?
+ *
+ * Sibling of the `isMainWindowSender` predicate handed to the consent service,
+ * and built the same way: identity against the live `BrowserWindow` handle,
+ * evaluated per call (the window does not exist at handler-registration time),
+ * fail-closed on every uncertainty. It deliberately does NOT reuse
+ * `isMainWindowSender` — the About switch lives in this CHILD window, so the
+ * main-window predicate would reject the one sender that is allowed to turn
+ * telemetry on and leave the user unable to consent after a refusal.
+ *
+ * The single `settingsWin` handle above is the existing bookkeeping for this
+ * window (`openSettingsWindow` focuses it instead of opening a second one, and
+ * `closed` clears it), so there is no parallel window registry here.
+ */
+function isSettingsWindowSender(sender: unknown): boolean {
+  return !!settingsWin && !settingsWin.isDestroyed() && sender === settingsWin.webContents
 }
 
 handleIpc('ui:openSettings', () => openSettingsWindow())
@@ -10096,9 +10244,7 @@ handleIpc('mcp:requestStdioEnable', async () => {
   logMcpStdio.info('stdio MCP globally enabled via native-confirm')
 
   // Broadcast the new settings so open windows pick up the enable without a restart.
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('settings:changed', getSettings())
-  }
+  broadcastSettingsChanged(getSettings())
 
   return { ok: true as const, source: 'native-confirm' as const }
 })
@@ -10245,9 +10391,7 @@ handleIpc('mcp:approveStdioConnection', async (_e, idInput?: unknown) => {
   logMcpStdio.info(`stdio connection "${config.name}" approved via native-confirm (hash=${commandHash.slice(0, 12)}…)`)
 
   // Broadcast new settings so the Settings window refreshes the "Needs approval" badge.
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('settings:changed', getSettings())
-  }
+  broadcastSettingsChanged(getSettings())
 
   return { ok: true as const, source: 'native-confirm' as const }
 })
@@ -10470,6 +10614,17 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
       }
     } catch (err) {
       logPeriodic.warn(`Periodic sync failed for folder "${folder}" account #${aid}:`, err)
+    } finally {
+      // §2.86 iter2, review finding 1: this loop is a SEPARATE sync path from
+      // the `net:syncFolderHeaders` handler, it runs with no user present, and
+      // it commits batches through the callback above. Without this call a user
+      // who never opens a folder in the UI got no static rules at all.
+      // In `finally` because a `fetchAllFolderHeaders` that throws may already
+      // have committed batches. The pass is idempotent and costs one indexed
+      // query when there is nothing to do.
+      processMailRules(aid, folder).catch(err =>
+        logRules.error('Background processMailRules (periodic sync) failed:', err)
+      )
     }
   }
 }

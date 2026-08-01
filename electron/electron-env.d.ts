@@ -4,6 +4,12 @@
 declare const __SENTRY_DSN__: string
 declare const __APP_VERSION__: string
 
+// Vite define substitutions (Google OAuth Desktop client, main bundle only).
+// Empty string when the build was made without credentials — see
+// electron/googleOAuthConfig.ts.
+declare const __GOOGLE_OAUTH_CLIENT_ID__: string
+declare const __GOOGLE_OAUTH_CLIENT_SECRET__: string
+
 declare namespace NodeJS {
   interface ProcessEnv {
     /**
@@ -31,7 +37,7 @@ interface Window {
   api: {
     /** Initial theme detected synchronously from additionalArguments (no IPC round-trip). */
     initialTheme: 'dark' | 'light'
-    /** Anonymous install-id hash (16 hex chars) propagated from main. Empty string in dev/e2e. */
+    /** Pseudonymous install-id hash (16 hex chars) propagated from main. Empty string in dev/e2e. */
     installIdHash: string
     /** Persisted sentryEnabled flag, propagated from main via additionalArguments. */
     sentryEnabled: boolean
@@ -117,6 +123,12 @@ interface Window {
         | 'offline:status'
         | 'settings:get'
         | 'settings:save'
+        // §2.82 — first-run telemetry consent. `telemetry:consentState` answers
+        // `{ needed, version }` (read-only, "should the screen be shown");
+        // `telemetry:setConsent` takes `{ granted }` and nothing else — main
+        // stamps the disclosure version and the timestamp itself.
+        | 'telemetry:consentState'
+        | 'telemetry:setConsent'
         | 'e2e:localizeMails'
         | 'compose:getInit'
         | 'ui:openSettings'

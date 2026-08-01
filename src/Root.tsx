@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactElement } from 'react'
 import i18n, { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, type Language } from './i18n'
 import { SentryErrorBoundary, sendFeedback, isSentryActive } from './sentry'
 import App from './App'
@@ -6,6 +6,8 @@ import Settings from './windows/Settings'
 import Account from './windows/Account'
 import Compose from './windows/Compose'
 import MailWindow from './windows/MailWindow'
+import TelemetryConsentDialog from './components/TelemetryConsentDialog'
+import { useTelemetryConsent } from './hooks/useTelemetryConsent'
 
 /** Inline feedback form for ErrorBoundary fallback.
  * Does not use i18n provider (React tree has crashed), strings are determined by lang. */
@@ -102,6 +104,42 @@ function FallbackUI({ eventId }: { eventId?: string }) {
   )
 }
 
+/**
+ * Route a child-window hash to its component.
+ *
+ * Returns `null` for the main window — which is also how Root decides whether
+ * the telemetry consent gate applies, so a hash that this table routes can
+ * never end up behind the gate.
+ *
+ * Note the direction of the default: `null` means "not a known child window",
+ * and Root treats that as the main window, so an UNKNOWN hash falls INTO the
+ * gate. A new child window is therefore not covered automatically — omitting it
+ * here puts the consent screen in front of it instead of leaving it out. Add
+ * every new child-window hash to this table (and to the routing tests in
+ * src/Root.test.tsx).
+ *
+ * Pure: no hooks, safe to call during render before the hook list.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- exported for unit tests (src/Root.test.tsx); same pattern as detectAuthRecoveryKind in App.tsx.
+export function renderChildWindow(hash: string): ReactElement | null {
+  if (hash === '#/settings') return <Settings />
+  if (hash.startsWith('#/account')) {
+    const params = new URLSearchParams(hash.split('?')[1] || '')
+    const mode = params.get('mode') === 'edit' ? 'edit' as const : 'new' as const
+    const editId = params.get('id') ? Number(params.get('id')) : undefined
+    return <Account initialMode={mode} initialEditId={editId} />
+  }
+  if (hash === '#/compose') return <Compose />
+  if (hash.startsWith('#/mail-window')) {
+    const params = new URLSearchParams(hash.split('?')[1] || '')
+    const accountId = Number(params.get('accountId') || '')
+    const folder = params.get('folder') || ''
+    const uid = Number(params.get('uid') || '')
+    return <MailWindow accountId={accountId} folder={folder} uid={uid} />
+  }
+  return null
+}
+
 export default function Root() {
   const [hash, setHash] = useState(location.hash)
   useEffect(() => {
@@ -156,21 +194,22 @@ export default function Root() {
     }
   }, [])
 
+  const childWindow = renderChildWindow(hash)
+
+  // §2.82 — first-run telemetry consent. Main-window only: child windows are
+  // opened from an already-running app, so their user has necessarily passed
+  // the gate already.
+  const consent = useTelemetryConsent({ enabled: childWindow === null })
+
   const content = (() => {
-    if (hash === '#/settings') return <Settings />
-    if (hash.startsWith('#/account')) {
-      const params = new URLSearchParams(hash.split('?')[1] || '')
-      const mode = params.get('mode') === 'edit' ? 'edit' as const : 'new' as const
-      const editId = params.get('id') ? Number(params.get('id')) : undefined
-      return <Account initialMode={mode} initialEditId={editId} />
-    }
-    if (hash === '#/compose') return <Compose />
-    if (hash.startsWith('#/mail-window')) {
-      const params = new URLSearchParams(hash.split('?')[1] || '')
-      const accountId = Number(params.get('accountId') || '')
-      const folder = params.get('folder') || ''
-      const uid = Number(params.get('uid') || '')
-      return <MailWindow accountId={accountId} folder={folder} uid={uid} />
+    if (childWindow) return childWindow
+    // Nothing is rendered while the state query is in flight, and `<App/>` is
+    // not rendered at all while the screen is up. That is deliberate: mounting
+    // App runs its load effect, which opens the account wizard when no account
+    // exists — the consent question has to come before any of that (AC (c)/AC4).
+    if (consent.phase === 'checking') return null
+    if (consent.phase === 'required') {
+      return <TelemetryConsentDialog submitting={consent.submitting} onDecide={consent.decide} />
     }
     return <App />
   })()

@@ -92,6 +92,7 @@ import {
   type PendingActionPayload,
 } from './aiPendingActions'
 import { recordEvent as recordEventForAi, startMetricSpan } from '../metrics'
+import { isTelemetryCollectionAllowed } from '../telemetryGate'
 import { bucketCount } from '../metricsBuckets'
 import {
   filterVercelTools as filterVercelEgressTools,
@@ -4873,19 +4874,22 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
   internetGateRegistered = true
 
   // Telemetry: span covering the entire AI request lifecycle.
-  // Wrapped in try/catch so a broken Sentry SDK never blocks AI chat —
-  // telemetry is best-effort and must never affect user-visible behaviour.
+  //
+  // §2.82 iter2 (finding 4) — routed through `startMetricSpan` instead of a
+  // direct `startInactiveSpan`. Direct SDK calls bypass the consent collection
+  // gate (electron/telemetryGate.ts): a span is an open recording window, and
+  // one opened while the answer is "not asked yet" would be submitted on end()
+  // — possibly after the user consented, shipping a window they never agreed
+  // to. `startMetricSpan` returns a no-op handle while collection is off,
+  // supplies the registered `op`, and applies the `parentSpan: null` sampling
+  // guard. Wrapped anyway so a broken Sentry SDK never blocks AI chat.
   try {
-    span = startInactiveSpan({
-      name: 'ai.chat',
-      op: 'ai.chat',
-      attributes: {
-        'ai.provider': provider,
-        'ai.model': model,
-        'ai.context_type': options.context?.type || 'none',
-        'ai.has_history': Boolean(options.history?.length),
-        'ai.session_resumed': Boolean(options.sessionId),
-      },
+    span = startMetricSpan('ai.chat', {
+      'ai.provider': provider,
+      'ai.model': model,
+      'ai.context_type': options.context?.type || 'none',
+      'ai.has_history': Boolean(options.history?.length),
+      'ai.session_resumed': Boolean(options.sessionId),
     })
   } catch { /* span creation must never break the caller */ }
 
@@ -5114,16 +5118,23 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
       } catch { /* span finalization must never break the caller */ }
     }
 
+    // §2.82 iter2 (finding 4, same class) — this is the only direct
+    // `sentryLogger` call outside electron/metrics.ts, and like the span above
+    // it was a transmission point the consent gate did not know about. Gate it
+    // at the source rather than relying on the SDK's `enabled` flag, which is a
+    // different mechanism with a different lifetime.
     try {
-      sentryLogger.info('AI chat completed', {
-        'ai.provider': provider,
-        'ai.model': model,
-        'ai.tool_call_count': toolCallCount,
-        'ai.tools_used': [...toolNames].join(','),
-        'ai.aborted': aborted,
-        'ai.error': errorOccurred,
-        ...(costUsd !== undefined ? { 'ai.cost_usd': costUsd } : {}),
-      })
+      if (isTelemetryCollectionAllowed()) {
+        sentryLogger.info('AI chat completed', {
+          'ai.provider': provider,
+          'ai.model': model,
+          'ai.tool_call_count': toolCallCount,
+          'ai.tools_used': [...toolNames].join(','),
+          'ai.aborted': aborted,
+          'ai.error': errorOccurred,
+          ...(costUsd !== undefined ? { 'ai.cost_usd': costUsd } : {}),
+        })
+      }
     } catch { /* ignore */ }
 
     // §3.3 B1 — append one privacy audit row per completed AI request. Pure

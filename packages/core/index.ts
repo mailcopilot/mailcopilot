@@ -132,3 +132,12 @@ export {
   collapseQuotedText,
   type CollapseOptions,
 } from './quotedText'
+
+export {
+  scrubUserPathsShape,
+  scrubEmailAddressesShape,
+  scrubEventPiiWith,
+  scrubLogPiiWith,
+  type ScrubbableEvent,
+  type ScrubbableLog,
+} from './piiScrub'
