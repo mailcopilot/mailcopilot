@@ -110,7 +110,10 @@ When the active message has attachments, they appear above the message body. Eac
 - A **file-type icon** chosen from the MIME type, with a fallback to the filename extension when the MIME type is missing, generic (`application/octet-stream`), or unrecognized: PDF, image, archive, document, spreadsheet, presentation, plain text, embedded `.eml` message, or a generic file icon when nothing more specific applies.
 - The **filename**.
 - The **file size**.
-- A **"Preview available"** badge on attachments MailCopilot recognises as previewable. The current set is PNG, JPEG, GIF, WebP images and PDF documents -- the badge appears only for these types and indicates that preview support is on the roadmap; the row's primary action today is still the download button.
+
+Layout images the message body already renders inline -- such as a logo in an HTML signature -- are never removed from the list. MailCopilot cannot reliably tell, from outside the browser, whether a given part actually ended up visible on screen -- layout, CSS, and responsive-image selection decide that -- so instead of guessing, it keeps every part reachable: real attachments (the files the sender actually attached) are listed first, and inline images the body rendered are demoted to the end of the list, behind the same expand toggle described below.
+
+An expand toggle appears whenever there is more to show than fits collapsed -- more than four real attachments, or any demoted inline images, even if there are four or fewer real attachments. Click **Show more (N)**, where N counts only the items not currently visible, to reveal everything, and **Show less** to collapse the list again.
 
 Click the download button on an attachment row to save it to your computer. The download button has an explicit accessible label so screen readers announce the action together with the filename.
 
@@ -123,6 +126,15 @@ When you click a link in an email, MailCopilot checks it for safety:
 - **IDN/Punycode domains** -- domains using internationalized characters are flagged.
 
 For suspicious links, a confirmation dialog appears where you can see the actual destination and choose whether to open it or cancel.
+
+### Right-Click a Link
+
+Right-click a link in a message body to open a small context menu with:
+
+- **Open Link in Browser** -- opens the link the same way clicking it does, including the safety checks above (mismatched-domain and HTTP warnings, IDN/punycode flagging). This item only appears in the main window and the standalone message window (see [Open in Window](#open-in-window)) -- it is not offered in Settings, Compose, or Account windows, since none of them display email links.
+- **Copy Link Address** -- copies the link's actual destination to the clipboard, not its visible text, and never the internal routing form MailCopilot uses to render the link. For a web address (`http:`/`https:`) with an internationalized domain name, the address is copied in its punycode (ASCII) form -- the form your browser will actually use -- rather than the Unicode form, so a copied address cannot hide a lookalike domain behind readable characters. For a `mailto:` address, an internationalized domain is percent-encoded instead, since mail clients do not resolve it as a punycode host. Credentials embedded in a link (`https://user:pass@host/…`) are copied as-is, not stripped -- if you paste such a link elsewhere, the credentials go with it.
+
+Neither item appears for links that are not `http:`, `https:`, or `mailto:` (for example a `javascript:` or `data:` link embedded in a message), or for a link address longer than 8192 characters.
 
 ## Message Actions
 

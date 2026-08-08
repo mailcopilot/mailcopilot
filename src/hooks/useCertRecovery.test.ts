@@ -318,6 +318,46 @@ describe('useCertRecovery — trust()', () => {
     expect(result.current.dialog?.errorKey).toBe('reprobeFailed')
   })
 
+  it('keeps the prompt untouched when the user refuses main native confirmation', async () => {
+    // Gate 5 lives in main: this click only ASKS for the OS confirmation.
+    // { cancelled: true } means the user said no — nothing was pinned and the
+    // offer is still open, so retiring the prompt here would burn the only
+    // warning the user gets for this endpoint this session.
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:trustCert') return Promise.resolve({ ok: false, cancelled: true })
+      return Promise.resolve({ ok: true })
+    })
+    const { result } = renderHook(() => useCertRecovery())
+    act(() => fire('cert:recoveryRequired', REQ))
+    await act(async () => { await result.current.trust() })
+
+    expect(result.current.dialog).not.toBeNull()
+    expect(result.current.dialog?.fingerprint).toBe('AA:BB:CC')
+    // A refusal is a decision, not a failure: no inline error, buttons live again.
+    expect(result.current.dialog?.errorKey).toBeNull()
+    expect(result.current.dialog?.trusting).toBe(false)
+    expect(result.current.dialog?.stale).toBe(false)
+  })
+
+  it('lets the user confirm again after refusing the native confirmation', async () => {
+    let refused = false
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:trustCert' && !refused) {
+        refused = true
+        return Promise.resolve({ ok: false, cancelled: true })
+      }
+      return Promise.resolve({ ok: true })
+    })
+    const { result } = renderHook(() => useCertRecovery())
+    act(() => fire('cert:recoveryRequired', REQ))
+    await act(async () => { await result.current.trust() })
+    expect(result.current.dialog).not.toBeNull()
+
+    await act(async () => { await result.current.trust() })
+
+    expect(result.current.dialog).toBeNull()
+  })
+
   it('surfaces an inline error and keeps the dialog open when net:trustCert rejects', async () => {
     mockInvoke.mockImplementation((channel: string) => {
       if (channel === 'net:trustCert') return Promise.reject(new Error('pin write failed'))

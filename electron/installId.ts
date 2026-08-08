@@ -1,5 +1,14 @@
 /**
- * Anonymous install identifier.
+ * Per-install identifier — pseudonymous, NOT anonymous.
+ *
+ * The header used to say "anonymous". It is not: the identifier is stable for
+ * the life of the install and rides on every envelope, so everything one
+ * install sends is joinable into a single per-install trace (see below). Under
+ * GDPR recital 26 that is pseudonymisation, not anonymisation, and the consent
+ * screen now says so in as many words ("a random identifier for this
+ * installation … so it is not fully anonymous"). Keep the code's vocabulary and
+ * the user-facing text saying the same thing — a comment that claims a
+ * protection the code does not implement is worse than no comment at all.
  *
  * On first run we generate a random UUID via crypto.randomUUID() and persist
  * it to electron-store. On every subsequent run we read the same UUID from
@@ -7,12 +16,29 @@
  * is stable across releases so DAU/MAU, retention and cohort analysis don't
  * break every time the app auto-updates.
  *
- * Non-goals:
- *   - User tracking — the hash is not tied to any account/email.
- *   - Per-event attribution — the hash is ONLY emitted in session-level
- *     events (app.session_started, app.session_ended, usage.session_summary).
- *     Attaching it to every event would both bloat Sentry cardinality and
- *     make per-event data trivially joinable into a user-level trace.
+ * Non-goal: cross-user or cross-device tracking. The hash is not tied to any
+ * account, email or device fingerprint, and it is never shared with any sink
+ * besides Sentry. It does, however, link this install's own sessions together
+ * — that is its purpose.
+ *
+ * What this identifier DOES do — stated plainly:
+ *
+ *   - It is attached to the Sentry SDK as `user.id` (`setSentryUserId` in
+ *     electron/sentry.ts and src/sentry.ts, called at boot in both processes),
+ *     so it rides on EVERY event, transaction and session envelope — not only
+ *     on session-level metrics. That is deliberate: `count_unique(user)` and
+ *     Release Health adoption are permanently 0 without it.
+ *   - Consequently, everything an install sends IS joinable into a per-install
+ *     trace on the Sentry side. What limits the damage is the content rule
+ *     (only enums, counts, durations, buckets — see metricsSchema.ts), not
+ *     any unlinkability property. The consent screen discloses this linkage
+ *     explicitly (§2.82).
+ *
+ * There IS a narrower rule that remains true and is worth keeping: the
+ * `install_id_hash` TAG is registered on exactly three events
+ * (app.session_started, app.session_ended, usage.session_summary). Do not add
+ * it to others — as a tag it explodes Sentry cardinality, and it buys nothing
+ * that `user.id` does not already provide.
  *
  * Storage key: `metrics.installId`, in the standard electron-store file.
  */
@@ -70,8 +96,9 @@ function rawInstallId(): string {
  * retention / DAU / MAU analytics at every auto-update, so we deliberately
  * do NOT mix the version into the hash.
  *
- * Lazy + cached — safe to call on hot paths, but in practice only session
- * events read it.
+ * Lazy + cached — safe to call on hot paths. Read early in both processes:
+ * main attaches it to the SDK right after settings load and passes it to
+ * child windows via `--install-id-hash=`, and the session metrics tag it.
  */
 export function getInstallIdHash(): string {
   if (cachedHash) return cachedHash

@@ -1,5 +1,6 @@
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { setSentryUserEnabled, setSentryUserId, startManualSpan } from './sentry'
+import { folderRoleFromPath } from './utils/metrics'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useTranslation } from 'react-i18next'
 import type { AccountMeta, AttachmentMeta, ComposeInit, FolderPreference, FolderRoles, Mailbox, MailSummary, MessageDetails } from '../packages/net/types'
@@ -17,6 +18,7 @@ import {
   uniqEmails, computeReplyRecipients, prefixSubject, htmlToText, quoteText, formatSmartDate, sortFolders,
   deriveIsSentByMe,
 } from './utils/mail'
+import { TranslatedError, presentedError } from './utils/errorPresentation'
 import { useMailLinkClick } from './hooks/useMailLinkClick'
 import { useCertRecovery } from './hooks/useCertRecovery'
 import LinkWarningDialog from './components/LinkWarningDialog'
@@ -500,7 +502,11 @@ export default function App() {
         setError(t(startingKey, { account: accountLabel }))
         try {
           const result = await window.api.invoke(channel, accountId) as { ok?: boolean }
-          if (!result?.ok) throw new Error(t('common.error'))
+          // TranslatedError, not Error: this branch throws so the catch below
+          // owns the cooldown + reopen-account cleanup once, and its message is
+          // already our own translated copy. `presentedError` passes it through
+          // instead of collapsing it into the generic sentence.
+          if (!result?.ok) throw new TranslatedError(t('common.error'))
           authRecoveryCooldownUntil.current.delete(accountId)
           setError(t(successKey, { account: accountLabel }))
           void window.setTimeout(() => {
@@ -519,7 +525,7 @@ export default function App() {
           } catch {
             // ignore
           }
-          setError(t(failedHelpKey, { error: String(oauthErr) }))
+          setError(t(failedHelpKey, { error: presentedError(t, oauthErr) }))
           return true
         }
       }
@@ -648,7 +654,7 @@ export default function App() {
       }
       setOutboxItems(mapped)
     } catch (e) {
-      setError(t('app.errors.load', { error: String(e) }))
+      setError(t('app.errors.load', { error: presentedError(t, e) }))
     } finally {
       setOutboxLoading(false)
     }
@@ -831,7 +837,7 @@ export default function App() {
       if (!s) return
       const sentryNow = s.sentryEnabled !== false
       setSentryUserEnabled(sentryNow)
-      // Re-attach the anonymous install-id if the user toggles Sentry back
+      // Re-attach the pseudonymous install-id if the user toggles Sentry back
       // on (setSentryUserEnabled handles the off → null path internally).
       if (sentryNow && window.api?.installIdHash) {
         setSentryUserId(window.api.installIdHash)
@@ -953,7 +959,7 @@ export default function App() {
   // Phishing-aware link-click pipeline (IDN/http/mismatch/unsafeBypass checks).
   // mail:link IPC listener is attached and cleaned up inside the hook.
   const { linkPrompt, dismissPrompt, approvePrompt } = useMailLinkClick(
-    (errMsg) => setError(tRef.current('app.errors.openExternal', { error: errMsg })),
+    (errMsg) => setError(tRef.current('app.errors.openExternal', { error: presentedError(tRef.current, errMsg) })),
   )
 
   // TLS trust rework Phase A3 — cert-recovery dialog + interception notices.
@@ -983,7 +989,14 @@ export default function App() {
   // inline → external-image extract/fetch/replace → CSP wrap) lives in
   // useMailIframeDoc to keep App.tsx from growing the §3.10 security
   // pipeline inline (hotspot policy, CLAUDE.md §5).
-  const { doc: mailIframeDoc, hasExternalImages: mailHasExternalImages } = useMailIframeDoc({
+  const {
+    doc: mailIframeDoc,
+    hasExternalImages: mailHasExternalImages,
+    // §2.128: the parts whose chip the list drops. Passed straight to
+    // MailBodyContent — one decision, one owner (the hook that substituted
+    // their bytes).
+    hiddenAttachments: mailHiddenAttachments,
+  } = useMailIframeDoc({
     active,
     details,
     alwaysLoadImages,
@@ -1547,7 +1560,7 @@ export default function App() {
           }
         })()
       } catch (e) {
-        if (!cancelled) setError(tRef.current('app.errors.load', { error: String(e) }))
+        if (!cancelled) setError(tRef.current('app.errors.load', { error: presentedError(tRef.current, e) }))
       }
     }
 
@@ -1747,7 +1760,7 @@ export default function App() {
     } catch (e) {
       const handled = await maybeRecoverAuthIssue(aid, e)
       if (!handled && currentAccountIdRef.current === aid && viewModeRef.current === 'account') {
-        setError(t('app.errors.sync', { error: String(e) }))
+        setError(t('app.errors.sync', { error: presentedError(t, e) }))
       }
       setConnectionStatus(prev => { const m = new Map(prev); m.set(aid, 'error'); return m })
     } finally {
@@ -1782,7 +1795,10 @@ export default function App() {
     setQ('')
     if (viewMode !== 'account') setViewMode('account')
     setCurrentFolder(folder)
-    console.debug('[active→null] switchFolder', folder)
+    // Log the folder's ROLE, never its path: renderer console output becomes a
+    // Sentry breadcrumb (src/sentry.ts), and folder names are server-controlled
+    // text the consent screen promises we do not collect.
+    console.debug('[active→null] switchFolder', folderRoleFromPath(folder))
     setActive(null)
     setSelectedKeys(new Set())
     selectionAnchorKey.current = null
@@ -1903,7 +1919,7 @@ export default function App() {
             : undefined
           setHasMore(list.length >= PAGE_SIZE)
         } catch (e) {
-          if (ctxSeq.current === seq) setError(tRef.current('app.errors.load', { error: String(e) }))
+          if (ctxSeq.current === seq) setError(tRef.current('app.errors.load', { error: presentedError(tRef.current, e) }))
         }
 
         // 2) On entering unified, sync INBOX of selected accounts so the aggregate is complete.
@@ -1944,7 +1960,7 @@ export default function App() {
             : undefined
           setHasMore(list.length >= PAGE_SIZE)
         } catch (e) {
-          if (ctxSeq.current === seq) setError(tRef.current('app.errors.sync', { error: String(e) }))
+          if (ctxSeq.current === seq) setError(tRef.current('app.errors.sync', { error: presentedError(tRef.current, e) }))
         }
       } finally {
         if (ctxSeq.current === seq) setSyncing(false)
@@ -2165,9 +2181,11 @@ export default function App() {
     } catch (e) {
       // Search pagination can be cancelled mid-flight when the user types a new query;
       // that's expected, not an error worth surfacing.
+      // `msg` is for the cancellation probe only — the presentation tag is a
+      // prefix, so substring matching is unaffected — and never for display.
       const msg = e instanceof Error ? e.message : String(e)
       if (/Search request cancelled/i.test(msg)) return
-      if (ctxSeq.current === seq) setError(t('app.errors.load', { error: msg }))
+      if (ctxSeq.current === seq) setError(t('app.errors.load', { error: presentedError(t, e) }))
     } finally {
       loading.current = false
       setPaginatingSearch(false)
@@ -2233,7 +2251,7 @@ export default function App() {
           setHasMore(list.length >= PAGE_SIZE)
         }
       } catch (e) {
-        if (ctxSeq.current === seq) setError(t('app.errors.sync', { error: String(e) }))
+        if (ctxSeq.current === seq) setError(t('app.errors.sync', { error: presentedError(t, e) }))
       } finally {
         if (ctxSeq.current === seq) setSyncing(false)
       }
@@ -2329,7 +2347,7 @@ export default function App() {
         void window.api.invoke('net:setSeen', m.accountId, m.folder, [m.uid], true).catch(() => {})
       }
     } catch (e) {
-      if (ctxSeq.current === seq && openSeq.current === myOpen) setError(t('app.errors.loadMessage', { error: String(e) }))
+      if (ctxSeq.current === seq && openSeq.current === myOpen) setError(t('app.errors.loadMessage', { error: presentedError(t, e) }))
       endOpenSpan()
     } finally {
       if (ctxSeq.current === seq && openSeq.current === myOpen) setLoadingBody(false)
@@ -2439,7 +2457,7 @@ export default function App() {
       if (delta !== 0) bumpFolderUnreadPending(m.accountId, m.folder, delta)
       if (beforeUnread !== afterUnread) recordPendingUnread(m.accountId, m.folder, m.uid, afterUnread)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, recordPendingUnread, t])
 
@@ -2455,7 +2473,7 @@ export default function App() {
         sel && sel.accountId === m.accountId && sel.folder === m.folder && sel.uid === m.uid ? { ...sel, flagged } : sel
       ))
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.flag', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.flag', { error: presentedError(t, e) }))
     }
   }, [t])
 
@@ -2472,7 +2490,7 @@ export default function App() {
         sel && sel.accountId === m.accountId && sel.folder === m.folder && sel.uid === m.uid ? { ...sel, pinned: newPinned } : sel
       ))
     } catch (e) {
-      setError(t('app.errors.pin', { error: String(e) }))
+      setError(t('app.errors.pin', { error: presentedError(t, e) }))
     }
   }, [t])
 
@@ -2601,7 +2619,7 @@ export default function App() {
       }
       for (const m of selected) recordPendingUnread(m.accountId, m.folder, m.uid, afterUnread)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, groupConversations, mails, recordPendingUnread, selectedKeys, t, threadRows])
 
@@ -2630,7 +2648,7 @@ export default function App() {
       for (const uid of uniq) clearPendingUnread(currentAccountId, currentFolder, uid)
       removeManyFromUi(movedMsgs)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, clearPendingUnread, currentAccountId, currentFolder, mails, removeManyFromUi, t, viewMode])
 
@@ -2645,7 +2663,16 @@ export default function App() {
   const bulkMoveByRole = useCallback(async (role: 'archive' | 'junk' | 'trash') => {
     const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
     if (msgs.length === 0) {
-      setError(`Bulk ${role}: no messages selected (selectedKeys=${selectedKeys.size}, mails=${mails.length})`)
+      // Silent no-op, matching the account-mode siblings (bulkArchive /
+      // bulkSpam / bulkDelete all `return` on an empty expansion). This used to
+      // raise an English banner with internal counters in it — hardcoded copy
+      // the user cannot act on, and inconsistent with the same gesture in the
+      // other view mode. The counters stay, in the console, where they help.
+      console.warn('[bulkMoveByRole] empty expansion', {
+        role,
+        selectedKeys: selectedKeys.size,
+        mails: mails.length,
+      })
       return
     }
 
@@ -2705,7 +2732,7 @@ export default function App() {
           })
           inboxZeroDecrement(restoreMsgs.length)
         }
-        setError(t('app.errors.move', { error: String(e) }))
+        setError(t('app.errors.move', { error: presentedError(t, e) }))
       })
     }
 
@@ -2763,7 +2790,7 @@ export default function App() {
     try {
       await window.api.invoke('net:move', m.accountId, m.folder, toFolder, [m.uid])
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, clearPendingUnread, inboxZeroIncrement, removeFromUi, t])
 
@@ -2824,7 +2851,7 @@ export default function App() {
       for (const uid of uniq) clearPendingUnread(accountId, folder, uid)
       removeManyFromUi(removedMsgs)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.delete', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.delete', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, clearPendingUnread, mails, removeManyFromUi, t])
 
@@ -2883,7 +2910,7 @@ export default function App() {
       removeManyFromUi(items)
       inboxZeroIncrement(items.length)
     } catch (e) {
-      setError(t('app.errors.move', { error: String(e) }))
+      setError(t('app.errors.move', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, groupConversations, inboxZeroIncrement, removeManyFromUi, t, threadRows])
 
@@ -2906,7 +2933,7 @@ export default function App() {
       }))
       bumpFolderUnreadPending(m0.accountId, m0.folder, -unreadItems.length)
     } catch (e) {
-      setError(t('app.errors.markSeen', { error: String(e) }))
+      setError(t('app.errors.markSeen', { error: presentedError(t, e) }))
     }
   }, [activeThread, bumpFolderUnreadPending, t])
 
@@ -3035,7 +3062,7 @@ export default function App() {
 
       await window.api.invoke('ui:openCompose', m.accountId, init)
     } catch (e) {
-      setError(t('app.errors.compose', { error: String(e) }))
+      setError(t('app.errors.compose', { error: presentedError(t, e) }))
     }
   }, [active, accountsById, t])
 
@@ -3078,7 +3105,7 @@ export default function App() {
       }
       await window.api.invoke('ui:openCompose', ref.accountId, init)
     } catch (e) {
-      setError(t('app.errors.compose', { error: String(e) }))
+      setError(t('app.errors.compose', { error: presentedError(t, e) }))
     }
   }, [active, accountsById, t])
 
@@ -3105,7 +3132,7 @@ export default function App() {
         source: 'draft',
       } satisfies ComposeInit)
     } catch (e) {
-      setError(t('app.errors.compose', { error: String(e) }))
+      setError(t('app.errors.compose', { error: presentedError(t, e) }))
     }
   }, [active, t])
 
@@ -3115,7 +3142,7 @@ export default function App() {
       await window.api.invoke('mail:queueSendNow', item.id)
       await loadOutbox(item.accountId)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     } finally {
       setOutboxActionId(null)
     }
@@ -3131,7 +3158,7 @@ export default function App() {
       }
       await loadOutbox(aid)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     } finally {
       setOutboxActionId(null)
     }
@@ -3144,7 +3171,7 @@ export default function App() {
       await window.api.invoke('mail:queueReschedule', item.id, at)
       await loadOutbox(item.accountId)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     } finally {
       setOutboxActionId(null)
     }
@@ -3203,7 +3230,7 @@ export default function App() {
         switchFolder(nextName)
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [applyAccountMailboxesAndRoles, switchFolder, t])
 
@@ -3218,7 +3245,7 @@ export default function App() {
         switchFolder('INBOX')
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [applyAccountMailboxesAndRoles, switchFolder, t])
 
@@ -3229,7 +3256,7 @@ export default function App() {
         void window.api.invoke('net:syncFolderHeaders', menu.accountId, menu.folderPath, { mode: 'full' }).catch(() => {})
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3239,7 +3266,7 @@ export default function App() {
     try {
       await upsertFolderPref(menu.accountId, menu.folderPath, { icon })
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3249,7 +3276,7 @@ export default function App() {
       await upsertFolderPref(menu.accountId, menu.folderPath, { includeInBadges: !current })
       setFolders(prev => [...prev])
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3263,7 +3290,7 @@ export default function App() {
         setFolders(prev => [...prev])
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [switchFolder, t, upsertFolderPref])
 
@@ -3277,7 +3304,7 @@ export default function App() {
       await upsertFolderPref(menu.accountId, menu.folderPath, { indexInSearch: !current })
       setFolders(prev => [...prev])
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3294,7 +3321,7 @@ export default function App() {
         setError(t('app.errors.attachment', { error: res.error || t('common.error') }))
       }
     } catch (e) {
-      setError(t('app.errors.attachment', { error: String(e) }))
+      setError(t('app.errors.attachment', { error: presentedError(t, e) }))
     } finally {
       setSavingAttachment(null)
     }
@@ -3353,7 +3380,7 @@ export default function App() {
             : undefined
           setHasMore(list.length >= PAGE_SIZE)
         } catch (e) {
-          setError(t('app.errors.search', { error: String(e) }))
+          setError(t('app.errors.search', { error: presentedError(t, e) }))
         }
         return
       }
@@ -3454,9 +3481,10 @@ export default function App() {
       }
     } catch (e) {
       // Cancellation is expected when the user types fast and we supersede prior requests.
+      // Probe only — see the note in the search-pagination catch above.
       const msg = e instanceof Error ? e.message : String(e)
       if (!/Search request cancelled/i.test(msg)) {
-        setError(t('app.errors.search', { error: msg }))
+        setError(t('app.errors.search', { error: presentedError(t, e) }))
       }
     } finally {
       // Only the most recent request is allowed to clear the spinner;
@@ -5023,6 +5051,7 @@ export default function App() {
                       alwaysLoadImages={alwaysLoadImages}
                       showExternalImages={showExternalImages}
                       mailIframeDoc={mailIframeDoc}
+                      hiddenAttachments={mailHiddenAttachments}
                       iframeKey={`${activeKey}:${alwaysLoadImages || showExternalImages ? 'ext' : 'safe'}`}
                       mailIframeRef={mailIframeRef}
                       activeMailKey={`${active?.accountId}:${active?.folder}:${active?.uid}`}
@@ -5066,6 +5095,7 @@ export default function App() {
                     alwaysLoadImages={alwaysLoadImages}
                     showExternalImages={showExternalImages}
                     mailIframeDoc={mailIframeDoc}
+                    hiddenAttachments={mailHiddenAttachments}
                     iframeKey={`${activeKey}:${alwaysLoadImages || showExternalImages ? 'ext' : 'safe'}`}
                     mailIframeRef={mailIframeRef}
                     activeMailKey={`${active?.accountId}:${active?.folder}:${active?.uid}`}

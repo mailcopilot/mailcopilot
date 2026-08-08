@@ -88,12 +88,64 @@ export type Settings = {
   aiMaxTurns?: number
   /** Max budget per single AI request (USD), API providers only */
   aiMaxBudgetPerRequest?: number
+  /**
+   * §2.122 — per-provider "an API key for this provider was saved at some
+   * point" marker. NEVER the key itself, never a fragment or a hash of it:
+   * a boolean and nothing more.
+   *
+   * OBSERVABILITY, NOT ENFORCEMENT (CLAUDE.md §5 "Кто владеет правдой"). The
+   * OS secret store owns the truth about whether a key exists; this flag is
+   * our own recollection of having written one. It is allowed to influence
+   * exactly two things: the wording of the message the user sees, and
+   * telemetry. It MUST NOT gate saving, gate the assistant, trigger a delete
+   * or a re-auth, or stand in for a real key read. A disagreement
+   * (`flag = true`, store empty) turns "no key" into "there was one and it is
+   * gone — enter it again", and forbids nothing.
+   *
+   * Main-only writable (`MAIN_ONLY_SETTINGS_FIELDS`): written by
+   * `setAiApiKeySavedFlag` from the main-process save/delete paths in
+   * electron/services/ai.ts, deliberately absent from
+   * `rendererWritableSettingsSchema`.
+   */
+  aiApiKeySaved?: {
+    'anthropic-api'?: boolean
+    'openai-api'?: boolean
+    'gemini-api'?: boolean
+  }
   /** Global offline mode — disables all network access */
   workOffline?: boolean
   /** Extended debug logging in main/electron-log */
   debugLogging?: boolean
-  /** Send anonymous error reports to Sentry */
+  /**
+   * Send diagnostic and usage data to Sentry. NOT anonymous: every event
+   * carries the stable per-install identifier (electron/installId.ts), which
+   * is pseudonymisation, not anonymisation.
+   *
+   * This is the Settings → About switch — the GDPR art. 7(3) withdrawal path,
+   * so it stays renderer-writable. It is NOT by itself permission to send:
+   * telemetry flows only when this is not `false` AND `telemetryConsent`
+   * records an active grant for the current disclosure version (see
+   * `isTelemetryAllowed` in electron/telemetryConsent.ts).
+   */
   sentryEnabled?: boolean
+  /**
+   * §2.82 — proof of the user's answer on the first-run telemetry consent
+   * screen.
+   *
+   * Main-only writable. The renderer asks for the state and reports the click
+   * through `telemetry:consentState` / `telemetry:setConsent`; `version` and
+   * `at` are stamped by the main process, never taken from the renderer
+   * payload, and `settings:save` rejects this field outright
+   * (`MAIN_ONLY_SETTINGS_FIELDS`). A renderer that could write it would be
+   * able to manufacture consent it never obtained.
+   *
+   * Absent means "not answered yet" → nothing is sent and the screen runs
+   * once. `version` pins the answer to the DISCLOSED COMPOSITION of collected
+   * data (`TELEMETRY_CONSENT_VERSION`); widening the composition bumps it and
+   * re-asks exactly once, which is the only lawful reason to show the screen
+   * again (ePrivacy art. 5(3), GDPR art. 4(11)).
+   */
+  telemetryConsent?: { granted: boolean; version: number; at: string }
   /** Background polling sync interval (minutes, 1-30). With IMAP IDLE, this is just a safety net. */
   syncIntervalMinutes?: number
   /** Periodic folder sync interval (minutes, 1-60). Syncs folders with headerSyncMode full/period. */
@@ -913,6 +965,18 @@ export const settingsSchema = z.object({
   aiPanelOpen: z.boolean().default(false),
   aiPanelWidth: z.number().int().min(280).max(600).default(350),
   aiSendOnEnter: z.boolean().default(true),
+  /**
+   * §2.119 — the address AI requests are delivered to, and the proxy in front
+   * of it. Both are renderer-writable ON PURPOSE (a self-hosted endpoint and a
+   * corporate proxy are wanted capabilities), and both are the destination of
+   * a request carrying the user's API key — so a CHANGE to either is gated on
+   * a native confirmation in main: electron/services/aiDestinationGuard.ts.
+   *
+   * The schema cannot express that gate, which is why it is written here: a
+   * new write path to these two fields is a new exfiltration route unless it
+   * goes through the guard too. Today there are exactly two, `settings:save`
+   * and the `ai:checkAuth` overrides.
+   */
   aiOpenAiBaseUrl: z.string().trim().optional(),
   aiProxyUrl: z.string().trim().optional(),
   aiLocale: z.enum(['auto', 'ru', 'en']).default('auto'),
@@ -921,9 +985,35 @@ export const settingsSchema = z.object({
   aiMonthlyBudgetUsd: z.number().min(0).max(100000).default(100),
   aiMaxTurns: z.number().int().min(1).max(200).default(30),
   aiMaxBudgetPerRequest: z.number().min(0).max(100).default(2),
+  /**
+   * §2.122 — per-provider "a key was saved at some point" marker. See the
+   * `Settings.aiApiKeySaved` JSDoc for the full contract (observability, never
+   * enforcement; never the key material). Main-only writable — deliberately
+   * NOT in `rendererWritableSettingsSchema`.
+   *
+   * Optional rather than `.default({})`: an absent record must stay
+   * distinguishable from "we looked and this provider was never saved", the
+   * same distinction `getRawPersistedSettings` protects for `sentryEnabled`.
+   */
+  aiApiKeySaved: z.object({
+    'anthropic-api': z.boolean().optional(),
+    'openai-api': z.boolean().optional(),
+    'gemini-api': z.boolean().optional(),
+  }).optional(),
   workOffline: z.boolean().default(false),
   debugLogging: z.boolean().default(false),
   sentryEnabled: z.boolean().default(true),
+  /**
+   * §2.82 — persisted first-run telemetry consent. Main-only writable; see the
+   * `Settings.telemetryConsent` JSDoc for the contract. `.optional()` with no
+   * default on purpose: "no record" is a meaningful state (not answered yet →
+   * send nothing, ask once) and a default would erase it.
+   */
+  telemetryConsent: z.object({
+    granted: z.boolean(),
+    version: z.number().int(),
+    at: z.string().min(1),
+  }).optional(),
   syncIntervalMinutes: z.number().int().min(1).max(30).default(1),
   periodicSyncIntervalMin: z.number().int().min(1).max(60).default(5),
   darkModeEmails: z.boolean().default(true),
@@ -990,6 +1080,14 @@ export const settingsSchema = z.object({
  *     `mcp:removeConnection` IPC, never via a raw `settings:save`. Leaving
  *     it off this schema prevents a compromised renderer from bypassing the
  *     command-allowlist gate by writing connections directly to settings.
+ *   - `telemetryConsent` (§2.82) — the record of the user's answer on the
+ *     consent screen. Written only by the `telemetry:setConsent` handler,
+ *     which stamps `version` and `at` itself. A renderer able to write it
+ *     could fabricate consent that was never given.
+ *   - `aiApiKeySaved` (§2.122) — main's own record of having written an AI
+ *     key to the OS secret store. It exists to make a lost key legible
+ *     ("there was one and it is gone"), so a renderer that could set or
+ *     clear it would be editing the evidence about its own storage.
  */
 export const rendererWritableSettingsSchema = z.object({
   theme: z.enum(['light', 'dark']).optional(),
@@ -1028,6 +1126,12 @@ export const rendererWritableSettingsSchema = z.object({
   aiPanelOpen: z.boolean().optional(),
   aiPanelWidth: z.number().int().min(280).max(600).optional(),
   aiSendOnEnter: z.boolean().optional(),
+  /**
+   * §2.119 — writable, but a CHANGE needs a human: see the JSDoc on the same
+   * two fields in `settingsSchema` above, and
+   * electron/services/aiDestinationGuard.ts. Membership here is what makes the
+   * guard necessary, not a statement that the fields are harmless.
+   */
   aiOpenAiBaseUrl: z.string().trim().optional(),
   aiProxyUrl: z.string().trim().optional(),
   aiLocale: z.enum(['auto', 'ru', 'en']).optional(),
@@ -1077,6 +1181,12 @@ export const MAIN_ONLY_SETTINGS_FIELDS = [
   'mcpEnableStdio',
   'stdioApproved',
   'mcpConnections',
+  // §2.82 — consent record. Renderer signals its click through
+  // `telemetry:setConsent`; main stamps the version and timestamp.
+  'telemetryConsent',
+  // §2.122 — main's record of having saved an AI key. Written only by
+  // `setAiApiKeySavedFlag` from the main-side save/delete paths.
+  'aiApiKeySaved',
 ] as const
 
 export type MainOnlySettingsField = typeof MAIN_ONLY_SETTINGS_FIELDS[number]
@@ -1132,10 +1242,40 @@ export interface SecretBackend {
  * (matching pre-§2.33 semantics). `keytar.deletePassword` resolves to a
  * boolean; we normalize it to void so the SecretBackend contract is uniform.
  */
+/**
+ * §2.132 — under `MAILCOPILOT_E2E=1` this path must never run.
+ *
+ * In the real app `electron/main.ts` injects the secretStore-backed
+ * implementation, which serves e2e runs from the per-data-dir encrypted disk
+ * fallback and never contacts the keychain. This default is what remains if
+ * that wiring is ever missed — and `service`/`imap:<id>`/`smtp:<id>` address a
+ * PER-USER keychain, not the throwaway `MAILCOPILOT_DATA_DIR`, so silently
+ * falling through here means a test overwrites or deletes the developer's own
+ * credentials (that is exactly how §2.132 was found: an e2e run replaced a live
+ * AI key with a test string).
+ *
+ * What the throw guarantees is that no keychain call happens — NOT that a test
+ * turns red. Several call sites here swallow secret-backend failures on purpose
+ * (a keychain fault must not break a save flow), so under a missing wiring the
+ * refusal can surface as a clean null or a dropped write instead of an
+ * exception. That is the intended trade: the user's credentials stay untouched,
+ * and the e2e run simply has no secret to read.
+ *
+ * Unit tests are unaffected: they mock the `keytar` module and do not set
+ * `MAILCOPILOT_E2E`.
+ */
+function assertKeychainAllowed(): void {
+  if (process.env.MAILCOPILOT_E2E === '1') {
+    throw new Error(
+      'secret backend: OS keychain access is disabled under MAILCOPILOT_E2E (setSecretBackend was not wired)',
+    )
+  }
+}
+
 const defaultSecretBackend: SecretBackend = {
-  get: (key) => keytar.getPassword(service, key),
-  set: (key, value) => keytar.setPassword(service, key, value),
-  delete: async (key) => { await keytar.deletePassword(service, key) },
+  get: async (key) => { assertKeychainAllowed(); return keytar.getPassword(service, key) },
+  set: async (key, value) => { assertKeychainAllowed(); return keytar.setPassword(service, key, value) },
+  delete: async (key) => { assertKeychainAllowed(); await keytar.deletePassword(service, key) },
 }
 
 let secretBackend: SecretBackend = defaultSecretBackend
@@ -2085,6 +2225,28 @@ export function deleteMcpConnection(id: string): void {
  */
 let mcpEnvSanitizationAuditedThisLaunch = false
 
+/**
+ * The persisted settings record EXACTLY as stored — no schema parse, no
+ * defaults, no migrations.
+ *
+ * `getSettings()` cannot answer "was this key ever written?", because zod
+ * substitutes a default for every absent field. §2.82's one-time consent
+ * migration needs precisely that distinction: `sentryEnabled: false` on disk
+ * is a user who found the About switch and turned it off (an expressed
+ * refusal, seed it as one), while an ABSENT key is a user who was simply never
+ * asked (leave the record empty so the consent screen runs). Reading the
+ * parsed value would conflate the two the moment anyone changes
+ * `sentryEnabled`'s default — see electron/services/telemetryConsentService.ts.
+ *
+ * Returns `undefined` when nothing has been persisted yet (fresh install) or
+ * the stored value is not an object.
+ */
+export function getRawPersistedSettings(): Record<string, unknown> | undefined {
+  const raw = store.get('settings')
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  return raw as Record<string, unknown>
+}
+
 export function getSettings(): Settings {
   ensureMigratedSingleAccountToAccounts()
   const raw = store.get('settings')
@@ -2196,4 +2358,25 @@ export function __resetMcpEnvSanitizationAuditFlagForTest(): void {
 export function saveSettings(s: Settings) {
   const parsed = settingsSchema.parse(s)
   store.set('settings', parsed)
+}
+
+/** Providers whose AI key can be stored. Mirrors `ApiKeyProvider` in
+ * electron/services/ai.ts (`Exclude<AiProvider, 'subscription'>`); kept as a
+ * literal here so packages/net stays free of an electron import. */
+export type AiKeyProviderId = 'anthropic-api' | 'openai-api' | 'gemini-api'
+
+/**
+ * §2.122 — record (or clear) the non-secret "a key for this provider was
+ * saved" marker. MAIN-PROCESS ONLY: the sole call sites are `saveApiKey` /
+ * `deleteApiKey` in electron/services/ai.ts, and the field is absent from
+ * `rendererWritableSettingsSchema` so `settings:save` rejects it outright.
+ *
+ * The value is a boolean and only a boolean — no key material, no fragment,
+ * no hash. See the `Settings.aiApiKeySaved` JSDoc for why this may never
+ * become an enforcement input.
+ */
+export function setAiApiKeySavedFlag(provider: AiKeyProviderId, saved: boolean): void {
+  const current = getSettings()
+  const next = { ...(current.aiApiKeySaved ?? {}), [provider]: saved }
+  saveSettings({ ...current, aiApiKeySaved: next })
 }

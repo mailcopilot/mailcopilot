@@ -52,6 +52,14 @@ export {
 } from './mail'
 
 export {
+  extractImageSrcCids,
+  selectCidPartsToInline,
+  selectPartsToHide,
+  MAX_INLINE_CID_PARTS,
+} from './cidRefs'
+export type { InlineCidCandidate, ResolvedCidPart } from './cidRefs'
+
+export {
   normalizeExternalUrl,
   buildRoutedMailLink,
   isRoutedMailLink,
@@ -122,6 +130,22 @@ export {
   isLinuxInstallerError,
 } from './transientErrors'
 
+// §2.127 — user-facing error presentation. Only the RENDERER half of
+// errorPresentation.ts is re-exported here: the renderer decodes the tag the
+// main-process funnel embedded and picks a sentence from a closed vocabulary.
+// The encoder side (`presentedIpcMessage`, `describeErrorForLog`) is
+// main-process-only and stays on the deep path `@mailcopilot/core/errorPresentation`,
+// so a renderer file cannot reach for it by autocomplete.
+export {
+  ERROR_PRESENTATION_KEYS,
+  ERROR_PRESENTATION_I18N_KEYS,
+  isErrorPresentationKey,
+  classifyErrorPresentation,
+  decodeErrorPresentation,
+  stripErrorPresentation,
+  type ErrorPresentationKey,
+} from './errorPresentation'
+
 export {
   isKeychainUnavailableError,
   KEYCHAIN_UNAVAILABLE_RE,
@@ -132,3 +156,18 @@ export {
   collapseQuotedText,
   type CollapseOptions,
 } from './quotedText'
+
+export {
+  analyzeTableReferences,
+  type SqlTableReferences,
+  type SqlGuardRefusalReason,
+} from './sqlGuard'
+
+export {
+  scrubUserPathsShape,
+  scrubEmailAddressesShape,
+  scrubEventPiiWith,
+  scrubLogPiiWith,
+  type ScrubbableEvent,
+  type ScrubbableLog,
+} from './piiScrub'

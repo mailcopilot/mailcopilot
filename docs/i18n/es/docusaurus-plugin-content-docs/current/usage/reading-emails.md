@@ -100,13 +100,25 @@ Cuando el mensaje activo tiene adjuntos, estos aparecen encima del cuerpo del me
 - Un **icono de tipo de archivo** elegido a partir del tipo MIME, con respaldo en la extension del nombre de archivo cuando el tipo MIME falta, es generico (`application/octet-stream`) o no se reconoce: PDF, imagen, archivo comprimido, documento, hoja de calculo, presentacion, texto plano, mensaje `.eml` incrustado, o un icono generico cuando no aplica nada mas especifico.
 - El **nombre del archivo**.
 - El **tamano del archivo**.
-- Un **distintivo «Vista previa disponible»** en los adjuntos que MailCopilot reconoce como previsualizables. El conjunto actual cubre imagenes PNG, JPEG, GIF, WebP y documentos PDF -- el distintivo aparece solo en estos tipos e indica que la funcion de previsualizacion esta planificada; la accion principal de la fila sigue siendo hoy el boton de descarga.
+
+Las imagenes de maquetacion que el cuerpo del mensaje ya muestra en linea -- por ejemplo un logotipo en una firma HTML -- nunca se eliminan de la lista. MailCopilot no puede determinar con fiabilidad, desde fuera del navegador, si una parte concreta llego a ser visible en pantalla -- eso lo deciden la maquetacion, el CSS y la seleccion dentro de una imagen adaptable --, asi que en vez de adivinar mantiene todas las partes accesibles: los adjuntos reales (los archivos que el remitente adjunto de verdad) se listan primero, y las imagenes en linea que el cuerpo renderizo se relegan al final de la lista, detras del mismo interruptor de expansion descrito mas abajo.
+
+Aparece un interruptor de expansion siempre que haya mas que mostrar de lo que cabe contraido -- mas de cuatro adjuntos reales, o cualquier imagen en linea relegada, incluso si hay cuatro adjuntos reales o menos. Haz clic en **Mostrar mas (N)**, donde N cuenta solo los elementos que no estan visibles ahora mismo, para revelarlo todo, y en **Mostrar menos** para volver a contraer la lista.
 
 Haz clic en el boton de descarga de la fila del adjunto para guardar el archivo en tu equipo. El boton de descarga tiene una etiqueta accesible explicita, de modo que los lectores de pantalla anuncian la accion junto con el nombre del archivo.
 
 ## Enlaces
 
 MailCopilot verifica los enlaces: enlaces no coincidentes, HTTP y dominios IDN.
+
+### Clic derecho en un enlace
+
+Haz clic derecho en un enlace dentro del cuerpo de un mensaje para abrir un pequeno menu contextual con:
+
+- **Abrir enlace en el navegador** -- abre el enlace de la misma forma que un clic, incluidas las comprobaciones de seguridad anteriores (avisos de dominio no coincidente y de HTTP, deteccion de dominios IDN/punycode). Esta opcion solo aparece en la ventana principal y en la ventana de mensaje independiente (ver [Abrir en ventana](#abrir-en-ventana)) -- no se ofrece en las ventanas de Configuracion, Redactar o Cuenta, ya que ninguna de ellas muestra enlaces de correo.
+- **Copiar dirección del enlace** -- copia el destino real del enlace al portapapeles, no su texto visible, y nunca la forma interna de enrutamiento que MailCopilot usa para representar el enlace. Para una direccion web (`http:`/`https:`) con un nombre de dominio internacionalizado, la direccion se copia en su forma punycode (ASCII) -- la forma que su navegador usara realmente -- en lugar de la forma Unicode, de modo que una direccion copiada no pueda ocultar un dominio similar detras de caracteres legibles. Para una direccion `mailto:`, un dominio internacionalizado se codifica en porcentaje en su lugar, ya que los clientes de correo no lo resuelven como un host punycode. Las credenciales incrustadas en un enlace (`https://user:pass@host/…`) se copian tal cual, sin eliminarse -- si pega ese enlace en otro lugar, las credenciales lo acompanan.
+
+Ninguna de las dos opciones aparece para enlaces que no comiencen con `http:`, `https:` o `mailto:` (por ejemplo, un enlace `javascript:` o `data:` incrustado en un mensaje), ni para una direccion de enlace de mas de 8192 caracteres.
 
 ## Acciones
 

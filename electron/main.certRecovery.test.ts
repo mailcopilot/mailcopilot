@@ -14,9 +14,10 @@ import { X509Certificate } from 'node:crypto'
  * We mirror the wiring points verbatim with injected dependencies:
  *
  *   - `net:trustCert` handler: schema validation → account-exists guard →
- *     ENDPOINT-OWNERSHIP guard → upsertTlsPin (canonical fingerprint) →
- *     TRUST-OFFER gate → certRecovery.consumeTrustOffer → telemetry →
- *     accounts:changed broadcast → one-shot per-account resync.
+ *     ENDPOINT-OWNERSHIP guard → TRUST-OFFER gate → NATIVE CONFIRMATION gate
+ *     (gate 5, with its single-flight latch and post-dialog offer re-check) →
+ *     upsertTlsPin (canonical fingerprint) → certRecovery.consumeTrustOffer →
+ *     telemetry → accounts:changed broadcast → one-shot per-account resync.
  *   - `cert:dismiss` handler: schema validation → certRecovery.dismiss.
  *   - `broadcast()` recipient counting.
  *   - `persistCertNoticeShownHosts` atomic write-then-rename.
@@ -286,6 +287,51 @@ function buildAccountTlsConfig(
   }
 }
 
+// ─── Mirror: gate 5 — native trust confirmation (electron/main.ts) ─────────
+/** Stand-in for the BrowserWindow returned by `BrowserWindow.fromWebContents`
+ *  — only its identity matters (it is passed straight to showMessageBox). */
+type MockBrowserWindow = { webContents: unknown }
+
+// Mirrors `confirmCertTrustNatively`: IS_E2E auto-confirms; otherwise the OS
+// message box decides, and only the explicit second button is a yes.
+const certTrustConfirmInFlight = new Set<string>()
+
+async function confirmCertTrustNatively(
+  sender: unknown,
+  host: string,
+  port: number,
+  fingerprint: string,
+  deps: {
+    isE2E: boolean
+    showMessageBox: ((parent: MockBrowserWindow, opts: object) => Promise<{ response: number }>) &
+      ((opts: object) => Promise<{ response: number }>)
+    fromWebContents: (sender: unknown) => MockBrowserWindow | null
+  },
+): Promise<boolean> {
+  if (deps.isE2E) return true
+  const opts = {
+    type: 'warning' as const,
+    title: 'Trust this certificate?',
+    message: `Trust the certificate presented by ${host}:${port}?`,
+    detail:
+      `SHA-256 fingerprint:\n${fingerprint}\n\n` +
+      'MailCopilot will accept exactly this certificate for this account from ' +
+      'now on, including when it is not signed by a recognised authority. ' +
+      'Continue only if this fingerprint matches the one published by your ' +
+      'mail provider — someone intercepting the connection would present a ' +
+      'different certificate. If you did not just ask to trust a certificate, ' +
+      'choose Cancel.',
+    buttons: ['Cancel', 'Trust Certificate'],
+    defaultId: 0,
+    cancelId: 0,
+  }
+  const parent = deps.fromWebContents(sender)
+  const result = parent
+    ? await deps.showMessageBox(parent, opts)
+    : await deps.showMessageBox(opts)
+  return result.response === 1
+}
+
 // ─── Mirror: net:trustCert handler (electron/main.ts) ──────────────────────
 async function trustCertHandler(
   payload: unknown,
@@ -298,8 +344,13 @@ async function trustCertHandler(
     providerFromHost: (host: string) => string
     broadcast: (channel: string, payload: unknown) => number
     triggerAccountResync: (accountId: number) => void
+    isE2E: boolean
+    showMessageBox: ((parent: MockBrowserWindow, opts: object) => Promise<{ response: number }>) &
+      ((opts: object) => Promise<{ response: number }>)
+    fromWebContents: (sender: unknown) => MockBrowserWindow | null
+    sender: unknown
   },
-): Promise<{ ok: true }> {
+): Promise<{ ok: true } | { ok: false; cancelled: true }> {
   const parsed = certTrustSchema.parse(payload)
   const meta = deps.getAccountMeta(parsed.accountId)
   if (!meta) throw new Error(`Account #${parsed.accountId} not found`)
@@ -314,6 +365,41 @@ async function trustCertHandler(
     const reason = offer === 'fingerprint-mismatch' ? 'offer_fingerprint_mismatch' : 'no_pending_offer'
     try {
       deps.recordEvent('cert.trust_rejected', { provider: deps.providerFromHost(host), reason })
+    } catch { /* telemetry must not block the trust flow */ }
+    throw new Error('cert_trust_not_offered')
+  }
+  // Gate 5 — trusted confirmation, after the cheap gates so an unauthorized
+  // caller cannot raise a native modal at all.
+  const confirmKey = `${parsed.accountId}|${host}|${parsed.port}`
+  if (certTrustConfirmInFlight.has(confirmKey)) {
+    try {
+      deps.recordEvent('cert.trust_rejected', {
+        provider: deps.providerFromHost(host), reason: 'confirm_in_flight',
+      })
+    } catch { /* telemetry must not block the trust flow */ }
+    throw new Error('cert_trust_confirm_in_flight')
+  }
+  certTrustConfirmInFlight.add(confirmKey)
+  let confirmed: boolean
+  try {
+    confirmed = await confirmCertTrustNatively(deps.sender, host, parsed.port, fingerprint, deps)
+  } finally {
+    certTrustConfirmInFlight.delete(confirmKey)
+  }
+  if (!confirmed) {
+    try {
+      deps.recordEvent('cert.trust_rejected', {
+        provider: deps.providerFromHost(host), reason: 'user_declined',
+      })
+    } catch { /* telemetry must not block the trust flow */ }
+    return { ok: false as const, cancelled: true as const }
+  }
+  // Re-check: the modal may have sat on screen past the offer TTL.
+  if (deps.certRecovery.peekTrustOffer(parsed.accountId, host, parsed.port, fingerprint) !== 'ok') {
+    try {
+      deps.recordEvent('cert.trust_rejected', {
+        provider: deps.providerFromHost(host), reason: 'no_pending_offer',
+      })
     } catch { /* telemetry must not block the trust flow */ }
     throw new Error('cert_trust_not_offered')
   }
@@ -509,6 +595,12 @@ describe('main.ts TLS trust rework — net:trustCert handler', () => {
   let broadcast: ReturnType<typeof vi.fn>
   let getAccountMeta: ReturnType<typeof vi.fn>
   let triggerAccountResync: ReturnType<typeof vi.fn>
+  let showMessageBox: ReturnType<typeof vi.fn>
+  let fromWebContents: ReturnType<typeof vi.fn>
+  let isE2E: boolean
+
+  const FAKE_SENDER = { webContents: 'fake-sender' }
+  const FAKE_WINDOW: MockBrowserWindow = { webContents: 'fake-window' }
 
   function run(payload: unknown) {
     return trustCertHandler(payload, {
@@ -521,10 +613,21 @@ describe('main.ts TLS trust rework — net:trustCert handler', () => {
       providerFromHost: () => 'other',
       broadcast: broadcast as unknown as (channel: string, payload: unknown) => number,
       triggerAccountResync,
+      isE2E,
+      showMessageBox: showMessageBox as unknown as
+        ((parent: MockBrowserWindow, opts: object) => Promise<{ response: number }>) &
+        ((opts: object) => Promise<{ response: number }>),
+      fromWebContents: fromWebContents as unknown as (sender: unknown) => MockBrowserWindow | null,
+      sender: FAKE_SENDER,
     })
   }
 
   beforeEach(() => {
+    certTrustConfirmInFlight.clear()
+    // Default: the user clicks "Trust Certificate" in main's native dialog.
+    showMessageBox = vi.fn().mockResolvedValue({ response: 1 })
+    fromWebContents = vi.fn().mockReturnValue(FAKE_WINDOW)
+    isE2E = false
     certRecovery = makeCertRecoveryMock()
     upsertTlsPin = vi.fn()
     // Default: the endpoint still serves the certificate the dialog showed.
@@ -552,6 +655,140 @@ describe('main.ts TLS trust rework — net:trustCert handler', () => {
     await run(validPayload)
 
     expect(fetchServerCertificate).toHaveBeenCalledWith('imap.example.com', 993)
+  })
+
+  // ─── Gate 5 — native confirmation ────────────────────────────────────────
+  // Gates 1–4 only check values main previously broadcast to the renderer, so
+  // a compromised renderer can replay them. These tests pin the property that
+  // closes that hole: nothing is trusted and no trust anchor is written until
+  // a human answers a dialog the renderer cannot draw or script.
+
+  it('mints nothing when the native confirmation is not answered with Trust', async () => {
+    showMessageBox.mockResolvedValue({ response: 0 })
+
+    const result = await run(validPayload)
+
+    expect(result).toEqual({ ok: false, cancelled: true })
+    // No probe, no pin, no anchor, no offer burn, no downstream effects.
+    expect(fetchServerCertificate).not.toHaveBeenCalled()
+    expect(upsertTlsPin).not.toHaveBeenCalled()
+    expect(certRecovery.consumeTrustOffer).not.toHaveBeenCalled()
+    expect(broadcast).not.toHaveBeenCalled()
+    expect(triggerAccountResync).not.toHaveBeenCalled()
+    expect(recordEvent).toHaveBeenCalledWith('cert.trust_rejected', {
+      provider: 'other', reason: 'user_declined',
+    })
+    expect(recordEvent).not.toHaveBeenCalledWith('cert.trust_clicked', expect.anything())
+  })
+
+  it.each([
+    ['Esc / dismissed without a button', undefined],
+    ['parent window destroyed (−1)', -1],
+    ['a third button that is not Trust', 2],
+  ])('treats %s as a refusal', async (_label, response) => {
+    showMessageBox.mockResolvedValue({ response })
+
+    const result = await run(validPayload)
+
+    expect(result).toEqual({ ok: false, cancelled: true })
+    expect(upsertTlsPin).not.toHaveBeenCalled()
+  })
+
+  it('names the endpoint and the exact fingerprint in the confirmation', async () => {
+    await run(validPayload)
+
+    expect(showMessageBox).toHaveBeenCalledTimes(1)
+    const opts = showMessageBox.mock.calls[0][1] as { message: string; detail: string; buttons: string[] }
+    // The user confirms ONE certificate on ONE endpoint, not "trust something".
+    expect(opts.message).toContain('imap.example.com:993')
+    expect(opts.detail).toContain(FP_COLONS)
+    expect(opts.buttons).toEqual(['Cancel', 'Trust Certificate'])
+  })
+
+  it('shows the confirmation modal to the requesting window, falling back to a parentless dialog', async () => {
+    await run(validPayload)
+    expect(showMessageBox).toHaveBeenCalledWith(FAKE_WINDOW, expect.objectContaining({
+      buttons: ['Cancel', 'Trust Certificate'],
+    }))
+
+    showMessageBox.mockClear()
+    fromWebContents.mockReturnValue(null)
+    await run(validPayload)
+    expect(showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      buttons: ['Cancel', 'Trust Certificate'],
+    }))
+  })
+
+  it.each([
+    ['no trust offer is open', () => certRecovery.peekTrustOffer.mockReturnValue('no-offer')],
+    ['the endpoint is not the account\'s', () => getAccountMeta.mockReturnValue({
+      imap: { host: 'other.example.com', port: 993, secure: true },
+      smtp: { host: 'other.example.com', port: 465, secure: true },
+    })],
+    ['the account does not exist', () => getAccountMeta.mockReturnValue(undefined)],
+  ])('raises no native dialog when %s', async (_label, arrange) => {
+    arrange()
+
+    await expect(run(validPayload)).rejects.toThrow()
+
+    // An unauthorized caller must not be able to put a modal on the user's
+    // screen at all — otherwise the gate itself becomes a nuisance vector.
+    expect(showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('leaves the offer redeemable after a refusal (the user can look again and confirm)', async () => {
+    showMessageBox.mockResolvedValueOnce({ response: 0 })
+    expect(await run(validPayload)).toEqual({ ok: false, cancelled: true })
+
+    // Same offer, same certificate — the retry goes through untouched.
+    const second = await run(validPayload)
+
+    expect(second).toEqual({ ok: true })
+    expect(upsertTlsPin).toHaveBeenCalledWith(42, 'imap.example.com', 993, FP_COLONS, SELF_SIGNED_PEM)
+    expect(certRecovery.consumeTrustOffer).toHaveBeenCalledWith(42, 'imap.example.com', 993)
+  })
+
+  it('refuses to stack a second confirmation on the same endpoint (no consent fatigue)', async () => {
+    let release!: (r: { response: number }) => void
+    showMessageBox.mockReturnValueOnce(new Promise<{ response: number }>((resolve) => { release = resolve }))
+
+    const first = run(validPayload)
+    await Promise.resolve()
+
+    await expect(run(validPayload)).rejects.toThrow('cert_trust_confirm_in_flight')
+    expect(showMessageBox).toHaveBeenCalledTimes(1)
+    expect(recordEvent).toHaveBeenCalledWith('cert.trust_rejected', {
+      provider: 'other', reason: 'confirm_in_flight',
+    })
+
+    release({ response: 1 })
+    expect(await first).toEqual({ ok: true })
+    // The in-flight latch releases, so a later legitimate attempt still works.
+    expect(await run(validPayload)).toEqual({ ok: true })
+  })
+
+  it('does not pin when the offer expired while the confirmation was open', async () => {
+    // Live at the pre-dialog peek, gone at the post-dialog re-check.
+    certRecovery.peekTrustOffer
+      .mockReturnValueOnce('ok')
+      .mockReturnValue('no-offer')
+
+    await expect(run(validPayload)).rejects.toThrow('cert_trust_not_offered')
+
+    expect(showMessageBox).toHaveBeenCalledTimes(1)
+    expect(fetchServerCertificate).not.toHaveBeenCalled()
+    expect(upsertTlsPin).not.toHaveBeenCalled()
+    expect(certRecovery.consumeTrustOffer).not.toHaveBeenCalled()
+  })
+
+  it('IS_E2E auto-confirms: the harness cannot drive a native dialog', async () => {
+    isE2E = true
+
+    const result = await run(validPayload)
+
+    expect(result).toEqual({ ok: true })
+    expect(showMessageBox).not.toHaveBeenCalled()
+    expect(upsertTlsPin).toHaveBeenCalledWith(42, 'imap.example.com', 993, FP_COLONS, SELF_SIGNED_PEM)
   })
 
   it('refuses to pin when main never opened a dialog for this endpoint', async () => {

@@ -7,8 +7,12 @@ name: Build macOS
 on:
   workflow_dispatch:
     inputs:
+      # A LABEL, not a checkout target: it names the run in the Actions UI and in
+      # the GitLab job log. Nothing is checked out by this name — service runs
+      # (no CI_COMMIT_TAG) publish no tag at all, so there would be nothing to
+      # find under it.
       tag:
-        description: "Version tag (e.g. v1.14.0)"
+        description: "Version tag / run id, for identification only (e.g. v1.14.0)"
         required: true
         type: string
       # Sentry DSN is NOT a secret — it ships inside every client bundle by
@@ -20,6 +24,40 @@ on:
         required: false
         type: string
         default: ""
+      # The electron-updater feed, baked into app-update.yml at package time.
+      # Not a secret either — it ships inside every artifact by design, exactly
+      # like the DSN — so it travels the same way: a plain dispatch input from
+      # scripts/trigger-github-build.sh. Empty falls back to the placeholder
+      # below, which is correct for a manual run of this workflow but produces
+      # a build that CANNOT self-update.
+      update_url:
+        description: "electron-updater feed URL baked into the build"
+        required: false
+        type: string
+        default: ""
+
+# Least privilege for the run-scoped GITHUB_TOKEN. Without this block the token
+# inherits the org/repo default, which may be the legacy read-write-all — far
+# more than a build job needs, and flagged by CodeQL ("Workflow does not contain
+# permissions").
+#
+# Why `contents: read` is the whole list — derived from what the steps below
+# actually do, not from a template:
+#   - actions/checkout@v4 reads the repository tree: needs contents: read.
+#   - actions/setup-node@v4 passes github.token only to read the PUBLIC
+#     actions/node-versions repo (see its action.yml `token` default); a public
+#     read needs no extra scope.
+#   - actions/upload-artifact@v4 does NOT use GITHUB_TOKEN at all. It talks to
+#     the per-run Artifact service via ACTIONS_RUNTIME_TOKEN, which is granted by
+#     the runner and is not governed by this block — so uploading needs no
+#     `actions:` scope here.
+#   - electron-builder runs with `--publish never`, so nothing is written back to
+#     the repo, releases or packages.
+# Nothing in this workflow writes to GitHub. Do not widen this block without a
+# step that demonstrably fails on it; grant the narrowest missing scope instead
+# of dropping the block.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -29,14 +67,34 @@ jobs:
     env:
       # Disable code signing (no Apple Developer ID certificate configured yet).
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      # Placeholder URL for electron-updater (overridden in production by MAILCOPILOT_UPDATE_URL).
-      MAILCOPILOT_UPDATE_URL: "https://placeholder.local/updates"
+      # electron-updater feed, baked into app-update.yml by electron-builder
+      # (see the `publish.url` field in electron-builder.json5).
+      #
+      # The placeholder is a FALLBACK for manual runs, not the production value.
+      # It used to be the only value here, with a comment claiming it was
+      # "overridden in production" — nothing overrode it, because the GitLab
+      # trigger never sent one. Every Windows and macOS artifact therefore
+      # shipped pointing at `placeholder.local`, so "check for updates" failed
+      # DNS resolution and surfaced as "network error — try again when you're
+      # online", and background update checks failed the same way. Verified on
+      # the released 1.23.0 installer, not inferred. Linux was never affected —
+      # its value comes from the CI variable in .gitlab-ci.yml.
+      MAILCOPILOT_UPDATE_URL: ${{ inputs.update_url != '' && inputs.update_url || 'https://placeholder.local/updates' }}
 
     steps:
-      - name: Checkout source at tag
+      # Builds the commit this run was dispatched on, and nothing else.
+      # `github.sha` for a workflow_dispatch is the head of the dispatched ref,
+      # and it is the same value as the run's `head_sha` — which is what
+      # scripts/trigger-github-build.sh matches on when it picks its run and
+      # re-checks before downloading the artifact. So "the commit that was
+      # verified" and "the commit that was built" are one object, not two values
+      # that could disagree. Do NOT reintroduce an input for this: an input is not
+      # covered by head_sha, so a second dispatch on the same branch would pass
+      # both guards while building something else.
+      - name: Checkout the dispatched commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -66,8 +124,9 @@ jobs:
           SENTRY_DSN: ${{ inputs.sentry_dsn != '' && inputs.sentry_dsn || secrets.SENTRY_DSN }}
           # Sourcemap upload is intentionally NOT wired here. This build step
           # executes vite.config.ts from an arbitrary workflow_dispatch ref
-          # (checkout above uses `ref: inputs.tag`), so attaching
-          # SENTRY_AUTH_TOKEN would let a malicious ref exfiltrate the token.
+          # (anyone able to dispatch chooses the ref, and the checkout above
+          # follows it), so attaching SENTRY_AUTH_TOKEN would let a malicious ref
+          # exfiltrate the token.
           # vite.config.ts gates the upload on SENTRY_AUTH_TOKEN && SENTRY_DSN
           # both being set, so without the token the upload is skipped and the
           # build still passes. Wire it later via a protected GitHub

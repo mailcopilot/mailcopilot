@@ -8,7 +8,6 @@ import type { AttachmentMeta } from '../../packages/net/types'
 // user-visible labels for readability in assertions. Mirrors the pattern used
 // by AiPanel.test.tsx.
 const i18nMap: Record<string, string> = {
-  'attachments.previewAvailable': 'Preview available',
   'attachments.iconLabel.pdf': 'PDF document',
   'attachments.iconLabel.image': 'Image',
   'attachments.iconLabel.archive': 'Archive',
@@ -49,7 +48,7 @@ function baseAtt(overrides: Partial<AttachmentMeta> = {}): AttachmentMeta {
 }
 
 describe('AttachmentRow', () => {
-  it('renders PDF icon + filename + size + Preview badge for application/pdf', () => {
+  it('renders PDF icon + filename + size for application/pdf', () => {
     const { container } = render(
       <AttachmentRow
         attachment={baseAtt({ filename: 'report.pdf', contentType: 'application/pdf', size: 2048 })}
@@ -59,12 +58,6 @@ describe('AttachmentRow', () => {
     expect(container.querySelector('.attachment-icon')).toBeTruthy()
     expect(container.querySelector('.attachment-name')?.textContent).toBe('report.pdf')
     expect(container.querySelector('.attachment-size')?.textContent).toBe('2.0 KB')
-    const badge = container.querySelector('.attachment-preview-badge')
-    expect(badge).toBeTruthy()
-    expect(badge?.textContent).toBe('Preview available')
-    // Badge must be hidden from AT — the button's aria-label already conveys
-    // intent; the badge is a purely visual hint for sighted users.
-    expect(badge?.getAttribute('aria-hidden')).toBe('true')
   })
 
   it('renders archive icon without Preview badge for application/zip', () => {
@@ -89,7 +82,7 @@ describe('AttachmentRow', () => {
     expect(container.querySelector('.attachment-preview-badge')).toBeNull()
   })
 
-  it('renders image icon + Preview badge for octet-stream fallback on .png', () => {
+  it('renders image icon for octet-stream fallback on .png', () => {
     const { container } = render(
       <AttachmentRow
         attachment={baseAtt({ filename: 'photo.png', contentType: 'application/octet-stream' })}
@@ -97,7 +90,7 @@ describe('AttachmentRow', () => {
       />
     )
     expect(container.querySelector('.attachment-icon')).toBeTruthy()
-    expect(container.querySelector('.attachment-preview-badge')?.textContent).toBe('Preview available')
+    expect(container.querySelector('.attachment-preview-badge')).toBeNull()
   })
 
   it('renders unnamed fallback when filename is missing', () => {
@@ -167,7 +160,7 @@ describe('AttachmentRow', () => {
     expect(container.querySelector('.attachment-chip')?.getAttribute('aria-label')).toBe('Download attachment: Attachment')
   })
 
-  it('marks inner icon/name/size/badge as aria-hidden so screen readers read only the button label', () => {
+  it('marks inner icon/name/size as aria-hidden so screen readers read only the button label', () => {
     const { container } = render(
       <AttachmentRow
         attachment={baseAtt({ filename: 'report.pdf', contentType: 'application/pdf', size: 2048 })}
@@ -177,7 +170,6 @@ describe('AttachmentRow', () => {
     expect(container.querySelector('.attachment-icon')?.getAttribute('aria-hidden')).toBe('true')
     expect(container.querySelector('.attachment-name')?.getAttribute('aria-hidden')).toBe('true')
     expect(container.querySelector('.attachment-size')?.getAttribute('aria-hidden')).toBe('true')
-    expect(container.querySelector('.attachment-preview-badge')?.getAttribute('aria-hidden')).toBe('true')
   })
 
   it('renders very long filename without truncation in DOM text', () => {
@@ -284,5 +276,46 @@ describe('AttachmentRow', () => {
       />
     )
     expect(container.querySelector('.attachment-preview-badge')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §2.125 — the "Preview available" badge is gone. No preview action exists, so
+// the label advertised a capability the product does not have and doubled the
+// chip width. It returns in §2.126 together with a real preview action.
+// ---------------------------------------------------------------------------
+describe('AttachmentRow — §2.125 preview badge removal', () => {
+  // Both types for which fileIcon() still reports previewable: true.
+  const previewableCases: Array<[string, string]> = [
+    ['report.pdf', 'application/pdf'],
+    ['photo.png', 'image/png'],
+  ]
+
+  it.each(previewableCases)(
+    'renders no preview badge for %s even though the descriptor is previewable',
+    (filename, contentType) => {
+      const { container } = render(
+        <AttachmentRow attachment={baseAtt({ filename, contentType })} onDownload={() => {}} />
+      )
+      expect(container.querySelector('.attachment-preview-badge')).toBeNull()
+      // stableT() echoes unknown keys, so a leftover render would surface either
+      // the translated label or the raw key. Neither may appear.
+      expect(container.textContent).not.toContain('Preview available')
+      expect(container.textContent).not.toContain('attachments.previewAvailable')
+    },
+  )
+
+  it('keeps the chip a plain download button for previewable content', () => {
+    const onDownload = vi.fn()
+    const { container } = render(
+      <AttachmentRow
+        attachment={baseAtt({ filename: 'report.pdf', contentType: 'application/pdf' })}
+        onDownload={onDownload}
+      />
+    )
+    const chip = container.querySelector('.attachment-chip') as HTMLButtonElement
+    expect(chip.getAttribute('aria-label')).toBe('Download attachment: report.pdf')
+    fireEvent.click(chip)
+    expect(onDownload).toHaveBeenCalledTimes(1)
   })
 })

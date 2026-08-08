@@ -5,7 +5,7 @@ title: Regole email
 
 # Regole email
 
-Le regole email ti permettono di ordinare e organizzare automaticamente le email in arrivo in base a condizioni da te definite. Le regole vengono valutate ogni volta che arrivano nuovi messaggi.
+Le regole email ti permettono di ordinare e organizzare automaticamente le email in arrivo in base a condizioni da te definite. Le regole vengono eseguite ogni volta che MailCopilot scarica la posta dal server, non necessariamente nell'istante in cui un messaggio vi arriva.
 
 ## Creare una regola
 
@@ -19,9 +19,9 @@ Le regole email ti permettono di ordinare e organizzare automaticamente le email
 Ogni regola ha una o più condizioni. Tutte le condizioni devono corrispondere affinché la regola si attivi (logica AND). Se hai bisogno della logica OR, crea regole separate.
 
 Campi condizione disponibili:
-- **Da** — nome o indirizzo del mittente.
-- **A** — indirizzo del destinatario.
-- **CC** — indirizzo in copia.
+- **Mittente** — confrontato con il nome visualizzato del mittente, se presente nel messaggio, e solo in sua assenza con l'indirizzo. Una regola pensata per un indirizzo può smettere di corrispondere non appena quel mittente inizia a usare un nome visualizzato: testa la regola dopo averla impostata e controlla se smette di attivarsi.
+- **Destinatario** — indirizzo del destinatario.
+- **Cc** — presente nell'editor delle regole, ma MailCopilot non memorizza il campo Cc per la posta in cache, quindi per una regola ogni messaggio ha il Cc vuoto. Questo fa sì che la condizione si comporti in modo imprevedibile invece di limitarsi a "non funzionare": far corrispondere un indirizzo specifico nel Cc non riesce mai, ma un operatore di esclusione come **non contiene**, o un'espressione regolare che corrisponde a una stringa vuota, corrisponde invece a **ogni** messaggio. Non usare una condizione sul Cc in una regola che sposta la posta nel cestino, la segna come spam o la sposta in un'altra cartella -- con l'operatore sbagliato può agire su tutta la tua casella di posta.
 - **Oggetto** — l'oggetto dell'email.
 - **Ha allegato** — se l'email contiene allegati.
 
@@ -29,7 +29,7 @@ Operatori disponibili:
 - **contiene** / **non contiene** — corrispondenza parziale.
 - **è uguale a** — corrispondenza esatta.
 - **inizia con** / **finisce con** — corrispondenza per prefisso o suffisso.
-- **corrisponde a espressione regolare** — ricerca avanzata tramite espressioni regolari.
+- **corrisponde al regex** — ricerca avanzata tramite espressioni regolari.
 
 ### Azioni
 
@@ -37,26 +37,34 @@ Quando una regola corrisponde, vengono eseguite una o più azioni:
 
 - **Archivia** — sposta nella cartella Archivio.
 - **Sposta nel cestino** — sposta nella cartella Cestino.
-- **Sposta in cartella** — sposta in una cartella specifica a tua scelta.
+- **Sposta nella cartella** — sposta in una cartella specifica a tua scelta.
 - **Segna come letto** — segna automaticamente l'email come letta.
-- **Contrassegna con stella** — contrassegna l'email con una stella.
+- **Aggiungi stella** — contrassegna l'email con una stella.
 - **Segna come spam** — sposta nella cartella Spam.
 
 ### Interrompi l'elaborazione
 
-Se attivi **«Interrompi l'elaborazione delle regole successive»**, nessuna regola aggiuntiva verrà valutata dopo l'attivazione di questa. È utile quando hai una regola generica e vuoi evitare che sovrascriva regole più specifiche.
+Se attivi **«Non elaborare le regole successive»**, nessuna regola aggiuntiva verrà valutata dopo l'attivazione di questa. È utile quando hai una regola generica e vuoi evitare che sovrascriva regole più specifiche.
 
 ## Testare le regole
 
-Prima di salvare una regola, clicca su **«Testa sulle email esistenti»** per vedere quali delle tue email esistenti corrispondono alle condizioni. Questo ti aiuta a verificare che la regola funzioni come previsto prima di applicarla alla nuova posta.
+Prima di salvare una regola, clicca su **«Testa sulle email esistenti»** per vedere in anteprima quali delle tue email recenti nella posta in arrivo corrisponderebbero alle condizioni. L'anteprima controlla fino a 500 email nella posta in arrivo già scaricate su questo dispositivo e mostra fino a 20 corrispondenze -- è un controllo rapido, non una ricerca esaustiva in tutta la tua casella di posta. Per una regola limitata a un solo account, queste sono le tue email più recenti; per una regola valida per tutti gli account, le 500 email controllate provengono dall'insieme dei tuoi account, ma non sono necessariamente le più recenti in assoluto. Le email più vecchie e quelle non ancora scaricate su questo dispositivo non sono incluse.
 
 ## Applicare alle email esistenti
 
-Seleziona **«Applica alle email esistenti nella posta in arrivo»** quando salvi una regola per applicarla immediatamente alle email già presenti nella tua casella di posta.
+Seleziona **«Applica alle email esistenti nella posta in arrivo»** quando salvi una regola per eseguirla subito sulla posta che hai già. Questo copre fino a 1000 email nella posta in arrivo già scaricate su questo dispositivo -- per una regola limitata a un solo account, le tue email più recenti di questo tipo; per una regola valida per tutti gli account, fino a 1000 email provenienti dall'insieme dei tuoi account, non necessariamente le più recenti in assoluto. Non risale oltre nella cronologia della posta sul server e copre solo la posta in arrivo, non altre cartelle. Se un'azione fallisce, viene saltata solo quell'azione -- le altre azioni della stessa regola vengono comunque eseguite su quell'email, e il resto dell'operazione si completa comunque.
+
+## Solo posta nuova
+
+Le regole agiscono sulla posta nuova non appena arriva sul tuo dispositivo, indipendentemente da come vi sia arrivata -- una notifica push, una sincronizzazione periodica o una pagina con email più recenti di quelle già viste. In passato la via con cui un messaggio arrivava poteva contare, e una regola poteva non vederlo affatto; ora questa lacuna non c'è più. Tornare indietro nello scorrimento per caricare pagine più vecchie, però, non fa passare quelle email meno recenti attraverso le regole -- è intenzionale, lo stesso comportamento "nessuna scansione della cronologia" descritto più sotto, non una lacuna rimasta.
+
+Detto questo, questa garanzia per la posta nuova non è assoluta in ogni situazione: un'email la cui azione fallisce per tre tentativi consecutivi (ad esempio per una connessione interrotta) viene abbandonata definitivamente -- MailCopilot la salta e prosegue in quella cartella, quindi un riavvio successivo non la farà riapparire. Ciò che un riavvio azzera davvero è un conteggio che non ha ancora raggiunto tre: se l'app si riavvia prima che un'email abbia fallito tre volte di fila, il conteggio riparte da zero, quindi un'azione che continua a fallire per un motivo che non si risolve può bloccare indefinitamente l'elaborazione di una cartella, senza mai raggiungere davvero quel limite di tre tentativi.
+
+Le regole, inoltre, non esplorano mai da sole la cronologia completa di una cartella. Ogni cartella che MailCopilot già conosce all'avvio riceve subito un punto di partenza, prima ancora che avvenga qualsiasi sincronizzazione -- una cartella vuota riceve un punto di partenza pari a zero, quindi la sua primissima email viene valutata normalmente; una cartella che ha già posta in cache riceve un punto di partenza successivo a quella posta, così la posta esistente non viene ripresa, ma tutto ciò che arriva dopo sì. Una cartella che compare solo dopo quel momento di avvio -- appena creata o a cui ti sei appena iscritto -- viene gestita diversamente: non viene valutato nulla al suo interno finché MailCopilot non l'ha sincronizzata una prima volta, e conta solo la posta arrivata dopo quella prima sincronizzazione. Lo stesso nuovo inizio avviene se il server reimposta la numerazione dei messaggi di una cartella (raro, ma può accadere dopo alcune migrazioni lato server). Usa **«Applica alle email esistenti nella posta in arrivo»** (vedi sopra) se vuoi che una regola valuti anche la posta che hai già.
 
 ## Priorità delle regole
 
-Le regole vengono valutate in ordine di priorità (numero più basso = priorità più alta). Puoi modificare la priorità durante la modifica di una regola. Se due regole hanno la stessa priorità, vengono valutate nell'ordine di creazione.
+Le regole vengono valutate in ordine di priorità (numero più basso = priorità più alta). La priorità viene assegnata automaticamente alla creazione della regola -- al momento non è possibile modificarla dall'editor delle regole. Se due regole hanno la stessa priorità, quale delle due viene eseguita per prima non è definito.
 
 ## Regole IA
 
@@ -73,7 +81,7 @@ Le azioni delle regole IA vengono registrate in modo che tu possa verificare qua
 
 ### Le nuove regole IA partono disattivate
 
-Una regola IA appena creata è **disattivata per impostazione predefinita**. Attiva **«Attivato»** sulla regola dopo aver verificato il suo prompt e le azioni consentite, per iniziare ad applicarla alla posta in arrivo. Questo evita che una regola agisca sulla tua casella di posta prima che tu abbia confermato che si comporta come previsto.
+Una regola IA appena creata è **disattivata per impostazione predefinita**. Attiva **«Attivata»** sulla regola dopo aver verificato il suo prompt e le azioni consentite, per iniziare ad applicarla alla posta in arrivo. Questo evita che una regola agisca sulla tua casella di posta prima che tu abbia confermato che si comporta come previsto.
 
 ### Limite di regole attivate per account
 

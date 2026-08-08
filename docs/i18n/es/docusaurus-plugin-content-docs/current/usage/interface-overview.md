@@ -54,6 +54,12 @@ Columna derecha: encabezados, cuerpo del mensaje, adjuntos y botones de accion (
 
 Arrastra el borde entre columnas. Tu preferencia se guarda entre sesiones.
 
+## Seleccion y edicion de texto
+
+Haz clic derecho en cualquier campo de texto -- la barra de busqueda, un mensaje que estas redactando, el campo de la petición del asistente IA, o cualquier otro cuadro editable -- para abrir un pequeno menu contextual con **Cortar**, **Copiar**, **Pegar** y **Seleccionar todo**. Un clic derecho sobre texto seleccionado y no editable (por ejemplo un pasaje resaltado en el cuerpo de un mensaje) ofrece solo **Copiar**.
+
+Un clic derecho en un enlace dentro del cuerpo de un mensaje abre un menu distinto con opciones para abrir o copiar el enlace; consulta [Clic derecho en un enlace](./reading-emails#clic-derecho-en-un-enlace).
+
 ## Barra de estado
 
 Una barra de estado persistente recorre la parte inferior de la ventana, similar a la de VS Code. Muestra la actividad en segundo plano que antes solo se veia dentro del panel de busqueda:

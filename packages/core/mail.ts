@@ -115,10 +115,26 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/** Replaces src="cid:..." references with data: URIs (inline images). */
-export function replaceCidImages(html: string, cidToDataUri: Record<string, string>): string {
+/**
+ * Replaces src="cid:..." references with data: URIs (inline images).
+ *
+ * A `Map` is the preferred container and the only one that can carry every
+ * `Content-ID` a sender may write: a `Content-ID` is attacker-controlled data,
+ * and in a plain object the name `__proto__` is not a data slot but an
+ * inherited setter — `obj['__proto__'] = uri` creates no own property, so
+ * `Object.entries` never yields the pair and the substitution silently does
+ * not happen. Plain objects are still accepted for the callers that build
+ * their map from keys they control themselves; own enumerable properties are
+ * read, so a `Object.create(null)` record works too.
+ */
+export function replaceCidImages(
+  html: string,
+  cidToDataUri: Record<string, string> | ReadonlyMap<string, string>,
+): string {
   let out = html
-  for (const [cidRaw, dataUri] of Object.entries(cidToDataUri)) {
+  const pairs: Iterable<[string, string]> =
+    cidToDataUri instanceof Map ? cidToDataUri.entries() : Object.entries(cidToDataUri)
+  for (const [cidRaw, dataUri] of pairs) {
     const cid = normalizeCid(cidRaw)
     if (!cid || !dataUri) continue
     const re = new RegExp(`cid:(?:<)?${escapeRegExp(cid)}(?:>)?`, 'gi')

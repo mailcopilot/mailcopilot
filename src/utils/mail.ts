@@ -1,5 +1,4 @@
 import DOMPurify from 'dompurify'
-import { normalizeCid as _normalizeCid } from '@mailcopilot/core/mail'
 import type { MailAddress, FolderRoles } from '../../packages/types'
 
 /**
@@ -93,7 +92,15 @@ export function sanitizeMailHtml(html: string): string {
     FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'background'],
     ALLOW_DATA_ATTR: false,
     // data:/cid: needed for inline images. External resources are controlled by CSP in iframe.
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|cid|data):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+    // Narrowed copy of DOMPurify's default IS_ALLOWED_URI: we deliberately allow
+    // fewer schemes than upstream (no ftp/tel/callto/sms/xmpp/matrix). Keep the
+    // hyphens escaped — `[a-z+.\-]` / `[^a-z+.\-:]` are sets of literal characters.
+    // An unescaped `.-:` is parsed as the range 0x2E–0x3A (swallowing `/` and the
+    // digits), which silently rejects relative URLs such as `path/page`. Upstream
+    // carries the same escape + disable directive; `--report-unused-disable-directives`
+    // makes dropping the escape fail lint, so the two stay in sync.
+    // eslint-disable-next-line no-useless-escape
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|cid|data):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
   })
 }
 
@@ -547,15 +554,3 @@ export function buildMailIframeSrcDoc(bodyHtml: string, opts: { darkMode: boolea
   ].join('')
 }
 
-/** Extract `cid:<id>` references from email HTML. Returns unique normalized CIDs. */
-export function extractCidsFromHtml(html: string): string[] {
-  const s = html || ''
-  const res: string[] = []
-  const re = /cid:([^'">)\s]+)/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(s))) {
-    const cid = _normalizeCid(m[1] || '')
-    if (cid) res.push(cid)
-  }
-  return Array.from(new Set(res))
-}

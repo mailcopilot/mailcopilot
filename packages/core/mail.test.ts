@@ -196,6 +196,24 @@ describe('packages/core/mail (pure)', () => {
     expect(out).toContain('src="data:image/jpeg;base64,BBBB"')
   })
 
+  it('replaceCidImages accepts a Map, including cids that name Object.prototype members', () => {
+    const html = '<img src="cid:__proto__"><img src="cid:<constructor>">'
+    const out = replaceCidImages(html, new Map([
+      ['__proto__', 'data:image/png;base64,AAAA'],
+      ['constructor', 'data:image/png;base64,BBBB'],
+    ]))
+    expect(out).toContain('src="data:image/png;base64,AAAA"')
+    expect(out).toContain('src="data:image/png;base64,BBBB"')
+    expect(out).not.toContain('cid:')
+  })
+
+  it('replaceCidImages reads own properties, so a prototype-less record works too', () => {
+    const map: Record<string, string> = Object.create(null)
+    map['__proto__'] = 'data:image/png;base64,AAAA'
+    const out = replaceCidImages('<img src="cid:__proto__">', map)
+    expect(out).toContain('src="data:image/png;base64,AAAA"')
+  })
+
   // --- formatSmartDate ---
 
   it('formatSmartDate: today -> time', () => {

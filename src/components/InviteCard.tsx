@@ -15,6 +15,7 @@
 import { useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CalendarDays, MapPin, User, Loader2, CheckCircle, Clock, XCircle } from 'lucide-react'
+import { ERROR_PRESENTATION_I18N_KEYS, decodeErrorPresentation } from '@mailcopilot/core'
 import type { CalendarInvitePublic, RsvpMethod } from '../../packages/types'
 
 export interface InviteCardProps {
@@ -340,10 +341,18 @@ export default function InviteCard({
         setRsvpState({ kind: 'error', response, errorMsg: result.error ?? 'Unknown error' })
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err)
-      setRsvpState({ kind: 'error', response, errorMsg })
+      // §2.127 — the IPC rejection path (SMTP unreachable, credentials
+      // rejected) reads as one of four sentences; the raw text was the
+      // "Error invoking remote method 'mail:rsvpInvite'" wrapper. The
+      // `result.error` branch above is a different channel — a structured
+      // envelope, not a rejection — and is left as-is.
+      setRsvpState({
+        kind: 'error',
+        response,
+        errorMsg: t(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(err)]),
+      })
     }
-  }, [accountId, messageUid, folder])
+  }, [accountId, messageUid, folder, t])
 
   const isSending = rsvpState.kind === 'sending'
 

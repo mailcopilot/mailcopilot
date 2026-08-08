@@ -74,7 +74,12 @@ Per una verifica manuale in qualsiasi momento, aprite **Impostazioni > Informazi
 
 Per attivare il download automatico in background, aprite **Impostazioni > Informazioni** e selezionate **Scarica automaticamente gli aggiornamenti in background**. Quando attivata, le nuove versioni vengono scaricate silenziosamente e viene chiesto di riavviare quando l'aggiornamento e pronto.
 
-Se MailCopilot e stato installato per tutto il sistema (ad esempio tramite un gestore di pacchetti), la casella di download automatico e disabilitata e i controlli di download e riavvio non sono disponibili. Utilizzate il gestore di pacchetti o i privilegi di amministratore per l'aggiornamento. Il pulsante **Controlla aggiornamenti** continua a funzionare in questa modalita.
+MailCopilot normalmente puo aggiornarsi da solo su ogni piattaforma supportata: un'installazione AppImage sostituisce il file `.AppImage` stesso, e un'installazione `.deb`/`.rpm`/pacman lascia che il meccanismo di aggiornamento tenti la scrittura richiedendo privilegi di amministratore (`pkexec`/`sudo`), esattamente come farebbero `apt`/`dnf`/`pacman` -- il risultato effettivo lo decidono quella richiesta di elevazione dei privilegi e il gestore di pacchetti, non MailCopilot.
+
+L'auto-aggiornamento puo non essere disponibile in due modi diversi, e MailCopilot mostra controlli diversi per ciascuno:
+
+- **La build non e pacchettizzata** -- una build di sviluppo o CI. In questo caso non esiste alcun meccanismo di aggiornamento: il pulsante **Controlla aggiornamenti** e l'area di stato non compaiono, e al loro posto viene mostrato l'avviso **"Gli aggiornamenti sono disabilitati in questa build"**.
+- **La build e pacchettizzata, ma l'auto-aggiornamento e bloccato** -- o perche MailCopilot non e riuscito a determinare la cartella in cui dovrebbe scrivere l'aggiornamento sul posto, o perche quella cartella non e scrivibile dal vostro account. Il primo caso si verifica su Linux quando l'app non e in esecuzione come un'AppImage montata (per esempio un'AppImage estratta o una build grezza `linux-unpacked`) -- in quel caso non c'e nessuna cartella in cui scrivere. Il secondo caso significa che la cartella di un'AppImage in esecuzione non e scrivibile (un'installazione `.deb`/`.rpm`/pacman non e interessata, perche queste elevano i privilegi al posto vostro); su Windows e macOS significa che la cartella che contiene l'eseguibile installato non e scrivibile. In entrambi i casi compare un avviso che spiega il motivo, il pulsante **Controlla aggiornamenti** continua a funzionare, e la casella di download automatico resta disponibile -- ma i controlli di download e riavvio sono nascosti.
 
 ## Posso disabilitare gli aggiornamenti automatici?
 

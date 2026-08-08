@@ -88,7 +88,13 @@ function renderMarkdown(entries) {
   lines.push('')
   lines.push('# Telemetry')
   lines.push('')
-  lines.push('MailCopilot collects a small amount of anonymous diagnostic and usage data when you enable **Send anonymous diagnostics and usage data** in Settings → About. This page documents exactly what is collected, and — just as importantly — what is never collected.')
+  // Wording note (§2.82): this data is NOT anonymous — every event carries the
+  // stable install identifier, which is pseudonymisation, not anonymisation.
+  // The strings below must keep saying so; the consent screen, Settings → About
+  // and docs/docs/privacy/telemetry.md all state it, and a generator that
+  // reverts to "anonymous" would silently overwrite that page with a claim the
+  // product does not make.
+  lines.push('MailCopilot can send a small amount of diagnostic and usage data — but only after you actively agree to it. It never contains the content of your mail, but it does include a random identifier for this installation, so the data is **not fully anonymous**: see [Install identifier](#install-identifier) below for exactly what that identifier does and does not let us learn. This page documents exactly what is collected, and — just as importantly — what is never collected.')
   lines.push('')
   lines.push('## What we never collect')
   lines.push('')
@@ -106,16 +112,16 @@ function renderMarkdown(entries) {
   lines.push('')
   lines.push('All telemetry is sent to [Sentry](https://sentry.io), our error monitoring and performance platform. When you disable the toggle in Settings, the pipeline is bypassed entirely — nothing is sent. When you enable debug logging, the same events also appear in your local `main.log` so you can inspect exactly what would be transmitted.')
   lines.push('')
-  lines.push('### Anonymous install identifier')
+  lines.push('### Install identifier')
   lines.push('')
   lines.push('On first run, MailCopilot generates a random UUID and stores it in the local config file. This UUID never leaves your device. What is transmitted instead is a SHA-256 hash of it — truncated to 16 hex characters — which we call `install_id_hash`. It is attached to every telemetry event as the Sentry user id so we can answer questions like "how many unique installs are running version X" or "is crash Y affecting 1 user or 100". The hash is:')
   lines.push('')
-  lines.push('- **Anonymous** — not derived from, or correlated with, any account email, device fingerprint, IP address, or hardware identifier.')
+  lines.push('- **Not anonymous, but not identifying either** — it is not derived from, or correlated with, any account email, device fingerprint, IP address, or hardware identifier, so it cannot be traced back to you personally. It is, however, a stable per-installation identifier: everything a given install sends is linked together by it, across every session. That linkage is precisely why the consent screen does not call this data anonymous.')
   lines.push('- **Stable across releases** — the same install keeps the same hash when the app auto-updates, so retention metrics survive version bumps.')
   lines.push('- **Not reversible** — there is no mapping on our side from the hash back to the UUID or to your device.')
   lines.push('- **Dropped when you disable telemetry** — flipping the Settings toggle off immediately clears the identifier from the Sentry client and stops all further transmissions.')
   lines.push('')
-  lines.push('We use this identifier in the same way a web analytics tool would use an anonymous visitor id: it lets us count *distinct* installs rather than *total events*. That difference is the entire reason telemetry is useful — without it, one noisy install would look the same as a hundred calm installs.')
+  lines.push('We use this identifier in the same way a web analytics tool would use a visitor id: it lets us count *distinct* installs rather than *total events*. That difference is the entire reason telemetry is useful — without it, one noisy install would look the same as a hundred calm installs.')
   lines.push('')
   lines.push('## Events')
   lines.push('')

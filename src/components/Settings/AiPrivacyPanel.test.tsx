@@ -68,6 +68,21 @@ const i18nMap: Record<string, string> = {
   'ai.privacy.audit.outcome.ok': 'OK',
   'ai.privacy.audit.outcome.error': 'Error',
   'ai.privacy.audit.outcome.aborted': 'Aborted',
+  // §2.127 closed error vocabulary — the panel renders one of these instead of
+  // the rejection text (which carries the raw IPC wrapper and, for AggregateError,
+  // nothing at all).
+  'app.errors.presented.offline': 'No connection to the mail server. MailCopilot will keep retrying.',
+  'app.errors.presented.timeout': 'The mail server did not respond in time. MailCopilot will keep retrying.',
+  'app.errors.presented.auth': 'Sign-in was rejected. Check the account password, or re-authorize the account in Settings.',
+  'app.errors.presented.unknown': 'Could not complete the request. Please try again.',
+}
+
+/** §2.127 — the four sentences the panel is allowed to show. */
+const PRESENTED = {
+  offline: i18nMap['app.errors.presented.offline'],
+  timeout: i18nMap['app.errors.presented.timeout'],
+  auth: i18nMap['app.errors.presented.auth'],
+  unknown: i18nMap['app.errors.presented.unknown'],
 }
 const stableT = (key: string, opts?: Record<string, unknown>): string => {
   let text = i18nMap[key] ?? key
@@ -577,7 +592,9 @@ describe('AiPrivacyPanel — soft-delete', () => {
       fireEvent.click(screen.getByTestId('ai-privacy-delete-5'))
     })
     await act(async () => {})
-    expect(screen.getByText('DB error')).toBeInTheDocument()
+    // §2.127 — the vocabulary sentence, not the rejection text.
+    expect(screen.getByText(PRESENTED.unknown)).toBeInTheDocument()
+    expect(screen.queryByText('DB error')).not.toBeInTheDocument()
   })
 })
 
@@ -663,7 +680,8 @@ describe('AiPrivacyPanel — clear all', () => {
       fireEvent.click(screen.getByTestId('ai-privacy-clear-all'))
     })
     await act(async () => {})
-    expect(screen.getByText('Clear failed')).toBeInTheDocument()
+    expect(screen.getByText(PRESENTED.unknown)).toBeInTheDocument()
+    expect(screen.queryByText('Clear failed')).not.toBeInTheDocument()
   })
 })
 
@@ -707,7 +725,8 @@ describe('AiPrivacyPanel — export buttons', () => {
       fireEvent.click(screen.getByTestId('ai-privacy-export-json'))
     })
     await act(async () => {})
-    expect(screen.getByText('Export failed')).toBeInTheDocument()
+    expect(screen.getByText(PRESENTED.unknown)).toBeInTheDocument()
+    expect(screen.queryByText('Export failed')).not.toBeInTheDocument()
   })
 })
 
@@ -721,7 +740,8 @@ describe('AiPrivacyPanel — error state', () => {
     mockInvoke.mockRejectedValue(new Error('IPC error'))
     renderPanel()
     await expandPanel()
-    expect(screen.getByText('IPC error')).toBeInTheDocument()
+    expect(screen.getByText(PRESENTED.unknown)).toBeInTheDocument()
+    expect(screen.queryByText('IPC error')).not.toBeInTheDocument()
   })
 
   it('clears error on successful subsequent fetch', async () => {
@@ -735,11 +755,33 @@ describe('AiPrivacyPanel — error state', () => {
     })
     renderPanel()
     await expandPanel()
-    expect(screen.getByText('transient')).toBeInTheDocument()
+    expect(screen.getByText(PRESENTED.unknown)).toBeInTheDocument()
     // Refresh — second attempt succeeds.
     await act(async () => { fireEvent.click(screen.getByText('Refresh')) })
     await act(async () => {})
-    expect(screen.queryByText('transient')).not.toBeInTheDocument()
+    expect(screen.queryByText(PRESENTED.unknown)).not.toBeInTheDocument()
+  })
+
+  it('renders the tagged vocabulary key and never the raw text behind it (§2.127)', async () => {
+    // Shape produced by the main-process funnel in electron/ipc.ts: the
+    // presentation tag is prepended to whatever the server said. The tag
+    // decides the sentence; the server's words must not reach the screen.
+    mockInvoke.mockRejectedValue(
+      new Error("[mcerr:offline] Error invoking remote method 'ai:auditLog:list': AggregateError"),
+    )
+    renderPanel()
+    await expandPanel()
+    expect(screen.getByText(PRESENTED.offline)).toBeInTheDocument()
+    expect(screen.queryByText(/mcerr/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/AggregateError/)).not.toBeInTheDocument()
+  })
+
+  it('renders the auth sentence for a credentials rejection', async () => {
+    mockInvoke.mockRejectedValue(new Error('[mcerr:auth] Invalid credentials (Failure)'))
+    renderPanel()
+    await expandPanel()
+    expect(screen.getByText(PRESENTED.auth)).toBeInTheDocument()
+    expect(screen.queryByText(/Invalid credentials/)).not.toBeInTheDocument()
   })
 })
 

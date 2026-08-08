@@ -14,11 +14,25 @@
  * §3.3.C-uiaudit.22: metaTo/metaCc changed from string to MailAddress[] so
  * RecipientList can render collapsible chips with tooltips. metaBcc and
  * isSentByMe added for BCC privacy invariant (BCC shown only when isSentByMe).
+ *
+ * §2.128: the attachment list model (ordering, dedupe and the collapse
+ * ceiling) lives in `src/utils/attachmentList.ts`. This component only owns the
+ * expand/collapse UI state — deliberately keyed by activeMailKey so switching
+ * messages never carries an expanded list over to the next one.
+ *
+ * No part ever loses its chip. Parts the body inlined (reported as
+ * `hiddenAttachments` by `useMailIframeDoc`, which substituted their bytes and
+ * therefore knows) are demoted below the real attachments and wait behind the
+ * same toggle as any attachment past the ceiling. Expanding shows all of them.
+ * Deciding "the browser already drew this" is not something we can do from
+ * outside the browser, and getting it wrong used to cost the user a file.
  */
 
 import { Loader2, WifiOff, AlertTriangle } from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { MailAddress, MailSummary, AttachmentMeta, MessageDetails } from '../../packages/net/types'
+import { buildAttachmentList } from '../utils/attachmentList'
 import AttachmentRow from './AttachmentRow'
 import InviteCard from './InviteCard'
 import RecipientList from './RecipientList'
@@ -67,6 +81,15 @@ export interface MailBodyContentProps {
   showExternalImages: boolean
   /** Prepared srcdoc for the HTML iframe (null while being built). */
   mailIframeDoc: string | null
+  /**
+   * §2.128: the parts the body inlined, as reported by
+   * `useMailIframeDoc().hiddenAttachments`. Exactly these are demoted below the
+   * real attachments — never removed, and always reachable by expanding.
+   *
+   * Optional on purpose: a caller that does not render a body (or does not run
+   * the hook) passes nothing and gets the server's own order.
+   */
+  hiddenAttachments?: readonly AttachmentMeta[] | null
   /** Unique key for the iframe element — forces remount on content change. */
   iframeKey: string
   /** Ref forwarded to the iframe element so the caller can interact with it. */
@@ -97,6 +120,7 @@ export default function MailBodyContent({
   alwaysLoadImages,
   showExternalImages,
   mailIframeDoc,
+  hiddenAttachments,
   iframeKey,
   mailIframeRef,
   activeMailKey,
@@ -107,12 +131,21 @@ export default function MailBodyContent({
 }: MailBodyContentProps) {
   const { t } = useTranslation()
 
-  const visibleAttachments: AttachmentMeta[] = active && details?.attachments
-    ? details.attachments.filter(
-        att =>
-          (att.disposition || '').toLowerCase() !== 'inline' || Boolean(att.filename),
-      )
-    : []
+  // Expanded state is stored as "which message is expanded" rather than a bare
+  // boolean: selecting another message then implicitly collapses the list
+  // without an effect and without a stale-state window.
+  const [expandedFor, setExpandedFor] = useState<string | null>(null)
+
+  const attachmentsSource: AttachmentMeta[] | null = active ? details?.attachments ?? null : null
+  const attachmentList = useMemo(
+    () =>
+      buildAttachmentList({
+        attachments: attachmentsSource,
+        inlineParts: hiddenAttachments,
+        expanded: expandedFor === activeMailKey,
+      }),
+    [attachmentsSource, hiddenAttachments, expandedFor, activeMailKey],
+  )
 
   // BCC privacy invariant: only show BCC row when the message was sent by me
   // AND the bcc list is non-empty. Never show BCC for received mail.
@@ -145,9 +178,12 @@ export default function MailBodyContent({
         </div>
       </div>
 
-      {visibleAttachments.length > 0 && (
-        <div className="mail-attachments">
-          {visibleAttachments.map(att => (
+      {attachmentList.total > 0 && (
+        <div
+          className={`mail-attachments${attachmentList.expanded ? ' mail-attachments--expanded' : ''}`}
+          data-testid="mail-attachments"
+        >
+          {attachmentList.visible.map(att => (
             <AttachmentRow
               key={att.part}
               attachment={att}
@@ -155,6 +191,22 @@ export default function MailBodyContent({
               disabled={savingAttachment === `${activeMailKey}:${att.part}`}
             />
           ))}
+          {attachmentList.canExpand && (
+            <button
+              type="button"
+              className="attachments-toggle"
+              data-testid="attachments-toggle"
+              aria-expanded={attachmentList.expanded}
+              onClick={() => setExpandedFor(attachmentList.expanded ? null : activeMailKey)}
+            >
+              {/* The count is what is NOT on screen right now, not the total:
+                  the toggle's only promise is "there are N more chips behind
+                  me", and after §2.128 those N include the inlined parts. */}
+              {attachmentList.expanded
+                ? t('mail.attachments.showLess')
+                : t('mail.attachments.showMore', { hidden: attachmentList.hiddenCount })}
+            </button>
+          )}
         </div>
       )}
 

@@ -59,6 +59,15 @@ vi.mock('./featureReach', () => ({
   markFeatureReachFromEvent: (...args: unknown[]) => markFeatureReachFromEventMock(...args),
 }))
 
+// Sentry sink for the handleIpc error funnel. Mocked here so this unit test
+// never pulls @sentry/node (and the vite-injected __SENTRY_DSN__ global) into
+// its module graph; the PII/throttle behaviour of the real reporter is covered
+// in electron/sentry.test.ts.
+const reportIpcHandlerErrorMock = vi.fn()
+vi.mock('./sentry', () => ({
+  reportIpcHandlerError: (...args: unknown[]) => reportIpcHandlerErrorMock(...args),
+}))
+
 // Import AFTER mocks so the module picks them up.
 import {
   handleIpc,
@@ -67,6 +76,23 @@ import {
 } from './ipc'
 
 // --- Shared helpers --------------------------------------------------------
+
+// tsconfig targets ES2020, so `AggregateError` has no type declaration here
+// even though the runtime (Node 22 / Electron 43) provides it. Reach it
+// structurally, like packages/core/transientErrors.ts does.
+type AggErrCtor = new (errors: unknown[], message?: string) => Error & { errors: unknown[] }
+const AggErr = (globalThis as unknown as { AggregateError: AggErrCtor }).AggregateError
+
+/** Invoke a registered handler and resolve with whatever it rejected with. */
+async function rejectionOf(channel: string, ...args: unknown[]): Promise<unknown> {
+  const wrapped = handleRegistrations.get(channel)!
+  try {
+    await wrapped(null, ...args)
+    return null
+  } catch (e) {
+    return e
+  }
+}
 
 function resetLogs() {
   logCalls.info.length = 0
@@ -83,6 +109,7 @@ beforeEach(() => {
   recordHistogramMock.mockClear()
   recordGaugeMock.mockClear()
   markFeatureReachFromEventMock.mockClear()
+  reportIpcHandlerErrorMock.mockReset()
 })
 
 afterEach(() => {
@@ -115,6 +142,170 @@ describe('handleIpc', () => {
     expect(logCalls.error).toHaveLength(1)
     expect(logCalls.error[0]?.[0]).toBe('[test:fail]')
     expect(logCalls.error[0]?.[1]).toBe('boom')
+  })
+
+  // --- Presentation tagging (BACKLOG §2.127) -------------------------------
+  // Electron's IPC serializer hands the renderer a brand-new plain Error with
+  // only `message` and `stack` — `.errors[]`, `.code` and `.cause` are gone
+  // (measured on Electron 40 with a real main+preload+renderer round trip).
+  // So the funnel classifies the LIVE error object here and encodes the verdict
+  // into the message, the only carrier that survives.
+
+  it('tags an AggregateError with a key derived from its inner errors, not from its (empty) message', async () => {
+    const inner = Object.assign(new Error('connect ETIMEDOUT 203.0.113.10:993'), { code: 'ETIMEDOUT' })
+    const agg = new AggErr([inner])
+    expect(agg.message).toBe('') // the production symptom: nothing to render
+
+    handleIpc('net:inboxSummaries', async () => {
+      throw agg
+    })
+    const rejection = await rejectionOf('net:inboxSummaries')
+    expect((rejection as Error).message.startsWith('[mcerr:timeout] ')).toBe(true)
+    expect((rejection as { cause?: unknown }).cause).toBe(agg)
+  })
+
+  it('tags credential failures separately from network failures', async () => {
+    handleIpc('net:testImap', async () => {
+      throw Object.assign(new Error('Invalid credentials'), { authenticationFailed: true })
+    })
+    const rejection = await rejectionOf('net:testImap')
+    expect((rejection as Error).message.startsWith('[mcerr:auth] ')).toBe(true)
+  })
+
+  it('tags an unrecognised failure with the neutral key instead of leaving it untagged', async () => {
+    handleIpc('test:novel', async () => {
+      throw new Error('something we have never seen')
+    })
+    const rejection = await rejectionOf('test:novel')
+    expect((rejection as Error).message.startsWith('[mcerr:unknown] ')).toBe(true)
+  })
+
+  it('keeps the original text after the tag — two renderer consumers substring-match it', async () => {
+    // src/hooks/useCertRecovery.ts maps `cert_trust_*` codes to inline dialog
+    // errors, and src/sentry.ts beforeSend runs isTransientNetworkError over
+    // the wrapped message to keep network noise out of Sentry. Both match by
+    // substring, so the tag may be prepended but the text must survive.
+    handleIpc('net:trustCert', async () => {
+      throw new Error('cert_trust_fingerprint_mismatch')
+    })
+    const certRejection = await rejectionOf('net:trustCert')
+    expect((certRejection as Error).message).toContain('cert_trust_fingerprint_mismatch')
+
+    handleIpc('update:download', async () => {
+      throw new Error('net::ERR_CONNECTION_RESET')
+    })
+    const netRejection = await rejectionOf('update:download')
+    expect((netRejection as Error).message).toContain('net::ERR_CONNECTION_RESET')
+  })
+
+  it('logs the flattened AggregateError tree — the log line used to be empty', async () => {
+    const agg = new AggErr([
+      Object.assign(new Error('connect ETIMEDOUT 203.0.113.10:993'), { code: 'ETIMEDOUT' }),
+    ])
+    handleIpc('net:syncFolderHeaders', async () => {
+      throw agg
+    })
+    await rejectionOf('net:syncFolderHeaders')
+
+    expect(logCalls.error[0]?.[0]).toBe('[net:syncFolderHeaders]')
+    expect(String(logCalls.error[0]?.[1])).toContain('connect ETIMEDOUT 203.0.113.10:993 (ETIMEDOUT)')
+  })
+
+  // --- Sentry error funnel -------------------------------------------------
+  // Before this, electron/ipc.ts had zero captureException call sites: every
+  // handler failure went to electron-log only, which has no Sentry bridge
+  // (CLAUDE.md §8). Measured cost: 80 error-level lines in a user's local log
+  // over 4 days (including TLS failures that broke their mailbox) against zero
+  // events in Sentry over 30 days.
+
+  it('reports exactly one Sentry event per handler failure, with the channel and without the arguments', async () => {
+    const failure = new Error('550 5.1.1 <victim@example.com>: Recipient address rejected')
+    handleIpc('net:sendMail', async () => {
+      throw failure
+    })
+    const wrapped = handleRegistrations.get('net:sendMail')!
+
+    // The renderer passes the full draft — body, recipients, subject.
+    const draft = { accountId: 1, to: ['victim@example.com'], subject: 'Q3 payroll', body: 'secret contents' }
+    await expect(wrapped(null, draft)).rejects.toThrow('550 5.1.1')
+
+    expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
+    const call = reportIpcHandlerErrorMock.mock.calls[0]!
+    // EXACTLY two arguments — the channel name and the raw error, nothing else.
+    // The handler's IPC arguments are structurally excluded here, so no
+    // downstream sanitizer has to be trusted to strip the draft.
+    expect(call).toHaveLength(2)
+    expect(call[0]).toBe('net:sendMail')
+    expect(call[1]).toBe(failure)
+    expect(call).not.toContain(draft)
+  })
+
+  it('does not report anything when the handler succeeds', async () => {
+    handleIpc('test:ok', async () => 'fine')
+    await handleRegistrations.get('test:ok')!(null)
+    expect(reportIpcHandlerErrorMock).not.toHaveBeenCalled()
+  })
+
+  it('reports non-Error throws too (the funnel must not depend on the thrown shape)', async () => {
+    handleIpc('test:throwString', async () => {
+      throw 'plain string failure'
+    })
+    // §2.127: the funnel re-throws a tagged Error rather than the raw value,
+    // because the presentation key has to reach the renderer and the message
+    // is the only field that survives Electron's IPC serializer. The original
+    // value is preserved verbatim in the text and in `cause`.
+    const rejection = await rejectionOf('test:throwString')
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toContain('plain string failure')
+    expect((rejection as { cause?: unknown }).cause).toBe('plain string failure')
+
+    expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
+    expect(reportIpcHandlerErrorMock.mock.calls[0]![0]).toBe('test:throwString')
+  })
+
+  it('still rejects toward the renderer when the Sentry reporter itself throws', async () => {
+    // CLAUDE.md §8: a broken telemetry sink must never break the feature. The
+    // ORIGINAL error has to win — not the telemetry failure.
+    reportIpcHandlerErrorMock.mockImplementation(() => {
+      throw new Error('sentry transport exploded')
+    })
+
+    const original = new Error('original handler failure')
+    handleIpc('test:sentryBroken', async () => {
+      throw original
+    })
+
+    const rejection = await rejectionOf('test:sentryBroken')
+    // The rejection describes the HANDLER failure (wrapped with its
+    // presentation tag), not the telemetry failure, and keeps the original
+    // object reachable through `cause`.
+    expect((rejection as Error).message).toContain('original handler failure')
+    expect((rejection as Error).message).not.toContain('sentry transport exploded')
+    expect((rejection as { cause?: unknown }).cause).toBe(original)
+    expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the slow-IPC accounting intact when the Sentry reporter throws', async () => {
+    // The reporter is called inside the catch block; the `finally` block that
+    // owns inflight cleanup + the slow-IPC histogram must still run.
+    reportIpcHandlerErrorMock.mockImplementation(() => {
+      throw new Error('sentry transport exploded')
+    })
+    let t = 6_000_000
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => t)
+
+    handleIpc('test:slowFail', async () => {
+      t += 800
+      throw new Error('boom')
+    })
+    await expect(handleRegistrations.get('test:slowFail')!(null)).rejects.toThrow('boom')
+
+    expect(recordHistogramMock).toHaveBeenCalledWith(
+      'ipc.slow_ms',
+      800,
+      expect.objectContaining({ channel: 'test:slowFail' }),
+    )
+    dateSpy.mockRestore()
   })
 
   it('emits slow-IPC warning and ipc.slow_ms histogram above threshold', async () => {
@@ -423,6 +614,27 @@ describe('registerMetricsRecordHandler', () => {
       name: 'send_queue.append_failed',
       kind: 'event',
       tags: { reason: 'quota', provider_id: 'gmail' },
+    })
+
+    expect(recordEventMock).not.toHaveBeenCalled()
+    expect(recordHistogramMock).not.toHaveBeenCalled()
+    expect(logCalls.warn.some((args) =>
+      String(args[0]).includes('rejecting main-only metric'),
+    )).toBe(true)
+  })
+
+  // §2.122 — ai.api_key_store_op (mainOnly=true). Emitted only from
+  // electron/services/ai.ts on a read/write/delete of a stored AI key; a
+  // compromised renderer must not be able to fabricate a clean storage
+  // history (or mask a real one) through the metrics:record bridge.
+  it('rejects ai.api_key_store_op (mainOnly=true) from renderer without recording anything', () => {
+    registerMetricsRecordHandler()
+    const onHandler = onRegistrations.get('metrics:record')!
+
+    onHandler(null, {
+      name: 'ai.api_key_store_op',
+      kind: 'event',
+      tags: { op: 'delete', provider: 'anthropic-api', outcome: 'ok' },
     })
 
     expect(recordEventMock).not.toHaveBeenCalled()

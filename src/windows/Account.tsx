@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Save, Plug, Loader2, Minus, Square, Copy, X, Plus, CheckCircle, LogIn, AlertCircle } from 'lucide-react'
+import { Save, Plug, Loader2, Plus, CheckCircle, LogIn, AlertCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { TranslatedError, presentedError } from '../utils/errorPresentation'
 import type { AccountConfig, AccountMeta, AutoconfigResult, TlsPin } from '../../packages/net/types'
-import { useMaximized } from '../hooks/useMaximized'
+import type { OAuthConnectStage, OAuthProgress } from '@mailcopilot/types'
+import WindowTitlebar from '../components/WindowTitlebar'
+import OAuthWaiting from '../components/OAuthWaiting'
 import { recordEvent, providerFromHost } from '../utils/metrics'
 import { captureException } from '../sentry'
+
+// §2.127 — `presentedError` / `TranslatedError` live in src/utils/errorPresentation.ts.
+// The account wizard is where this matters most: it is the first screen a new
+// user meets, and `String(e)` used to render "Error: Error invoking remote
+// method 'accounts:save': ..." right under the password field.
 
 /** Map a free-form error message to a low-cardinality failure tag. */
 function failureKindFromError(err: unknown): 'auth' | 'tls' | 'network' | 'permanent' | 'unknown' {
@@ -15,9 +23,18 @@ function failureKindFromError(err: unknown): 'auth' | 'tls' | 'network' | 'perma
   return 'unknown'
 }
 
+/** Stages the waiting step knows how to label. Guards the translation-key
+ *  interpolation in {@link OAuthWaiting} — an unrecognised stage would render
+ *  a raw dot-path rather than copy. */
+const OAUTH_CONNECT_STAGES: readonly OAuthConnectStage[] = ['browser', 'token', 'imap', 'smtp', 'saving']
+
+function isOAuthConnectStage(value: unknown): value is OAuthConnectStage {
+  return typeof value === 'string' && (OAUTH_CONNECT_STAGES as readonly string[]).includes(value)
+}
+
 const defaultImap: AccountConfig['imap'] = { host: '', port: 993, secure: true, user: '', pass: '', tlsPinsSha256: [] }
 const defaultSmtp: AccountConfig['smtp'] = { host: '', port: 465, secure: true, user: '', pass: '', tlsPinsSha256: [] }
-type WizardStep = 'provider' | 'type' | 'credentials' | 'detected' | 'manual'
+type WizardStep = 'provider' | 'oauth' | 'type' | 'credentials' | 'detected' | 'manual'
 type ProviderId = 'gmail' | 'outlook' | 'generic-imap'
 
 // ---------------------------------------------------------------------------
@@ -206,7 +223,6 @@ function mapMetaToForm(meta: AccountMeta): {
 
 export default function Account({ initialMode = 'new', initialEditId }: { initialMode?: 'new' | 'edit'; initialEditId?: number }) {
   const { t } = useTranslation()
-  const maximized = useMaximized()
   const [, setAccounts] = useState<AccountMeta[]>([])
   const [selected, setSelected] = useState<number | 'new'>(initialMode === 'edit' && initialEditId != null ? initialEditId : 'new')
   const [form, setForm] = useState<{
@@ -228,6 +244,14 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
   const [connectingMicrosoft, setConnectingMicrosoft] = useState(false)
   const [autoconfiguring, setAutoconfiguring] = useState(false)
   const [wizardStep, setWizardStep] = useState<WizardStep>('provider')
+  // §2.94 — which provider the wizard is currently connecting, and how far
+  // main has got. Seeded to 'browser' on click so the waiting step never
+  // renders an empty stage line before the first broadcast arrives.
+  const [oauthProvider, setOauthProvider] = useState<'gmail' | 'outlook'>('gmail')
+  const [oauthStage, setOauthStage] = useState<OAuthConnectStage>('browser')
+  // Which provider's connect flow THIS window started, if any. Read from the
+  // mount-once progress listener, so it has to be a ref rather than state.
+  const activeOAuthProviderRef = useRef<'gmail' | 'outlook' | null>(null)
   const [smtpSeparateAuth, setSmtpSeparateAuth] = useState(false)
   const [tlsPins, setTlsPins] = useState<TlsPin[]>([])
   const [status, setStatus] = useState('')
@@ -309,9 +333,9 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
         }
       }
     } catch (e) {
-      setError(String(e))
+      setError(presentedError(t, e))
     }
-  }, [refreshTlsPins, selected])
+  }, [refreshTlsPins, selected, t])
 
   useEffect(() => {
     let cancelled = false
@@ -323,6 +347,31 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       window.api?.off('accounts:changed', onChanged)
     }
   }, [load])
+
+  // §2.94 — stage updates for the OAuth waiting step. Mount-once (deps []):
+  // the preload `off()` bridge cannot match a re-created listener by identity,
+  // so a re-subscribing effect would leak one listener per render (the same
+  // failure mode as the runaway-tabs incident, §2.25).
+  useEffect(() => {
+    const onProgress = (payload: unknown) => {
+      const p = payload as Partial<OAuthProgress> | null
+      if (!p || typeof p !== 'object') return
+      if (p.provider !== 'gmail' && p.provider !== 'outlook') return
+      // Validate the stage against the known set rather than accepting any
+      // string: the value is interpolated into a translation key, and an
+      // unknown one would render the raw dot-path to the user.
+      if (!isOAuthConnectStage(p.stage)) return
+      // `broadcast` reaches every window and both providers have independent
+      // mutexes, so a flow the user did NOT start here (the other provider's
+      // re-auth from edit mode) can emit while this one is running. Only the
+      // flow this window actually started may drive the waiting step.
+      if (activeOAuthProviderRef.current !== p.provider) return
+      setOauthProvider(p.provider)
+      setOauthStage(p.stage)
+    }
+    window.api?.on('oauth:progress', onProgress)
+    return () => window.api?.off('oauth:progress', onProgress)
+  }, [])
 
   const isGoogle = isGmailOAuth(form.authType, form.providerId)
   const isOutlook = isOutlookOAuth(form.authType, form.providerId)
@@ -384,7 +433,13 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       setStatus(t('account.status.tlsPinned', { host, port }))
       return fingerprintSha256
     } catch (e) {
-      setError(t('account.errors.tlsPinFetch', { error: String(e) }))
+      // Vocabulary rather than the raw text even though this is a diagnostic
+      // screen: this path is only reached AFTER the connection test already
+      // failed with a certificate error, i.e. the host resolved and answered.
+      // Whatever `tls:getServerCert` says on top of that ("unable to verify",
+      // a TLS alert) is not something the user can act on, and it comes from a
+      // server we have explicitly not decided to trust yet.
+      setError(t('account.errors.tlsPinFetch', { error: presentedError(t, e) }))
       return undefined
     }
   }, [form.imap.host, form.imap.port, form.smtp.host, form.smtp.port, persistPinsForEndpoint, refreshTlsPins, selected, t])
@@ -449,7 +504,11 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       setError(t('account.errors.imapSmtp', { imap: imapRes.error || t('common.error'), smtp: smtpRes.error || t('common.error') }))
       return false
     } catch (e) {
-      setError(String(e))
+      // The EXPECTED failure of a connection test is the `{ ok, error }`
+      // envelope handled above, which still shows the server's own words on
+      // purpose. Reaching this catch means the call itself broke (validation,
+      // IPC), and that text is ours and useless to the user.
+      setError(presentedError(t, e))
       return false
     } finally {
       setTesting(false)
@@ -494,7 +553,10 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       }))
       setStatus(t('account.status.autoconfigApplied', { source: cfg.source }))
     } catch (e) {
-      setError(t('account.errors.autoconfigFailed', { error: String(e) }))
+      // "Settings not found" has its own message above; anything landing here
+      // is a fetch/parse failure against a third-party autoconfig endpoint,
+      // whose text is neither actionable nor ours to render.
+      setError(t('account.errors.autoconfigFailed', { error: presentedError(t, e) }))
     } finally {
       setAutoconfiguring(false)
     }
@@ -565,7 +627,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       setWizardStep('detected')
     } catch (e) {
       recordEvent('onboarding.autoconfig_result', { success: false, provider: providerFromHost(email.split('@')[1] || '') })
-      setError(t('account.errors.autoconfigFailed', { error: String(e) }))
+      setError(t('account.errors.autoconfigFailed', { error: presentedError(t, e) }))
       setWizardStep('manual')
     } finally {
       setAutoconfiguring(false)
@@ -606,7 +668,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       setStatus(t('account.status.saved'))
       if (closeAfter) window.close()
     } catch (e) {
-      setError(String(e))
+      setError(presentedError(t, e))
     }
   }, [form, persistPinsForEndpoint, refreshTlsPins, t])
 
@@ -626,6 +688,12 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
     setConnectingGoogle(true)
     setError('')
     setStatus('')
+    activeOAuthProviderRef.current = 'gmail'
+    // Set once the account exists in main: past that point a renderer-side
+    // failure (e.g. the accounts:list refresh below) must NOT be presented as
+    // "connect failed", or the user retries and creates a duplicate.
+    let accountPersisted = false
+    let persistedAccountId: number | undefined
     try {
       // If editing an existing Google account — re-authorize. Otherwise create a new one.
       const existingId = (selected !== 'new' && isGmailOAuth(form.authType, form.providerId)) ? selected : undefined
@@ -635,8 +703,12 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       }
       if (!res.ok) {
         // Failure is reported by the catch block below — avoid double-counting.
-        throw new Error(t('account.errors.googleOAuthFailed'))
+        // TranslatedError so `presentedError` keeps this copy instead of
+        // replacing it with the generic vocabulary sentence.
+        throw new TranslatedError(t('account.errors.googleOAuthFailed'))
       }
+      accountPersisted = true
+      persistedAccountId = res.id
       if (isOnboarding) {
         recordEvent('onboarding.google_oauth_result', { success: true })
         recordEvent('onboarding.account_saved', { provider: 'gmail', auth_type: 'oauth' })
@@ -685,12 +757,29 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
 
       setStatus(t('account.status.googleConnected', { email: res.email }))
     } catch (e) {
-      if (isOnboarding) {
+      if (isOnboarding && !accountPersisted) {
         recordEvent('onboarding.google_oauth_result', { success: false, failure_kind: failureKindFromError(e) })
       }
-      setError(String(e))
+      // The main-side flow rejects with developer-facing English strings
+      // ("Google access token does not contain scope ...") that also carry
+      // provider prose; the wizard shows a vocabulary sentence instead, while
+      // `presentedError` keeps our own TranslatedError copy.
+      setError(presentedError(t, e))
+      // Hand the picker back so the user can retry or pick another provider;
+      // the error banner above it explains what went wrong. Not after the
+      // account was already saved, though — inviting a retry there produces a
+      // duplicate (codex-bg-review, 2026-08-02).
+      if (!accountPersisted) {
+        setWizardStep(prev => (prev === 'oauth' ? 'provider' : prev))
+      } else if (persistedAccountId !== undefined) {
+        // The account DID get created; only a renderer-side step failed. Leave
+        // the waiting step for that account's form so the spinner terminates —
+        // otherwise onboarding sits on it forever with an error banner above.
+        setSelected(persistedAccountId)
+      }
     } finally {
       setConnectingGoogle(false)
+      if (activeOAuthProviderRef.current === 'gmail') activeOAuthProviderRef.current = null
     }
   }, [form.authType, form.providerId, refreshTlsPins, selected, t])
 
@@ -702,6 +791,11 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
     setConnectingMicrosoft(true)
     setError('')
     setStatus('')
+    activeOAuthProviderRef.current = 'outlook'
+    // See the Google counterpart: past this point a renderer-side failure must
+    // not read as "connect failed", or a retry duplicates the account.
+    let accountPersisted = false
+    let persistedAccountId: number | undefined
     try {
       const existingId = (selected !== 'new' && isOutlookOAuth(form.authType, form.providerId)) ? selected : undefined
       const res = await window.api.invoke('oauth:microsoft:connect', existingId) as {
@@ -709,8 +803,11 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
         tlsCertRequired?: { imap?: { host: string; port: number }; smtp?: { host: string; port: number } }
       }
       if (!res.ok) {
-        throw new Error(t('account.errors.microsoftOAuthFailed'))
+        // See the Google counterpart on TranslatedError.
+        throw new TranslatedError(t('account.errors.microsoftOAuthFailed'))
       }
+      accountPersisted = true
+      persistedAccountId = res.id
       if (isOnboarding) {
         recordEvent('onboarding.account_saved', { provider: 'outlook', auth_type: 'oauth' })
       }
@@ -759,9 +856,18 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
     } catch (e) {
       // Microsoft-specific oauth_result event is not yet in metricsSchema.ts —
       // tracked as followup. Generic account_saved / method_selected cover the funnel.
-      setError(String(e))
+      // See the Google counterpart on why the raw text is not shown.
+      setError(presentedError(t, e))
+      if (!accountPersisted) {
+        setWizardStep(prev => (prev === 'oauth' ? 'provider' : prev))
+      } else if (persistedAccountId !== undefined) {
+        // See the Google counterpart — terminate the waiting step on the
+        // account that was in fact created.
+        setSelected(persistedAccountId)
+      }
     } finally {
       setConnectingMicrosoft(false)
+      if (activeOAuthProviderRef.current === 'outlook') activeOAuthProviderRef.current = null
     }
   }, [form.authType, form.providerId, refreshTlsPins, selected, t])
 
@@ -769,10 +875,18 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
   const handleProviderSelect = useCallback((provider: ProviderId) => {
     if (provider === 'gmail') {
       setForm(prev => ({ ...prev, providerId: 'gmail', transportType: 'imap-smtp' }))
+      // Leave the picker immediately: it must not stay clickable while the
+      // flow runs, or a second click starts a competing connection (§2.94).
+      setOauthProvider('gmail')
+      setOauthStage('browser')
+      setWizardStep('oauth')
       // Proceed directly to OAuth — skip the manual credentials step
       void connectGoogle()
     } else if (provider === 'outlook') {
       setForm(prev => ({ ...prev, providerId: 'outlook', transportType: 'imap-smtp' }))
+      setOauthProvider('outlook')
+      setOauthStage('browser')
+      setWizardStep('oauth')
       // Proceed directly to Microsoft OAuth — same pattern as Gmail
       void connectMicrosoft()
     } else if (provider === 'generic-imap') {
@@ -784,20 +898,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
   return (
     <>
     {/* Custom titlebar for frameless window */}
-    <div className="child-titlebar">
-      <span className="child-titlebar-title">{selected === 'new' ? t('account.title') : t('account.editTitle')}</span>
-      <div className="titlebar-controls">
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')}>
-          <Minus size={14} />
-        </button>
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')}>
-          {maximized ? <Copy size={12} /> : <Square size={12} />}
-        </button>
-        <button className="titlebar-btn titlebar-btn-close" onClick={() => window.close()}>
-          <X size={14} />
-        </button>
-      </div>
-    </div>
+    <WindowTitlebar title={selected === 'new' ? t('account.title') : t('account.editTitle')} />
     <div className="window-container">
       <h2>{selected === 'new' ? t('account.title') : t('account.editTitle')}</h2>
       <p className="hint">
@@ -811,6 +912,10 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
         <>
           {wizardStep === 'provider' && (
             <ProviderPicker onSelect={handleProviderSelect} />
+          )}
+
+          {wizardStep === 'oauth' && (
+            <OAuthWaiting provider={oauthProvider} stage={oauthStage} />
           )}
 
           {wizardStep === 'type' && (

@@ -51,6 +51,7 @@ import db, {
 import {
   getAccountMeta,
   getSettings,
+  setAiApiKeySavedFlag,
   type Settings,
 } from '../../packages/net/config'
 import {
@@ -60,6 +61,8 @@ import {
   estimateAiRuleCostUsd,
   nullUsageReservationUsd,
   AI_RULE_NULL_USAGE_COST_FLOOR,
+  analyzeTableReferences,
+  type SqlGuardRefusalReason,
 } from '../../packages/core'
 import type { AttachmentMeta, UnsubscribeAttemptResult } from '../../packages/net/types'
 // §2.51.f2 iteration 6 — the CANONICAL "not a public internet host" predicates,
@@ -74,6 +77,9 @@ import {
   MAX_DOWNLOAD_BYTES,
 } from './attachmentContent'
 import { secretStore } from './secretStore'
+// §2.119 — the single source of truth for "what address does a request
+// actually go to", shared with the destination-change guard.
+import { openAiBaseUrlForRequest, UnusableAiEndpointError } from './aiDestination'
 import {
   registerPendingAction,
   RegisterRateLimitError,
@@ -92,6 +98,7 @@ import {
   type PendingActionPayload,
 } from './aiPendingActions'
 import { recordEvent as recordEventForAi, startMetricSpan } from '../metrics'
+import { isTelemetryCollectionAllowed } from '../telemetryGate'
 import { bucketCount } from '../metricsBuckets'
 import {
   filterVercelTools as filterVercelEgressTools,
@@ -266,9 +273,27 @@ export interface AiChatOptions {
   perRequestEgressConsent?: boolean
 }
 
+/**
+ * Outcome of an auth check for the configured provider.
+ *
+ * §2.122 — three distinct storage outcomes, not one. Before this, `no_key` and
+ * `store_unavailable` were both reported as `invalid_key`, which told the user
+ * their key was wrong when in fact nothing had been read at all — and pointed
+ * them at the "change provider" button, which deleted keys. The states:
+ *   - `no_key`            — the store answered, and there is no key for this
+ *                           provider. Ask for one; do not blame the user.
+ *   - `store_unavailable` — the store itself failed (keychain fault the
+ *                           fallback did not mask). We do NOT know whether a
+ *                           key exists, so nothing may be deleted or re-asked
+ *                           on the strength of this.
+ *   - `invalid_key`       — a key WAS read and was rejected: malformed for the
+ *                           provider, or 401/403 from the provider itself.
+ */
 export type AuthStatus =
   | { status: 'authenticated'; email?: string }
   | { status: 'not_configured' }
+  | { status: 'no_key' }
+  | { status: 'store_unavailable' }
   | { status: 'invalid_key' }
   | { status: 'no_subscription' }
   | { status: 'error'; message: string }
@@ -376,9 +401,24 @@ function getUiContext(): EmailContext | null {
 
 const activeRequests = new Map<string, AbortController>()
 
-/** Normalize OpenAI-compatible base URL: strip trailing slashes and /v1 suffix. */
+/**
+ * Normalize OpenAI-compatible base URL: strip trailing slashes and /v1 suffix.
+ *
+ * §2.119 — delegates to ./aiDestination.ts, which is also what the
+ * destination-change guard compares with. The two must not drift: if the guard
+ * canonicalised an address differently from the code that builds the request,
+ * "the same destination as before" would be a statement about a string rather
+ * than about where the API key is delivered. The shared parse now returns the
+ * guard's identity itself, so `${normalizeOpenAiBaseUrl(x)}/v1/...` is by
+ * construction a URL whose prefix is the approved address.
+ *
+ * THROWS `UnusableAiEndpointError` for a stored value that cannot be one (a
+ * query string, a fragment, a non-http scheme, garbage). Callers either sit
+ * inside an error-classifying try (`checkAuth`, the simple-chat path,
+ * `isLocalInferenceEndpoint`) or handle it explicitly (`streamOpenAiChat`).
+ */
 function normalizeOpenAiBaseUrl(raw: string | undefined): string {
-  return (raw?.trim() || 'https://api.openai.com').replace(/\/+$/, '').replace(/\/v1$/, '')
+  return openAiBaseUrlForRequest(raw)
 }
 
 // --- Pending action registry (delegated to ./aiPendingActions) ---
@@ -882,38 +922,108 @@ const QUERY_DB_ALLOWED_TABLES = new Set([
   'mail_rules', 'rule_log',
 ])
 
-/** Match a table identifier: bare name OR quoted (`"name"`, `[name]`, `` `name` ``).
- * Group 1 = bare name, Group 2 = double-quoted, Group 3 = brackets, Group 4 = backticks. */
-const TABLE_IDENT_RE = /([a-zA-Z_]\w*)|"([^"]+)"|\[([^\]]+)\]|`([^`]+)`/g
+/**
+ * Class of a SQLite execution failure, derived from the engine's message but
+ * never carrying it. See `QUERY_DB_ENGINE_ERROR_CLASSES`.
+ */
+type QueryDbEngineErrorClass =
+  | 'no-such-table'
+  | 'no-such-column'
+  | 'no-such-function'
+  | 'ambiguous-column'
+  | 'syntax'
+  | 'misuse'
+  | 'too-complex'
+  | 'unknown'
 
-/** Extract one table name from a regex match of TABLE_IDENT_RE. */
-function identFromMatch(m: RegExpExecArray): string {
-  return (m[1] || m[2] || m[3] || m[4]).toLowerCase()
+/**
+ * Every way `query_db` can decline to return rows — one closed vocabulary for
+ * all six refusal branches (BACKLOG §2.118).
+ *
+ * `guard:*` mirrors `SqlGuardRefusalReason` from `packages/core/sqlGuard.ts`
+ * (pure, mock-free module — this hotspot keeps only the wiring and the
+ * allowlist above, CLAUDE.md §5 «Hotspot policy»); `engine:*` mirrors
+ * `QueryDbEngineErrorClass`. Deriving both halves via template-literal keys
+ * keeps `QUERY_DB_REFUSAL_MESSAGE` exhaustive by construction: a new guard
+ * reason or error class is a compile error here, not a silently missing
+ * message.
+ */
+type QueryDbRefusalCode =
+  | 'not-select'
+  | 'forbidden-keyword'
+  | 'multi-statement'
+  | 'forbidden-table'
+  | `guard:${SqlGuardRefusalReason}`
+  | `engine:${QueryDbEngineErrorClass}`
+
+/**
+ * Model-facing explanation for each refusal code.
+ *
+ * INVARIANT (CLAUDE.md §5 — untrusted content stays behind a boundary): the
+ * value returned for a refusal is one of these constants and nothing else.
+ * Not a fragment of the offending SQL, not the SQLite error text.
+ *
+ * The SQL is model-written, and the model is email-influenced — `wrapUntrusted()`
+ * reduces that, it does not remove it. So `SELECT * FROM "…instructions…"` and
+ * the engine's `no such column: …` both carry sender-shaped bytes, and echoing
+ * either one back would round-trip them into the conversation as *trusted*
+ * text, through our own refusal channel. A boundary marker would only mitigate
+ * that; a fixed string eliminates it, so refusals are fixed strings and are
+ * deliberately NOT wrapped — there is nothing untrusted left in them to wrap.
+ *
+ * What the model loses: the identifier it asked for. What it keeps: the class
+ * of failure plus, for the allowlist, the readable tables — which is our own
+ * list, not its bytes, and is the half that actually tells it what to do next.
+ * The identifier was never information the model lacked: it wrote the query and
+ * still has it in context.
+ */
+const QUERY_DB_REFUSAL_MESSAGE: Record<QueryDbRefusalCode, string> = {
+  'not-select': 'Query must start with SELECT',
+  'forbidden-keyword': 'Query contains a forbidden SQL keyword',
+  'multi-statement': 'Only a single SQL query is allowed',
+  'forbidden-table': `Query references a table that query_db may not read. Readable tables: ${[...QUERY_DB_ALLOWED_TABLES].join(', ')}`,
+  'guard:empty': 'Query is empty',
+  'guard:comment': 'SQL comments are not allowed in query_db — send the query without comments',
+  'guard:unterminated-string': 'Query contains an unterminated string literal',
+  'guard:unterminated-identifier': 'Query contains an unterminated quoted identifier',
+  'guard:invalid-character': 'Query contains a character that is not valid SQL',
+  'guard:missing-table-name': 'Could not determine which tables the query reads — use a plain FROM/JOIN table reference',
+  'guard:unsupported-schema': 'Only tables in the main database can be queried',
+  'guard:unbalanced-parentheses': 'Query has unbalanced parentheses',
+  'engine:no-such-table': 'The query names a table that does not exist in this cache',
+  'engine:no-such-column': 'The query names a column that does not exist — check the columns of the tables you selected',
+  'engine:no-such-function': 'The query uses a function, module or collation this database does not provide',
+  'engine:ambiguous-column': 'A column name in the query is ambiguous — qualify it with its table or alias',
+  'engine:syntax': 'The query is not valid SQL',
+  'engine:misuse': 'A function or operator in the query was used incorrectly',
+  'engine:too-complex': 'The query is too large or too complex for SQLite to compile',
+  'engine:unknown': 'The query could not be executed',
 }
 
-/** Extract table names from a SELECT query for allowlist validation.
- * Matches FROM/JOIN table references including comma-separated tables
- * and quoted identifiers ("table", [table], `table`). Skips subqueries in parentheses. */
-export function extractTableNames(sql: string): string[] {
-  const tables: string[] = []
-  // Pass 1: tables directly after FROM/JOIN keywords (bare or quoted)
-  const keywordRe = /\b(?:FROM|JOIN)\s+(?![\s(])(?:([a-zA-Z_]\w*)|"([^"]+)"|\[([^\]]+)\]|`([^`]+)`)/gi
-  let m: RegExpExecArray | null
-  while ((m = keywordRe.exec(sql)) !== null) {
-    tables.push((m[1] || m[2] || m[3] || m[4]).toLowerCase())
+/**
+ * Allowlist (not denylist — CLAUDE.md §8, `netErrorTelemetry.ts` is the
+ * canonical shape) mapping SQLite messages onto a class. Order matters only
+ * in that the first match wins; anything unrecognised is `unknown`, so an
+ * unfamiliar engine message degrades to the most generic label rather than
+ * leaking through. The patterns are matched against the engine text; the text
+ * itself is then discarded.
+ */
+const QUERY_DB_ENGINE_ERROR_CLASSES: ReadonlyArray<readonly [RegExp, QueryDbEngineErrorClass]> = [
+  [/\bno such table\b/i, 'no-such-table'],
+  [/\bno such column\b/i, 'no-such-column'],
+  [/\bno such (?:function|module|collation sequence|index|view|trigger)\b/i, 'no-such-function'],
+  [/\bambiguous column name\b/i, 'ambiguous-column'],
+  [/\b(?:syntax error|incomplete input|unrecognized token)\b/i, 'syntax'],
+  [/\b(?:wrong number of arguments|misuse of|unable to use function|datatype mismatch)\b/i, 'misuse'],
+  [/\b(?:too many|expression tree is too large|parser stack overflow|string or blob too big)\b/i, 'too-complex'],
+]
+
+function classifyQueryDbEngineError(err: unknown): QueryDbEngineErrorClass {
+  const message = err instanceof Error ? err.message : String(err)
+  for (const [pattern, cls] of QUERY_DB_ENGINE_ERROR_CLASSES) {
+    if (pattern.test(message)) return cls
   }
-  // Pass 2: comma-separated tables within FROM clauses ("FROM a, b, c")
-  const fromClauseRe = /\bFROM\b(.+?)(?:\bWHERE\b|\bGROUP\b|\bORDER\b|\bLIMIT\b|\bJOIN\b|\bUNION\b|\bHAVING\b|\bON\b|$)/gi
-  while ((m = fromClauseRe.exec(sql)) !== null) {
-    const clause = m[1]
-    // Match comma-separated identifiers (bare or quoted)
-    const commaIdentRe = new RegExp(',\\s*(?:' + TABLE_IDENT_RE.source + ')', 'g')
-    let cm: RegExpExecArray | null
-    while ((cm = commaIdentRe.exec(clause)) !== null) {
-      tables.push(identFromMatch(cm))
-    }
-  }
-  return [...new Set(tables)]
+  return 'unknown'
 }
 
 // --- AI memory (file-based storage) ---
@@ -1638,39 +1748,78 @@ function registerMailTools(
 
   server.tool(
     'query_db',
-    'Execute a read-only SQL query against the SQLite cache (SELECT only). Tables: messages (account_id, folder_path, uid, subject, from_addr, from_name, to_addr, body_text, date, unread, flagged, has_attachments, message_id, in_reply_to, references), contacts, folders, folder_prefs, send_queue, snoozed, tls_pins, offline_ops, sync_state.',
+    'Execute a read-only SQL query against the SQLite cache (SELECT only, no SQL comments). Tables: messages (account_id, folder_path, uid, subject, from_addr, from_name, to_addr, body_text, date, unread, flagged, has_attachments, message_id, in_reply_to, references), contacts, folders, folder_prefs, send_queue, snoozed, tls_pins, offline_ops, sync_state.',
     {
       sql: z.string().min(1).max(2000),
     },
     async ({ sql: rawSql }) => {
-      logAI.info(`MCP query_db sql="${rawSql.slice(0, 200)}"`)
+      // The SQL is model-written and therefore email-influenced, so neither the
+      // conversation nor the log gets it back: the tool result is a constant
+      // from `QUERY_DB_REFUSAL_MESSAGE`, and the log carries a stable hash plus
+      // a refusal code. The hash is what a support case actually needs — it
+      // groups a retry storm and matches a query the user can paste — while the
+      // query text itself is already visible in the AI conversation, so the log
+      // does not need to be its second, exportable copy (CLAUDE.md §8).
+      const sqlHash = shortHash(rawSql)
+      logAI.info(`MCP query_db sqlHash=${sqlHash} len=${rawSql.length}`)
+
+      /**
+       * The ONLY non-success exit of this tool. Every branch below goes through
+       * it, so "one rule, not six" is structural rather than a convention:
+       * a refusal returns a code-authored message keyed by a closed vocabulary,
+       * and logs codes and counts. `counts` is typed to numbers on purpose —
+       * that is what stops free text from creeping back into the log line.
+       */
+      const refuse = (code: QueryDbRefusalCode, counts?: Readonly<Record<string, number>>) => {
+        const extra = counts ? Object.entries(counts).map(([k, v]) => ` ${k}=${v}`).join('') : ''
+        logAI.warn(`MCP query_db → refused code=${code} sqlHash=${sqlHash} len=${rawSql.length}${extra}`)
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ error: QUERY_DB_REFUSAL_MESSAGE[code], refusal: code }),
+          }],
+        }
+      }
+
       const trimmed = rawSql.trim()
       // Must start with SELECT
       if (!/^\s*SELECT\b/i.test(trimmed)) {
-        logAI.warn(`MCP query_db → not SELECT: "${trimmed.slice(0, 60)}"`)
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Query must start with SELECT' }) }] }
+        return refuse('not-select')
       }
       // Forbidden keywords ANYWHERE in query (prevents PRAGMA/INSERT in subqueries)
       if (QUERY_DB_FORBIDDEN_KEYWORDS_RE.test(trimmed)) {
-        logAI.warn(`MCP query_db → forbidden keyword: "${trimmed.slice(0, 80)}"`)
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Query contains forbidden SQL keyword' }) }] }
+        return refuse('forbidden-keyword')
       }
       // No multi-statement queries
       if (/;[\s]*\S/.test(trimmed)) {
-        logAI.warn(`MCP query_db → multi-statement: "${trimmed.slice(0, 60)}"`)
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Only a single SQL query is allowed' }) }] }
+        return refuse('multi-statement')
       }
-      // Table allowlist
-      const tableRefs = extractTableNames(trimmed)
+      // Table allowlist. The scan is fail-closed: anything it cannot account
+      // for (comments, unterminated literals, a FROM it cannot resolve to a
+      // table name) is a refusal, NOT an empty table list. An empty list used
+      // to mean "nothing to reject", which is how `FROM/**/ai_action_log`
+      // walked past this allowlist entirely (BACKLOG §2.118).
+      const analysis = analyzeTableReferences(trimmed)
+      if (!analysis.ok) {
+        return refuse(`guard:${analysis.reason}`)
+      }
+      const tableRefs = analysis.tables
       const forbiddenTables = tableRefs.filter(t => !QUERY_DB_ALLOWED_TABLES.has(t))
       if (forbiddenTables.length > 0) {
-        logAI.warn(`MCP query_db → forbidden table(s): ${forbiddenTables.join(', ')}`)
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: `Access to table(s) not allowed: ${forbiddenTables.join(', ')}` }) }] }
+        // Neither the message nor the log names the refused table: those
+        // identifiers are lifted straight out of the model's SQL, so a quoted
+        // identifier is an arbitrary attacker-chosen string. The refusal states
+        // the tables we DO allow instead — same actionable content, our bytes.
+        return refuse('forbidden-table', { tables: tableRefs.length, forbidden: forbiddenTables.length })
       }
       try {
         // Always wrap in a subquery with hard LIMIT cap to prevent memory spikes.
         // Even if the user query has its own LIMIT (e.g. LIMIT 100000), the outer
         // wrapper ensures SQLite never materializes more than MAX_ROWS+1 rows.
+        //
+        // This wrapper is only sound because the guard above refuses unbalanced
+        // parentheses: a crafted imbalance re-associates these very parens into
+        // a query that reads a table the guard never saw (§2.118).
         const innerSql = trimmed.replace(/;?\s*$/, '')
         const safeSql = `SELECT * FROM (${innerSql}) LIMIT ${QUERY_DB_MAX_ROWS + 1}`
         const rows = db.prepare(safeSql).all() as Record<string, unknown>[]
@@ -1684,9 +1833,14 @@ function registerMailTools(
           }],
         }
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err)
-        logAI.warn(`MCP query_db → SQL error: ${message}`)
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: message }) }] }
+        // SQLite messages are engine-authored, but they quote the model's own
+        // identifiers back (`no such column: <whatever the model typed>`), so
+        // they are attacker-shaped by transitivity. The class label is the half
+        // that carries information the model does not already have — it wrote
+        // the query and still has it in context, so the identifier tells it
+        // nothing new while the class ("column" vs "syntax" vs "too complex")
+        // is exactly what decides its next attempt.
+        return refuse(`engine:${classifyQueryDbEngineError(err)}`)
       }
     },
   )
@@ -2966,6 +3120,51 @@ function buildPrompt(userPrompt: string, context?: EmailContext): string {
 let _proxyAgent: ProxyAgent | null = null
 let _proxyUrl: string | null = null
 
+/** Stands in for a proxy address this module could not parse. */
+export const PROXY_LOG_UNPARSEABLE = '<unparseable>'
+
+/**
+ * The part of a proxy address that may be written to the persisted log.
+ *
+ * WHY THIS EXISTS. `http://user:password@host:port` is the ordinary form of an
+ * authenticated corporate proxy, and `aiProxyUrl` accepts it. `logAI.info` sits
+ * at the file transport's threshold (`electron/logger.ts` sets
+ * `transports.file.level = 'info'` whenever file logging is on), so anything
+ * this line carries lands in the file a user is asked to attach to a bug
+ * report. §2.119 put a native confirmation in front of a change to this very
+ * setting because it decides where an API key travels; writing the proxy's own
+ * password out in plain text alongside it defeats the point.
+ *
+ * WHAT SURVIVES: scheme, host, port. That is the whole diagnostic question the
+ * line was written to answer — was a proxy configured, and where did the
+ * traffic go. Userinfo, path, query and fragment are dropped, and dropped BY
+ * CONSTRUCTION: the result is assembled from parsed components rather than
+ * filtered out of the raw string, so there is no pattern for an unusual URL to
+ * slip past. Path and query go too because undici dials the proxy's origin —
+ * they say nothing about the destination and are free-form text.
+ *
+ * FAILURE DIRECTION IS "LOG LESS". Anything that does not parse into an
+ * address with a host yields {@link PROXY_LOG_UNPARSEABLE}. The raw value is
+ * never a fallback: a URL that fails to parse is precisely the one most likely
+ * to be a mistyped credential, and the log must not become the place that
+ * preserves it. This holds independently of whether `new ProxyAgent()` would
+ * have rejected the same string first — the safety of the log line must not
+ * rest on a third party's parser staying as strict as it is today.
+ */
+export function describeProxyForLog(proxyUrl: string): string {
+  let parsed: URL
+  try {
+    parsed = new URL(proxyUrl)
+  } catch {
+    return PROXY_LOG_UNPARSEABLE
+  }
+  // A hostless URL (`data:`, `mailto:`) is not an address traffic can go to,
+  // and its opaque body is exactly the free-form text this function refuses to
+  // reproduce.
+  if (!parsed.hostname) return PROXY_LOG_UNPARSEABLE
+  return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}`
+}
+
 /** fetch with HTTP proxy support. If proxyUrl is set — uses undici ProxyAgent. */
 function aiFetch(url: string, init: RequestInit, proxyUrl?: string): Promise<Response> {
   if (!proxyUrl) return fetch(url, init)
@@ -2973,7 +3172,7 @@ function aiFetch(url: string, init: RequestInit, proxyUrl?: string): Promise<Res
     _proxyAgent?.close().catch(() => {})
     _proxyAgent = new ProxyAgent(proxyUrl)
     _proxyUrl = proxyUrl
-    logAI.info(`ProxyAgent created: ${proxyUrl}`)
+    logAI.info(`ProxyAgent created: ${describeProxyForLog(proxyUrl)}`)
   }
   return undiciFetch(url, { ...init, dispatcher: _proxyAgent! } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
 }
@@ -2999,6 +3198,105 @@ function getApiKeyId(provider: ApiKeyProvider): string {
     case 'openai-api': return 'openai_api_key'
     case 'gemini-api': return 'gemini_api_key'
   }
+}
+
+/** The three providers whose key can be stored. Single source for the runtime
+ * guard on `deleteApiKey` (a mistyped provider must not become "all of them"
+ * ever again) and for exhaustive iteration in tests. */
+export const API_KEY_PROVIDERS: readonly ApiKeyProvider[] = [
+  'anthropic-api',
+  'openai-api',
+  'gemini-api',
+] as const
+
+function isApiKeyProvider(value: unknown): value is ApiKeyProvider {
+  return typeof value === 'string' && (API_KEY_PROVIDERS as readonly string[]).includes(value)
+}
+
+// --- §2.122: AI-key secret-store journal ------------------------------------
+//
+// Why a SECOND logger in this file: a day of live-instance logs contained zero
+// lines from any `SecretStore` scope, so "the key survived a restart, but that
+// does not always happen" had nothing to be diagnosed with. Reads, writes and
+// deletes of an AI key now leave a scoped trail under the SAME scope name
+// secretStore.ts uses, so one grep covers the whole path.
+//
+// PII: the value NEVER appears — not in the log, not in telemetry, not even as
+// a length or a hash. Only the provider (closed enum), the operation, the
+// outcome, and, for a fault, the error's class name plus its message LENGTH
+// (backend error text can carry paths / D-Bus addresses, so it stays out).
+const logSecretStore = createLogger('SecretStore')
+
+type AiKeySecretOp = 'read' | 'write' | 'delete'
+type AiKeySecretOutcome = 'found' | 'absent' | 'ok' | 'store_error'
+
+function journalAiKeySecretOp(
+  op: AiKeySecretOp,
+  provider: ApiKeyProvider,
+  outcome: AiKeySecretOutcome,
+  err?: unknown,
+): void {
+  try {
+    const detail: Record<string, unknown> = { op, provider, outcome }
+    if (err !== undefined) {
+      detail.errName = err instanceof Error ? err.name : typeof err
+      detail.errMessageLen = err instanceof Error ? err.message.length : 0
+    }
+    if (outcome === 'store_error') logSecretStore.warn('ai api key store op failed', detail)
+    else logSecretStore.info('ai api key store op', detail)
+  } catch { /* the journal must never break a key operation */ }
+  try {
+    recordEventForAi('ai.api_key_store_op', { op, provider, outcome })
+  } catch { /* telemetry must never break a key operation */ }
+}
+
+/**
+ * §2.122 backfill — providers whose marker we have already reconciled with a
+ * successful read this session. Purely an efficiency latch: without it every
+ * AI request would re-parse the settings record to answer a question whose
+ * answer cannot change until a save or a delete (both of which write the
+ * marker themselves, and the delete clears this latch).
+ */
+const _aiKeySavedFlagBackfilled = new Set<ApiKeyProvider>()
+
+/** Test-only: forget the per-session backfill latch. */
+export function __resetAiKeySavedFlagBackfillForTest(): void {
+  _aiKeySavedFlagBackfilled.clear()
+}
+
+/**
+ * §2.122 — a key that is DEMONSTRABLY there gets the marker, even if it was
+ * saved before the marker existed.
+ *
+ * Without this, everyone who stored a key under an older build carries
+ * `aiApiKeySaved = undefined` forever, and any UI that words itself from the
+ * marker shows them "no key" over a key that is present — the exact symptom
+ * this task exists to remove, reintroduced through the upgrade path.
+ *
+ * Direction is one-way ON, and deliberately so: only `saveApiKey` and a delete
+ * that actually happened may write this marker, plus this backfill. An
+ * `absent` read never clears it, because "the store answered empty" is
+ * precisely the state we want to be able to describe as "there WAS one and it
+ * is gone" — clearing on absence would erase the only evidence of the
+ * instability we are hunting.
+ *
+ * Still observability, not enforcement: nothing reads this to decide whether a
+ * key exists, whether to prompt, or whether to delete (CLAUDE.md §5 "Кто
+ * владеет правдой" — the OS store owns that truth, this is only our memory of
+ * having written one).
+ */
+function backfillAiApiKeySavedFlag(provider: ApiKeyProvider): void {
+  if (_aiKeySavedFlagBackfilled.has(provider)) return
+  _aiKeySavedFlagBackfilled.add(provider)
+  try {
+    // Already recorded — nothing to reconcile, and no settings write.
+    if (getSettings().aiApiKeySaved?.[provider] === true) return
+  } catch {
+    // Settings unreadable: fall through and attempt the write anyway. The
+    // write is itself failure-tolerant (see setAiApiKeySavedFlagSafely), so
+    // the worst case is a no-op, never a failed key read.
+  }
+  setAiApiKeySavedFlagSafely(provider, true)
 }
 
 async function getApiKey(provider: ApiKeyProvider): Promise<string | null> {
@@ -3030,13 +3328,74 @@ async function getApiKey(provider: ApiKeyProvider): Promise<string | null> {
   // before. The reporter call is itself guarded so telemetry can never alter the
   // password-read error path (§8) — the original error always wins.
   try {
-    return await secretStore.get(getApiKeyId(provider), 'ai_keys')
+    const key = await secretStore.get(getApiKeyId(provider), 'ai_keys')
+    // §2.122 — "answered, and there is nothing here" is a different fact from
+    // "could not ask", and both were previously invisible. Journal both.
+    journalAiKeySecretOp('read', provider, key ? 'found' : 'absent')
+    // A successful read is proof the key exists, so it also repairs a missing
+    // marker (keys saved before the marker existed). One-way: `absent` and
+    // `store_error` leave the marker exactly as it was.
+    if (key) backfillAiApiKeySavedFlag(provider)
+    return key
   } catch (err) {
+    journalAiKeySecretOp('read', provider, 'store_error', err)
     try {
       reportKeychainUnavailable(err, 'ai_keys')
     } catch { /* telemetry must never alter the password-read error path (§8) */ }
     throw err
   }
+}
+
+/**
+ * §2.122 — read a key for an auth check WITHOUT collapsing "the store failed"
+ * into "there is no key". The caller gets the two apart, which is the whole
+ * point: only one of them means the user has to type something.
+ */
+type ApiKeyReadOutcome =
+  | { ok: true; key: string | null }
+  | { ok: false; err: unknown }
+
+async function readApiKeyForAuth(provider: ApiKeyProvider): Promise<ApiKeyReadOutcome> {
+  try {
+    return { ok: true, key: await getApiKey(provider) }
+  } catch (err) {
+    return { ok: false, err }
+  }
+}
+
+/**
+ * Shared tail of every adapter's store-failure branch: report it (§8 — an
+ * expected failure mode in a try/catch needs BOTH a log line and a Sentry
+ * exception; `createLogger().error` is not bridged) and answer
+ * `store_unavailable`.
+ *
+ * NOTHING third-party-authored leaves this function. Neither the renderer
+ * status nor the Sentry event carries the store's own text: the exception we
+ * capture is SYNTHETIC and every field on it comes from a closed set (a fixed
+ * sentence, a fixed error name, the `ApiKeyProvider` enum). The raw error is
+ * only ever read for its class name and message LENGTH, and only into the local
+ * log — a keychain backend's message routinely embeds service ids, account
+ * names, D-Bus addresses and filesystem paths (CLAUDE.md §5 "Telemetry
+ * consent": free third-party text does not travel, allowlist not denylist).
+ *
+ * Why a distinct event at all, given `getApiKey` already reported: that path
+ * emits `reportKeychainUnavailable('ai_keys')`, which is deduplicated to ONCE
+ * PER SESSION and attributed to the store. This one says something else — that
+ * an interactive auth check was the caller that hit it, and which provider —
+ * so it keeps its own fingerprint rather than being folded into that latch.
+ */
+function storeUnavailableStatus(provider: ApiKeyProvider, err: unknown): AuthStatus {
+  try {
+    logSecretStore.warn('ai auth check hit an unavailable secret store', {
+      provider,
+      errName: err instanceof Error ? err.name : typeof err,
+      errMessageLen: err instanceof Error ? err.message.length : 0,
+    })
+  } catch { /* diagnostics must never alter the auth-check result */ }
+  const synthetic = new Error('AI key secret store unavailable during auth check')
+  synthetic.name = 'AiKeyStoreUnavailable'
+  captureException(synthetic, { source: 'ai.checkAuth.secret_store', provider })
+  return { status: 'store_unavailable' }
 }
 
 async function getProviderEnv(settings: Settings): Promise<Record<string, string>> {
@@ -3570,7 +3929,24 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
 
   const contextPrompt = buildPrompt(req.prompt, req.context || getUiContext() || undefined)
   const sourceCollector = createSourceCollector(req.context)
-  const baseUrl = normalizeOpenAiBaseUrl(req.settings.aiOpenAiBaseUrl)
+  // §2.119 — a stored endpoint that cannot be turned into an unambiguous
+  // request base is refused rather than concatenated onto (see
+  // `parseAiEndpointBase`). This is the one call site whose throw would leave
+  // an async generator, so it is turned into a normal error event; the message
+  // is the static one from the error class, never the offending value.
+  let baseUrl: string
+  try {
+    baseUrl = normalizeOpenAiBaseUrl(req.settings.aiOpenAiBaseUrl)
+  } catch (err) {
+    yield {
+      type: 'error',
+      requestId: req.requestId,
+      message: err instanceof UnusableAiEndpointError
+        ? err.message
+        : 'OpenAI endpoint address could not be used',
+    }
+    return
+  }
 
   // Build multi-turn messages from conversation history + current prompt
   const messages: Array<{ role: 'user' | 'assistant'; content: string }> = req.history?.length
@@ -4007,14 +4383,14 @@ const anthropicAdapter: AgentProviderAdapter = {
   id: 'anthropic-api',
   async checkAuth() {
     // API mode: only check for key presence, CLI is not required.
-    try {
-      const key = await getApiKey('anthropic-api')
-      if (!key) return { status: 'invalid_key' }
-      if (!key.startsWith('sk-ant-')) return { status: 'invalid_key' }
-      return { status: 'authenticated' }
-    } catch {
-      return { status: 'error', message: 'Error accessing keytar' }
-    }
+    // §2.122 — three outcomes: store fault, no key, key present but malformed.
+    const read = await readApiKeyForAuth('anthropic-api')
+    if (!read.ok) return storeUnavailableStatus('anthropic-api', read.err)
+    if (!read.key) return { status: 'no_key' }
+    // A key WAS read and does not look like an Anthropic key — this is the one
+    // case where "invalid" is an honest description.
+    if (!read.key.startsWith('sk-ant-')) return { status: 'invalid_key' }
+    return { status: 'authenticated' }
   },
   streamChat: streamClaudeChat,
   capabilities() {
@@ -4025,9 +4401,13 @@ const anthropicAdapter: AgentProviderAdapter = {
 const openAiAdapter: AgentProviderAdapter = {
   id: 'openai-api',
   async checkAuth(settings) {
+    // §2.122 — the store read is classified BEFORE the network call, so a
+    // keychain fault can never be reported as a rejected key.
+    const read = await readApiKeyForAuth('openai-api')
+    if (!read.ok) return storeUnavailableStatus('openai-api', read.err)
+    if (!read.key) return { status: 'no_key' }
+    const key = read.key
     try {
-      const key = await getApiKey('openai-api')
-      if (!key) return { status: 'invalid_key' }
       const baseUrl = normalizeOpenAiBaseUrl(settings.aiOpenAiBaseUrl)
       const res = await aiFetch(`${baseUrl}/v1/models`, {
         method: 'GET',
@@ -4052,9 +4432,13 @@ const openAiAdapter: AgentProviderAdapter = {
 const geminiAdapter: AgentProviderAdapter = {
   id: 'gemini-api',
   async checkAuth(settings) {
+    // §2.122 — same split as the OpenAI adapter: store fault, no key, and only
+    // then a verdict about the key itself.
+    const read = await readApiKeyForAuth('gemini-api')
+    if (!read.ok) return storeUnavailableStatus('gemini-api', read.err)
+    if (!read.key) return { status: 'no_key' }
+    const key = read.key
     try {
-      const key = await getApiKey('gemini-api')
-      if (!key) return { status: 'invalid_key' }
       if (key.trim().length < 10) return { status: 'invalid_key' }
       const res = await aiFetch(
         `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
@@ -4873,19 +5257,22 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
   internetGateRegistered = true
 
   // Telemetry: span covering the entire AI request lifecycle.
-  // Wrapped in try/catch so a broken Sentry SDK never blocks AI chat —
-  // telemetry is best-effort and must never affect user-visible behaviour.
+  //
+  // §2.82 iter2 (finding 4) — routed through `startMetricSpan` instead of a
+  // direct `startInactiveSpan`. Direct SDK calls bypass the consent collection
+  // gate (electron/telemetryGate.ts): a span is an open recording window, and
+  // one opened while the answer is "not asked yet" would be submitted on end()
+  // — possibly after the user consented, shipping a window they never agreed
+  // to. `startMetricSpan` returns a no-op handle while collection is off,
+  // supplies the registered `op`, and applies the `parentSpan: null` sampling
+  // guard. Wrapped anyway so a broken Sentry SDK never blocks AI chat.
   try {
-    span = startInactiveSpan({
-      name: 'ai.chat',
-      op: 'ai.chat',
-      attributes: {
-        'ai.provider': provider,
-        'ai.model': model,
-        'ai.context_type': options.context?.type || 'none',
-        'ai.has_history': Boolean(options.history?.length),
-        'ai.session_resumed': Boolean(options.sessionId),
-      },
+    span = startMetricSpan('ai.chat', {
+      'ai.provider': provider,
+      'ai.model': model,
+      'ai.context_type': options.context?.type || 'none',
+      'ai.has_history': Boolean(options.history?.length),
+      'ai.session_resumed': Boolean(options.sessionId),
     })
   } catch { /* span creation must never break the caller */ }
 
@@ -5114,16 +5501,23 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
       } catch { /* span finalization must never break the caller */ }
     }
 
+    // §2.82 iter2 (finding 4, same class) — this is the only direct
+    // `sentryLogger` call outside electron/metrics.ts, and like the span above
+    // it was a transmission point the consent gate did not know about. Gate it
+    // at the source rather than relying on the SDK's `enabled` flag, which is a
+    // different mechanism with a different lifetime.
     try {
-      sentryLogger.info('AI chat completed', {
-        'ai.provider': provider,
-        'ai.model': model,
-        'ai.tool_call_count': toolCallCount,
-        'ai.tools_used': [...toolNames].join(','),
-        'ai.aborted': aborted,
-        'ai.error': errorOccurred,
-        ...(costUsd !== undefined ? { 'ai.cost_usd': costUsd } : {}),
-      })
+      if (isTelemetryCollectionAllowed()) {
+        sentryLogger.info('AI chat completed', {
+          'ai.provider': provider,
+          'ai.model': model,
+          'ai.tool_call_count': toolCallCount,
+          'ai.tools_used': [...toolNames].join(','),
+          'ai.aborted': aborted,
+          'ai.error': errorOccurred,
+          ...(costUsd !== undefined ? { 'ai.cost_usd': costUsd } : {}),
+        })
+      }
     } catch { /* ignore */ }
 
     // §3.3 B1 — append one privacy audit row per completed AI request. Pure
@@ -6584,24 +6978,85 @@ export async function checkAuth(settings: Settings): Promise<AuthStatus> {
 
 // --- Save/delete API key ---
 
-export async function saveApiKey(key: string, provider: ApiKeyProvider = 'anthropic-api'): Promise<void> {
+/**
+ * §2.122 — store the key of ONE provider.
+ *
+ * The provider is REQUIRED, exactly as on `deleteApiKey`, and for the
+ * symmetrical reason: the argument-less call used to mean "Anthropic", so any
+ * caller that forgot it wrote a foreign provider's key over the Anthropic
+ * credential — a silent, destructive reinterpretation of a mistake. There is no
+ * default provider; a missing one is a programming error and is thrown.
+ */
+export async function saveApiKey(key: string, provider: ApiKeyProvider): Promise<void> {
+  if (!isApiKeyProvider(provider)) {
+    throw new Error('saveApiKey requires an explicit provider')
+  }
   // §2.33 PR2b — write through secretStore so AI keys inherit the machine-bound
   // AES-256-GCM disk fallback (no D-Bus hang, no user re-entry prompt) when the
   // OS keychain is unreachable. The 'ai_keys' surface tags any once-per-session
   // keychain-unavailability telemetry emitted inside the store.
-  await secretStore.set(getApiKeyId(provider), key, 'ai_keys')
+  try {
+    await secretStore.set(getApiKeyId(provider), key, 'ai_keys')
+  } catch (err) {
+    journalAiKeySecretOp('write', provider, 'store_error', err)
+    throw err
+  }
+  journalAiKeySecretOp('write', provider, 'ok')
+  // §2.122 — remember that we wrote one, so a later empty read can be described
+  // as "it is gone" instead of "your key is wrong". Observability only: the
+  // flag is written AFTER the store succeeded and its failure cannot fail the
+  // save (CLAUDE.md §5 "Кто владеет правдой" — the store owns the truth).
+  setAiApiKeySavedFlagSafely(provider, true)
 }
 
-export async function deleteApiKey(provider?: ApiKeyProvider): Promise<void> {
-  const providers: ApiKeyProvider[] = provider
-    ? [provider]
-    : ['anthropic-api', 'openai-api', 'gemini-api']
-  for (const p of providers) {
+/**
+ * §2.122 — delete the stored key of ONE provider.
+ *
+ * The provider is REQUIRED, and there is deliberately no "delete everything"
+ * meaning for a missing argument. Until this change, `deleteApiKey()` with no
+ * argument wiped all three providers, and the AI panel's "change provider"
+ * button called it exactly that way — a user who was (wrongly) told their key
+ * was invalid destroyed the other two providers' keys by following the only
+ * button on screen. A bulk wipe, if ever needed, is a separate deliberate
+ * action with its own name and its own channel, not the empty-argument case of
+ * this one.
+ *
+ * Unlike the old loop, a store failure PROPAGATES: reporting a delete that did
+ * not happen as success is the same class of lie this task exists to remove.
+ */
+export async function deleteApiKey(provider: ApiKeyProvider): Promise<void> {
+  if (!isApiKeyProvider(provider)) {
+    throw new Error('deleteApiKey requires an explicit provider')
+  }
+  try {
+    // §2.33 PR2b — delete through secretStore (keytar OR disk fallback).
+    await secretStore.delete(getApiKeyId(provider), 'ai_keys')
+  } catch (err) {
+    journalAiKeySecretOp('delete', provider, 'store_error', err)
+    throw err
+  }
+  journalAiKeySecretOp('delete', provider, 'ok')
+  // Only a delete that actually happened clears the marker.
+  setAiApiKeySavedFlagSafely(provider, false)
+  // Drop the backfill latch too: after a delete, the next successful read is
+  // new evidence (the user re-entered a key, or the delete did not stick) and
+  // must be free to set the marker again.
+  _aiKeySavedFlagBackfilled.delete(provider)
+}
+
+/** Persist the §2.122 marker without letting a settings-write fault reach the
+ * caller: the marker is observability, and a key operation that succeeded must
+ * not be reported as failed because our note about it could not be saved. */
+function setAiApiKeySavedFlagSafely(provider: ApiKeyProvider, saved: boolean): void {
+  try {
+    setAiApiKeySavedFlag(provider, saved)
+  } catch (err) {
     try {
-      // §2.33 PR2b — delete through secretStore (keytar OR disk fallback).
-      await secretStore.delete(getApiKeyId(p), 'ai_keys')
-    } catch {
-      // ignore one provider and continue
-    }
+      logSecretStore.warn('ai api key saved-flag write failed', {
+        provider,
+        saved,
+        errName: err instanceof Error ? err.name : typeof err,
+      })
+    } catch { /* never throw out of a key operation */ }
   }
 }

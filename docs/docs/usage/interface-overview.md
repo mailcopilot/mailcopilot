@@ -77,6 +77,12 @@ The right column displays the content of the selected message:
 
 You can resize the message list and reading pane by dragging the border between them. Your preferred width is remembered between sessions.
 
+## Text Selection and Editing
+
+Right-click inside any text field -- the search bar, a message you are composing, an AI chat prompt, or any other editable box -- to open a small context menu with **Cut**, **Copy**, **Paste**, and **Select All**. Right-clicking selected, non-editable text (for example a highlighted passage in a message body) offers **Copy** on its own.
+
+Right-clicking a link in a message body opens a different menu with options to open or copy the link; see [Right-Click a Link](./reading-emails#right-click-a-link).
+
 ## Status Bar
 
 A persistent status bar runs along the bottom of the window, similar to the one in VS Code. It surfaces background activity that previously was only visible inside the search panel:

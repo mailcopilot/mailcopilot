@@ -1,3 +1,4 @@
+import { X509Certificate } from 'node:crypto'
 import net from 'node:net'
 import tls from 'node:tls'
 
@@ -17,9 +18,25 @@ type TlsConfig = {
    * the certificate body (see `contract_out` — owned by packages/db). While
    * it is absent, a pinned self-signed server fails closed with a normal
    * certificate error instead of being silently accepted.
+   *
+   * SECURITY-LOAD-BEARING BEYOND CHAIN BUILDING: presence of a leaf here is
+   * also what tells `buildTlsOptions` that the leaf's identity was confirmed
+   * by the user through the main-initiated recovery dialog, which is the only
+   * writer of certificate bodies. A leaf pinned by fingerprint alone (the
+   * renderer-writable `tls:addPin` channel) is still hostname-checked. Do not
+   * populate this field from anything a renderer supplies.
    */
   tlsPinnedCertsPem?: string[]
-  /** Hostname for TLS SNI and certificate verification (when connecting by IP instead of hostname) */
+  /**
+   * Hostname for TLS SNI when the connection is dialled by IP (DNS fallback
+   * path in ./smtp, IP-addressed accounts).
+   *
+   * It is also the identity the certificate is verified against wherever a
+   * hostname check applies: the unpinned path (Node's own
+   * `checkServerIdentity` prefers `servername` over `host`) and the
+   * fingerprint-only pinned mode. Only an ANCHORED pinned leaf skips the name
+   * check — see `buildTlsOptions`.
+   */
   servername?: string
 }
 
@@ -238,8 +255,16 @@ export type TlsOptions = {
  *
  *  Pinned path therefore = full chain verification (default + system roots,
  *  plus the pinned certificates themselves as explicit anchors when their PEM
- *  is known) AND hostname check AND fingerprint equality. Pinning narrows
- *  trust, it never widens it.
+ *  is known) AND fingerprint equality. Pinning narrows trust, it never widens
+ *  it.
+ *
+ *  Identity on the pinned path has TWO modes, decided per PRESENTED
+ *  certificate — see the `checkServerIdentity` comment below for the full
+ *  reasoning:
+ *    - the leaf is one of the pinned ANCHORS (its PEM is stored) → identity is
+ *      established by the pinned material itself, the hostname is not checked;
+ *    - the leaf is pinned by FINGERPRINT ONLY → the hostname check stays, in
+ *      full, exactly as on the unpinned path.
  *
  *  Consequence to keep in mind: while `tlsPinnedCertsPem` is empty, a pinned
  *  SELF-SIGNED server fails closed (certificate error surfaced through the
@@ -266,19 +291,95 @@ export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
   // pinned connection, where the fingerprint check pins the leaf anyway.
   const ca = combined ? dedupePem([...combined, ...anchors]) : (anchors.length ? dedupePem(anchors) : null)
 
+  /**
+   * Fingerprints of the pins that came with a certificate BODY, i.e. the pins
+   * that are also trust anchors in `ca` above.
+   *
+   * This set — not "were any anchors supplied at all" — is the discriminator
+   * for the identity mode below. An endpoint can hold both kinds of pin at
+   * once (an anchored one from the recovery dialog plus a fingerprint-only one
+   * added from Settings), and a per-endpoint "has anchors" flag would extend
+   * the anchored certificate's privilege to the fingerprint-only one.
+   *
+   * An unparsable anchor contributes NOTHING (rather than throwing): the pin
+   * store validates PEM bodies on write, so this is a corrupt-row path, and
+   * degrading it to "hostname-checked" keeps a bad row from silently widening
+   * identity. Note the empty-string guard on `fingerprint256` — a certificate
+   * that cannot name itself must not match a pin that failed to parse either.
+   */
+  const anchorFingerprints = new Set<string>()
+  for (const pem of anchors) {
+    try {
+      const fp = normalizeFingerprintSha256(new X509Certificate(pem).fingerprint256 || '')
+      if (fp) anchorFingerprints.add(fp)
+    } catch {
+      // Corrupt stored anchor — it stays in `ca` (where OpenSSL will ignore
+      // it) but grants no identity.
+    }
+  }
+
   return {
     rejectUnauthorized: true,
     ...(ca && { ca }),
     ...(sni && { servername: sni }),
+    /**
+     * Pin check first, then a per-certificate identity mode.
+     *
+     * WHY THE MODE EXISTS. A pin's authority depends on where its fingerprint
+     * came from, and the two sources have very different trust:
+     *
+     *  - ANCHORED pin (`cert_pem` stored, so the certificate is also in `ca`
+     *    above): mintable only through the main-initiated recovery dialog
+     *    (`net:trustCert`, gated on a trust offer bound to account+endpoint+
+     *    fingerprint; the PEM is fetched by MAIN and cross-checked against the
+     *    displayed fingerprint, and packages/db refuses a body that disagrees
+     *    with its pin). It is a certificate the user was shown and accepted.
+     *  - FINGERPRINT-ONLY pin: also writable through `tls:addPin`, a plain
+     *    renderer IPC channel (Settings → "add pin", the account wizard) with
+     *    no trust-offer gate. The renderer chooses the string. A compromised
+     *    renderer is inside this product's threat model — it parses email.
+     *
+     * So the hostname check may be dropped ONLY for an anchored leaf:
+     *  - `rejectUnauthorized: true` still holds, so this callback is reached
+     *    only after OpenSSL verified the whole chain (expiry, signatures,
+     *    basic constraints) against default + system roots plus the anchors;
+     *  - reaching it also means the peer completed the handshake, i.e. proved
+     *    possession of the leaf's PRIVATE KEY — a copy of the certificate is
+     *    not enough, certificates are public;
+     *  - and the leaf is byte-for-byte the one the user confirmed for THIS
+     *    endpoint. That is strictly stronger than "some name in this
+     *    certificate matches the host we dialled" — the standard rationale for
+     *    pinning, and the same trade Thunderbird's certificate exceptions make.
+     * This is what makes the recovery dialog actually work for an account
+     * addressed by bare IP (certificate carries no matching IP SAN): the
+     * previous order checked the name FIRST and returned before the
+     * fingerprint was compared, so "Trust this certificate" was a no-op and
+     * every later connection failed with the same
+     * ERR_TLS_CERT_ALTNAME_INVALID. (Latent until §2.52: the pinned path ran
+     * with `rejectUnauthorized: false`, so Node never invoked this callback.)
+     *
+     * For a fingerprint-only pin NONE of that holds — the fingerprint proves
+     * only that the leaf is the one the RENDERER named. Without the hostname
+     * check such a pin would stop narrowing trust and start REDIRECTING it:
+     * any CA-valid certificate whose fingerprint the renderer wrote here would
+     * be accepted as this mail host, which together with a network position is
+     * a complete MITM. So the check stays, in full. A forged fingerprint-only
+     * pin can then still do what it always could — make the connection fail —
+     * and nothing more (see the `tls:addPin` JSDoc in electron/main.ts, which
+     * states exactly this property).
+     *
+     * Not relaxed in either mode: a leaf that is not pinned at all is refused
+     * (server-side rotation fails closed and re-raises the recovery dialog),
+     * and a certificate without a usable fingerprint is refused.
+     */
     checkServerIdentity: (hostname, cert) => {
-      // When connecting by IP, use the original hostname for certificate verification
-      const hostForCheck = sni || hostname
-      const hostErr = tls.checkServerIdentity(hostForCheck, cert)
-      if (hostErr) return hostErr
       const fp = normalizeFingerprintSha256(cert.fingerprint256 || '')
       if (!fp) return new Error('TLS pin error: server certificate fingerprint is empty')
       if (!pins.includes(fp)) return new Error(`TLS pin mismatch: ${fp}`)
-      return undefined
+      // Anchored leaf → the pinned material established identity.
+      if (anchorFingerprints.has(fp)) return undefined
+      // Fingerprint-only leaf → same identity check as the unpinned path.
+      return tls.checkServerIdentity(sni || hostname, cert)
     },
   }
 }

@@ -5,7 +5,7 @@ title: Mail Rules
 
 # Mail Rules
 
-Mail rules let you automatically sort and organize incoming emails based on conditions you define. Rules are evaluated each time new messages arrive.
+Mail rules let you automatically sort and organize incoming emails based on conditions you define. Rules run whenever MailCopilot fetches mail from the server, not necessarily the instant a message arrives there.
 
 ## Creating a Rule
 
@@ -19,9 +19,9 @@ Mail rules let you automatically sort and organize incoming emails based on cond
 Each rule has one or more conditions. All conditions must match for the rule to trigger (AND logic). If you need OR logic, create separate rules.
 
 Available condition fields:
-- **From** -- sender name or address.
+- **From** -- matches the sender's display name when the message has one, and only falls back to the sender's address if it doesn't. A rule aimed at an address can stop matching once that sender starts including a display name, so test the rule after setting it up and watch for it going quiet.
 - **To** -- recipient address.
-- **CC** -- CC address.
+- **CC** -- present in the rule editor, but MailCopilot doesn't store the CC field for cached mail, so every message looks like it has an empty CC to a rule. That makes the condition behave unpredictably rather than simply not working: matching a specific address in CC never succeeds, but an exclusion-style operator like **does not contain**, or a regular expression that matches an empty string, matches *every* message instead. Don't use a CC condition in a rule that moves mail to Trash, marks it as spam, or moves it to another folder -- with the wrong operator it can act on your whole inbox.
 - **Subject** -- the email subject line.
 - **Has attachment** -- whether the email has attachments.
 
@@ -48,15 +48,23 @@ If you enable **"Stop processing further rules"**, no additional rules will be e
 
 ## Testing Rules
 
-Before saving a rule, click **Test on existing emails** to see which of your existing emails would match the conditions. This helps you verify that the rule works as expected before applying it to new mail.
+Before saving a rule, click **Test on existing emails** to preview which of your recent inbox mail would match its conditions. The preview checks up to 500 Inbox messages already downloaded to this device and lists up to 20 matches -- it's a quick sanity check, not an exhaustive search of your whole mailbox. For a rule scoped to a single account, that's your most recent mail; for a rule scoped to all accounts, the 500 checked are pulled from across your accounts but aren't necessarily the most recent overall. Older mail and mail not yet downloaded to this device aren't included.
 
 ## Applying to Existing Emails
 
-Check **"Apply to existing emails in inbox"** when saving a rule to immediately apply it to emails already in your inbox.
+Check **"Apply to existing emails in inbox"** when saving a rule to run it immediately against mail you already have. This reaches up to 1,000 Inbox messages already downloaded to this device -- for a single-account rule, your most recent such mail; for a rule scoped to all accounts, up to 1,000 pulled from across your accounts, not necessarily the most recent overall. It doesn't go further back into your mail history on the server, and it only covers the Inbox, not other folders. If one action fails, only that action is skipped -- any other actions in the same rule still run against that message, and the rest of the run still completes.
+
+## New Mail Only
+
+Rules act on new mail once it reaches your device, no matter which path brought it in -- a push notification, a periodic sync, or a page of mail newer than what you'd already seen. Which of those paths delivered a message used to matter and could make a rule miss it entirely; that gap is now closed. Scrolling back to load older pages doesn't feed those older messages into rules, though -- that's intentional, the same "no history scan" behavior described below, not a leftover gap.
+
+That guarantee for new mail isn't absolute in every situation, though: a message whose action fails three attempts in a row (for example, because of a dropped connection) is given up on for good -- MailCopilot skips it and moves on in that folder, so a later restart won't bring it back. What a restart does reset is a count that hasn't reached three yet: if the app restarts before a message has failed three times in a row, the count starts over from zero, so an action that keeps failing for a reason that doesn't go away can stall a folder's processing indefinitely without ever actually reaching that three-attempt limit.
+
+Rules also don't retroactively scan a folder's full history on their own. Every folder MailCopilot already knows about when it starts up gets a starting point right away, before any syncing happens -- an empty folder gets a starting point of zero, so its very first message is evaluated normally; a folder that already has cached mail gets a starting point past that mail, so the existing mail isn't swept in but anything arriving afterward is. A folder that only comes into existence after that startup moment -- newly created or newly subscribed -- is set up differently: nothing in it is evaluated until MailCopilot has synced it once, and only mail arriving after that first sync counts. The same fresh start happens if the server ever resets a folder's message numbering (rare, but it can happen after certain server-side migrations). Use **Apply to existing emails in inbox** (see above) if you want a rule to also evaluate mail you already have.
 
 ## Rule Priority
 
-Rules are evaluated in priority order (lower number = higher priority). You can adjust the priority when editing a rule. If two rules have the same priority, they are evaluated in creation order.
+Rules run in priority order (lower number = higher priority). Priority is assigned automatically when you create a rule -- there's no control in the rule editor to change it at the moment. When two rules end up with the same priority, which one runs first is not defined.
 
 ## AI Rules
 

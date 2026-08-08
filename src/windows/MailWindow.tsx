@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Minus, Square, Copy, X, Loader2, AlertTriangle, WifiOff, Undo2 } from 'lucide-react'
+import { Loader2, AlertTriangle, WifiOff, Undo2 } from 'lucide-react'
 import type { AccountMeta, ComposeInit, FolderRoles, MessageDetails } from '@mailcopilot/types'
-import { addrListToString } from '@mailcopilot/core'
+import {
+  ERROR_PRESENTATION_I18N_KEYS,
+  addrListToString,
+  decodeErrorPresentation,
+  isErrorPresentationKey,
+} from '@mailcopilot/core'
 import RecipientList from '../components/RecipientList'
 import { computeReplyRecipients, prefixSubject, htmlToText, quoteText } from '../utils/mail'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
 import { sanitizeMailHtml } from '../utils/mail'
 import { rewriteMailHtmlLinks } from '../utils/mailLinks'
 import { useMailLinkClick } from '../hooks/useMailLinkClick'
@@ -44,7 +49,6 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
   const { t } = useTranslation()
   const tRef = useRef(t)
   tRef.current = t
-  const maximized = useMaximized()
   const [details, setDetails] = useState<MessageDetails | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -196,7 +200,14 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'fetch_failed')
+          // §2.127 — store the presentation KEY, not text. The raw message was
+          // never rendered (the branch below only tested `error` for
+          // truthiness), so the tag never leaked here; but keeping a key lets
+          // the empty state say *why* the message would not open — "no
+          // connection to the mail server" instead of only "Message not
+          // found". Storing the key rather than a translated string keeps `t`
+          // out of this effect's dependencies.
+          setError(decodeErrorPresentation(err))
           setLoading(false)
         }
       }
@@ -515,20 +526,7 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
 
   return (
     <>
-      <div className="child-titlebar">
-        <span className="child-titlebar-title">{subject || t('mail.actions.openInWindow')}</span>
-        <div className="titlebar-controls">
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')} title={t('window.minimize', { defaultValue: 'Minimize' })}>
-            <Minus size={14} />
-          </button>
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')} title={t('window.maximize', { defaultValue: 'Maximize' })}>
-            {maximized ? <Copy size={12} /> : <Square size={12} />}
-          </button>
-          <button className="titlebar-btn titlebar-btn-close" onClick={() => window.close()} title={t('window.close', { defaultValue: 'Close' })}>
-            <X size={14} />
-          </button>
-        </div>
-      </div>
+      <WindowTitlebar title={subject || t('mail.actions.openInWindow')} />
       <div className="mail-window-root">
         <MailActionsToolbar
           flagged={flagged}
@@ -605,6 +603,11 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
             <div className="empty-state">
               <AlertTriangle size={24} />
               <p>{t('app.empty.messageNotFound.title')}</p>
+              {isErrorPresentationKey(error) && (
+                <p className="hint" data-testid="mail-window-error-reason">
+                  {t(ERROR_PRESENTATION_I18N_KEYS[error])}
+                </p>
+              )}
             </div>
           ) : details?.offlineFallback ? (
             <div className="empty-state offline-fallback">

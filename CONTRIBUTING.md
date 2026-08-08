@@ -68,8 +68,35 @@ Requirements:
 
 ```bash
 npm install       # installs deps and rebuilds native modules for Electron
+cp .env.example .env   # optional local secrets, git-ignored
 npm run dev       # Vite dev server + Electron with hot reload
 ```
+
+`vite.config.ts` loads `.env` from the repository root, so anything you put
+there reaches both the build and the Electron process started by `npm run dev`.
+Variables already set in your shell win over the file.
+
+### Google OAuth credentials
+
+The repository intentionally contains no Google OAuth client — a credential
+committed to a public repo gets indexed by secret scanners and revoked by the
+provider. So **Gmail sign-in does not work in a build you made yourself** until
+you register your own client; every other account type, Gmail app passwords
+included, is unaffected.
+
+Create an OAuth client ID of type **Desktop app** in
+[Google Cloud Console](https://console.cloud.google.com/apis/credentials), grant
+it the scopes `https://mail.google.com/`, `openid`, `email`, `profile`, and set:
+
+```bash
+MAILCOPILOT_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+MAILCOPILOT_GOOGLE_CLIENT_SECRET=...
+```
+
+Resolution order is environment variable first, then the value baked into the
+main bundle at build time (`define` in `vite.config.ts`, the same mechanism as
+`__SENTRY_DSN__`). Never add a literal fallback in the source — see
+`electron/googleOAuthConfig.ts`.
 
 ## Commands
 

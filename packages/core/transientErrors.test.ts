@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { isTransientNetworkError, isLinuxInstallerError } from './transientErrors';
+import { isTransientNetworkError, isLinuxInstallerError, walkErrorTree } from './transientErrors';
+
+// tsconfig targets ES2020, so `AggregateError` has no type declaration here
+// even though the runtime (Node 22 / Electron 40) provides it.
+type AggErrCtor = new (errors: unknown[], message?: string) => Error & { errors: unknown[] };
+const AggErr = (globalThis as unknown as { AggregateError: AggErrCtor }).AggregateError;
 
 describe('isTransientNetworkError', () => {
   describe('Chromium net:: codes', () => {
@@ -195,6 +200,120 @@ describe('isTransientNetworkError', () => {
       const agg = Object.assign(new Error('empty'), { errors: [] as Error[] });
       expect(isTransientNetworkError(agg)).toBe(false);
     });
+  });
+});
+
+// walkErrorTree is exported for the first time this batch — consumed today by
+// packages/core/errorPresentation.ts (classifyErrorPresentation,
+// describeErrorForLog). It has no direct test in either that file's test
+// suite (both only exercise it through the classifier), so it is pinned down
+// here as its own exported contract.
+describe('walkErrorTree', () => {
+  function collect(input: unknown): unknown[] {
+    const seen: unknown[] = [];
+    walkErrorTree(input, (node) => { seen.push(node); });
+    return seen;
+  }
+
+  it('visits the root node itself, not just its children', () => {
+    const err = new Error('boom');
+    expect(collect(err)).toEqual([err]);
+  });
+
+  it('does not call the visitor at all for null/undefined', () => {
+    expect(collect(null)).toEqual([]);
+    expect(collect(undefined)).toEqual([]);
+  });
+
+  it('skips primitives that are neither a string nor an object', () => {
+    // Only strings and objects carry error-shaped information; numbers/
+    // booleans are not error nodes and must not reach the visitor.
+    expect(collect(42)).toEqual([]);
+    expect(collect(true)).toEqual([]);
+  });
+
+  it('visits a bare string node', () => {
+    expect(collect('connect ETIMEDOUT')).toEqual(['connect ETIMEDOUT']);
+  });
+
+  it('walks AggregateError.errors in order, parent before children (pre-order)', () => {
+    const a = new Error('first');
+    const b = new Error('second');
+    const agg = new AggErr([a, b]);
+    expect(collect(agg)).toEqual([agg, a, b]);
+  });
+
+  it('walks a cause chain', () => {
+    const root = new Error('root cause');
+    const mid = new Error('mid') as Error & { cause?: unknown };
+    mid.cause = root;
+    const top = new Error('top') as Error & { cause?: unknown };
+    top.cause = mid;
+    expect(collect(top)).toEqual([top, mid, root]);
+  });
+
+  it('walks both errors[] and cause on the same node', () => {
+    const innerAgg = new Error('inner');
+    const cause = new Error('the cause');
+    const node = Object.assign(new AggErr([innerAgg]), { cause });
+    expect(collect(node)).toEqual([node, innerAgg, cause]);
+  });
+
+  it('does not re-visit a node reachable through two different paths (WeakSet dedup)', () => {
+    const shared = new Error('shared');
+    const agg = new AggErr([shared, shared]);
+    expect(collect(agg)).toEqual([agg, shared]);
+  });
+
+  it('does NOT dedupe repeated string nodes — only objects go through the WeakSet', () => {
+    const agg = new AggErr(['same text', 'same text']);
+    expect(collect(agg)).toEqual([agg, 'same text', 'same text']);
+  });
+
+  it('terminates on a self-referencing cause instead of looping forever', () => {
+    const self = new Error('self') as Error & { cause?: unknown };
+    self.cause = self;
+    expect(collect(self)).toEqual([self]);
+  });
+
+  it('terminates on a mutual cause cycle (A causes B causes A)', () => {
+    const a = new Error('a') as Error & { cause?: unknown };
+    const b = new Error('b') as Error & { cause?: unknown };
+    a.cause = b;
+    b.cause = a;
+    expect(collect(a)).toEqual([a, b]);
+  });
+
+  it('terminates on a self-containing AggregateError', () => {
+    const agg = new AggErr([]);
+    (agg.errors as unknown[]).push(agg);
+    expect(collect(agg)).toEqual([agg]);
+  });
+
+  it('stops descending once MAX_CAUSE_DEPTH (5) is reached, but still visits the boundary node', () => {
+    // Chain of 7 causes: root(d0) -> c1(d1) -> ... -> c6(d6). The depth guard
+    // is checked AFTER visiting the current node and BEFORE recursing into its
+    // children, so the node at depth 5 is visited but its own cause (depth 6)
+    // is never reached.
+    const nodes = Array.from({ length: 7 }, (_, i) => new Error(`d${i}`) as Error & { cause?: unknown });
+    for (let i = 0; i < nodes.length - 1; i++) nodes[i]!.cause = nodes[i + 1];
+    const visited = collect(nodes[0]);
+    expect(visited).toEqual(nodes.slice(0, 6));
+    expect(visited).not.toContain(nodes[6]);
+  });
+
+  it('propagates a throwing getter instead of swallowing it — callers own the try/catch', () => {
+    // walkErrorTree reads `.errors` / `.cause` directly with no internal
+    // try/catch; a hostile getter throws OUT of the traversal. This is why
+    // every current caller (classifyErrorPresentation, describeErrorForLog in
+    // ./errorPresentation.ts) wraps its own `walkErrorTree(...)` call rather
+    // than relying on the function to be exception-safe by itself.
+    const hostile = {
+      get cause(): unknown {
+        throw new Error('boom');
+      },
+    };
+    expect(() => collect(hostile)).toThrow('boom');
   });
 });
 

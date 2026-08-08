@@ -43,6 +43,11 @@ const i18nMap: Record<string, string> = {
   'app.empty.loadingMessage.title': 'Loading…',
   'app.empty.messageNotFound.title': 'Message not found',
   'app.errors.bodyNotAvailableOffline': 'Body not available offline',
+  // §2.127 closed error vocabulary.
+  'app.errors.presented.offline': 'No connection to the mail server. MailCopilot will keep retrying.',
+  'app.errors.presented.timeout': 'The mail server did not respond in time. MailCopilot will keep retrying.',
+  'app.errors.presented.auth': 'Sign-in was rejected. Check the account password, or re-authorize the account in Settings.',
+  'app.errors.presented.unknown': 'Could not complete the request. Please try again.',
   // Link warning dialog
   'mail.links.title': 'This link looks suspicious',
   'mail.links.textLabel': 'Link text',
@@ -452,6 +457,32 @@ describe('MailWindow — loading and error states', () => {
     })
     await act(async () => { renderMailWindow() })
     expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
+  })
+
+  it('names the reason under the not-found title when the rejection is tagged (§2.127)', async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') {
+        return Promise.reject(
+          new Error("[mcerr:offline] Error invoking remote method 'net:messageDetails': AggregateError"),
+        )
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+    const reason = document.querySelector('[data-testid="mail-window-error-reason"]')
+    expect(reason).toBeInTheDocument()
+    expect(reason?.textContent).toContain('No connection to the mail server')
+    expect(reason?.textContent).not.toContain('mcerr')
+    expect(reason?.textContent).not.toContain('AggregateError')
+  })
+
+  it('shows no reason line for the invalid-params guard (not a presentation key)', async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockResolvedValue(undefined)
+    await act(async () => { renderMailWindow({ uid: 0 }) })
+    expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="mail-window-error-reason"]')).toBeNull()
   })
 
   it('shows offline icon when offlineFallback is true', async () => {

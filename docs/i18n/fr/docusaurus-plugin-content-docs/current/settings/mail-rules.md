@@ -5,7 +5,7 @@ title: Règles de messagerie
 
 # Règles de messagerie
 
-Les règles de messagerie vous permettent de trier et d'organiser automatiquement les e-mails entrants selon des conditions que vous définissez. Les règles sont évaluées à chaque réception de nouveaux messages.
+Les règles de messagerie vous permettent de trier et d'organiser automatiquement les e-mails entrants selon des conditions que vous définissez. Les règles s'exécutent chaque fois que MailCopilot récupère le courrier sur le serveur, pas nécessairement au moment exact où un message y arrive.
 
 ## Créer une règle
 
@@ -19,9 +19,9 @@ Les règles de messagerie vous permettent de trier et d'organiser automatiquemen
 Chaque règle comporte une ou plusieurs conditions. Toutes les conditions doivent correspondre pour que la règle se déclenche (logique ET). Si vous avez besoin d'une logique OU, créez des règles séparées.
 
 Champs de condition disponibles :
-- **De** — nom ou adresse de l'expéditeur.
-- **À** — adresse du destinataire.
-- **CC** — adresse en copie.
+- **Expéditeur** — comparé au nom d'affichage de l'expéditeur lorsque le message en a un, et à son adresse seulement en l'absence de nom d'affichage. Une règle ciblant une adresse peut cesser de se déclencher dès que cet expéditeur commence à utiliser un nom d'affichage — testez la règle après l'avoir configurée et surveillez si elle cesse de fonctionner.
+- **Destinataire** — adresse du destinataire.
+- **Cc** — présent dans l'éditeur de règles, mais MailCopilot ne stocke pas le champ Cc des e-mails mis en cache, donc chaque message apparaît avec un Cc vide aux yeux d'une règle. La condition se comporte alors de façon imprévisible plutôt que de simplement « ne pas fonctionner » : faire correspondre une adresse précise en Cc ne réussit jamais, mais un opérateur d'exclusion comme **ne contient pas**, ou une expression régulière qui correspond à une chaîne vide, correspond au contraire à **tous** les messages. N'utilisez pas de condition sur le Cc dans une règle qui met à la corbeille, marque comme spam ou déplace le courrier vers un autre dossier -- avec le mauvais opérateur, elle peut agir sur toute votre boîte de réception.
 - **Objet** — l'objet de l'e-mail.
 - **Contient une pièce jointe** — si l'e-mail a des pièces jointes.
 
@@ -29,7 +29,7 @@ Opérateurs disponibles :
 - **contient** / **ne contient pas** — correspondance partielle.
 - **est égal à** — correspondance exacte.
 - **commence par** / **se termine par** — correspondance par préfixe ou suffixe.
-- **correspond à l'expression régulière** — recherche avancée par motif à l'aide d'expressions régulières.
+- **correspond au regex** — recherche avancée par motif à l'aide d'expressions régulières.
 
 ### Actions
 
@@ -37,7 +37,7 @@ Lorsqu'une règle correspond, une ou plusieurs actions sont effectuées :
 
 - **Archiver** — déplacer vers le dossier Archive.
 - **Mettre à la corbeille** — déplacer vers le dossier Corbeille.
-- **Déplacer vers un dossier** — déplacer vers un dossier spécifique de votre choix.
+- **Déplacer vers le dossier** — déplacer vers un dossier spécifique de votre choix.
 - **Marquer comme lu** — marquer automatiquement l'e-mail comme lu.
 - **Marquer d'une étoile** — signaler l'e-mail avec un drapeau.
 - **Marquer comme spam** — déplacer vers le dossier Spam.
@@ -48,15 +48,23 @@ Si vous activez **« Arrêter le traitement des règles suivantes »**, aucune r
 
 ## Tester les règles
 
-Avant d'enregistrer une règle, cliquez sur **« Tester sur les e-mails existants »** pour voir lesquels de vos e-mails existants correspondent aux conditions. Cela vous aide à vérifier que la règle fonctionne comme prévu avant de l'appliquer aux nouveaux messages.
+Avant d'enregistrer une règle, cliquez sur **« Tester sur les e-mails existants »** pour prévisualiser lesquels de vos e-mails récents de la boîte de réception correspondraient aux conditions. L'aperçu vérifie jusqu'à 500 e-mails de la boîte de réception déjà téléchargés sur cet appareil et affiche jusqu'à 20 correspondances -- c'est une vérification rapide, pas une recherche exhaustive dans toute votre boîte de messagerie. Pour une règle limitée à un seul compte, ce sont vos e-mails les plus récents ; pour une règle portant sur tous les comptes, les 500 e-mails vérifiés proviennent de l'ensemble de vos comptes mais ne sont pas nécessairement les plus récents dans l'absolu. Les e-mails plus anciens et ceux pas encore téléchargés sur cet appareil ne sont pas inclus.
 
 ## Appliquer aux e-mails existants
 
-Cochez **« Appliquer aux e-mails existants dans la boîte de réception »** lors de l'enregistrement d'une règle pour l'appliquer immédiatement aux e-mails déjà présents dans votre boîte de réception.
+Cochez **« Appliquer aux e-mails existants dans la boîte de réception »** lors de l'enregistrement d'une règle pour l'exécuter immédiatement sur les e-mails que vous avez déjà. Cela couvre jusqu'à 1 000 e-mails de la boîte de réception déjà téléchargés sur cet appareil -- pour une règle limitée à un seul compte, vos e-mails les plus récents de ce type ; pour une règle portant sur tous les comptes, jusqu'à 1 000 e-mails provenant de l'ensemble de vos comptes, pas nécessairement les plus récents dans l'absolu. Cela ne remonte pas plus loin dans votre historique de messagerie sur le serveur, et cela ne concerne que la boîte de réception, pas les autres dossiers. Si une action échoue, seule cette action est ignorée -- les autres actions de la même règle continuent de s'exécuter pour cet e-mail, et le reste de l'opération se termine quand même.
+
+## Uniquement les nouveaux e-mails
+
+Les règles s'appliquent à un nouvel e-mail dès qu'il arrive sur votre appareil, quel que soit le moyen par lequel il y est arrivé -- notification push, synchronisation périodique ou une page contenant des e-mails plus récents que ceux déjà vus. Le moyen par lequel un message arrivait pouvait auparavant faire qu'une règle le manque complètement ; cet écart est désormais comblé. En revanche, remonter dans l'historique en faisant défiler la liste ne fait pas passer ces anciens e-mails par les règles -- c'est voulu, il s'agit du même comportement « pas d'exploration de l'historique » décrit plus bas, pas d'un écart qui subsisterait.
+
+Cette garantie pour les nouveaux e-mails n'est cependant pas absolue en toute circonstance : un e-mail dont l'action échoue trois fois de suite (par exemple à cause d'une connexion interrompue) est abandonné pour de bon -- MailCopilot le passe et poursuit dans ce dossier, si bien qu'un redémarrage ultérieur ne le fera pas réapparaître. Ce qu'un redémarrage réinitialise réellement, c'est un compteur qui n'a pas encore atteint trois : si l'application redémarre avant qu'un e-mail n'ait échoué trois fois de suite, le compte repart de zéro, si bien qu'une action qui échoue sans cesse pour une raison qui persiste peut bloquer indéfiniment le traitement d'un dossier, sans jamais réellement atteindre cette limite de trois tentatives.
+
+Par ailleurs, les règles n'explorent jamais l'historique complet d'un dossier de leur propre initiative. Chaque dossier que MailCopilot connaît déjà au démarrage reçoit immédiatement un point de départ, avant même toute synchronisation -- un dossier vide reçoit un point de départ à zéro, si bien que son tout premier e-mail est évalué normalement ; un dossier qui contient déjà des e-mails en cache reçoit un point de départ situé après ces e-mails, de sorte que le courrier déjà présent n'est pas repris, mais que tout ce qui arrive ensuite l'est. Un dossier qui n'apparaît qu'après ce démarrage -- nouvellement créé ou nouvellement abonné -- est traité différemment : rien n'y est évalué tant que MailCopilot ne l'a pas synchronisé une première fois, et seuls les e-mails arrivant après cette première synchronisation comptent. Le même nouveau départ se produit si le serveur réinitialise un jour la numérotation des messages d'un dossier (rare, mais cela peut se produire après certaines migrations côté serveur). Utilisez **« Appliquer aux e-mails existants dans la boîte de réception »** (voir ci-dessus) si vous souhaitez qu'une règle évalue aussi les e-mails que vous avez déjà.
 
 ## Priorité des règles
 
-Les règles sont évaluées par ordre de priorité (nombre plus petit = priorité plus élevée). Vous pouvez ajuster la priorité lors de la modification d'une règle. Si deux règles ont la même priorité, elles sont évaluées dans l'ordre de création.
+Les règles sont évaluées par ordre de priorité (nombre plus petit = priorité plus élevée). La priorité est attribuée automatiquement à la création d'une règle -- il n'existe actuellement aucun moyen de la modifier depuis l'éditeur de règles. Si deux règles ont la même priorité, l'ordre dans lequel elles s'exécutent n'est pas défini.
 
 ## Règles IA
 
@@ -73,7 +81,7 @@ Les actions des règles IA sont enregistrées afin que vous puissiez consulter q
 
 ### Les nouvelles règles IA démarrent désactivées
 
-Une règle IA nouvellement créée est **désactivée par défaut**. Activez **« Activé »** sur la règle une fois que vous avez vérifié son prompt et les actions autorisées, pour commencer à l'appliquer au courrier entrant. Cela évite qu'une règle n'agisse sur votre boîte de réception avant que vous n'ayez confirmé qu'elle se comporte comme prévu.
+Une règle IA nouvellement créée est **désactivée par défaut**. Activez **« Activée »** sur la règle une fois que vous avez vérifié son prompt et les actions autorisées, pour commencer à l'appliquer au courrier entrant. Cela évite qu'une règle n'agisse sur votre boîte de réception avant que vous n'ayez confirmé qu'elle se comporte comme prévu.
 
 ### Limite de règles activées par compte
 

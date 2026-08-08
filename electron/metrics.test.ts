@@ -40,14 +40,22 @@ import {
   bucketSessionLength,
   folderRoleFromPath,
 } from './metrics'
+import {
+  setTelemetryCollectionAllowed,
+  __resetTelemetryGateForTest,
+} from './telemetryGate'
 
 describe('metrics module', () => {
   beforeEach(() => {
     sentryInfo.mockClear()
     startInactiveSpanMock.mockClear()
+    // §2.82: the transmitting sink and every buffer are consent-gated. Unless
+    // a case says otherwise, it describes the consented state.
+    setTelemetryCollectionAllowed(true)
   })
   afterEach(() => {
     resetAggregator()
+    __resetTelemetryGateForTest()
   })
 
   describe('recordEvent', () => {
@@ -105,6 +113,75 @@ describe('metrics module', () => {
     it('emits immediately without aggregation', () => {
       recordGauge('body_indexer.backlog', 17000)
       expect(sentryInfo).toHaveBeenCalledWith('body_indexer.backlog', { value: 17000 })
+    })
+  })
+
+  // §2.82 iter2 finding 2 — the aggregate window used to buffer for up to 10
+  // seconds regardless of consent, so a flush that landed after an opt-in
+  // shipped pre-consent samples. These cases fail against that behaviour.
+  describe('consent gate', () => {
+    it('never opens an aggregate bucket while collection is not allowed', () => {
+      setTelemetryCollectionAllowed(false)
+      recordHistogram('ipc.slow_ms', 500, { channel: 'net:x', duration_bucket: '500-1000' })
+      recordHistogram('ipc.slow_ms', 700, { channel: 'net:x', duration_bucket: '500-1000' })
+      // Consent arrives, then a flush: nothing from before it may appear.
+      setTelemetryCollectionAllowed(true)
+      flushAggregator()
+      expect(sentryInfo).not.toHaveBeenCalled()
+    })
+
+    it('drops buffered samples on a consent transition instead of flushing them', () => {
+      recordHistogram('ipc.slow_ms', 500, { channel: 'net:x', duration_bucket: '500-1000' })
+      // Withdrawal (GDPR art. 7(3)) — the open window must not survive it.
+      setTelemetryCollectionAllowed(false)
+      setTelemetryCollectionAllowed(true)
+      flushAggregator()
+      expect(sentryInfo).not.toHaveBeenCalled()
+    })
+
+    it('does not reach the Sentry sink for immediate events', () => {
+      setTelemetryCollectionAllowed(false)
+      recordEvent('app.updated', { from_version: '1.0.0', to_version: '1.1.0' })
+      recordHistogram('app.startup_ms', 1234, { accounts_count: 1 })
+      recordGauge('body_indexer.backlog', 17000)
+      expect(sentryInfo).not.toHaveBeenCalled()
+    })
+
+    it('does not open metric spans', () => {
+      setTelemetryCollectionAllowed(false)
+      const span = startMetricSpan('imap.sync', { folder_role: 'inbox' })
+      expect(startInactiveSpanMock).not.toHaveBeenCalled()
+      // Callers must still get a usable handle — telemetry never throws.
+      expect(() => { span.end() }).not.toThrow()
+    })
+
+    // §2.82 iter2 finding 4 — the AI chat span used to be opened with a direct
+    // `startInactiveSpan` call in electron/services/ai.ts, i.e. a collection
+    // point the gate did not know about. A span is an open recording window:
+    // one started before an answer and ended after a "yes" would ship a period
+    // the user never agreed to be measured over.
+    it('does not open the ai.chat span either', () => {
+      setTelemetryCollectionAllowed(false)
+      const span = startMetricSpan('ai.chat', { 'ai.provider': 'claude' })
+      expect(startInactiveSpanMock).not.toHaveBeenCalled()
+      // The no-op handle must satisfy everything the AI request lifecycle does
+      // to it later — setAttributes / setStatus / end.
+      expect(() => {
+        span.setAttributes({ 'ai.tool_call_count': 3 })
+        span.setStatus({ code: 1 })
+        span.end()
+      }).not.toThrow()
+    })
+
+    it('opens the ai.chat span with its registered op once collection is allowed', () => {
+      setTelemetryCollectionAllowed(true)
+      startMetricSpan('ai.chat', { 'ai.provider': 'claude', 'ai.model': 'sonnet' })
+      expect(startInactiveSpanMock).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'ai.chat',
+        op: 'ai.chat',
+        parentSpan: null,
+        attributes: { 'ai.provider': 'claude', 'ai.model': 'sonnet' },
+      }))
     })
   })
 

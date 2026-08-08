@@ -10,9 +10,21 @@
  *  2. Mail panel actions (including print button) are hidden when no mail is open.
  *  3. Button click calls iframe.contentWindow.print() and NOT top-level window.print().
  *  4. Ctrl+P path: SKIP_NEEDS_INVESTIGATION (see comment below).
+ *
+ * Every test below that opens a mail selects the fixture message with an HTML
+ * body explicitly (by its RU subject — fixture content is RU by default, see
+ * `E2E_LANGUAGE` in electron/main.ts), rather than `mail-item.first()`. The
+ * `iframe.mail-iframe` this suite exercises only renders when the opened
+ * message has an `html` body (see MailBodyContent.tsx); `.first()` picks
+ * whatever the inbox sorts to the top, which is not guaranteed to be an HTML
+ * message and silently times out waiting for the iframe otherwise.
  */
 import { test, expect } from '@playwright/test'
 import { launchApp, cleanupApp, clickMailItem, EXPECT_TIMEOUT, type AppContext } from './helpers'
+
+/** RU subject of the fixture message with an HTML body (uid 100) — see
+ *  electron/main.ts buildE2EBoxes / E2E_TEXTS.htmlSubject. */
+const HTML_SUBJECT_RU = 'E2E1: html письмо'
 
 test('print: button is visible when mail is open', async () => {
   const ctx: Partial<AppContext> = {}
@@ -23,8 +35,8 @@ test('print: button is visible when mail is open', async () => {
     // No mail open yet — action toolbar is not rendered
     await expect(page.getByTestId('mail-action-print')).toHaveCount(0, { timeout: EXPECT_TIMEOUT })
 
-    // Open first available mail
-    await clickMailItem(page.getByTestId('mail-item').first())
+    // Open the HTML-body fixture mail
+    await clickMailItem(page.getByTestId('mail-item').filter({ hasText: HTML_SUBJECT_RU }))
     await expect(page.getByTestId('mail-subject')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     // Print button must now be present
@@ -40,8 +52,9 @@ test('print: button click calls iframe.contentWindow.print() not window.print()'
     Object.assign(ctx, await launchApp())
     const page = ctx.page!
 
-    // Open a mail — any will do
-    await clickMailItem(page.getByTestId('mail-item').first())
+    // Open the HTML-body fixture mail — the iframe this test targets only
+    // renders for a message that has an html body.
+    await clickMailItem(page.getByTestId('mail-item').filter({ hasText: HTML_SUBJECT_RU }))
     await expect(page.getByTestId('mail-subject')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     // Wait for the mail iframe to load
@@ -112,8 +125,8 @@ test('print: mail iframe sandbox attribute includes allow-modals (regression gua
     Object.assign(ctx, await launchApp())
     const page = ctx.page!
 
-    // Open a mail so the iframe is rendered.
-    await clickMailItem(page.getByTestId('mail-item').first())
+    // Open the HTML-body fixture mail so the iframe is rendered.
+    await clickMailItem(page.getByTestId('mail-item').filter({ hasText: HTML_SUBJECT_RU }))
     await expect(page.getByTestId('mail-subject')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     const mailIframe = page.locator('iframe.mail-iframe')
@@ -140,8 +153,8 @@ test('print: button is visible and enabled after mail opens (not disabled)', asy
     Object.assign(ctx, await launchApp())
     const page = ctx.page!
 
-    // Open a mail.
-    await clickMailItem(page.getByTestId('mail-item').first())
+    // Open the HTML-body fixture mail.
+    await clickMailItem(page.getByTestId('mail-item').filter({ hasText: HTML_SUBJECT_RU }))
     await expect(page.getByTestId('mail-subject')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     const printBtn = page.getByTestId('mail-action-print')
@@ -170,7 +183,7 @@ test.skip('print: Ctrl+P triggers same iframe print path — SKIP_NEEDS_INVESTIG
     Object.assign(ctx, await launchApp())
     const page = ctx.page!
 
-    await clickMailItem(page.getByTestId('mail-item').first())
+    await clickMailItem(page.getByTestId('mail-item').filter({ hasText: HTML_SUBJECT_RU }))
     await expect(page.getByTestId('mail-subject')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     await page.evaluate(() => {

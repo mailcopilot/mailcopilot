@@ -1,6 +1,14 @@
 import { simpleParser, MailParser, type ParsedMail } from 'mailparser'
 import type { AddressObject, StructuredHeader } from 'mailparser'
 import type { AttachmentMeta, MailAddress, MessageDetails } from './types'
+import {
+  EmlParseQueueOverflowError,
+  EmlWorkerUnavailableError,
+  extractIcsInWorker,
+  parseEmlDetailsInWorker,
+  planEmlParseDispatch,
+  recordEmlParseDispatch,
+} from './emlWorkerClient'
 
 export const EML_ATTACHMENT_PART_PREFIX = 'eml:'
 
@@ -130,10 +138,17 @@ function mapParsedAddrs(group: AddressObject | AddressObject[] | undefined): Mai
 }
 
 /**
- * Parses an EML buffer (RFC822) and extracts MessageDetails.
- * Uses lightweight streaming parser — skips attachment content for speed.
+ * Parses an EML buffer (RFC822) and extracts MessageDetails, on the calling
+ * thread. Uses the lightweight streaming parser — skips attachment content.
+ *
+ * §2.124 — "lightweight" is about attachment CONTENT, not about cost: the MIME
+ * splitter underneath still yields to the event loop once per line, so this
+ * function costs ~1 event-loop turn per 77 bytes of input. That is free on a
+ * worker's own loop and ruinous on the Electron main loop. Call
+ * `parseEmlBuffer` unless you are already off the main thread — it routes
+ * large inputs to the worker and calls this for the rest.
  */
-export async function parseEmlBuffer(uid: number, raw: Buffer): Promise<MessageDetails> {
+export async function parseEmlBufferInline(uid: number, raw: Buffer): Promise<MessageDetails> {
   const parsed = await parseLightweight(raw)
   const refsRaw = parsed.references
   const references = Array.isArray(refsRaw)
@@ -174,6 +189,183 @@ export async function parseEmlBuffer(uid: number, raw: Buffer): Promise<MessageD
     attachments: attachments.length > 0 ? attachments : undefined,
     draftId,
   }
+}
+
+/**
+ * §2.22 Wave A — extract a raw `text/calendar` part from a full RFC822 buffer,
+ * on the calling thread. Used by the local-EML cache path: `electron/main.ts`
+ * already holds the raw bytes and parses them via `parseEmlBuffer`, which
+ * intentionally skips attachment content, so the ics has to be recovered with
+ * a second, full pass. Layering note: this stays in `packages/net` because it
+ * is pure MIME walking; ical.js parsing is one layer up in `inviteBridge.ts`.
+ *
+ * §2.22 fix iter4 — codex-security-review MEDIUM: cap the returned ics at
+ * `MAX_ICS_BYTES` to mirror the IMAP path. Without this guard, a maliciously
+ * oversized ics inside an offline-cached EML would force unbounded
+ * `simpleParser` + `toString('utf8')` + downstream `ICAL.parse` work, giving
+ * an attacker a cheap CPU/memory amplifier.
+ *
+ * §2.124 — this is the SECOND full parse of the same bytes on every EML cache
+ * hit, and it costs as many event-loop turns as the first one (measured:
+ * 32 026 turns for a 2.47 MB message, the same as the lightweight pass). Use
+ * `extractIcsFromRawEml`, which offloads large inputs, rather than calling
+ * this directly from the main thread.
+ */
+export async function extractIcsFromRawEmlInline(raw: Buffer): Promise<string | undefined> {
+  try {
+    const parsed = await simpleParser(raw)
+    const atts = parsed.attachments ?? []
+    for (const att of atts) {
+      const contentType = (att.contentType || '').toLowerCase()
+      const filename = att.filename || ''
+      const isIcs =
+        contentType === 'text/calendar' ||
+        contentType === 'application/ics' ||
+        (contentType === 'application/octet-stream' && /\.ics$/i.test(filename))
+      if (!isIcs) continue
+      const content = att.content
+      if (Buffer.isBuffer(content)) {
+        if (content.length > MAX_ICS_BYTES) return undefined
+        return content.toString('utf8')
+      }
+      if (typeof content === 'string') {
+        // Byte-length guard via Buffer.byteLength (string `.length` counts
+        // UTF-16 code units, not bytes; an ics with multibyte UTF-8 chars
+        // could otherwise slip the cap on the byte side).
+        if (Buffer.byteLength(content, 'utf8') > MAX_ICS_BYTES) return undefined
+        return content
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+const MAX_ICS_BYTES = 1 * 1024 * 1024
+
+/**
+ * §2.124 — main-thread entry points. Both parses of the message-open path run
+ * in a worker once the raw message is large enough to make the splitter's
+ * per-line event-loop yields visible; smaller messages keep the inline path so
+ * the ordinary open does not depend on worker health.
+ *
+ * Failure policy, deliberately asymmetric, and the asymmetry turns on ONE
+ * question: had the worker announced itself before it died?
+ *  - it had NOT (missing build artifact, spawn failure, a thread that never
+ *    came up, a replacement that failed to load) — no bytes had been dispatched
+ *    to it, so the message cannot be the cause. Fall back to the inline parse
+ *    and keep working;
+ *  - it HAD, and then crashed or timed out with these bytes in flight —
+ *    propagate. Retrying them inline would aim a parse that just killed a
+ *    thread at the main process, which is exactly the failure this task exists
+ *    to remove.
+ *
+ * Readiness is the discriminator precisely because it is causally independent
+ * of the message (the announcement precedes any dispatch — see
+ * `readyGeneration` in emlWorkerClient.ts). An earlier version asked "has this
+ * worker answered a job", which crafted MIME could defeat: killing a
+ * never-answered worker was read as "workers do not run here", and the fallback
+ * then parsed those same bytes on the main thread.
+ *
+ * A third outcome exists and is neither of the above: a parse can be REFUSED
+ * outright (`EmlParseQueueOverflowError`) when too much work is already pinned.
+ * A refusal is not a fallback — nothing is parsed anywhere — and it is not
+ * counted as a dispatch.
+ *
+ * Every dispatch reports which of those paths it took (`eml.parse_dispatch`).
+ * That is not decoration: the fallback keeps the app fully working and merely
+ * an order of magnitude slower, so without a counter a dead worker produces no
+ * error, no crash, and no watchdog line anywhere — see the metric's entry in
+ * electron/metricsSchema.ts for why the UiFreeze detector cannot see it.
+ *
+ * CANCELLATION IS PRESENT BUT NOT CONNECTED. `opts.signal` is plumbed all the
+ * way to the worker client and covered by specs, and NO PRODUCTION CALLER
+ * PASSES ONE: `electron/main.ts` invokes both entry points with the buffer
+ * alone. Abandoning a slow open needs an IPC cancel channel through
+ * `preload.ts` (filed as a followup, owned by the electron boundary), so until
+ * that lands the only cancellation that occurs in the field is the client's own
+ * job timeout. Read the `worker_aborted` counter accordingly — zero means the
+ * wiring is missing, not that users never walk away.
+ */
+
+/** An abandoned open (the user closed the message) is not a parse failure and
+ *  must not be counted as one. Matches the AbortError the client raises.
+ *
+ *  Reachable from tests and from a future cancel channel; not from any caller
+ *  that exists today (see the note above). */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError'
+}
+
+export async function parseEmlBuffer(
+  uid: number,
+  raw: Buffer,
+  opts?: { signal?: AbortSignal },
+): Promise<MessageDetails> {
+  const plan = planEmlParseDispatch(raw)
+  if (plan.path === 'worker') {
+    try {
+      const details = await parseEmlDetailsInWorker(uid, raw, opts?.signal)
+      recordEmlParseDispatch('worker', raw.length)
+      return details
+    } catch (err) {
+      if (err instanceof EmlWorkerUnavailableError) {
+        // The parse still happens — inline, on the main loop, at the cost this
+        // whole mechanism exists to avoid. Counted as such.
+        recordEmlParseDispatch('inline_unavailable', raw.length)
+        return parseEmlBufferInline(uid, raw)
+      }
+      if (err instanceof EmlParseQueueOverflowError) {
+        // Refused before anything was dispatched, so no parse took place on any
+        // thread and there is nothing to count as a dispatch. Emphatically NOT
+        // an inline fallback: the refusal exists to stop spending main-process
+        // resources on a burst, and inline is the most expensive way to spend
+        // them. One message open fails; the queue drains; the next is admitted.
+        throw err
+      }
+      recordEmlParseDispatch(isAbortError(err) ? 'worker_aborted' : 'worker_failed', raw.length)
+      throw err
+    }
+  }
+  recordEmlParseDispatch(plan.path, raw.length)
+  return parseEmlBufferInline(uid, raw)
+}
+
+export async function extractIcsFromRawEml(
+  raw: Buffer,
+  opts?: { signal?: AbortSignal },
+): Promise<string | undefined> {
+  const plan = planEmlParseDispatch(raw)
+  if (plan.path === 'worker') {
+    try {
+      const ics = await extractIcsInWorker(raw, opts?.signal)
+      recordEmlParseDispatch('worker', raw.length)
+      return ics
+    } catch (err) {
+      if (err instanceof EmlWorkerUnavailableError) {
+        recordEmlParseDispatch('inline_unavailable', raw.length)
+        return extractIcsFromRawEmlInline(raw)
+      }
+      if (err instanceof EmlParseQueueOverflowError) {
+        // The calendar scan is best-effort everywhere, so a refusal costs an
+        // RSVP card and nothing else — and it must not be retried inline, which
+        // would let a burst buy exactly the main-thread work it was refused.
+        return undefined
+      }
+      // The ics is best-effort everywhere else on this path (see the callers
+      // in electron/main.ts): a worker crash or timeout must not turn a
+      // readable message into an unopenable one, it just means no RSVP card.
+      if (isAbortError(err)) {
+        recordEmlParseDispatch('worker_aborted', raw.length)
+        throw err
+      }
+      recordEmlParseDispatch('worker_failed', raw.length)
+      return undefined
+    }
+  }
+  recordEmlParseDispatch(plan.path, raw.length)
+  return extractIcsFromRawEmlInline(raw)
 }
 
 export type ExtractedEmlAttachment = {

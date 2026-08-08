@@ -541,6 +541,39 @@ describe('nodemailer v9 — createTransport auth and TLS config', () => {
       expect(callArg.tls).toBeUndefined()
     }
   })
+
+  it('pinned SMTP endpoint gets the same two-mode identity policy as IMAP', async () => {
+    // SMTP has no TLS policy of its own — it hands buildTlsOptions() straight
+    // to nodemailer (which merges `options.tls` last, so our
+    // checkServerIdentity survives). This asserts the policy reaches the
+    // sending path intact for a FINGERPRINT-ONLY pin, the mode that a
+    // compromised renderer can create via `tls:addPin`: the hostname check
+    // must still apply. The anchored mode (identity established by the pinned
+    // certificate body) is covered against real handshakes in tls.test.ts.
+    mockVerify.mockResolvedValueOnce(true)
+    const pin = 'AA:BB:CC:DD'
+    await testSmtpConnection({ ...cfg, tlsPinsSha256: [pin] })
+    const callArg = vi.mocked(nodemailer.createTransport).mock.calls[0][0] as Record<string, unknown>
+    const tlsOpts = callArg.tls as {
+      rejectUnauthorized: boolean
+      checkServerIdentity: (hostname: string, cert: unknown) => Error | undefined
+    }
+    expect(tlsOpts.rejectUnauthorized).toBe(true)
+
+    // Pin matches, certificate names a different host → refused.
+    const redirected = { fingerprint256: pin, subjectaltname: 'DNS:mail.other.test' }
+    expect(tlsOpts.checkServerIdentity('smtp.example.test', redirected)).toBeInstanceOf(Error)
+
+    // Pin matches and the name matches → accepted.
+    const legit = { fingerprint256: pin, subjectaltname: 'DNS:smtp.example.test' }
+    expect(tlsOpts.checkServerIdentity('smtp.example.test', legit)).toBeUndefined()
+
+    // Rotated certificate → refused as a pin mismatch.
+    const rotated = { fingerprint256: '11:22:33:44', subjectaltname: 'DNS:smtp.example.test' }
+    const err = tlsOpts.checkServerIdentity('smtp.example.test', rotated)
+    expect(err).toBeInstanceOf(Error)
+    expect(err!.message).toContain('TLS pin mismatch')
+  })
 })
 
 // --- smtp.send span instrumentation ----------------------------------------

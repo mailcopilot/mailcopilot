@@ -23,7 +23,8 @@ import { Cpu, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react
  *
  * IPC contracts (see electron/preload.ts whitelist + electron/main.ts):
  *  - Outbound:
- *      `update:systemInfo` → SystemInfoPayload (one-shot on mount)
+ *      `update:systemInfo` → SystemInfoPayload | null (one-shot on mount;
+                            null = sender is not the settings window)
  *      `update:check`      → { ok, status, version?, error_class? }
  *      `update:download`   → { ok, reason? }
  *      `update:install`    → { ok }
@@ -34,6 +35,36 @@ import { Cpu, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react
  *      `update:checkResult`      — { status, version?, error_class? }
  *      `update:downloadFailed`   — { error_class? }
  */
+
+/**
+ * §2.58 — mirrors `SelfUpdateBlockedReason` in electron/services/updateCheck.ts.
+ * Main and renderer ship in the same artifact, so this is a copy of one enum,
+ * not a compatibility surface across versions.
+ */
+type SelfUpdateBlockedReason = 'not-packaged' | 'no-in-place-target' | 'target-dir-readonly'
+
+/**
+ * Reason → warning string. Exhaustive by type: adding a reason in main without
+ * a translated explanation here is a compile error, not a silent fallback.
+ * 'not-packaged' never reaches this map in practice (the dedicated
+ * "unsupported" state covers dev builds) but is mapped anyway so the record
+ * stays total.
+ */
+const SELF_UPDATE_WARNING_KEY: Record<SelfUpdateBlockedReason, string> = {
+  'not-packaged': 'settings.about.update.cannotSelfUpdateUnknown',
+  'no-in-place-target': 'settings.about.update.cannotSelfUpdateNoTarget',
+  'target-dir-readonly': 'settings.about.update.cannotSelfUpdateHint',
+}
+
+/**
+ * The payload crosses IPC, so its `selfUpdateBlockedReason` is only *declared*
+ * to be the enum. Narrow at runtime and fall back to the neutral wording —
+ * never invent a diagnosis (telling the user "folder not writable" when the
+ * reason is unknown is worse than saying nothing specific).
+ */
+function isKnownBlockedReason(value: unknown): value is SelfUpdateBlockedReason {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(SELF_UPDATE_WARNING_KEY, value)
+}
 
 type SystemInfoPayload = {
   appVersion: string
@@ -46,6 +77,12 @@ type SystemInfoPayload = {
   installPath: string
   installPathWritable: boolean
   canSelfUpdate: boolean
+  /**
+   * §2.58 — enum reason behind canSelfUpdate=false (null when true).
+   * Optional so a test fixture can omit it; an omitted/unknown value yields
+   * the neutral warning, not a guessed one.
+   */
+  selfUpdateBlockedReason?: SelfUpdateBlockedReason | null
   isPackaged: boolean
 }
 
@@ -87,8 +124,14 @@ export default function SystemInfo({ autoUpdateEnabled, onAutoUpdateEnabledChang
     let cancelled = false
     void (async () => {
       try {
-        const res = await window.api.invoke<SystemInfoPayload>('update:systemInfo')
+        const res = await window.api.invoke<SystemInfoPayload | null>('update:systemInfo')
         if (cancelled || !mountedRef.current) return
+        // §2.58 iter2 — main answers `null` when the caller is not the
+        // settings window (the payload carries the install path). This panel
+        // only ever renders inside that window, so `null` here means a wiring
+        // regression, not a user-facing state: keep `info === null` and show
+        // the static version, exactly like an IPC failure.
+        if (!res) return
         setInfo(res)
         // In dev/e2e the autoUpdater is disabled — surface that as a
         // dedicated state so the button can be hidden cleanly.
@@ -202,6 +245,20 @@ export default function SystemInfo({ autoUpdateEnabled, onAutoUpdateEnabledChang
 
   const channelLabel = info ? t(`settings.about.system.channel.${info.channel}`) : ''
   const canSelfUpdate = info?.canSelfUpdate ?? false
+  // §2.58 — the warning explains *why* in-place update is unavailable, but it
+  // never takes the checkbox away: the user stays in control of the setting
+  // (main still suppresses the pointless background download). 'not-packaged'
+  // is already covered by the dedicated "unsupported" state below.
+  const selfUpdateBlocked = Boolean(info && info.isPackaged && !canSelfUpdate)
+  const blockedReason = info?.selfUpdateBlockedReason
+  const selfUpdateWarning = !selfUpdateBlocked
+    ? null
+    : isKnownBlockedReason(blockedReason)
+      ? t(SELF_UPDATE_WARNING_KEY[blockedReason])
+      // Missing/unrecognised reason: say that self-update is unavailable and
+      // stop there. Guessing a cause misinforms the user and sends them
+      // chasing a permission problem that may not exist.
+      : t('settings.about.update.cannotSelfUpdateUnknown')
 
   return (
     <div className="settings-system-info" data-testid="settings-about-system">
@@ -294,22 +351,31 @@ export default function SystemInfo({ autoUpdateEnabled, onAutoUpdateEnabledChang
 
       <label
         className="setting-check"
-        title={!canSelfUpdate ? t('settings.about.update.cannotSelfUpdateHint') : undefined}
-        style={!canSelfUpdate ? { opacity: 0.6 } : undefined}
+        title={selfUpdateWarning ?? undefined}
       >
         <input
           type="checkbox"
           data-testid="settings-about-auto-update"
           checked={autoUpdateEnabled}
-          disabled={!canSelfUpdate}
           onChange={e => onAutoUpdateEnabledChange(e.target.checked)}
         />
         {t('settings.about.update.autoDownload')}
       </label>
+      {/* §2.58 — warning, not a lockout: the control above stays operable so
+          the user can still change the preference (and see it persist) even
+          on a build that cannot replace itself in place. */}
+      {selfUpdateWarning !== null && (
+        <p
+          className="hint"
+          data-testid="settings-about-self-update-warning"
+          style={{ color: 'var(--warning, #f59e0b)' }}
+        >
+          <AlertCircle size={14} style={{ verticalAlign: -2, marginRight: 4 }} />
+          {selfUpdateWarning}
+        </p>
+      )}
       <p className="hint">
-        {canSelfUpdate
-          ? t('settings.about.update.autoDownloadHint')
-          : t('settings.about.update.cannotSelfUpdateHint')}
+        {t('settings.about.update.autoDownloadHint')}
       </p>
 
       {/* Action button — state-machine driven */}

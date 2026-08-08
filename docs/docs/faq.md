@@ -136,7 +136,12 @@ To check for an update manually at any time, open **Settings > About** and click
 
 To enable automatic background downloads, open **Settings > About** and check **Automatically download updates in the background**. When enabled, new versions download silently and you are prompted to restart when the update is ready.
 
-If MailCopilot was installed system-wide (for example, via a package manager), the auto-download checkbox is disabled and the Download / Restart controls are not available. Use your system package manager or administrator privileges to update instead. The **Check for updates** button still works in this mode.
+MailCopilot can normally update itself in place on every platform it supports: an AppImage install replaces the `.AppImage` file itself, and a `.deb`/`.rpm`/pacman install lets the update mechanism attempt the write by requesting administrator privileges (`pkexec`/`sudo`), the same way `apt`/`dnf`/`pacman` would -- the actual outcome is decided by that privilege prompt and the package manager, not by MailCopilot.
+
+Self-update can be unavailable in two different ways, and MailCopilot shows different controls for each:
+
+- **The build isn't packaged** -- a development or CI build. There is no updater at all: the **Check for updates** button and the status area do not appear, and a note reads **"Updates are disabled in this build"** instead.
+- **The build is packaged, but self-update is blocked** -- either because MailCopilot could not determine the directory it would need to update in place, or because that directory is not writable by your account. The first case happens on Linux when the app isn't running as a mounted AppImage (for example, an extracted AppImage or a raw `linux-unpacked` build) -- there is no directory to update. The second case means the folder holding a running AppImage isn't writable (a `.deb`/`.rpm`/pacman install is not affected, since those elevate privileges instead); on Windows and macOS it means the folder holding the installed executable isn't writable. In either case a warning explains why, the **Check for updates** button keeps working, and the auto-download checkbox stays available -- but the Download / Restart controls are hidden.
 
 ### Can I turn off automatic updates?
 

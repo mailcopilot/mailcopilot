@@ -106,7 +106,13 @@
       "pin": "Fehler beim Anheften: {{error}}",
       "compose": "Fehler beim Erstellen: {{error}}",
       "attachment": "Anhangfehler: {{error}}",
-      "openExternal": "Fehler beim Öffnen des Links: {{error}}"
+      "openExternal": "Fehler beim Öffnen des Links: {{error}}",
+      "presented": {
+        "offline": "Keine Verbindung zum Mailserver. MailCopilot versucht es weiter.",
+        "timeout": "Der Mailserver hat nicht rechtzeitig geantwortet. MailCopilot versucht es weiter.",
+        "auth": "Anmeldung abgelehnt. Kontopasswort prüfen oder das Konto in den Einstellungen neu autorisieren.",
+        "unknown": "Anfrage konnte nicht ausgeführt werden. Bitte erneut versuchen."
+      }
     },
     "authRecovery": {
       "googlePrompt": "Die Google-Autorisierung für {{account}} ist abgelaufen. Jetzt neu verbinden?",
@@ -373,7 +379,9 @@
     },
     "attachments": {
       "download": "Anhang herunterladen",
-      "unnamed": "Anhang"
+      "unnamed": "Anhang",
+      "showMore": "Mehr anzeigen ({{hidden}})",
+      "showLess": "Weniger anzeigen"
     },
     "list": {
       "filter": "Filtern",
@@ -430,6 +438,14 @@
   "settings": {
     "title": "Einstellungen",
     "unsavedWarning": "Es gibt ungespeicherte Änderungen. Ohne Speichern schließen?",
+    "aiDestination": {
+      "declinedTitle": "Adresse unverändert",
+      "invalidTitle": "Adresse nicht übernommen",
+      "busyTitle": "Adressänderung nicht angewendet",
+      "unchangedFields": "Es gilt weiterhin der bisherige Wert für: {{fields}}.",
+      "otherSettingsSaved": "Ihre übrigen Änderungen auf dieser Seite wurden gespeichert.",
+      "retry": "Erneut versuchen"
+    },
     "hint": "Passen Sie das Aussehen und Verhalten der App an",
     "tabs": {
       "accounts": "Konten",
@@ -712,8 +728,9 @@
       "version": "Version",
       "website": "Webseite",
       "docs": "Dokumentation",
-      "sentryEnabled": "Anonyme Diagnose- und Nutzungsdaten senden",
-      "sentryHint": "Umfasst Absturzberichte, Leistungsmetriken und anonyme Nutzungsereignisse (z. B. welche Funktionen verwendet werden). Enthält niemals Nachrichteninhalte, Adressen, Betreffzeilen oder Ordnernamen.",
+      "sentryEnabled": "Diagnose- und Nutzungsdaten senden",
+      "sentryHint": "Umfasst Absturzberichte, Leistungsmessungen, Nutzungsereignisse (welche Funktionen verwendet werden, welcher KI-Anbieter und welches Modell, die geschätzten Kosten einer Anfrage) sowie eine zufällige Installationskennung, die Ihre Sitzungen verbindet. Nachrichteninhalte, Betreffzeilen und Ordnernamen werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf, und aus dem Fehlertext, den Ihr Mailserver zurückgibt, werden Adressen und Dateipfade automatisch entfernt, soweit sie erkannt werden. Die einzige Adresse, die gesendet wird, ist die, die Sie unten selbst in das Feedback-Formular eintragen, damit Sie eine Antwort erhalten können.",
+      "sentryConsentPending": "Die Diagnose bleibt aus, solange die Einwilligungsfrage nicht beantwortet ist. MailCopilot fragt beim nächsten Start einmal nach; bis dahin hat dieser Schalter keine Wirkung.",
       "debugLogging": "Debug-Protokollierung aktivieren",
       "debugLoggingHint": "Schreibt detaillierte Protokolle in eine Datei zur Fehlerbehebung. Protokolle werden lokal gespeichert und nie automatisch gesendet.",
       "system": {
@@ -736,7 +753,9 @@
         "title": "Updates",
         "autoDownload": "Updates automatisch im Hintergrund herunterladen",
         "autoDownloadHint": "Wenn aktiviert, werden neue Versionen still heruntergeladen und Sie werden zum Neustart aufgefordert. Wenn deaktiviert, entscheiden Sie selbst, ob jedes Update heruntergeladen wird.",
-        "cannotSelfUpdateHint": "Diese Installation ist schreibgeschützt (systemweite Installation). Updates erfordern Administratorrechte.",
+        "cannotSelfUpdateHint": "Der Ordner mit der App ist nicht beschreibbar, daher kann das Update nicht an Ort und Stelle installiert werden. Laden Sie die neue Version manuell herunter oder verschieben Sie die App in einen eigenen Ordner.",
+        "cannotSelfUpdateNoTarget": "Diese Version kann sich nicht selbst ersetzen (sie läuft weder als AppImage noch als Systempaket). Laden Sie die neue Version manuell von der Website herunter.",
+        "cannotSelfUpdateUnknown": "Diese Installation kann sich nicht automatisch aktualisieren. Laden Sie die neue Version manuell von der Website herunter.",
         "checkNow": "Nach Updates suchen",
         "checking": "Wird geprüft…",
         "upToDate": "Sie haben die neueste Version",
@@ -749,6 +768,32 @@
         "unsupportedDev": "Updates sind in dieser Version deaktiviert"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "Diagnosedaten senden?",
+    "intro": "MailCopilot kann Diagnose- und Nutzungsdaten senden, damit Abstürze und Verzögerungen gefunden und behoben werden können. Inhalte Ihrer E-Mails sind darin nie enthalten, wohl aber eine zufällige Kennung dieser Installation — vollständig anonym sind die Daten daher nicht. Ohne Ihre Zustimmung wird nichts gesendet. Ihre E-Mails und der KI-Assistent funktionieren bei beiden Antworten gleich — lehnen Sie ab, wird das Feedback-Formular in den Einstellungen durch einen Link auf unsere Website ersetzt.",
+    "sentTitle": "Wenn Sie zustimmen, sendet MailCopilot:",
+    "sent": {
+      "errors": "Fehler und Abstürze: die Art des Fehlers und den Stacktrace, der zeigt, an welcher Stelle im Code er auftrat",
+      "versions": "Die MailCopilot-Version, Ihr Betriebssystem und dessen Version",
+      "performance": "Die Dauer von Vorgängen — Mail-Synchronisierung, Suche, Versand, KI-Anfragen",
+      "usage": "Welche Funktionen Sie wie oft genutzt haben — Suche, Verfassen von E-Mails, KI, Regeln, Vorlagen, Zurückstellen — sowie den verwendeten KI-Anbieter, das Modell und die geschätzten Kosten einer Anfrage",
+      "aiKeyStore": "Zugriffe auf den Speicher, in dem Ihre KI-Schlüssel liegen: welcher Anbieter, ob der Schlüssel gelesen, gespeichert oder gelöscht wurde, und wie es ausging — auch, ob dort ein Schlüssel vorhanden war. Der Schlüssel selbst wird nie gesendet.",
+      "setup": "Grunddaten zur Einrichtung: wie viele Konten Sie haben, die Art des Maildienstes (zum Beispiel Gmail oder Outlook), die Anmeldemethode, die Sprache der Oberfläche und das Design",
+      "installId": "Eine zufällige Kennung dieser Installation, die beim ersten Start erzeugt wird. Sie ist nicht mit Ihrer E-Mail-Adresse verknüpft, verbindet aber die Daten Ihrer verschiedenen Sitzungen mit derselben Installation."
+    },
+    "neverTitle": "MailCopilot sendet niemals:",
+    "never": {
+      "bodies": "Nachrichtentexte, Betreffzeilen und die Namen Ihrer Ordner werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf, und in den Daten steht nur die Art des Ordners, etwa Posteingang oder Papierkorb. Der einzige Text, den nicht wir verfassen, ist die Fehlermeldung eines Mailservers; Adressen und Dateipfade werden vor dem Senden automatisch daraus entfernt, soweit sie erkannt werden",
+      "addresses": "E-Mail-Adressen, weder Ihre noch die anderer. Die einzige Ausnahme ist das Feedback-Formular unter Einstellungen → Über: Eine Adresse, die Sie dort selbst eintragen, wird zusammen mit Ihrer Nachricht gesendet, damit Sie eine Antwort erhalten können",
+      "attachments": "Anhänge und deren Dateinamen",
+      "searchQueries": "Was Sie in die Suche eingeben — gezählt werden nur die Länge der Anfrage und die Anzahl der Treffer",
+      "aiPrompts": "Den Text von KI-Anfragen und -Antworten"
+    },
+    "changeLater": "Sie können diese Entscheidung jederzeit ändern: Einstellungen → Über.",
+    "learnMore": "Was erfasst wird — Datenschutzseite",
+    "allow": "Zulassen",
+    "deny": "Nicht zulassen"
   },
   "account": {
     "title": "E-Mail verbinden",
@@ -870,7 +915,19 @@
       },
       "smtpSeparate": "SMTP-Login/Passwort weicht ab",
       "imapDetected": "IMAP: {{host}}:{{port}}",
-      "smtpDetected": "SMTP: {{host}}:{{port}}"
+      "smtpDetected": "SMTP: {{host}}:{{port}}",
+      "oauthWaiting": {
+        "title": "{{provider}} wird verbunden",
+        "stage": {
+          "browser": "Warten auf die Freigabe im Browser…",
+          "token": "Zugriff wird abgerufen…",
+          "imap": "E-Mail-Server wird geprüft…",
+          "smtp": "Versandserver wird geprüft…",
+          "saving": "Konto wird gespeichert…"
+        },
+        "browserHint": "Es sollte sich ein Browserfenster geöffnet haben. Erteilen Sie dort die Freigabe und kehren Sie hierher zurück.",
+        "appHint": "Fast fertig. Bei langsamer Verbindung können die Serverprüfungen bis zu einer Minute dauern."
+      }
     },
     "confirm": {
       "remove": "Konto {{label}} entfernen? Der lokale Cache wird gelöscht.",
@@ -1191,6 +1248,9 @@
       "errorPrefix": "Fehler",
       "notConfigured": "KI-Anbieter ist nicht konfiguriert. Konfigurieren Sie ihn in den Einstellungen.",
       "invalidKey": "Ungültiger API-Schlüssel. Überprüfen Sie Ihren Schlüssel unter Einstellungen → KI.",
+      "noKey": "Für diesen Anbieter ist kein API-Schlüssel hinterlegt. Geben Sie ihn unter Einstellungen → KI ein.",
+      "keyMissing": "Für diesen Anbieter wurde ein API-Schlüssel gespeichert, er ist aber nicht mehr im Schlüsselspeicher. Geben Sie ihn unter Einstellungen → KI erneut ein.",
+      "storeUnavailable": "Der Schlüsselspeicher des Systems hat nicht geantwortet, der API-Schlüssel konnte nicht gelesen werden. Wir haben nichts gelöscht, können aber im Moment nicht prüfen, ob der Schlüssel noch vorhanden ist. Versuchen Sie es später erneut oder starten Sie die App neu.",
       "noSubscription": "Autorisieren Sie sich über `claude login` im Terminal.",
       "quotaExceeded": "Nachrichtenlimit erreicht. Versuchen Sie es später oder wechseln Sie zu einem API-Schlüssel.",
       "requestBudgetStopped": "Anfrage gestoppt: Das Kostenlimit pro Anfrage wurde erreicht. Passen Sie es unter Einstellungen → KI an.",
@@ -1261,7 +1321,7 @@
       "chooseProvider": "Verbindungsmethode wählen:",
       "back": "Zurück",
       "resetProvider": "Konfiguration zurücksetzen",
-      "resetConfirm": "AI-Konfiguration zurücksetzen? Der API-Schlüssel wird gelöscht.",
+      "resetConfirm": "AI-Konfiguration zurücksetzen? Der API-Schlüssel dieses Anbieters wird gelöscht. Die Schlüssel anderer Anbieter bleiben erhalten.",
       "checkRequired": "Verbindung zuerst prüfen",
       "memory": {
         "title": "KI-Gedächtnis",
@@ -1346,7 +1406,6 @@
     "disabledHint": "Fehlerberichte sind deaktiviert. Besuchen Sie unsere Website für Unterstützung."
   },
   "attachments": {
-    "previewAvailable": "Vorschau verfügbar",
     "downloadAction": "Anhang herunterladen: {{name}}",
     "iconLabel": {
       "pdf": "PDF-Dokument",
@@ -1377,5 +1436,40 @@
     "cancelled": "Diese Veranstaltung wurde abgesagt",
     "notActionable": "Dies ist keine Einladung, die eine Antwort erfordert",
     "originalTimezone": "Ursprünglich geplant in {{tzid}}"
+  },
+  "window": {
+    "minimize": "Minimieren",
+    "maximize": "Maximieren",
+    "restore": "Wiederherstellen",
+    "close": "Schließen"
+  },
+  "contextMenu": {
+    "openLink": "Link im Browser öffnen",
+    "copyLinkAddress": "Linkadresse kopieren",
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einfügen",
+    "selectAll": "Alles auswählen"
+  },
+  "aiDestination": {
+    "confirmTitle": "Adresse für KI-Anfragen ändern?",
+    "confirmMessage": "KI-Anfragen laufen künftig über eine andere Adresse.",
+    "confirmDetail": "Fahren Sie nur fort, wenn Sie diese Adresse selbst eingegeben haben. Falls Sie die KI-Einstellungen gerade nicht geändert haben, wählen Sie Abbrechen.",
+    "endpointLabel": "Adresse des KI-Dienstes",
+    "proxyLabel": "Proxy für KI-Anfragen",
+    "endpointRisk": "Jede KI-Anfrage an diese Adresse enthält Ihren API-Schlüssel. Wer diese Adresse betreibt, erhält damit den Schlüssel und alles, was der Assistent sendet.",
+    "endpointRiskCleartext": "Jede KI-Anfrage an diese Adresse enthält Ihren API-Schlüssel. Wer diese Adresse betreibt, erhält damit den Schlüssel und alles, was der Assistent sendet. Die Adresse beginnt mit http:// statt https://, daher sind diese Anfragen unverschlüsselt: Jeder auf dem Netzwerkweg kann sie mitlesen, auch ein Proxy.",
+    "endpointRiskInactive": "Diese Adresse wird nur verwendet, wenn als KI-Anbieter ein OpenAI-kompatibler Dienst eingestellt ist — das ist derzeit nicht der Fall. Wird ein solcher Anbieter später ausgewählt, enthält jede KI-Anfrage an diese Adresse Ihren API-Schlüssel: Wer die Adresse betreibt, erhielte dann diesen Schlüssel und alles, was der Assistent sendet.",
+    "endpointRiskInactiveCleartext": "Diese Adresse wird nur verwendet, wenn als KI-Anbieter ein OpenAI-kompatibler Dienst eingestellt ist — das ist derzeit nicht der Fall. Wird ein solcher Anbieter später ausgewählt, enthält jede KI-Anfrage an diese Adresse Ihren API-Schlüssel: Wer die Adresse betreibt, erhielte dann diesen Schlüssel und alles, was der Assistent sendet. Zudem beginnt die Adresse mit http:// statt https://, sodass diese Anfragen unverschlüsselt wären: Jeder auf dem Netzwerkweg könnte sie mitlesen, auch ein Proxy.",
+    "proxyRisk": "Alle KI-Anfragen laufen über diesen Proxy. Wer ihn betreibt, sieht, welche Adressen Sie kontaktieren sowie Umfang und Häufigkeit. Ihren API-Schlüssel und die Inhalte der Nachrichten kann er nur lesen, wenn der Proxy verschlüsselte Verbindungen mit einem Zertifikat aufbricht, dem dieser Computer vertraut.",
+    "proxyRiskCleartext": "Alle KI-Anfragen laufen über diesen Proxy, und die Adresse des KI-Dienstes beginnt mit http:// statt https://, daher sind diese Anfragen unverschlüsselt. Wer den Proxy betreibt, kann somit Ihren API-Schlüssel und die Inhalte der Nachrichten lesen und nicht nur sehen, welche Adressen Sie kontaktieren.",
+    "currentValue": "Jetzt",
+    "newValue": "Neu",
+    "directValue": "kein Proxy (direkte Verbindung)",
+    "confirmButton": "Adresse ändern",
+    "cancelButton": "Abbrechen",
+    "declined": "Die neue Adresse für KI-Anfragen wurde nicht bestätigt; es gilt weiterhin die bisherige.",
+    "invalid": "Diese Adresse ist für KI-Anfragen nicht verwendbar. Geben Sie eine vollständige Adresse mit http:// oder https:// an; die Adresse des KI-Dienstes darf keine Abfrageparameter und kein #Fragment enthalten.",
+    "busy": "Es ist bereits eine Bestätigung der Adresse für KI-Anfragen offen. Beantworten Sie sie und versuchen Sie es erneut."
   }
 }

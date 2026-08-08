@@ -11,7 +11,8 @@ import type {
 // ── ABI-safe self-skip probe ─────────────────────────────────────────────────
 //
 // better-sqlite3 is a native module. When node_modules were built for Electron's
-// ABI (NODE_MODULE_VERSION 143) but vitest runs on the system Node (127), loading
+// ABI (NODE_MODULE_VERSION 148 on Electron 43) but vitest runs on the system Node
+// (127), loading
 // packages/db crashes at import time because packages/db/index.ts unconditionally
 // runs `new Database(dbPath)` at module load.
 //

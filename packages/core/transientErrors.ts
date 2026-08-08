@@ -85,6 +85,58 @@ function escapeRegex(s: string): string {
 const MAX_CAUSE_DEPTH = 5;
 
 /**
+ * Walk an error tree — `AggregateError.errors` arrays plus `cause` chains —
+ * visiting every node exactly once (strings and objects alike).
+ *
+ * This module is the single home of that unwrapping. `classify()` below folds
+ * the tree for telemetry ("transient iff all inner are transient"); other
+ * consumers need per-node inspection instead, and they get it from here rather
+ * than re-implementing cycle guards and depth limits:
+ *   - packages/core/errorPresentation.ts (user-facing message selection)
+ *
+ * The visitor is called with the raw node; property reads that could throw
+ * (exotic getters) are the visitor's problem, but the traversal itself never
+ * throws on the shapes it reads.
+ *
+ * Bounded by MAX_CAUSE_DEPTH and a WeakSet, so cyclic `cause` references and
+ * self-referencing aggregates terminate.
+ */
+export function walkErrorTree(input: unknown, visit: (node: unknown) => void): void {
+  walkNode(input, 0, new WeakSet(), visit)
+}
+
+function walkNode(
+  input: unknown,
+  depth: number,
+  seen: WeakSet<object>,
+  visit: (node: unknown) => void,
+): void {
+  if (input == null) return
+  if (typeof input === 'string') {
+    visit(input)
+    return
+  }
+  if (typeof input !== 'object') return
+
+  const obj = input as object
+  if (seen.has(obj)) return
+  seen.add(obj)
+  visit(obj)
+
+  if (depth >= MAX_CAUSE_DEPTH) return
+
+  const errs = (obj as { errors?: unknown }).errors
+  if (Array.isArray(errs)) {
+    for (const inner of errs) walkNode(inner, depth + 1, seen, visit)
+  }
+
+  const cause = (obj as { cause?: unknown }).cause
+  if (cause !== undefined && cause !== obj) {
+    walkNode(cause, depth + 1, seen, visit)
+  }
+}
+
+/**
  * Returns true if `input` looks like a transient network condition that is
  * not actionable from our code and should be filtered out of telemetry.
  *

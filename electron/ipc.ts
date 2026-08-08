@@ -29,9 +29,11 @@
 import { ipcMain } from 'electron'
 import * as perfHooks from 'node:perf_hooks'
 import { createLogger } from './logger'
+import { reportIpcHandlerError } from './sentry'
 import { recordEvent, recordHistogram, recordGauge, bucketDuration } from './metrics'
 import { METRIC_EVENTS, DOMAINS, type MetricKind, type TagSpec, type DomainName } from './metricsSchema'
 import { markFeatureReachFromEvent } from './featureReach'
+import { describeErrorForLog, presentedIpcMessage } from '@mailcopilot/core/errorPresentation'
 
 const logIpc = createLogger('IPC')
 const logUiFreeze = createLogger('UiFreeze')
@@ -78,12 +80,79 @@ const inflightIpc = new Map<number, { channel: string; start: number }>()
 let ipcSeq = 0
 
 /**
+ * Re-throwable copy of a handler failure carrying a presentation key.
+ *
+ * Measured on Electron 40 (real main+preload+renderer round trip): a rejected
+ * `ipcMain.handle` reaches the renderer as a brand-new plain `Error` whose only
+ * own properties are `message` and `stack`. `.errors[]`, `.code`, `.cause` and
+ * any custom own property set here are dropped by the serializer — the message
+ * text is the ONLY carrier that survives. That is why the classification has to
+ * happen here, in the process that still holds the real error object, and why
+ * the verdict rides inside the message.
+ *
+ * BACKLOG §2.127: without this the renderer rendered `String(e)` of an
+ * AggregateError, whose `message` is empty by construction, and the user read
+ * "Sync error: Error: Error invoking remote method 'net:inboxSummaries':
+ * AggregateError".
+ *
+ * The key is computed from the error OBJECT first (codes,
+ * `authenticationFailed`, the AggregateError tree), with two short text
+ * patterns as a fallback for servers that only say it in prose — see
+ * `classifyErrorPresentation`. Either way the verdict is reached HERE, in main,
+ * once; the renderer never re-derives one from text, which is the arms race
+ * this format exists to end. The original text is kept after the tag for
+ * DevTools; the UI reads the tag and renders a fixed sentence from a closed
+ * vocabulary, so untrusted server text never reaches the screen.
+ *
+ * The original text after the tag is LOAD-BEARING, not a courtesy: two renderer
+ * consumers already substring-match it and would break silently if a future
+ * cleanup dropped it —
+ *   - src/hooks/useCertRecovery.ts (`cert_trust_*` rejection codes → inline
+ *     dialog errors),
+ *   - src/sentry.ts beforeSend (isTransientNetworkError over the wrapped
+ *     message, which keeps update:* network noise out of Sentry).
+ * Both match by substring, so prepending the tag is safe; removing the text is
+ * not. What must NOT happen is the UI rendering that text — the renderer picks
+ * a sentence by key (packages/core/errorPresentation.ts).
+ *
+ * Retry/rollback behaviour is untouched: nothing in the main process consumes
+ * this rejection — `ipcMain.handle`'s reply path is its only consumer — and
+ * Sentry still receives the ORIGINAL error object (see below), so transient
+ * filtering keeps working on the real tree.
+ *
+ * Never throws: if anything about the error is hostile, the original value is
+ * re-thrown unchanged.
+ */
+function toPresentedIpcError(err: unknown): unknown {
+  try {
+    const presented = new Error(presentedIpcMessage(err))
+    // `cause` is assigned rather than passed to the constructor: tsconfig
+    // targets ES2020, where the two-argument Error constructor is not typed.
+    // It is main-process-only diagnostics anyway — the IPC serializer drops it.
+    if (err != null) (presented as { cause?: unknown }).cause = err
+    return presented
+  } catch {
+    return err
+  }
+}
+
+/**
  * Wrap `ipcMain.handle` with:
  *   - inflight-IPC tracking (so freeze reporters can show what's stuck);
  *   - slow-IPC warnings + `ipc.slow_ms` histogram for channels that finish
  *     above `SLOW_IPC_THRESHOLD_MS` and aren't on the long-running allowlist;
- *   - a uniform error funnel that logs via electron-log and re-throws so the
- *     renderer still sees the rejection.
+ *   - a uniform error funnel that logs via electron-log, reports a PII-free
+ *     synthetic event to Sentry, and re-throws so the call still REJECTS for
+ *     the renderer.
+ *
+ * What is re-thrown is NOT the original value: since §2.127 it is a substitute
+ * `Error` built by `toPresentedIpcError`, whose message is the original text
+ * with a `[mcerr:<key>]` tag prepended (the original is kept on `.cause`, which
+ * the IPC serializer drops anyway). Callers that inspect the rejection are
+ * therefore looking at a NEW object with a CHANGED message — the two renderer
+ * consumers that substring-match that message are listed on
+ * `toPresentedIpcError`, and anything added later must read the tag rather than
+ * assume the text is verbatim. Only the fact of rejection is unchanged.
  *
  * Every IPC handler in the main process MUST go through this wrapper. Raw
  * `ipcMain.handle(...)` is banned by ESLint project-wide; the only exception
@@ -98,8 +167,23 @@ export function handleIpc(channel: string, handler: Parameters<typeof ipcMain.ha
     try {
       return await handler(event, ...args)
     } catch (err) {
-      logIpc.error(`[${channel}]`, err instanceof Error ? err.message : err)
-      throw err // re-throw so the renderer receives the error
+      // describeErrorForLog, not `err.message`: an AggregateError's message is
+      // the empty string, so the four §2.127 incidents left log lines with no
+      // cause in them at all. The flattened tree (messages + codes of every
+      // node) is the diagnostic record — local log only, never Sentry.
+      logIpc.error(`[${channel}]`, describeErrorForLog(err))
+      // electron-log has NO Sentry bridge (CLAUDE.md §8), so before this the
+      // entire IPC surface — every handler in the app — was invisible in error
+      // monitoring. reportIpcHandlerError sends a PII-free synthetic event
+      // (channel + instanceof-derived error class only; never the raw error,
+      // whose message routinely carries bodies, addresses, queries and paths)
+      // and drops transient network noise at the source. It never throws; the
+      // extra guard here is belt-and-braces so telemetry can never convert a
+      // handled rejection into an unhandled one.
+      try { reportIpcHandlerError(channel, err) } catch { /* telemetry must never throw */ }
+      // Re-throw so the renderer still receives the rejection — now tagged with
+      // a closed-vocabulary presentation key (see toPresentedIpcError).
+      throw toPresentedIpcError(err)
     } finally {
       const dur = Date.now() - start
       inflightIpc.delete(id)

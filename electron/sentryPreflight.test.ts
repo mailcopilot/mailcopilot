@@ -2,10 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { TELEMETRY_CONSENT_VERSION } from './telemetryConsent'
 
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/does/not/exist') },
 }))
+
+const AT = '2026-07-27T10:00:00.000Z'
+const GRANTED = { granted: true, version: TELEMETRY_CONSENT_VERSION, at: AT }
+const DENIED = { granted: false, version: TELEMETRY_CONSENT_VERSION, at: AT }
 
 describe('sentryPreflight', () => {
   let tmpDir: string
@@ -23,49 +28,101 @@ describe('sentryPreflight', () => {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* ignore */ }
   })
 
-  it('returns true when settings.json does not exist (first run)', async () => {
-    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
-    expect(readSentryEnabledPreflight()).toBe(true)
-  })
+  function writeSettings(settings: unknown): void {
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify({ settings }))
+  }
 
-  it('returns true when settings.json has no sentryEnabled key (default-enabled)', async () => {
-    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify({ settings: { theme: 'dark' } }))
-    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
-    expect(readSentryEnabledPreflight()).toBe(true)
-  })
-
-  it('returns false when sentryEnabled is explicitly false', async () => {
-    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify({ settings: { sentryEnabled: false } }))
+  // AC1 — all four fail branches return false.
+  it('AC1: returns false when settings.json does not exist (first run, never asked)', async () => {
     const { readSentryEnabledPreflight } = await import('./sentryPreflight')
     expect(readSentryEnabledPreflight()).toBe(false)
   })
 
-  it('returns true when sentryEnabled is explicitly true', async () => {
-    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify({ settings: { sentryEnabled: true } }))
-    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
-    expect(readSentryEnabledPreflight()).toBe(true)
-  })
-
-  it('strips UTF-8 BOM before parsing', async () => {
-    const bom = Buffer.from([0xef, 0xbb, 0xbf])
-    const body = Buffer.from(JSON.stringify({ settings: { sentryEnabled: false } }), 'utf8')
-    fs.writeFileSync(path.join(tmpDir, 'settings.json'), Buffer.concat([bom, body]))
-    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
-    expect(readSentryEnabledPreflight()).toBe(false)
-  })
-
-  it('fails closed (returns false) when settings.json exists but is malformed', async () => {
-    // Prefer silent loss of events over silent leakage when we cannot
-    // verify the user's preference from a file that is clearly supposed
-    // to exist.
+  it('AC1: fails closed when settings.json exists but is malformed', async () => {
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), '{not valid json')
     const { readSentryEnabledPreflight } = await import('./sentryPreflight')
     expect(readSentryEnabledPreflight()).toBe(false)
   })
 
-  it('fails closed on an empty file (partial/truncated write)', async () => {
+  it('AC1: fails closed on an empty file (partial/truncated write)', async () => {
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), '')
     const { readSentryEnabledPreflight } = await import('./sentryPreflight')
     expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  it('AC1: fails closed when the file is unreadable', async () => {
+    const filePath = path.join(tmpDir, 'settings.json')
+    writeSettings({ telemetryConsent: GRANTED })
+    const readSpy = vi.spyOn(fs, 'readFileSync').mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+    })
+    try {
+      const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+      expect(readSentryEnabledPreflight()).toBe(false)
+    } finally {
+      readSpy.mockRestore()
+      fs.rmSync(filePath, { force: true })
+    }
+  })
+
+  it('AC1: fails closed when the data dir cannot be resolved', async () => {
+    delete process.env.MAILCOPILOT_DATA_DIR
+    const { app } = await import('electron')
+    vi.mocked(app.getPath).mockImplementationOnce(() => { throw new Error('no userData') })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  it('returns false when no consent record exists, even with sentryEnabled: true', async () => {
+    // Pre-§2.82 installs: the flag defaulted to on, but consent was never asked.
+    writeSettings({ sentryEnabled: true })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  it('returns true only for a granted record at the current disclosure version', async () => {
+    writeSettings({ telemetryConsent: GRANTED })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(true)
+  })
+
+  it('returns false for a refusal', async () => {
+    writeSettings({ telemetryConsent: DENIED, sentryEnabled: true })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  it('returns false when consent is granted but the About switch is off', async () => {
+    writeSettings({ telemetryConsent: GRANTED, sentryEnabled: false })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  it('returns false when the record predates the current disclosure version', async () => {
+    writeSettings({ telemetryConsent: { ...GRANTED, version: TELEMETRY_CONSENT_VERSION - 1 } })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  // AC6/AC (e) — a grant recorded by a NEWER build (app downgrade) is honored:
+  // the disclosure it covers is at least as wide as this build's.
+  it('returns true for a grant recorded by a newer build (downgrade)', async () => {
+    writeSettings({ telemetryConsent: { ...GRANTED, version: TELEMETRY_CONSENT_VERSION + 1 } })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(true)
+  })
+
+  it('returns false for a refusal recorded by a newer build (downgrade)', async () => {
+    writeSettings({ telemetryConsent: { ...DENIED, version: TELEMETRY_CONSENT_VERSION + 1 }, sentryEnabled: true })
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(false)
+  })
+
+  it('strips UTF-8 BOM before parsing', async () => {
+    const bom = Buffer.from([0xef, 0xbb, 0xbf])
+    const body = Buffer.from(JSON.stringify({ settings: { telemetryConsent: GRANTED } }), 'utf8')
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), Buffer.concat([bom, body]))
+    const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+    expect(readSentryEnabledPreflight()).toBe(true)
   })
 })

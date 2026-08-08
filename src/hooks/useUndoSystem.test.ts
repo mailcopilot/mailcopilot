@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
-import { useUndoSystem } from './useUndoSystem'
+import { useUndoSystem, type UseUndoSystemParams } from './useUndoSystem'
 import type { MailSummary } from '../../packages/net/types'
 
 // Mock window.api
@@ -33,7 +33,11 @@ function defaultParams() {
     setMails: vi.fn(),
     setError: vi.fn(),
     loadOutbox: vi.fn().mockResolvedValue(undefined),
-    t: vi.fn((key: string) => key),
+    // §2.127: the hook now shares `presentedError`'s `Translate` (react-i18next's
+    // branded TFunction), so a bare key->string stub needs the same cast the
+    // canonical helper's own test uses. Behaviour is unchanged: only `t(key)` is
+    // ever called here.
+    t: vi.fn((key: string) => key) as unknown as UseUndoSystemParams['t'],
     // §2.7 iter2: epoch ref owned by the caller. Each test gets a fresh
     // counter starting at 0; tests that assert the bump increment it via
     // the hook's transitions, then read .current.
@@ -420,5 +424,82 @@ describe('useUndoSystem §2.7 iter2 — pendingMoveEpoch counter', () => {
 
     expect(e1).toBeGreaterThan(e0)
     expect(e2).toBeGreaterThan(e1)
+  })
+})
+
+// §2.127 — electron/ipc.ts prefixes every rejection that crosses the IPC
+// boundary with a machine tag (`[mcerr:<key>] `). Both failure paths of this
+// hook used to interpolate `String(e)` straight into a user-visible sentence,
+// so the tag — and the third-party server text behind it — landed on screen.
+describe('useUndoSystem §2.127 — error presentation', () => {
+  let consoleError: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockInvoke.mockClear()
+    // The presentation helper keeps the raw value in DevTools on purpose;
+    // silence it here so a failing expectation stays readable.
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    consoleError.mockRestore()
+  })
+
+  it('shows the vocabulary sentence for a tagged net:move rejection, not the tag', async () => {
+    const params = makeParams()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:move') {
+        return Promise.reject(new Error("[mcerr:offline] Error invoking remote method 'net:move': AggregateError"))
+      }
+      return Promise.resolve(undefined)
+    })
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(30)], 'INBOX', 'Trash', 'Del'))
+    await act(async () => { vi.advanceTimersByTime(5000) })
+    await act(async () => { await Promise.resolve() })
+
+    expect(params.t).toHaveBeenCalledWith('app.errors.move', { error: 'app.errors.presented.offline' })
+    // The `t` mock echoes its key, so setError sees the outer sentence only.
+    const shown = (params.setError as ReturnType<typeof vi.fn>).mock.calls.map(c => String(c[0])).join('\n')
+    expect(shown).not.toContain('mcerr')
+    expect(shown).not.toContain('AggregateError')
+    // The raw value still reaches diagnostics.
+    expect(consoleError).toHaveBeenCalled()
+  })
+
+  it('shows the vocabulary sentence for a tagged mail:cancelSend rejection', async () => {
+    const params = makeParams()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'mail:cancelSend') {
+        return Promise.reject(new Error('[mcerr:auth] 535 5.7.8 Username and Password not accepted'))
+      }
+      return Promise.resolve(undefined)
+    })
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.setSendUndoInfo({ id: 'q9', accountId: 1, sendAt: new Date(Date.now() + 10000).toISOString() }))
+    await act(async () => { await result.current.handleSendUndo() })
+
+    expect(params.t).toHaveBeenCalledWith('app.errors.queue', { error: 'app.errors.presented.auth' })
+    const shown = (params.setError as ReturnType<typeof vi.fn>).mock.calls.map(c => String(c[0])).join('\n')
+    expect(shown).not.toContain('mcerr')
+    expect(shown).not.toContain('Username and Password')
+  })
+
+  it('falls back to the classifier when the rejection carries no tag', async () => {
+    const params = makeParams()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:move') return Promise.reject(new Error('socket hang up ETIMEDOUT'))
+      return Promise.resolve(undefined)
+    })
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(31)], 'INBOX', 'Trash', 'Del'))
+    await act(async () => { vi.advanceTimersByTime(5000) })
+    await act(async () => { await Promise.resolve() })
+
+    expect(params.t).toHaveBeenCalledWith('app.errors.move', { error: 'app.errors.presented.timeout' })
   })
 })

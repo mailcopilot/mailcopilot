@@ -11,6 +11,9 @@ vi.mock('@sentry/react', () => {
     captureException: vi.fn(),
     setUser: vi.fn(),
     getClient: vi.fn(() => client),
+    // §2.82: a consent transition drops the breadcrumb buffer.
+    getCurrentScope: vi.fn(() => ({ clearBreadcrumbs: vi.fn() })),
+    getIsolationScope: vi.fn(() => ({ clearBreadcrumbs: vi.fn() })),
     withScope: vi.fn((cb: (scope: { setTag: ReturnType<typeof vi.fn>; setExtras: ReturnType<typeof vi.fn> }) => void) => {
       cb({ setTag: vi.fn(), setExtras: vi.fn() })
     }),
@@ -406,5 +409,389 @@ describe('sentry renderer', () => {
     expect(handle).not.toBeNull()
     expect(() => handle!.setAttribute('k', 1)).not.toThrow()
     expect(() => handle!.end()).not.toThrow()
+  })
+})
+
+// §2.82 AC (g) / AC10 — the renderer must not ship the OS account name or let
+// the server infer an IP address. Mirrors electron/sentry.test.ts.
+describe('sentry renderer — PII scrubbing', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  it('replaces the OS account name in all three platform path shapes', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+
+    expect(scrubUserPaths('/home/ivan/apps/mailcopilot/dist/assets/index.js'))
+      .toBe('/home/<user>/apps/mailcopilot/dist/assets/index.js')
+    expect(scrubUserPaths('/Users/ivan/Applications/MailCopilot.app/index.js'))
+      .toBe('/Users/<user>/Applications/MailCopilot.app/index.js')
+    expect(scrubUserPaths('C:\\Users\\Иван\\AppData\\Local\\MailCopilot\\index.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Local\\MailCopilot\\index.js')
+    // Forward-slash Windows form and a non-C: drive.
+    expect(scrubUserPaths('D:/Users/ivan/app/index.js')).toBe('D:/Users/<user>/app/index.js')
+  })
+
+  it('is idempotent — a scrubbed path does not get scrubbed again', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+    const once = scrubUserPaths('/home/ivan/app/index.js')
+    expect(scrubUserPaths(once)).toBe(once)
+  })
+
+  it('leaves paths without a user segment alone', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+    expect(scrubUserPaths('/opt/mailcopilot/resources/app.asar/index.js'))
+      .toBe('/opt/mailcopilot/resources/app.asar/index.js')
+    expect(scrubUserPaths('')).toBe('')
+  })
+
+  it('beforeSend nulls the IP and scrubs every stack frame path field', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const event = {
+      user: { id: 'abc123', ip_address: '203.0.113.7' },
+      exception: {
+        values: [{
+          value: 'boom',
+          stacktrace: {
+            frames: [
+              {
+                filename: '/home/ivan/app/src/App.tsx',
+                abs_path: 'C:\\Users\\Иван\\app\\src\\App.tsx',
+                module: '/Users/ivan/app/src/App',
+              },
+              { filename: 'app:///assets/index.js' },
+            ],
+          },
+        }],
+      },
+    }
+
+    const out = beforeSend(event as never, {} as never) as typeof event | null
+    expect(out).toBeTruthy()
+    expect(out!.user.ip_address).toBeNull()
+    // The install id survives — stripping the IP must not strip the identity
+    // the whole dataset is keyed by. It is pseudonymous, NOT anonymous, and
+    // therefore still personal data (GDPR recital 26): stable per install and
+    // attached to everything, so one install's stream is joinable. That is
+    // exactly why the consent screen discloses it.
+    expect(out!.user.id).toBe('abc123')
+    const frames = out!.exception.values[0].stacktrace!.frames!
+    expect(frames[0].filename).toBe('/home/<user>/app/src/App.tsx')
+    expect(frames[0].abs_path).toBe('C:\\Users\\<user>\\app\\src\\App.tsx')
+    expect(frames[0].module).toBe('/Users/<user>/app/src/App')
+    expect(frames[1].filename).toBe('app:///assets/index.js')
+  })
+
+  it('beforeSend nulls the IP even when the event carries no user object', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const beforeSend = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+
+    const out = beforeSend({ exception: { values: [{ value: 'boom' }] } } as never, {} as never) as
+      { user?: { ip_address?: string | null } } | null
+    expect(out?.user?.ip_address).toBeNull()
+  })
+
+  it('beforeSendTransaction nulls the IP too', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    const beforeSendTransaction = vi.mocked(sentry.init).mock.calls[0][0]!.beforeSendTransaction!
+
+    const out = beforeSendTransaction({ user: { ip_address: '203.0.113.7' } } as never, {} as never) as
+      { user?: { ip_address?: string | null } } | null
+    expect(out?.user?.ip_address).toBeNull()
+  })
+
+  it('scrubEventPii never throws on a hostile shape (telemetry must not crash the UI)', async () => {
+    const { scrubEventPii } = await import('./sentry')
+    const frozen = Object.freeze({ user: { ip_address: '1.2.3.4' } })
+    expect(() => scrubEventPii(frozen)).not.toThrow()
+    expect(() => scrubEventPii(null)).not.toThrow()
+    expect(() => scrubEventPii({ exception: { values: 'not-an-array' } })).not.toThrow()
+  })
+})
+
+// §2.82 iter2 findings 2 and 3 — the renderer half. The scrubbing rules now
+// live in packages/core/piiScrub.ts and are shared with electron/sentry.ts, so
+// these cases pin the renderer's use of them (the rules themselves are covered
+// in packages/core/piiScrub.test.ts).
+describe('sentry renderer — consent transitions and exception text', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  it('scrubs the exception TEXT, not only stack frames', async () => {
+    const { scrubEventPii } = await import('./sentry')
+
+    const out = scrubEventPii({
+      exception: {
+        values: [{ value: "EACCES: permission denied, open '/home/ivan/.config/x'" }],
+      },
+    }) as { exception: { values: Array<{ value: string }> } }
+
+    expect(out.exception.values[0]!.value)
+      .toBe("EACCES: permission denied, open '/home/<user>/.config/x'")
+  })
+
+  it('scrubs a name containing spaces', async () => {
+    const { scrubUserPaths } = await import('./sentry')
+    expect(scrubUserPaths('C:\\Users\\John Doe\\AppData\\Local\\app.js'))
+      .toBe('C:\\Users\\<user>\\AppData\\Local\\app.js')
+  })
+
+  it('scrubs breadcrumbs, extra and contexts', async () => {
+    const { scrubEventPii } = await import('./sentry')
+    const out = scrubEventPii({
+      breadcrumbs: [{ message: 'navigated to file:///home/ivan/index.html' }],
+      extra: { file: '/home/ivan/a.js' },
+      contexts: { app: { app_path: '/home/ivan/b.js' } },
+    })
+    expect(JSON.stringify(out)).not.toContain('ivan')
+  })
+
+  it('clears the breadcrumb buffer on a consent transition', async () => {
+    const sentry = await import('@sentry/react')
+    const clearBreadcrumbs = vi.fn()
+    vi.mocked(sentry.getCurrentScope).mockReturnValue({ clearBreadcrumbs } as never)
+    vi.mocked(sentry.getIsolationScope).mockReturnValue({ clearBreadcrumbs } as never)
+
+    const { setSentryUserEnabled } = await import('./sentry')
+    // Renderer breadcrumbs (clicks, console, fetch) accumulate regardless of
+    // the enabled flag; a post-consent event must not carry a pre-consent trail.
+    setSentryUserEnabled(false)
+    clearBreadcrumbs.mockClear()
+    setSentryUserEnabled(true)
+    expect(clearBreadcrumbs).toHaveBeenCalled()
+
+    // No transition, no reset.
+    clearBreadcrumbs.mockClear()
+    setSentryUserEnabled(true)
+    expect(clearBreadcrumbs).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * §2.127 second door — the raw text of an IPC rejection must not leave the
+ * renderer as the exception itself.
+ *
+ * The finding these tests pin down: `captureException(err, …)` on a raw
+ * `catch (err)` from `window.api.invoke(...)` sent a string an IMAP/SMTP server
+ * controls, and neither the transient filter nor the PII scrubber can stop
+ * prose. Recognition is by the main-process tag, so what is transmitted is
+ * assembled from a closed set instead.
+ */
+describe('sentry renderer — tagged IPC rejections', () => {
+  /** Unique text standing in for whatever a hostile server put in its reply. */
+  const SERVER_MARKER = 'ZZ_SERVER_CONTROLLED_PROSE_ZZ'
+
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+  })
+
+  async function getBeforeSend() {
+    const sentry = await import('@sentry/react')
+    const { initSentry } = await import('./sentry')
+    initSentry()
+    return vi.mocked(sentry.init).mock.calls[0][0]!.beforeSend!
+  }
+
+  /** An event shaped like the SDK builds one, poisoned in every carrier. */
+  function poisonedEvent(tag: string) {
+    return {
+      exception: {
+        values: [{
+          type: 'Error',
+          value: `Error invoking remote method 'tls:getServerCert': Error: ${tag} ${SERVER_MARKER}`,
+          stacktrace: { frames: [{ filename: `app:///bundle.js?${SERVER_MARKER}`, function: 'invoke' }] },
+        }],
+      },
+      message: `wrapped ${SERVER_MARKER}`,
+      logentry: { message: SERVER_MARKER },
+      culprit: SERVER_MARKER,
+      breadcrumbs: [{ message: `console: ${SERVER_MARKER}`, data: { detail: SERVER_MARKER } }],
+      extra: { source: 'Account.tlsCertFetch', raw: SERVER_MARKER },
+      contexts: { trace: { trace_id: 'abc' }, response: { body: SERVER_MARKER } },
+      tags: { source: 'Account.tlsCertFetch', leaked: SERVER_MARKER },
+    }
+  }
+
+  it.each([['offline'], ['timeout']])(
+    'drops a [mcerr:%s] rejection entirely — that is network state, not a defect',
+    async (key) => {
+      const beforeSend = await getBeforeSend()
+      expect(beforeSend(poisonedEvent(`[mcerr:${key}]`) as never, {} as never)).toBeNull()
+    },
+  )
+
+  it('drops the AggregateError sync noise the text classifier never matched', async () => {
+    // The long-standing gap: `beforeSend` sees a STRING, while unwrapping an
+    // AggregateError needs the OBJECT (its own `message` is empty and
+    // `.errors[]` does not cross IPC). The tag carries main's object-level
+    // verdict, so this event is finally recognised as network noise.
+    const beforeSend = await getBeforeSend()
+    const raw = "Error invoking remote method 'net:inboxSummaries': AggregateError"
+    // Untagged, exactly as it used to arrive — still reported.
+    expect(beforeSend({ exception: { values: [{ value: raw }] } } as never, {} as never)).toBeTruthy()
+    // Tagged by the funnel — dropped.
+    expect(
+      beforeSend(
+        { exception: { values: [{ value: `Error invoking remote method 'net:inboxSummaries': Error: [mcerr:offline] AggregateError` }] } } as never,
+        {} as never,
+      ),
+    ).toBeNull()
+  })
+
+  it.each([['auth'], ['unknown']])(
+    'replaces a [mcerr:%s] rejection with a synthetic event carrying no third-party text',
+    async (key) => {
+      const beforeSend = await getBeforeSend()
+      const out = beforeSend(poisonedEvent(`[mcerr:${key}]`) as never, {} as never) as unknown as {
+        exception: { values: Array<{ type: string; value: string; stacktrace?: unknown }> }
+        tags: Record<string, unknown>
+      }
+      expect(out).toBeTruthy()
+      // Walk the WHOLE event, not just `value`: the tail must not survive in a
+      // stack frame, a breadcrumb, an extra, a context or a tag either.
+      expect(JSON.stringify(out)).not.toContain(SERVER_MARKER)
+      expect(out.exception.values).toHaveLength(1)
+      expect(out.exception.values[0]!.type).toBe('IpcFailure')
+      expect(out.exception.values[0]!.value).toBe(`ipc_tls:getServerCert_${key}`)
+      expect(out.exception.values[0]!.stacktrace).toBeUndefined()
+      // The verdict and the channel survive as tags — that is the whole payload.
+      expect(out.tags.ipc_failure).toBe(key)
+      expect(out.tags.ipc_channel).toBe('tls:getServerCert')
+      expect(out.tags.source).toBe('Account.tlsCertFetch')
+    },
+  )
+
+  it('leaves an untagged renderer error exactly as it was', async () => {
+    // Guard against over-capture: our own bugs keep their message, stack,
+    // breadcrumbs and extras. Only rejections main vouched for are rewritten.
+    const beforeSend = await getBeforeSend()
+    const event = {
+      exception: {
+        values: [{
+          type: 'TypeError',
+          value: 'Cannot read properties of undefined (reading "id")',
+          stacktrace: { frames: [{ filename: 'app:///bundle.js', function: 'render' }] },
+        }],
+      },
+      breadcrumbs: [{ message: 'clicked reply' }],
+      extra: { source: 'MailList', accountId: 7 },
+      tags: { source: 'MailList' },
+    }
+    const out = beforeSend(event as never, {} as never) as unknown as typeof event
+    expect(out).toBeTruthy()
+    expect(out.exception.values[0]!.type).toBe('TypeError')
+    expect(out.exception.values[0]!.value).toContain('Cannot read properties')
+    expect(out.exception.values[0]!.stacktrace).toBeTruthy()
+    expect(out.breadcrumbs).toHaveLength(1)
+    expect(out.extra).toEqual({ source: 'MailList', accountId: 7 })
+  })
+
+  it('finds the tag on a chained exception value, not only the first', async () => {
+    // The linkedErrors integration appends causes as extra values.
+    const beforeSend = await getBeforeSend()
+    const out = beforeSend(
+      {
+        exception: {
+          values: [
+            { type: 'Error', value: `outer wrapper ${SERVER_MARKER}` },
+            { type: 'Error', value: `[mcerr:auth] ${SERVER_MARKER}` },
+          ],
+        },
+      } as never,
+      {} as never,
+    )
+    expect(JSON.stringify(out)).not.toContain(SERVER_MARKER)
+  })
+
+  it('captureException drops a tagged network-state rejection without touching the SDK', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry, captureException } = await import('./sentry')
+    initSentry()
+
+    captureException(
+      new Error(`Error invoking remote method 'tls:getServerCert': Error: [mcerr:offline] ${SERVER_MARKER}`),
+      { source: 'Account.tlsCertFetch' },
+    )
+
+    expect(sentry.captureException).not.toHaveBeenCalled()
+    expect(sentry.withScope).not.toHaveBeenCalled()
+  })
+
+  it('captureException never hands the raw tagged rejection to the SDK', async () => {
+    const sentry = await import('@sentry/react')
+    const { initSentry, captureException } = await import('./sentry')
+    initSentry()
+
+    const tags: Record<string, unknown> = {}
+    const setExtras = vi.fn()
+    vi.mocked(sentry.withScope).mockImplementation(((cb: (scope: unknown) => void) => {
+      cb({ setTag: (k: string, v: unknown) => { tags[k] = v }, setExtras })
+    }) as never)
+
+    const raw = new Error(
+      `Error invoking remote method 'tls:getServerCert': Error: [mcerr:auth] ${SERVER_MARKER}`,
+    )
+    captureException(raw, { source: 'Account.tlsCertFetch', hostHint: SERVER_MARKER })
+
+    expect(sentry.captureException).toHaveBeenCalledOnce()
+    const sent = vi.mocked(sentry.captureException).mock.calls[0][0] as Error
+    expect(sent).not.toBe(raw)
+    expect(sent.name).toBe('IpcFailure')
+    expect(sent.message).toBe('ipc_tls:getServerCert_auth')
+    // Caller extras are dropped: this path is an allow list, not a filter.
+    expect(setExtras).not.toHaveBeenCalled()
+    expect(tags).toEqual({
+      source: 'Account.tlsCertFetch',
+      ipc_failure: 'auth',
+      ipc_channel: 'tls:getServerCert',
+    })
+  })
+
+  it('keeps the raw rejection intact for the local consumers that parse it', async () => {
+    // `useCertRecovery` matches machine-readable codes as a SUBSTRING of the
+    // rejection message, and Settings shows connection-test text through
+    // `stripErrorPresentation`. The telemetry path must observe, never mutate.
+    const { initSentry, captureException } = await import('./sentry')
+    const { trustErrorKey } = await import('./hooks/useCertRecovery')
+    initSentry()
+
+    const message =
+      "Error invoking remote method 'net:trustCert': Error: [mcerr:unknown] cert_trust_fingerprint_mismatch"
+    const err = new Error(message)
+    captureException(err, { source: 'useCertRecovery.trust' })
+
+    expect(err.message).toBe(message)
+    expect(trustErrorKey(err)).toBe('trustFingerprintMismatch')
+  })
+
+  it('applies the same hygiene to the synthetic event it built itself', async () => {
+    // The two paths must ship the same closed set: the event created by
+    // captureException goes through beforeSend too, where breadcrumbs and
+    // extras accumulated elsewhere in the session are dropped.
+    const beforeSend = await getBeforeSend()
+    const out = beforeSend(
+      {
+        exception: { values: [{ type: 'IpcFailure', value: 'ipc_net:trustCert_auth' }] },
+        breadcrumbs: [{ message: `console: ${SERVER_MARKER}` }],
+        extra: { raw: SERVER_MARKER },
+        tags: { source: 'useCertRecovery.trust', ipc_failure: 'auth', leaked: SERVER_MARKER },
+      } as never,
+      {} as never,
+    ) as unknown as { exception: { values: Array<{ value: string }> }; tags: Record<string, unknown> }
+    expect(JSON.stringify(out)).not.toContain(SERVER_MARKER)
+    expect(out.exception.values[0]!.value).toBe('ipc_net:trustCert_auth')
+    expect(out.tags).toEqual({ source: 'useCertRecovery.trust', ipc_failure: 'auth' })
   })
 })

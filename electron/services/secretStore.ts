@@ -36,10 +36,13 @@
  *     ciphertext that cannot be decrypted there — confidentiality survives disk
  *     exfiltration on ALL three platforms, not only Linux.
  *   - FAIL-CLOSED when no binding material exists: if no machine id can be
- *     obtained from any source, the KDF REFUSES to derive a key. `set` (and any
- *     write) throws "secret store fallback unavailable: no machine-binding
- *     material" rather than persisting a near-portable, weakly-bound secret;
- *     `get` of a missing entry still returns null. We never downgrade to
+ *     obtained from any source, the KDF REFUSES to derive a key. `set` (any
+ *     write that PERSISTS A SECRET) throws "secret store fallback unavailable:
+ *     no machine-binding material" rather than persisting a near-portable,
+ *     weakly-bound secret; `get` of a missing entry still returns null. `delete`
+ *     is deliberately outside this rule: it only REMOVES an entry, needs no key
+ *     to do so, and refusing it would leave a user with no machine id unable to
+ *     drop a credential they can no longer decrypt anyway. We never downgrade to
  *     salt-only binding (which would be decryptable on any machine holding a
  *     copy of the co-located salt — i.e. de-facto plaintext-on-disk).
  *   - Per-write random 12-byte IV; iv‖authTag‖ciphertext persisted together,
@@ -91,6 +94,55 @@ const SALT_FILE = 'secret-fallback.salt'
 
 /** Probe key — never holds a real secret; only used to test reachability. */
 const PROBE_ACCOUNT = '__mailcopilot_keytar_probe__'
+
+/**
+ * §2.132 — under `MAILCOPILOT_E2E=1` the OS keychain is OFF LIMITS and every
+ * operation is served by the encrypted disk fallback instead.
+ *
+ * A keychain entry is addressed by (service, account) — `mailcopilot` /
+ * `openai_api_key`, `imap:3`, `oauth-refresh:outlook:6` — and that address
+ * space belongs to the LOGGED-IN USER, not to `MAILCOPILOT_DATA_DIR`. The e2e
+ * suite drives the real IPC stack, so a spec that saves or deletes a secret was
+ * writing into the developer's own keychain: on 2026-08-05 a gate run deleted a
+ * live `openai_api_key` at 10:36 and left a test string under the same name,
+ * which the next app launch read back as `found` and the provider then
+ * rejected. Account ids in a throwaway e2e database start at 1, so `imap:<id>` /
+ * `smtp:<id>` collide with real accounts by construction too.
+ *
+ * The disk fallback IS per-data-dir, so forcing it makes the suite
+ * self-contained. It also removes the CI/dev divergence that hid the bug: a
+ * headless runner has no session bus, so the probe already chose the fallback
+ * and the specs exercised it; on a developer box `xvfb-run` does NOT disable
+ * D-Bus, so the very same specs reached the live keyring.
+ *
+ * **`!app.isPackaged` is load-bearing, not decoration.** `MAILCOPILOT_E2E` is an
+ * environment variable, so anything running as the user can set it (wrapper
+ * script, dropper, shell profile). Without the packaging check, that env var
+ * alone would move a shipped build's secrets out of the OS keychain and into
+ * the disk fallback — materially weaker against a same-user process, whose key
+ * is derived from a non-secret machine id plus a salt stored beside the
+ * ciphertext, all readable by that same user. `app.isPackaged` is a property of
+ * the build and survives env tampering, so the pair closes the escape. Same
+ * reasoning and same pair of conditions as `assertE2EHandlerAllowed`
+ * (electron/main.ts) and the consent bypass in
+ * electron/services/telemetryConsentService.ts. Dev runs and Playwright runs
+ * keep `isPackaged === false`, so the legitimate flow is unaffected.
+ *
+ * Failure direction: cannot prove we are unpackaged → assume we are packaged →
+ * keychain stays in use, i.e. fall back to normal product behaviour.
+ *
+ * Read per call rather than latched at import: the value must not depend on
+ * module-import order, and a test can drive both sides with `vi.stubEnv`.
+ */
+function isE2E(): boolean {
+  if (process.env.MAILCOPILOT_E2E !== '1') return false
+  try {
+    if (app.isPackaged) return false
+  } catch {
+    return false
+  }
+  return true
+}
 
 /** Default fast-fail probe budget. Short by design — must NOT wait out the
  * ~25s D-Bus activation hang. 2.5s is long enough for a healthy keychain to
@@ -152,6 +204,12 @@ export interface SecretStore {
  *   - `fallback` — keychain unavailable (timeout or keychain-unavailable error);
  *                  `err` is handed to the §2.34 helper so the Sentry report
  *                  carries an accurate surface.
+ *   - `e2e`      — §2.132: keychain reachability is irrelevant here and is
+ *                  deliberately never evaluated (`MAILCOPILOT_E2E=1` in an
+ *                  unpackaged build). Same disk path as `fallback`, but it is a
+ *                  POLICY decision, not a fault: nothing is probed and nothing
+ *                  is reported, because declining to use a keychain is not a
+ *                  keychain-unavailability incident.
  *   - `error`    — a real, NON-keychain failure (permission, native-binding
  *                  bug, …). We deliberately do NOT degrade to disk for this; the
  *                  operation rethrows so the fault is visible, not masked.
@@ -159,6 +217,7 @@ export interface SecretStore {
 type ProbeOutcome =
   | { backend: 'keytar' }
   | { backend: 'fallback'; err: unknown }
+  | { backend: 'e2e' }
   | { error: unknown }
 
 /** Module-scope cache of the one-shot probe decision (single probe per
@@ -272,7 +331,20 @@ function safeReport(err: unknown, surface: SecretStoreSurface): void {
 }
 
 export function createSecretStore(options: SecretStoreOptions = {}): SecretStore {
-  const getKeytar = options.keytar ?? (() => keytar as KeytarLike)
+  // §2.132 second line of defence. `ensureBackend` already refuses to select
+  // the keychain under e2e, so this throw is unreachable through the current
+  // get/set/delete paths — it exists so a FUTURE path that forgets the policy
+  // fails loudly here instead of silently mutating the developer's keychain.
+  // Only the default provider is guarded: an injected `options.keytar` is a
+  // test double by definition and owns no real credentials.
+  const getKeytar =
+    options.keytar ??
+    (() => {
+      if (isE2E()) {
+        throw new Error('secret store: OS keychain access is disabled under MAILCOPILOT_E2E')
+      }
+      return keytar as KeytarLike
+    })
   const getMachineId = options.machineId ?? defaultMachineId
   const getUserDataDir = options.userDataDir ?? defaultUserDataDir
   const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
@@ -509,6 +581,23 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
 
   /** Resolve (and cache) the backend decision for this session. */
   async function ensureBackend(): Promise<ProbeOutcome> {
+    // §2.132 — the e2e policy outranks the probe and is never cached: it must
+    // not depend on whether some earlier call already latched a decision, and
+    // it must not leave a latched decision behind for a later non-e2e store.
+    // No probe is issued, so the keychain is not even contacted.
+    if (isE2E()) {
+      // Isolation is only real when the run owns its data directory. With the
+      // flag set and no MAILCOPILOT_DATA_DIR, the fallback would resolve to the
+      // NORMAL profile and a test would write into — and delete out of — the
+      // secrets of a user whose keychain is unavailable. Refuse instead: every
+      // launcher in tests/e2e/helpers.ts sets both variables together, so this
+      // only ever fires on a hand-rolled or half-configured run, where a loud
+      // failure is the correct answer.
+      if (!process.env.MAILCOPILOT_DATA_DIR?.trim()) {
+        throw new Error('secret store: MAILCOPILOT_E2E requires MAILCOPILOT_DATA_DIR')
+      }
+      return { backend: 'e2e' }
+    }
     if (_probeDecision) return _probeDecision
     if (!_probeInFlight) {
       _probeInFlight = (async () => {
@@ -543,6 +632,7 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
   async function get(key: string, surface: SecretStoreSurface = 'unknown'): Promise<string | null> {
     const decision = await ensureBackend()
     if ('error' in decision) throw decision.error
+    if (decision.backend === 'e2e') return readFallback(key)
     if (decision.backend === 'fallback') {
       safeReport(decision.err ?? new Error('OS secret store unavailable'), surface)
       return readFallback(key)
@@ -562,6 +652,10 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
   async function set(key: string, value: string, surface: SecretStoreSurface = 'unknown'): Promise<void> {
     const decision = await ensureBackend()
     if ('error' in decision) throw decision.error
+    if (decision.backend === 'e2e') {
+      writeFallback(key, value)
+      return
+    }
     if (decision.backend === 'fallback') {
       safeReport(decision.err ?? new Error('OS secret store unavailable'), surface)
       writeFallback(key, value)
@@ -583,6 +677,10 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
   async function del(key: string, surface: SecretStoreSurface = 'unknown'): Promise<void> {
     const decision = await ensureBackend()
     if ('error' in decision) throw decision.error
+    if (decision.backend === 'e2e') {
+      deleteFallback(key)
+      return
+    }
     if (decision.backend === 'fallback') {
       safeReport(decision.err ?? new Error('OS secret store unavailable'), surface)
       deleteFallback(key)

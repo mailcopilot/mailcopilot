@@ -100,13 +100,25 @@ Wenn die aktive Nachricht Anhänge enthält, erscheinen diese über dem Nachrich
 - Ein **Dateityp-Symbol**, das aus dem MIME-Typ gewaehlt wird, mit Rueckfall auf die Dateiendung, wenn der MIME-Typ fehlt, generisch (`application/octet-stream`) oder unbekannt ist: PDF, Bild, Archiv, Dokument, Tabellenkalkulation, Praesentation, Klartext, eingebettete `.eml`-Nachricht oder ein generisches Datei-Symbol, wenn nichts Spezifischeres greift.
 - Der **Dateiname**.
 - Die **Dateigroesse**.
-- Ein **„Vorschau verfügbar"-Badge** bei Anhaengen, die MailCopilot als vorschaubar erkennt. Aktuell sind das PNG-, JPEG-, GIF-, WebP-Bilder und PDF-Dokumente -- das Badge erscheint nur bei diesen Typen und zeigt an, dass Vorschau-Unterstuetzung geplant ist; die primaere Aktion in der Zeile ist heute weiterhin die Download-Schaltflaeche.
+
+Layout-Bilder, die der Nachrichtentext bereits eingebettet darstellt -- etwa ein Logo in einer HTML-Signatur -- werden nie aus der Liste entfernt. MailCopilot kann von ausserhalb des Browsers nicht zuverlaessig feststellen, ob ein bestimmter Teil tatsaechlich sichtbar auf dem Bildschirm gelandet ist -- das entscheiden Layout, CSS und die Auswahl in einem responsiven Bild --, deshalb wird nicht geraten: Echte Anhaenge (die Dateien, die der Absender tatsaechlich beigefuegt hat) werden zuerst aufgelistet, eingebettete Bilder aus dem Nachrichtentext werden ans Ende der Liste verschoben, hinter denselben Ausklapp-Umschalter, der weiter unten beschrieben ist.
+
+Ein Ausklapp-Umschalter erscheint immer dann, wenn mehr angezeigt werden muesste, als eingeklappt Platz hat -- bei mehr als vier echten Anhaengen, oder wenn es zurueckgestellte eingebettete Bilder gibt, auch wenn es vier oder weniger echte Anhaenge sind. Klicken Sie auf **Mehr anzeigen (N)**, wobei N nur die gerade nicht sichtbaren Elemente zaehlt, um alles einzublenden, und auf **Weniger anzeigen**, um die Liste wieder einzuklappen.
 
 Klicken Sie in der Anhangzeile auf die Download-Schaltflaeche, um die Datei auf Ihrem Computer zu speichern. Die Download-Schaltflaeche hat ein explizites barrierefreies Label, sodass Bildschirmleser die Aktion zusammen mit dem Dateinamen ansagen.
 
 ## Links
 
 MailCopilot prueft Links auf Sicherheit: nicht uebereinstimmende Links, HTTP-Links und IDN-Domains.
+
+### Rechtsklick auf einen Link
+
+Rechtsklick auf einen Link im Nachrichtentext oeffnet ein kleines Kontextmenue mit:
+
+- **Link im Browser öffnen** -- oeffnet den Link genauso wie ein Klick, einschliesslich der oben beschriebenen Sicherheitspruefungen (Warnungen bei abweichender Domain und bei HTTP, IDN/Punycode-Kennzeichnung). Dieser Eintrag erscheint nur im Hauptfenster und im eigenstaendigen Nachrichtenfenster (siehe [In Fenster öffnen](#in-fenster-öffnen)) -- in den Fenstern Einstellungen, Neue Nachricht oder Konto wird er nicht angeboten, da dort keine E-Mail-Links angezeigt werden.
+- **Linkadresse kopieren** -- kopiert das tatsaechliche Linkziel in die Zwischenablage, nicht den sichtbaren Text, und niemals die interne Routing-Form, die MailCopilot zur Darstellung des Links verwendet. Bei einer Webadresse (`http:`/`https:`) mit einem internationalisierten Domainnamen wird die Adresse in ihrer Punycode-Form (ASCII) kopiert -- der Form, die Ihr Browser tatsaechlich verwendet -- statt in Unicode, damit eine kopierte Adresse keine aehnlich aussehende Domain hinter lesbaren Zeichen verbergen kann. Bei einer `mailto:`-Adresse wird eine internationalisierte Domain stattdessen prozentkodiert, da Mail-Clients sie nicht als Punycode-Host aufloesen. In einem Link eingebettete Zugangsdaten (`https://user:pass@host/…`) werden unveraendert kopiert, nicht entfernt -- wenn Sie einen solchen Link anderswo einfuegen, werden die Zugangsdaten mitkopiert.
+
+Keiner der beiden Eintraege erscheint bei Links, die nicht mit `http:`, `https:` oder `mailto:` beginnen (zum Beispiel ein in eine Nachricht eingebetteter `javascript:`- oder `data:`-Link), oder bei einer Linkadresse mit mehr als 8192 Zeichen.
 
 ## Aktionen
 

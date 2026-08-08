@@ -2,6 +2,7 @@ import http from 'node:http'
 import crypto from 'node:crypto'
 import { createLogger } from './logger'
 import { captureException } from './sentry'
+import { normalizeProviderDisplayName } from '../packages/core/providerDisplayName'
 
 const log = createLogger('MicrosoftOAuth')
 
@@ -13,7 +14,7 @@ const log = createLogger('MicrosoftOAuth')
  * return only the bare AADSTS code or OAuth2 error identifier — enough
  * to triage in dashboards, not enough to re-identify an account.
  *
- * Invariant (CLAUDE.md §8 "PII не уходит"): nothing this function returns
+ * Invariant (CLAUDE.md §8, "no PII leaves the process"): nothing this function returns
  * may contain an email address or full diagnostic text. Callers pass the
  * result into a NEW Error instance (not the original error object), so
  * the raw message and stack never reach Sentry.
@@ -33,11 +34,18 @@ export function summarizeOAuthErrorForSentry(err: unknown): string {
 
 export type MicrosoftOAuthTokens = {
   email: string
+  /** Human display name from the OIDC `name` claim (or Graph `displayName`
+   *  on the fallback path). Empty string when the provider returned none —
+   *  the caller decides how to fall back, this module never invents a name. */
+  displayName: string
   accessToken: string
   /** Epoch ms */
   expiresAt: number
   refreshToken: string
 }
+
+/** Coarse progress signal for the connect flow — see the Google counterpart. */
+export type MicrosoftOAuthStage = 'browser' | 'token'
 
 function base64UrlEncode(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
@@ -89,11 +97,18 @@ async function httpGetJson(url: string, headers: Record<string, string>): Promis
   return parsed
 }
 
-function extractEmailFromIdToken(idToken?: string): string {
+function extractProfileFromIdToken(idToken?: string): { email: string; displayName: string } {
+  // Read as `unknown` rather than asserting types — the payload is provider-
+  // controlled, and a non-string claim must degrade, not throw mid-flow.
   const payload = idToken
-    ? decodeJwtPayload<{ email?: string; preferred_username?: string }>(idToken)
+    ? decodeJwtPayload<{ email?: unknown; preferred_username?: unknown; name?: unknown }>(idToken)
     : undefined
-  return (payload?.email || payload?.preferred_username || '').trim()
+  const emailClaim = typeof payload?.email === 'string' ? payload.email : undefined
+  const upnClaim = typeof payload?.preferred_username === 'string' ? payload.preferred_username : undefined
+  return {
+    email: (emailClaim || upnClaim || '').trim(),
+    displayName: normalizeProviderDisplayName(payload?.name) ?? '',
+  }
 }
 
 let microsoftOAuthBusy = false
@@ -204,6 +219,8 @@ export async function runMicrosoftOAuthFlow(params: {
    *  match the production Azure app registration. Tests pass 0 (ephemeral)
    *  to avoid EADDRINUSE flake. */
   loopbackPort?: number
+  /** Best-effort progress sink — never awaited, never fails the flow. */
+  onStage?: (stage: MicrosoftOAuthStage) => void
 }): Promise<MicrosoftOAuthTokens> {
   if (microsoftOAuthBusy) throw new Error('Microsoft OAuth is already running in another window')
   microsoftOAuthBusy = true
@@ -222,8 +239,12 @@ async function doMicrosoftOAuthFlow(params: {
   timeoutMs?: number
   scopes?: string[]
   loopbackPort?: number
+  onStage?: (stage: MicrosoftOAuthStage) => void
 }): Promise<MicrosoftOAuthTokens> {
   const { clientId, clientSecret, openExternal } = params
+  const emitStage = (stage: MicrosoftOAuthStage) => {
+    try { params.onStage?.(stage) } catch { /* progress is advisory */ }
+  }
   const timeoutMs = params.timeoutMs ?? 3 * 60 * 1000
   const scopes = params.scopes ?? MICROSOFT_SCOPES
   const loopbackPort = params.loopbackPort ?? DEFAULT_MICROSOFT_OAUTH_LOOPBACK_PORT
@@ -279,7 +300,16 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
           res.end(oauthHtml(pageMessages.cancelTitle, pageMessages.cancelText))
           const oauthErr = new Error(errDesc || err)
           log.error('Microsoft OAuth error callback:', err, errDesc)
-          captureException(oauthErr, { source: 'MicrosoftOAuth', error_code: err, error_description: errDesc ?? undefined })
+          // §2.82 iter2 — `error_description` is Azure-authored free text and
+          // routinely inlines the UPN (the same hazard this file already
+          // documents on the refresh path). Neither it nor `oauthErr`, whose
+          // message IS that text, may reach Sentry: send a synthetic error
+          // carrying only the classified code. `oauthErr` is still what the
+          // local log and the rejected promise see.
+          captureException(
+            new Error(`oauth_callback_error: ${summarizeOAuthErrorForSentry(errDesc || err)}`),
+            { source: 'MicrosoftOAuth', stage: 'callback' },
+          )
           reject(oauthErr)
           return
         }
@@ -378,6 +408,7 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
       authUrl.searchParams.set('code_challenge', challenge)
       authUrl.searchParams.set('code_challenge_method', 'S256')
       authUrl.searchParams.set('scope', scopes.join(' '))
+      emitStage('browser')
       Promise.resolve(openExternal(authUrl.toString()))
         .catch((e) => {
           try { server.close() } catch { /* ignore */ }
@@ -387,6 +418,9 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
   })
 
   log.info('Authorization code received, exchanging for tokens...')
+
+  // The browser round trip is over — the rest happens inside the app.
+  emitStage('token')
 
   const tokenParams = new URLSearchParams({
     client_id: clientId,
@@ -418,7 +452,13 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
     ) as typeof tokenJson
   } catch (e) {
     log.error('Microsoft OAuth: token exchange failed:', e instanceof Error ? e.message : e)
-    captureException(e, { source: 'MicrosoftOAuth' })
+    // Same rule as the refresh path below: the token endpoint's failure body
+    // is Azure free text that can name the account. Only the classified code
+    // leaves the process.
+    captureException(
+      new Error(`token_exchange_failed: ${summarizeOAuthErrorForSentry(e)}`),
+      { source: 'MicrosoftOAuth', stage: 'token_exchange' },
+    )
     throw e
   }
 
@@ -431,8 +471,10 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
   const expiresAt = Date.now() + Math.max(0, expiresIn) * 1000
 
   // Usually email is available directly in id_token, but if missing — fallback to MS Graph /me.
-  const emailFromId = extractEmailFromIdToken(tokenJson.id_token)
-  if (emailFromId) return { email: emailFromId, accessToken, expiresAt, refreshToken }
+  const fromId = extractProfileFromIdToken(tokenJson.id_token)
+  if (fromId.email) {
+    return { email: fromId.email, displayName: fromId.displayName, accessToken, expiresAt, refreshToken }
+  }
 
   // Fallback: the initial access_token is Exchange-audience (we asked
   // /token for outlook.office.com scopes to fix AADSTS70011 on multi-
@@ -447,10 +489,18 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
       refreshToken,
       scopes: MICROSOFT_GRAPH_IDENTITY_SCOPES,
     })
-    const profile = await httpGetJson('https://graph.microsoft.com/v1.0/me', {
+    const profileRaw: unknown = await httpGetJson('https://graph.microsoft.com/v1.0/me', {
       Authorization: `Bearer ${graphToken.accessToken}`,
-    }) as { mail?: string; userPrincipalName?: string }
-    const emailFromGraph = (profile.mail || profile.userPrincipalName || '').trim()
+    })
+    // Narrow the document itself, not just its fields — see the Google
+    // counterpart: a successful `null` body must degrade, not throw.
+    const profile: { mail?: unknown; userPrincipalName?: unknown; displayName?: unknown } =
+      profileRaw && typeof profileRaw === 'object'
+        ? profileRaw as { mail?: unknown; userPrincipalName?: unknown; displayName?: unknown }
+        : {}
+    const mailField = typeof profile.mail === 'string' ? profile.mail : undefined
+    const upnField = typeof profile.userPrincipalName === 'string' ? profile.userPrincipalName : undefined
+    const emailFromGraph = (mailField || upnField || '').trim()
     if (!emailFromGraph) throw new Error('Could not retrieve user email from Microsoft Graph')
     // Return the MOST RECENT refresh_token. The Graph-identity refresh call
     // above may have rotated the refresh_token (Microsoft v2.0 rotation —
@@ -458,10 +508,20 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
     // would cause onboarding to immediately persist a stale token that
     // Microsoft could reject on first use. Wave-2 codex finding (019dbc07).
     const freshestRefreshToken = graphToken.refreshToken ?? refreshToken
-    return { email: emailFromGraph, accessToken, expiresAt, refreshToken: freshestRefreshToken }
+    // The id_token may still have carried a name even when it lacked an
+    // email; prefer it, then Graph's own displayName. Same normalization on
+    // both paths — Graph's field is no more trustworthy than the claim.
+    const displayName = fromId.displayName || (normalizeProviderDisplayName(profile.displayName) ?? '')
+    return { email: emailFromGraph, displayName, accessToken, expiresAt, refreshToken: freshestRefreshToken }
   } catch (e) {
     log.error('Microsoft OAuth: MS Graph /me failed:', e instanceof Error ? e.message : e)
-    captureException(e, { source: 'MicrosoftOAuth' })
+    // The Graph identity lookup is the one call whose response body is the
+    // user's profile — a failure message can echo the mail / userPrincipalName
+    // it was resolving. Synthetic error only.
+    captureException(
+      new Error(`graph_identity_failed: ${summarizeOAuthErrorForSentry(e)}`),
+      { source: 'MicrosoftOAuth', stage: 'graph_identity' },
+    )
     throw e instanceof Error ? e : new Error(String(e))
   }
 }

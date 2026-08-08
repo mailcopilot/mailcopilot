@@ -75,6 +75,72 @@ const SELF_SIGNED_FP = normalizeFingerprintSha256(
   new crypto.X509Certificate(SELF_SIGNED_CERT).fingerprint256,
 )
 
+// ---------------------------------------------------------------------------
+// Second fixture — SAN carries DNS:mail.example.test and NOTHING else (no IP
+// entry, valid until 2126). This is the shape of the real-world regression:
+// an account configured with a bare IP host whose server certificate names
+// only domains, so Node's identity check fails with
+// ERR_TLS_CERT_ALTNAME_INVALID ("IP: … is not in the cert's list") while the
+// certificate itself is exactly the one the user confirmed and pinned.
+// The primary fixture above cannot express this — its SAN includes
+// IP:127.0.0.1, so a connection dialled by IP passes the name check.
+// ---------------------------------------------------------------------------
+const DNS_ONLY_CERT = `-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIUb3yD4WXYPmRx48kl5Ax9XZkP2VQwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRbWFpbC5leGFtcGxlLnRlc3QwIBcNMjYwNzI2MTkyODU2
+WhgPMjEyNjA3MDIxOTI4NTZaMBwxGjAYBgNVBAMMEW1haWwuZXhhbXBsZS50ZXN0
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt5vdFk6wZP/ti3kj/1MR
+hL/82EqsfTYKuBVTuEBp6giSMYEpRHnl+aVLYpHedncCK/5hdP1p8YT4DC4VEXmi
+bXlGsKwd66XhaEzGO/YVNJ/fVo8AW+QwmX3rKu63/AInmzGqbFz49afxcI058dXw
+N0V3yg5GTwVhvfWU7Bd873XvDlLZlfdo7hLzXhzHbqUzfaqBgAKaWGd6Cj3y8nh2
+d5gpVk1sx8drhNkJ7wJGvmDhaVt9DwXXyBx10dQ4lbPJCKhFo+eaY6fwryt7Qk5J
+q67o9eAr7BuvVWX3x9zV6PwGyyUogTatlt5FGd+EOI2ch/scqOjJWdkicgn0zuTG
+2wIDAQABo3EwbzAdBgNVHQ4EFgQUSX+dwu1aIcFI8M2Gp8PVoTkO9kcwHwYDVR0j
+BBgwFoAUSX+dwu1aIcFI8M2Gp8PVoTkO9kcwDwYDVR0TAQH/BAUwAwEB/zAcBgNV
+HREEFTATghFtYWlsLmV4YW1wbGUudGVzdDANBgkqhkiG9w0BAQsFAAOCAQEAs9l2
++ZnCIClgwm+vkVud9fc9apcvzF/9hJWC6xszyq/7MxqDoEUdlgCJGzuvLk/9yrfj
+kMO+d7akLS9UjCCsSCtP3/xbx2aMJPvTUHBjBhH/GQ7xAucDxIKSUJ9UKqr70Jj/
+oCJDKxnF1ir6uH3fXEPy4e4kiMkw+q3CikOFxwk4HHNUVNWtmzekHFbeweWs9XD6
+42dLCUjb7mC7am0XSuE1iH/eTxRYHbTmYA9UkTi0GVrM+d856WTq3eoXrwGIiAe/
+VaTTlpoguDDLHgSMKHNLEnU2Tg+lWKe6DYqqVoh8zKjcFA//GtBLqhj0tZV3V+/L
+a+3kDWSBLZw9wshv+A==
+-----END CERTIFICATE-----
+`
+
+const DNS_ONLY_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC3m90WTrBk/+2L
+eSP/UxGEv/zYSqx9Ngq4FVO4QGnqCJIxgSlEeeX5pUtikd52dwIr/mF0/WnxhPgM
+LhUReaJteUawrB3rpeFoTMY79hU0n99WjwBb5DCZfesq7rf8AiebMapsXPj1p/Fw
+jTnx1fA3RXfKDkZPBWG99ZTsF3zvde8OUtmV92juEvNeHMdupTN9qoGAAppYZ3oK
+PfLyeHZ3mClWTWzHx2uE2QnvAka+YOFpW30PBdfIHHXR1DiVs8kIqEWj55pjp/Cv
+K3tCTkmrruj14CvsG69VZffH3NXo/AbLJSiBNq2W3kUZ34Q4jZyH+xyo6MlZ2SJy
+CfTO5MbbAgMBAAECggEAPaE1rr0u/FfjdkNtT9CkOrjut/MovsabBnsyJNCKPKIv
+4CoInhGEni1bhnSMBZugwP+b2tcM7qLBV+VH8Ruw56ojjj3XtTdy172ddJb/OzDG
+mJlbd3y6y2q2uyxx2Ucn4DHlkIYMkviSVEMzRfeXsBXDRbFQ7ElUK5z5Jd4kc4PC
+X0pu6+ObTBXoi+4R0Od7pzvWhlTc7xS6SZtDct5canAmwJEBgE07dllqS6jtjJ83
+BaoCb6A/5BTfZAWOmiR8+aOuFcmw6MqL4F5sFXG/6nXRONYv+5dSXamTBGdZwoqp
+jqlXacAjYMw4fr4csCZ1xXHTbPhfVjKCKr8QF4bzsQKBgQDtF9UPa8GA0o9syc8s
+NKtuyL6se2eNSnSk6EbWOhDu6OoIpJJfUUC0XAKkEd88CgvAi6RxIvKRY4DoQzvQ
+hhAcpKEHVvJaFkvebi+0D/JwZ+GT6yJxLOOltyM7DC1hGNTcLT2IvF+kYPYeDt9C
+u6gZ52a5T9Uhekeucn7+lFRo3QKBgQDGQCuOpblZY8SkL9GH94LH6QodkE7zaAC8
+J6ZKJrq43hBnTUGIqjAW2ObGoMtUAIx65/2RdEWN47PhnYbZmWnqXsKzwG1XXKhV
+z2AiS8bftaR3G9Tsylo0nmC1E3NV4dBNuSA6RyNFb1qUcmF7QMOlcpHpK0Y0hD1P
+cS34FXmXFwKBgQCJR+JjInaRm9nWGOgvZXPaGrxk7LNh2Tm+/ot9oXOKkixowrnK
+HScFB72zuHF0tzBk1bZql9yyGFZcpgltTSLpIt3mfQ6o4P4fFdfjP9SWB2BTILP5
+qg9KNcddekiQTyt5LWzSzpfmewonD19wqW3FSfpt1G7JCp+Uv9EOoV5atQKBgGkr
+u6+2DQj122i6kW6PCIsi/qHGX4vTHaizZA0sVJwj+hHDM0Pb/RzxviObQ6JxlBTT
+o3oZc5idNl03I0WmlECoOqP/LkJNPmQfWkF3b65X/0LMuf1QL+CAMI9/HQ1veQDy
+d71S5cw9EZF0yHAJYIERsYQ/18Oeb6QIR7m3MsTLAoGASXgAFKvXHXsA8/CdpkC0
+dIVAj+BSUma9BgVv+9zFz7DI9QqyJoKZDlEWcdADFz9FCzcZxXKbK8ZxpdliKlDd
+TnWPZpslSm1ox3WuvViQK9CvmqJCxDzQkFHyfxsgIxTrzs/TXDnYiTYMPwv1fGqs
+YXakA6KwN23uwED7i78CkQM=
+-----END PRIVATE KEY-----
+`
+
+const DNS_ONLY_FP = normalizeFingerprintSha256(
+  new crypto.X509Certificate(DNS_ONLY_CERT).fingerprint256,
+)
+
 describe('packages/net/tls', () => {
   describe('normalizeFingerprintSha256', () => {
     it('uppercase and colons', () => {
@@ -397,7 +463,7 @@ describe('packages/net/tls', () => {
       expect(opts).toEqual({ rejectUnauthorized: true, servername: 'smtp.gmail.com' })
     })
 
-    it('servername + pins — checkServerIdentity uses servername for host verification', () => {
+    it('servername + pins — servername is still sent as SNI', () => {
       const pin = 'AA:BB:CC:DD'
       const opts = buildTlsOptions({
         tlsPinsSha256: [pin],
@@ -406,18 +472,48 @@ describe('packages/net/tls', () => {
       expect(opts).toBeDefined()
       expect(opts!.servername).toBe('smtp.gmail.com')
 
-      // checkServerIdentity receives IP as hostname, but should verify servername
       const cert = {
         fingerprint256: pin,
         subjectaltname: 'DNS:smtp.gmail.com',
       } as unknown as tls.PeerCertificate
 
-      // Called with IP — but servername 'smtp.gmail.com' matches SAN
+      // Called with the IP as `hostname` — the pinned leaf is what authorizes
+      // the connection, so this resolves to "accepted".
       const result = opts!.checkServerIdentity!('1.2.3.4', cert)
       expect(result).toBeUndefined()
     })
 
-    it('servername + pins — hostname mismatch on wrong certificate', () => {
+    it('ANCHORED pin + no matching name — accepted, the name check is not consulted', () => {
+      // §2.52 regression: the pinned callback checked the hostname FIRST and
+      // returned its error before comparing fingerprints, so an endpoint whose
+      // certificate does not carry the dialled name (bare-IP host — the very
+      // case pinning exists for) could never be recovered: the user pressed
+      // "Trust" and the next connection failed identically.
+      const identitySpy = vi.spyOn(tls, 'checkServerIdentity')
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [DNS_ONLY_FP],
+        tlsPinnedCertsPem: [DNS_ONLY_CERT],
+        servername: 'smtp.gmail.com',
+      })
+
+      const cert = {
+        fingerprint256: DNS_ONLY_FP,
+        subjectaltname: 'DNS:mail.example.test',
+      } as unknown as tls.PeerCertificate
+
+      expect(opts!.checkServerIdentity!('1.2.3.4', cert)).toBeUndefined()
+      // Not "the name happened to match": for an anchored leaf the name check
+      // is not reached at all. Guard against a future re-introduction.
+      expect(identitySpy).not.toHaveBeenCalled()
+    })
+
+    it('FINGERPRINT-ONLY pin + no matching name — REFUSED (renderer-writable pins may not redirect identity)', () => {
+      // The security boundary that makes the mode split necessary: `tls:addPin`
+      // is a plain renderer IPC channel with no trust-offer gate, so a
+      // compromised renderer can choose this fingerprint. Skipping the name
+      // check for it would turn a pin from a narrowing of trust into a
+      // REDIRECTION of it — any CA-valid certificate whose fingerprint the
+      // renderer wrote would be accepted as this mail host.
       const pin = 'AA:BB:CC:DD'
       const opts = buildTlsOptions({
         tlsPinsSha256: [pin],
@@ -426,11 +522,95 @@ describe('packages/net/tls', () => {
 
       const cert = {
         fingerprint256: pin,
-        subjectaltname: 'DNS:other.example.com',
+        subjectaltname: 'DNS:attacker.example.com',
       } as unknown as tls.PeerCertificate
 
       const err = opts!.checkServerIdentity!('1.2.3.4', cert)
       expect(err).toBeInstanceOf(Error)
+      expect(err!.message).toMatch(/altnames|subject/i)
+      expect(isTlsTrustError(err)).toBe(true)
+    })
+
+    it('FINGERPRINT-ONLY pin + matching name — accepted (pin narrows, it does not block)', () => {
+      const pin = 'AA:BB:CC:DD'
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [pin],
+        servername: 'smtp.gmail.com',
+      })
+
+      const cert = {
+        fingerprint256: pin,
+        subjectaltname: 'DNS:smtp.gmail.com',
+      } as unknown as tls.PeerCertificate
+
+      expect(opts!.checkServerIdentity!('1.2.3.4', cert)).toBeUndefined()
+    })
+
+    it('MIXED endpoint — the anchor privilege belongs to the anchored leaf only', () => {
+      // One anchored pin (recovery dialog) plus one fingerprint-only pin
+      // (Settings) on the same endpoint. A per-endpoint "has anchors" flag
+      // would hand the anchored certificate's privilege to the renderer-chosen
+      // one; the discriminator is therefore per presented certificate.
+      const rendererPin = 'AA:BB:CC:DD'
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [DNS_ONLY_FP, rendererPin],
+        tlsPinnedCertsPem: [DNS_ONLY_CERT],
+        servername: 'smtp.gmail.com',
+      })
+
+      // Anchored leaf → accepted despite naming a different host.
+      const anchored = {
+        fingerprint256: DNS_ONLY_FP,
+        subjectaltname: 'DNS:mail.example.test',
+      } as unknown as tls.PeerCertificate
+      expect(opts!.checkServerIdentity!('1.2.3.4', anchored)).toBeUndefined()
+
+      // Fingerprint-only leaf on the SAME endpoint → still name-checked.
+      const fingerprintOnly = {
+        fingerprint256: rendererPin,
+        subjectaltname: 'DNS:attacker.example.com',
+      } as unknown as tls.PeerCertificate
+      const err = opts!.checkServerIdentity!('1.2.3.4', fingerprintOnly)
+      expect(err).toBeInstanceOf(Error)
+      expect(err!.message).toMatch(/altnames|subject/i)
+    })
+
+    it('unparsable stored anchor grants no identity — falls back to the name check', () => {
+      // Corrupt pin row (packages/db validates on write, so this is a
+      // repair-path). It must degrade to hostname-checked, never to "anchored".
+      const pin = 'AA:BB:CC:DD'
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [pin],
+        tlsPinnedCertsPem: ['-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n'],
+        servername: 'smtp.gmail.com',
+      })
+
+      const cert = {
+        fingerprint256: pin,
+        subjectaltname: 'DNS:attacker.example.com',
+      } as unknown as tls.PeerCertificate
+
+      expect(opts!.checkServerIdentity!('1.2.3.4', cert)).toBeInstanceOf(Error)
+    })
+
+    it('name matches but the pin does NOT — still refused as a pin mismatch', () => {
+      // The other half of the inversion: relaxing the NAME check must not
+      // relax the FINGERPRINT check. Server-side rotation therefore keeps
+      // failing closed and re-raises the recovery dialog.
+      const opts = buildTlsOptions({
+        tlsPinsSha256: ['AA:BB:CC:DD'],
+        servername: 'smtp.gmail.com',
+      })
+
+      const rotated = {
+        fingerprint256: '11:22:33:44',
+        subjectaltname: 'DNS:smtp.gmail.com',
+      } as unknown as tls.PeerCertificate
+
+      const err = opts!.checkServerIdentity!('1.2.3.4', rotated)
+      expect(err).toBeInstanceOf(Error)
+      expect(err!.message).toContain('TLS pin mismatch')
+      expect(isTlsTrustError(err)).toBe(true)
     })
   })
 
@@ -505,15 +685,21 @@ describe('packages/net/tls', () => {
       expect(isTlsTrustError(r.error)).toBe(true)
     })
 
-    it('pinned + matching pin + WRONG servername → handshake REJECTED', async () => {
+    it('pinned + matching pin + servername the certificate does not name → handshake SUCCEEDS', async () => {
+      // Behaviour change (P0 fix for the §2.52 regression): on the pinned path
+      // the confirmed leaf IS the identity. A name that the certificate does
+      // not carry no longer rejects it — otherwise "Trust this certificate"
+      // could never fix an endpoint addressed by IP or by a name absent from
+      // the certificate, which is precisely what the recovery flow is for.
+      // Chain verification and fingerprint equality are untouched.
       const opts = buildTlsOptions({
         tlsPinsSha256: [SELF_SIGNED_FP],
         tlsPinnedCertsPem: [SELF_SIGNED_CERT],
         servername: 'not-the-pinned-host.example',
       })!
       const r = await handshake(opts)
-      expect(r.ok).toBe(false)
-      expect(isTlsTrustError(r.error)).toBe(true)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
     })
 
     it('pinned WITHOUT the certificate PEM → self-signed server fails CLOSED', async () => {
@@ -533,6 +719,123 @@ describe('packages/net/tls', () => {
       const opts = buildTlsOptions({ servername: 'localhost' })!
       const r = await handshake(opts)
       expect(r.ok).toBe(false)
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+  })
+
+  // ─── REGRESSION: account addressed by bare IP, certificate names domains ───
+  //
+  // The reported P0: `ERR_TLS_CERT_ALTNAME_INVALID: … IP: 31.31.197.22 is not
+  // in the cert's list`. The user accepted the certificate in the recovery
+  // dialog, the pin was stored — and the very same error came back, because
+  // the pinned callback ran the name check first and returned before the
+  // fingerprint was ever compared.
+  //
+  // Served over a real handshake on 127.0.0.1 with NO `servername`, so Node
+  // verifies the identity against the IP literal exactly as it does in
+  // production for an IP-addressed account.
+
+  describe('bare-IP endpoint whose certificate carries no IP SAN', () => {
+    let server: tls.Server
+    let port: number
+
+    beforeEach(async () => {
+      __resetCombinedCaCacheForTest()
+      server = tls.createServer({ key: DNS_ONLY_KEY, cert: DNS_ONLY_CERT }, (socket) => {
+        socket.end('OK\r\n')
+      })
+      server.on('tlsClientError', () => {})
+      server.on('error', () => {})
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      port = (server.address() as net.AddressInfo).port
+    })
+
+    afterEach(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      __resetCombinedCaCacheForTest()
+    })
+
+    /** Dial by IP literal, no servername — the production shape of the bug. */
+    function handshakeByIp(opts: tls.ConnectionOptions): Promise<{ ok: boolean; error?: Error }> {
+      return new Promise((resolve) => {
+        let settled = false
+        const done = (r: { ok: boolean; error?: Error }) => {
+          if (settled) return
+          settled = true
+          try { socket.destroy() } catch { /* ignore */ }
+          resolve(r)
+        }
+        const socket = tls.connect({ host: '127.0.0.1', port, ...opts }, () => done({ ok: true }))
+        socket.once('error', (e: Error) => done({ ok: false, error: e }))
+        socket.setTimeout(5_000, () => done({ ok: false, error: new Error('handshake timeout') }))
+      })
+    }
+
+    it('NOT pinned → still rejected for the name mismatch (unpinned path unchanged)', async () => {
+      // The certificate is handed to OpenSSL as a trust anchor so the chain
+      // verifies and the ONLY possible failure is the identity check — that is
+      // what makes this a control for the pinned test below rather than a
+      // re-test of chain verification. `ca` is the sole substitution; the
+      // rest of the object is what buildTlsOptions produces for an unpinned
+      // endpoint (rejectUnauthorized: true, no checkServerIdentity override).
+      const unpinned = buildTlsOptions({})!
+      expect(unpinned.checkServerIdentity).toBeUndefined()
+      const r = await handshakeByIp({ ...unpinned, ca: [DNS_ONLY_CERT] })
+      expect(r.ok).toBe(false)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    it('pinned to this exact certificate → handshake SUCCEEDS despite the name mismatch', async () => {
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [DNS_ONLY_FP],
+        tlsPinnedCertsPem: [DNS_ONLY_CERT],
+      })!
+      const r = await handshakeByIp(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+    })
+
+    it('pinned by FINGERPRINT ONLY → still rejected for the name mismatch (the renderer-pin BLOCKER)', async () => {
+      // Models the attack the mode split closes: a compromised renderer writes
+      // a fingerprint through `tls:addPin` (no trust-offer gate, no PEM) for a
+      // certificate that IS publicly valid — here simulated by handing that
+      // certificate to OpenSSL as a root, which is what a real CA-issued
+      // attacker certificate amounts to. Chain verification therefore passes
+      // and the only thing standing between the user and a MITM is this
+      // hostname check.
+      const opts = buildTlsOptions({ tlsPinsSha256: [DNS_ONLY_FP] })!
+      const r = await handshakeByIp({ ...opts, ca: [...(opts.ca ?? []), DNS_ONLY_CERT] })
+      expect(r.ok).toBe(false)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    it('MIXED endpoint over a real handshake — a fingerprint-only leaf borrows nothing from the anchored one', async () => {
+      // Anchored pin for one certificate + fingerprint-only pin for another,
+      // on the same endpoint. The server presents the fingerprint-only one.
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP, DNS_ONLY_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+      })!
+      const r = await handshakeByIp({ ...opts, ca: [...(opts.ca ?? []), DNS_ONLY_CERT] })
+      expect(r.ok).toBe(false)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
+    })
+
+    it('pinned to a DIFFERENT certificate → rejected as a pin mismatch, not as a name mismatch', async () => {
+      // Server-side rotation while the host is addressed by IP: both failures
+      // apply, and the pin verdict must be the one reported — it is the reason
+      // the connection is refused, and it is what re-raises the recovery
+      // dialog for the new certificate.
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT, DNS_ONLY_CERT],
+      })!
+      const r = await handshakeByIp(opts)
+      expect(r.ok).toBe(false)
+      expect(r.error?.message).toContain('TLS pin mismatch')
+      expect(r.error?.message).toContain(DNS_ONLY_FP)
       expect(isTlsTrustError(r.error)).toBe(true)
     })
   })

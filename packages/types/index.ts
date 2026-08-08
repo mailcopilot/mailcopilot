@@ -5,6 +5,8 @@ export type {
   AutoconfigResult,
   AccountMeta,
   Identity,
+  OAuthConnectStage,
+  OAuthProgress,
 } from './account'
 
 export type {

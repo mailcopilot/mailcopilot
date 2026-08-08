@@ -1,10 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { AttachmentMeta, MailSummary, MessageDetails } from '../../packages/net/types'
 import {
   sanitizeMailHtml,
-  normalizeCid,
   replaceCidImages,
-  extractCidsFromHtml,
   extractExternalImageUrls,
   replaceExternalImages,
   buildExternalImageReplacementMap,
@@ -13,6 +11,11 @@ import {
 } from '../utils/mail'
 import { rewriteMailHtmlLinks } from '../utils/mailLinks'
 import { collapseQuotedText } from '@mailcopilot/core'
+import {
+  selectCidPartsToInline,
+  selectPartsToHide,
+  type ResolvedCidPart,
+} from '@mailcopilot/core/cidRefs'
 
 /**
  * Parameters for {@link useMailIframeDoc}.
@@ -62,6 +65,22 @@ export interface UseMailIframeDocReturn {
    * {@link doc}, so no double-parse.
    */
   hasExternalImages: boolean
+  /**
+   * The attachments whose chip the list drops — nothing more is claimed. A part
+   * is in here only when all four §2.128 conditions hold: it carries a `cid`,
+   * its disposition is explicitly `inline`, that `cid` is written in an
+   * `<img src>` / `<input type=image src>` position of the sanitized body, and
+   * this hook fetched its bytes and substituted them into the body.
+   *
+   * Everything else keeps its chip, including a part the body draws from a CSS
+   * background — one redundant chip is cheap, an unreachable file is not.
+   *
+   * Empty until the substitution finishes, so the only transition is
+   * shown → hidden: a failed fetch (offline, IPC error) leaves the chip in
+   * place, instead of hiding a file the body could not draw either. It is
+   * committed together with {@link doc}, so both land in the same render.
+   */
+  hiddenAttachments: AttachmentMeta[]
 }
 
 /**
@@ -178,19 +197,47 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
 
   const [doc, setDoc] = useState<string | null>(null)
   const [hasExternalImages, setHasExternalImages] = useState(false)
+  const [hiddenAttachments, setHiddenAttachments] = useState<AttachmentMeta[]>([])
+
+  /**
+   * The html the iframe will show, up to the point where it stops depending on
+   * IPC: lazy-load promotion + sanitize. Both steps are synchronous, so the
+   * inline-part decision below is available during render.
+   *
+   * It is deliberately the SANITIZED html: a `cid:` position DOMPurify removes
+   * (`<td background>`, a child of a forbidden element, …) is not drawn, and
+   * must therefore not be able to retire an attachment either.
+   */
+  const preparedHtml = useMemo(() => {
+    const raw = details?.html || ''
+    return raw ? sanitizeMailHtml(promoteLazyLoadAttrs(raw)) : ''
+  }, [details?.html])
+
+  /**
+   * The parts to fetch and substitute into the body. Broad on purpose — see
+   * `packages/core/cidRefs.ts`: this is the rendering question, and answering
+   * it too narrowly stops drawing images that render today. Which chips
+   * disappear is a different, much stricter question, answered after the fetch.
+   */
+  const cidPartsToInline = useMemo(
+    () => selectCidPartsToInline(details?.attachments, preparedHtml),
+    [details?.attachments, preparedHtml],
+  )
 
   useEffect(() => {
     let cancelled = false
     // Reset state at effect start so stale UI (previous email's srcdoc and
-    // banner) cannot show while the new email resolves.
+    // banner) cannot show while the new email resolves. Chips reset to "all
+    // shown": nothing has been substituted yet, so nothing may be hidden yet.
     setDoc(null)
     setHasExternalImages(false)
+    setHiddenAttachments([])
 
     if (!active || !details?.html) return () => { cancelled = true }
 
     const ctx = { accountId: active.accountId, folder: active.folder, uid: active.uid }
-    const rawHtml = details.html || ''
     const allowExternal = alwaysLoadImages || showExternalImages
+    // `preparedHtml` (above) already ran lazy-load promotion and sanitize.
     // Lazy-load attributes (data-src, data-original, data-srcset) are
     // normalized to their real counterparts UNCONDITIONALLY — regardless of
     // `allowExternal`. Rationale:
@@ -210,7 +257,6 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
     // promoted only when the element has no existing `src`. This avoids
     // creating duplicate `src=` attributes (non-deterministic parser
     // behavior) when a placeholder GIF is already present in `src`.
-    const normalizedRawHtml = promoteLazyLoadAttrs(rawHtml)
 
     const darkMode = theme === 'dark' && darkModeEmails
 
@@ -250,14 +296,9 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
       return urlToDataUri
     }
 
-    const inlineAtts = (details.attachments || [])
-      .filter(a => Boolean(a.cid) && (a.disposition || '').toLowerCase() === 'inline')
-      .slice(0, 25)
-
-    const hasCids = normalizedRawHtml.toLowerCase().includes('cid:') && inlineAtts.length > 0
-
     void (async () => {
-      // Sanitize FIRST. DOMPurify:
+      // Sanitize already happened in `preparedHtml` — BEFORE any replacement.
+      // DOMPurify:
       //   - drops dangerous tags (script, iframe, <image>, <base>, <meta>,
       //     <video>, <audio>, <feImage>)
       //   - drops dangerous attrs (on*, background)
@@ -266,33 +307,54 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
       // Running sanitize AFTER replace would re-introduce decoded-entity
       // bypasses (e.g. `src="https&#58;//…"` would survive the extractor and
       // then be decoded by DOMPurify straight into the iframe DOM).
-      let html = sanitizeMailHtml(normalizedRawHtml)
+      let html = preparedHtml
 
       // Replace CID images with data: URIs. `replaceCidImages` targets
       // `cid:<id>` tokens regardless of attribute context and is not a source
       // of external-URL leakage.
-      if (hasCids) {
-        const inlineByCid = new Map<string, AttachmentMeta>()
-        for (const a of inlineAtts) {
-          const cid = a.cid ? normalizeCid(a.cid) : ''
-          if (cid && !inlineByCid.has(cid)) inlineByCid.set(cid, a)
-        }
-        const cids = extractCidsFromHtml(html).slice(0, 25)
-        const cidToDataUri: Record<string, string> = {}
-        await Promise.all(cids.map(async (cid) => {
-          const att = inlineByCid.get(cid)
-          if (!att) return
+      //
+      // `substituted` collects the parts whose bytes actually arrived — §2.128
+      // condition 4. A part whose fetch failed is NOT in it, so it keeps its
+      // chip: the body shows a broken image, and the file has to stay reachable
+      // from somewhere.
+      let substituted: ResolvedCidPart<AttachmentMeta>[] = []
+      if (cidPartsToInline.length > 0) {
+        // A `Map`, not an object literal: the key is the sender's `Content-ID`,
+        // and an object's key space is not made of data. `obj['__proto__'] = uri`
+        // hits the inherited setter, creates no own property, and
+        // `replaceCidImages` (which walks own properties) never sees the pair —
+        // the image is not substituted, while the code below would have counted
+        // the part as substituted and dropped its chip. A message with
+        // `Content-ID: <__proto__>` plus `<img src="cid:__proto__">` thus removed
+        // a real attachment from the list without drawing it anywhere.
+        const cidToDataUri = new Map<string, string>()
+        await Promise.all(cidPartsToInline.map(async (entry) => {
+          const att = entry.attachment
           try {
             const resp = await window.api.invoke('net:attachmentBase64', ctx.accountId, ctx.folder, ctx.uid, att.part) as
               | { ok: true; contentBase64: string; contentType?: string }
               | { ok: false; error?: string }
             if (!resp || !resp.ok) return
             const ct = (att.contentType || resp.contentType || 'application/octet-stream').trim() || 'application/octet-stream'
-            cidToDataUri[cid] = `data:${ct};base64,${resp.contentBase64}`
+            cidToDataUri.set(entry.cid, `data:${ct};base64,${resp.contentBase64}`)
           } catch { /* ignore */ }
         }))
+        // Condition 4 is read off the very container the substitution consumes,
+        // rather than recorded as each fetch returns: a part counts as
+        // substituted exactly when `replaceCidImages` will find a data URI under
+        // its cid. Bookkeeping kept beside the write asserts an intention — that
+        // the write landed — and that intention is what failed here, with the
+        // chip disappearing for an image the body never received.
+        // A truthy value, not just presence of the key: `replaceCidImages` skips
+        // an empty data URI, so an empty one would not substitute either.
+        substituted = cidPartsToInline.filter(entry => Boolean(cidToDataUri.get(entry.cid)))
         html = replaceCidImages(html, cidToDataUri)
       }
+
+      // Conditions 2 and 3 on top of what really got substituted, against the
+      // html the substitution ran on (`preparedHtml` still carries the `cid:`
+      // tokens; `html` no longer does).
+      const hidden = selectPartsToHide(substituted, preparedHtml)
 
       // Extract EVERY external URL up-front — we must account for all of them
       // in the final DOM whether the fetch succeeds, fails, or is skipped
@@ -327,15 +389,23 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
       // <details>/<summary> so no JS injection is required in the iframe.
       const safeBody = collapseQuotedText(linkedHtml, 'html', { label: quotedTextLabel })
       const out = buildMailIframeSrcDoc(safeBody, { darkMode })
-      if (!cancelled) setDoc(out)
+      // One commit: the body and the chip row change in the same render, so a
+      // chip never blinks out ahead of the image that replaced it.
+      if (!cancelled) {
+        setHiddenAttachments(hidden)
+        setDoc(out)
+      }
     })()
 
     return () => { cancelled = true }
-    // details.attachments / details.html are the granular deps — anything
-    // else inside `details` (text body, flags, envelope) does not affect the
-    // srcdoc. Keeping the dep list tight avoids redundant pipeline reruns on
-    // unrelated detail updates.
-  }, [active, alwaysLoadImages, darkModeEmails, details?.attachments, details?.html, quotedTextLabel, showExternalImages, theme])
+    // `preparedHtml` and `cidPartsToInline` are memoized from details.html /
+    // details.attachments, so they are the granular deps — anything else inside
+    // `details` (text body, flags, envelope) does not affect the srcdoc.
+    // Keeping the dep list tight avoids redundant pipeline reruns on unrelated
+    // detail updates. `details?.html` stays in the list because the early
+    // return above branches on it (an html body that sanitizes to an empty
+    // string still produces a srcdoc).
+  }, [active, alwaysLoadImages, cidPartsToInline, darkModeEmails, details?.html, preparedHtml, quotedTextLabel, showExternalImages, theme])
 
-  return { doc, hasExternalImages }
+  return { doc, hasExternalImages, hiddenAttachments }
 }

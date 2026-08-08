@@ -23,6 +23,11 @@ const i18nMap: Record<string, string> = {
   'invite.cancelled': 'This event has been cancelled',
   'invite.notActionable': 'This is not an actionable invitation',
   'invite.originalTimezone': 'Originally scheduled in {{tzid}}',
+  // §2.127 closed error vocabulary.
+  'app.errors.presented.offline': 'No connection to the mail server. MailCopilot will keep retrying.',
+  'app.errors.presented.timeout': 'The mail server did not respond in time. MailCopilot will keep retrying.',
+  'app.errors.presented.auth': 'Sign-in was rejected. Check the account password, or re-authorize the account in Settings.',
+  'app.errors.presented.unknown': 'Could not complete the request. Please try again.',
 }
 
 const stableT = (key: string, opts?: Record<string, unknown>): string => {
@@ -564,6 +569,54 @@ describe('InviteCard', () => {
       const valueSpan = whenRow?.querySelector('.invite-meta-value')
       const text = valueSpan?.textContent ?? ''
       expect(text).not.toContain('–')
+    })
+  })
+
+  // §2.127 — an RSVP send crosses the SMTP path, so the interesting failure
+  // modes are exactly the ones the closed vocabulary names. The rejection text
+  // is attacker-influenceable (it can quote an SMTP server response) and is no
+  // longer rendered.
+  describe('RSVP failure presentation (§2.127)', () => {
+    it('shows the offline sentence when the IPC rejection carries the offline tag', async () => {
+      mockInvoke.mockRejectedValueOnce(
+        new Error("[mcerr:offline] Error invoking remote method 'mail:rsvpInvite': AggregateError"),
+      )
+      render(<InviteCard {...makeProps()} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('invite-btn-accept'))
+      })
+
+      const banner = screen.getByTestId('invite-error')
+      expect(banner).toHaveTextContent('No connection to the mail server')
+      expect(banner.textContent).not.toContain('mcerr')
+      expect(banner.textContent).not.toContain('AggregateError')
+    })
+
+    it('shows the auth sentence when the rejection carries the auth tag', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('[mcerr:auth] 535 5.7.8 Bad credentials'))
+      render(<InviteCard {...makeProps()} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('invite-btn-decline'))
+      })
+
+      const banner = screen.getByTestId('invite-error')
+      expect(banner).toHaveTextContent('Sign-in was rejected')
+      expect(banner.textContent).not.toContain('Bad credentials')
+    })
+
+    it('falls back to the generic sentence for an untagged rejection', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('something went sideways'))
+      render(<InviteCard {...makeProps()} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('invite-btn-accept'))
+      })
+
+      const banner = screen.getByTestId('invite-error')
+      expect(banner).toHaveTextContent('Could not complete the request')
+      expect(banner.textContent).not.toContain('sideways')
     })
   })
 })

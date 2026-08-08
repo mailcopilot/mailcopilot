@@ -42,7 +42,16 @@ const i18nMap: Record<string, string> = {
   'ai.chips.scopeEmail': 'Действия с письмом',
   'ai.errors.authCheck': 'Ошибка проверки авторизации',
   'ai.errors.errorPrefix': 'Ошибка',
+  // §2.127 closed vocabulary — the only error sentences the panel may render
+  // for a failed IPC call.
+  'app.errors.presented.auth': 'Вход отклонён',
+  'app.errors.presented.unknown': 'Не удалось выполнить запрос',
   'ai.errors.invalidKey': 'Неверный ключ',
+  // §2.122 — the three storage outcomes the panel must keep apart.
+  'ai.errors.noKey': 'Ключ не задан, введите его',
+  'ai.errors.keyMissing': 'Ключ был сохранён, но не найден — введите заново',
+  'ai.errors.storeUnavailable': 'Хранилище ключей не ответило; проверить ключ не удалось',
+  'ai.errors.changeProvider': 'Сменить провайдер',
   'ai.errors.noSubscription': 'Нет подписки',
   'ai.errors.notConfigured': 'Не настроено',
   'ai.prompts.summarize': 'Суммируй это письмо',
@@ -134,6 +143,21 @@ import React from 'react'
 // between tests so the 500ms result cache doesn't hide duplicate calls
 // across `it` blocks.
 import { __resetForTests as resetSingleFlight } from '../utils/ipcSingleFlight'
+import enLocale from '../i18n/locales/en.json'
+import ruLocale from '../i18n/locales/ru.json'
+import frLocale from '../i18n/locales/fr.json'
+import deLocale from '../i18n/locales/de.json'
+import esLocale from '../i18n/locales/es.json'
+import itLocale from '../i18n/locales/it.json'
+
+const LOCALES: Record<string, Record<string, unknown>> = {
+  en: enLocale as unknown as Record<string, unknown>,
+  ru: ruLocale as unknown as Record<string, unknown>,
+  fr: frLocale as unknown as Record<string, unknown>,
+  de: deLocale as unknown as Record<string, unknown>,
+  es: esLocale as unknown as Record<string, unknown>,
+  it: itLocale as unknown as Record<string, unknown>,
+}
 
 function renderPanel(props: Partial<AiPanelProps> = {}) {
   const defaults: AiPanelProps = {
@@ -241,6 +265,59 @@ describe('AiPanel', () => {
       await act(async () => { renderPanel({ aiProvider: undefined }) })
       expect(screen.getByText('Настроить')).toBeInTheDocument()
     })
+
+    // §2.127 — electron/ipc.ts tags every rejection that crosses the boundary
+    // with `[mcerr:<key>] `; this catch used to store String(e) as the auth
+    // error detail, so the tag (and the CLI's own words) reached the screen as
+    // soon as a provider was selected.
+    it('keeps the machine tag and CLI text out of the auth error detail', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const onSettingsChange = vi.fn()
+      let checkAuthCalls = 0
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') {
+          checkAuthCalls += 1
+          if (checkAuthCalls === 1) {
+            return Promise.reject(new Error("[mcerr:auth] Error invoking remote method 'ai:checkAuth': credentials rejected by claude CLI"))
+          }
+          // Never settles: keeps the error recorded by the click on screen.
+          return new Promise(() => {})
+        }
+        if (channel === 'aiSession:list') return Promise.resolve([])
+        return Promise.resolve()
+      })
+
+      let view!: ReturnType<typeof renderPanel>
+      await act(async () => { view = renderPanel({ aiProvider: undefined, onSettingsChange }) })
+
+      const subscriptionBtn = screen.getByText('Подписка Claude').closest('button')!
+      await act(async () => { fireEvent.click(subscriptionBtn) })
+
+      // A failed check must not switch the provider.
+      expect(onSettingsChange).not.toHaveBeenCalledWith('aiProvider', 'subscription')
+
+      // Once a provider is configured the recorded status becomes visible.
+      await act(async () => {
+        const configured: AiPanelProps = {
+          open: true,
+          onClose: vi.fn(),
+          contextType: null,
+          contextData: null,
+          aiProvider: 'subscription',
+          aiPrivacyConsent: true,
+          aiSendOnEnter: true,
+          onSettingsChange,
+        }
+        view.rerender(React.createElement(AiPanel, configured))
+      })
+
+      expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
+      expect(screen.getByText('Вход отклонён')).toBeInTheDocument()
+      expect(document.body.textContent).not.toContain('mcerr')
+      expect(document.body.textContent).not.toContain('credentials rejected')
+      expect(consoleError).toHaveBeenCalled()
+      consoleError.mockRestore()
+    })
   })
 
   // --- Privacy ---
@@ -295,6 +372,138 @@ describe('AiPanel', () => {
       await act(async () => { renderPanel() })
       expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
       expect(screen.getByText('Нет подписки')).toBeInTheDocument()
+    })
+
+    // --- §2.122: "no key" and "cannot read the store" are not "wrong key" ---
+
+    it('shows "key is not set" on no_key, not "invalid key"', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_key' })
+        if (channel === 'settings:get') return Promise.resolve({ aiApiKeySaved: {} })
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
+      expect(screen.getByText('Ключ не задан, введите его')).toBeInTheDocument()
+      expect(screen.queryByText('Неверный ключ')).toBeNull()
+    })
+
+    it('shows "was saved but is gone" on no_key when settings say a key was saved', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_key' })
+        if (channel === 'settings:get') return Promise.resolve({ aiApiKeySaved: { 'anthropic-api': true } })
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByText('Ключ был сохранён, но не найден — введите заново')).toBeInTheDocument()
+    })
+
+    it('falls back to the neutral no_key wording when the saved marker is unreadable', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_key' })
+        if (channel === 'settings:get') return Promise.reject(new Error('settings unavailable'))
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByText('Ключ не задан, введите его')).toBeInTheDocument()
+    })
+
+    it('shows "key store unavailable" on store_unavailable and does not read the saved marker', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'store_unavailable' })
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
+      expect(screen.getByText('Хранилище ключей не ответило; проверить ключ не удалось')).toBeInTheDocument()
+      expect(screen.queryByText('Неверный ключ')).toBeNull()
+      // The store's own verdict is unknown here — nothing about a stored key
+      // may be claimed, so the marker is not even consulted.
+      expect(mockInvoke).not.toHaveBeenCalledWith('settings:get')
+    })
+
+    // REGRESSION GUARD (§2.122) — "Change provider" deleted the API keys of ALL
+    // three providers: it invoked `ai:deleteApiKey` with no argument, which the
+    // main process read as "delete everything", with no confirmation. Switching
+    // providers is a settings change and nothing else.
+    it('"change provider" never deletes a key', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'invalid_key' })
+        return Promise.resolve()
+      })
+      const onSettingsChange = vi.fn()
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api', onSettingsChange }) })
+      await act(async () => { fireEvent.click(screen.getByText('Сменить провайдер')) })
+
+      expect(onSettingsChange).toHaveBeenCalledWith('aiProvider', '')
+      expect(mockInvoke).not.toHaveBeenCalledWith('ai:deleteApiKey')
+      expect(mockInvoke).not.toHaveBeenCalledWith('ai:deleteApiKey', expect.anything())
+      // Back to onboarding, so switching back to this provider is one click and
+      // the key it left behind is still usable.
+      expect(screen.getByTestId('ai-onboarding')).toBeInTheDocument()
+    })
+
+    // §2.122 — the open-effect gained a `cancelled` flag + cleanup this task,
+    // guarding BOTH `setAuthStatus` and the new `setKeyPreviouslySaved` write
+    // against a stale `ai:checkAuth` resolving after the provider changed.
+    // Without it, quickly switching providers could let an in-flight check for
+    // the OLD provider land after the NEW provider's check already resolved,
+    // silently reverting an authenticated panel back to an auth-error screen.
+    it('drops a stale checkAuth result for a provider the panel already switched away from', async () => {
+      let resolveAnthropic!: (v: unknown) => void
+      const anthropicPending = new Promise((res) => { resolveAnthropic = res })
+
+      mockInvoke.mockImplementation((channel: string, ...args: unknown[]) => {
+        if (channel === 'ai:checkAuth') {
+          if (args[0] === 'anthropic-api') return anthropicPending
+          if (args[0] === 'openai-api') return Promise.resolve({ status: 'authenticated' })
+        }
+        if (channel === 'settings:get') return Promise.resolve({ aiApiKeySaved: {} })
+        return Promise.resolve()
+      })
+
+      let view!: ReturnType<typeof renderPanel>
+      await act(async () => { view = renderPanel({ aiProvider: 'anthropic-api' }) })
+      // The anthropic-api check is still pending — no verdict yet either way
+      // (authStatus is still null, so the panel optimistically renders the
+      // composer rather than the auth-error screen).
+      expect(screen.queryByTestId('ai-auth-error')).toBeNull()
+
+      // Switch providers before the anthropic-api check settles. This unmounts
+      // the old effect (cancelled=true in its closure) and starts a fresh one
+      // for openai-api, which resolves immediately as authenticated.
+      await act(async () => {
+        const configured: AiPanelProps = {
+          open: true,
+          onClose: vi.fn(),
+          contextType: null,
+          contextData: null,
+          aiProvider: 'openai-api',
+          aiPrivacyConsent: true,
+          aiSendOnEnter: true,
+          onSettingsChange: vi.fn(),
+        }
+        view.rerender(React.createElement(AiPanel, configured))
+      })
+      expect(screen.getByTestId('ai-input')).toBeInTheDocument()
+
+      // Now the STALE anthropic-api promise resolves with a "no_key" verdict.
+      // If the cleanup guard is missing, this clobbers the authenticated
+      // openai-api view with an auth-error screen for a provider the user is
+      // no longer even looking at.
+      await act(async () => {
+        resolveAnthropic({ status: 'no_key' })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(screen.queryByTestId('ai-auth-error')).toBeNull()
+      expect(screen.getByTestId('ai-input')).toBeInTheDocument()
     })
   })
 
@@ -1715,4 +1924,33 @@ describe('AiPanel', () => {
       expect(body.contains(confirmBlock)).toBe(false)
     })
   })
+})
+
+// ---------------------------------------------------------------------------
+// §2.122 — what the `store_unavailable` copy is allowed to claim.
+//
+// The verdict means the OS key store did not answer, so the existence of a key
+// is UNKNOWN (see `AuthStatus` in electron/services/ai.ts). The copy used to
+// say "your key is still there", which is our guess presented as fact: the
+// truth about the keychain belongs to the OS, not to us (CLAUDE.md §5 "who owns
+// the truth"). We may state what we did — nothing — and that we cannot check.
+// ---------------------------------------------------------------------------
+describe('ai.errors.storeUnavailable — i18n claims', () => {
+  const CANNOT_CHECK_MARKER: Record<string, string> = {
+    en: 'cannot check',
+    ru: 'не можем проверить',
+    fr: 'ne pouvons pas vérifier',
+    de: 'nicht prüfen',
+    es: 'no podemos comprobar',
+    it: 'non possiamo verificare',
+  }
+
+  it.each(Object.keys(CANNOT_CHECK_MARKER))(
+    '%s says the key cannot be checked rather than claiming it is there',
+    (lang) => {
+      const locale = LOCALES[lang]
+      const errors = (locale.ai as Record<string, Record<string, string>>).errors
+      expect(errors.storeUnavailable.toLowerCase()).toContain(CANNOT_CHECK_MARKER[lang])
+    },
+  )
 })

@@ -1,3 +1,10 @@
+// Load `.env` from the repository root into process.env before anything below
+// reads it. Existing environment variables always win (dotenv never
+// overrides), so shell and CI values take precedence over the local file.
+// This is what makes `MAILCOPILOT_GOOGLE_CLIENT_ID` / `_SECRET` (and
+// SENTRY_DSN) available both to the `define` blocks and to the Electron
+// process spawned by `onstart` in dev.
+import 'dotenv/config'
 import { defineConfig, type Plugin } from 'vite'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -80,6 +87,16 @@ export default defineConfig(({ mode }) => ({
           define: {
             __SENTRY_DSN__: JSON.stringify(process.env.SENTRY_DSN || ''),
             __APP_VERSION__: JSON.stringify(process.env.npm_package_version || '0.0.0-dev'),
+            // Google OAuth Desktop client, baked in at build time. Injected
+            // into the MAIN bundle only — deliberately not into the renderer
+            // `define` above: the OAuth flow runs entirely in the main process
+            // (electron/googleOAuth.ts), so putting the credentials into the
+            // renderer bundle would widen their exposure surface (web context,
+            // DevTools, any future content-injection bug) for zero benefit.
+            // Empty when the build has no credentials — Gmail sign-in then
+            // fails with an actionable message, everything else still works.
+            __GOOGLE_OAUTH_CLIENT_ID__: JSON.stringify(process.env.MAILCOPILOT_GOOGLE_CLIENT_ID || ''),
+            __GOOGLE_OAUTH_CLIENT_SECRET__: JSON.stringify(process.env.MAILCOPILOT_GOOGLE_CLIENT_SECRET || ''),
           },
           build: {
             sourcemap: sentryUploadEnabled ? 'hidden' : false,
@@ -93,6 +110,11 @@ export default defineConfig(({ mode }) => ({
               entry: {
                 main: 'electron/main.ts',
                 'search-worker': 'electron/search-worker.ts',
+                // §2.124 — off-main-thread MIME parsing. Emitted next to
+                // main*.cjs so packages/net/emlWorkerClient.ts can resolve it
+                // as `path.join(__dirname, 'eml-parse-worker.js')`, the same
+                // arrangement search-worker.js already uses.
+                'eml-parse-worker': 'packages/net/emlParseWorker.ts',
               },
               formats: ['cjs'],
               fileName: (_format, entryName) => `${entryName}.js`,
@@ -117,7 +139,11 @@ export default defineConfig(({ mode }) => ({
     }),
   ],
   test: {
-    exclude: ['tests/e2e/**', 'tests/integration/**', 'node_modules/**', 'docs/**'],
+    // `scripts/**` holds `node:test` suites (run by `npm run test:scripts`), not vitest ones.
+    // Vitest still imports them while collecting, reports "(0 test)" and tears the worker down
+    // without awaiting their bodies — so their side effects (real child processes, temp dirs)
+    // keep running unmanaged and leak. Keep them out of vitest entirely.
+    exclude: ['tests/e2e/**', 'tests/integration/**', 'node_modules/**', 'docs/**', 'scripts/**'],
     coverage: {
       provider: 'v8',
       include: [

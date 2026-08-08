@@ -68,17 +68,22 @@ Para mas detalles, consulte [Datos de IA y registro de auditoria](./privacy/ai-d
 
 ## Como actualizar MailCopilot?
 
-De forma predeterminada, MailCopilot **no** descarga las actualizaciones automaticamente. Cuando se detecta una nueva version, aparece un boton **Descargar X.Y.Z** en **Configuracion > Acerca de**. Hagale clic para iniciar la descarga y, cuando finalice, haga clic en **Reiniciar para instalar**.
+De forma predeterminada, MailCopilot **no** descarga las actualizaciones automaticamente. Cuando se detecta una nueva version, aparece un boton **Descargar X.Y.Z** en **Configuración > Acerca de**. Hagale clic para iniciar la descarga y, cuando finalice, haga clic en **Reiniciar para instalar**.
 
-Para comprobar manualmente en cualquier momento, abra **Configuracion > Acerca de** y haga clic en **Buscar actualizaciones**.
+Para comprobar manualmente en cualquier momento, abra **Configuración > Acerca de** y haga clic en **Buscar actualizaciones**.
 
-Para activar la descarga automatica en segundo plano, abra **Configuracion > Acerca de** y marque **Descargar actualizaciones automaticamente en segundo plano**. Cuando esta opcion esta activada, las nuevas versiones se descargan silenciosamente y se le pide que reinicie cuando la actualizacion este lista.
+Para activar la descarga automatica en segundo plano, abra **Configuración > Acerca de** y marque **Descargar automáticamente las actualizaciones en segundo plano**. Cuando esta opcion esta activada, las nuevas versiones se descargan silenciosamente y se le pide que reinicie cuando la actualizacion este lista.
 
-Si MailCopilot fue instalado para todo el sistema (por ejemplo, mediante un gestor de paquetes), la casilla de descarga automatica esta deshabilitada y los controles de descarga y reinicio no estan disponibles. Use su gestor de paquetes o privilegios de administrador para actualizar. El boton **Buscar actualizaciones** sigue funcionando en este modo.
+MailCopilot normalmente puede actualizarse a si mismo en cualquier plataforma que admite: una instalacion AppImage sustituye el propio archivo `.AppImage`, y una instalacion `.deb`/`.rpm`/pacman deja que el mecanismo de actualizacion intente la escritura solicitando privilegios de administrador (`pkexec`/`sudo`), del mismo modo que lo harian `apt`/`dnf`/`pacman` -- el resultado final lo deciden ese aviso de elevacion de privilegios y el gestor de paquetes, no MailCopilot.
+
+La autoactualizacion puede no estar disponible por dos motivos distintos, y MailCopilot muestra controles diferentes para cada uno:
+
+- **La compilacion no esta empaquetada** -- una compilacion de desarrollo o de CI. En ese caso no existe ningun mecanismo de actualizacion: el boton **Buscar actualizaciones** y el area de estado no aparecen, y en su lugar se muestra el aviso **"Las actualizaciones están desactivadas en esta compilación"**.
+- **La compilacion esta empaquetada, pero la autoactualizacion esta bloqueada** -- ya sea porque MailCopilot no pudo determinar la carpeta en la que deberia escribir la actualizacion in situ, o porque esa carpeta no admite escritura para su cuenta. El primer caso ocurre en Linux cuando la aplicacion no se ejecuta como un AppImage montado (por ejemplo, un AppImage extraido o una compilacion `linux-unpacked` sin empaquetar) -- en ese caso no hay ninguna carpeta en la que escribir. El segundo caso significa que la carpeta de un AppImage en ejecucion no admite escritura (una instalacion `.deb`/`.rpm`/pacman no se ve afectada, ya que estas elevan privilegios en su lugar); en Windows y macOS significa que la carpeta que contiene el ejecutable instalado no admite escritura. En ambos casos aparece una advertencia explicando el motivo, el boton **Buscar actualizaciones** sigue funcionando, y la casilla de descarga automatica sigue disponible -- pero los controles de descarga y reinicio se ocultan.
 
 ## Puedo desactivar las actualizaciones automaticas?
 
-La descarga automatica en segundo plano esta desactivada de forma predeterminada. Si ha activado la opcion **Descargar actualizaciones automaticamente en segundo plano** y desea desactivarla, abra **Configuracion > Acerca de** y desmarchela. MailCopilot le seguira notificando cuando haya una actualizacion disponible, pero la descarga no comenzara hasta que haga clic en **Descargar**.
+La descarga automatica en segundo plano esta desactivada de forma predeterminada. Si ha activado la opcion **Descargar automáticamente las actualizaciones en segundo plano** y desea desactivarla, abra **Configuración > Acerca de** y desmarchela. MailCopilot le seguira notificando cuando haya una actualizacion disponible, pero la descarga no comenzara hasta que haga clic en **Descargar**.
 
 ## MailCopilot no sincroniza.
 

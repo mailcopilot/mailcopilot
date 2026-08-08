@@ -20,7 +20,8 @@ vi.mock('../db', () => ({
   getMessageByUid: vi.fn().mockReturnValue(undefined),
 }))
 
-import { extractEmlAttachment, parseEmlBuffer } from './eml'
+import { extractEmlAttachment, parseEmlBuffer, parseEmlBufferInline } from './eml'
+import { EML_WORKER_MIN_BYTES } from './emlWorkerClient'
 import { extractIcsFromRawEml } from './message'
 
 describe('packages/net/eml', () => {
@@ -280,5 +281,100 @@ describe('packages/net/eml — linkify-it mailto: DoS regression (mailparser tex
 
     expect(details.text).toBeDefined()
     expect(elapsedMs).toBeLessThan(2000)
+  })
+})
+
+// §2.124 — the two shapes a large message can take. The cost of parsing was
+// measured to be driven by the MIME splitter's per-line event-loop yield, not
+// by attachment content, so both shapes must come back with identical
+// metadata whether the parse ran inline or in the worker (the worker calls
+// exactly `parseEmlBufferInline`). Under vitest no built worker exists, so
+// `parseEmlBuffer` resolves to the inline path and these specs compare the
+// dispatching wrapper against the implementation it dispatches to.
+describe('packages/net/eml — large-message shapes (§2.124)', () => {
+  const ATTACHMENT_BYTES = 200 * 1024
+
+  function oneBigAttachment(): Buffer {
+    const payload = Buffer.alloc(ATTACHMENT_BYTES, 0x41).toString('base64').replace(/(.{76})/g, '$1\r\n')
+    return Buffer.from([
+      'From: Alice <alice@example.com>',
+      'To: Bob <bob@example.com>',
+      'Subject: One big attachment',
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="B"',
+      '',
+      '--B',
+      'Content-Type: text/plain; charset="utf-8"',
+      '',
+      'See attached.',
+      '--B',
+      'Content-Type: application/octet-stream; name="big.bin"',
+      'Content-Disposition: attachment; filename="big.bin"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      payload,
+      '--B--',
+      '',
+    ].join('\r\n'), 'utf8')
+  }
+
+  function manySmallParts(count: number): Buffer {
+    const payload = Buffer.alloc(512, 0x42).toString('base64').replace(/(.{76})/g, '$1\r\n')
+    const parts: string[] = [
+      '--B\r\nContent-Type: text/html; charset="utf-8"\r\n\r\n<p>Gallery</p>\r\n',
+    ]
+    for (let i = 0; i < count; i++) {
+      parts.push(
+        '--B\r\n' +
+        'Content-Type: image/png\r\n' +
+        'Content-Transfer-Encoding: base64\r\n' +
+        `Content-ID: <img${i}@example.com>\r\n` +
+        `Content-Disposition: inline; filename="img${i}.png"\r\n\r\n${payload}\r\n`,
+      )
+    }
+    parts.push('--B--\r\n')
+    return Buffer.from([
+      'From: Alice <alice@example.com>',
+      'To: Bob <bob@example.com>',
+      'Subject: Many parts',
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/related; boundary="B"',
+      '',
+      '',
+    ].join('\r\n') + parts.join(''), 'utf8')
+  }
+
+  it('reads a message that is large because of a single attachment', async () => {
+    const raw = oneBigAttachment()
+    expect(raw.length).toBeGreaterThan(EML_WORKER_MIN_BYTES)
+
+    const details = await parseEmlBuffer(501, raw)
+
+    expect(details.uid).toBe(501)
+    expect(details.envelope?.subject).toBe('One big attachment')
+    expect(details.text?.trim()).toBe('See attached.')
+    expect(details.attachments?.length).toBe(1)
+    expect(details.attachments?.[0]?.filename).toBe('big.bin')
+    expect(details.attachments?.[0]?.contentType).toBe('application/octet-stream')
+    // Pre-existing gap, unchanged by §2.124 and asserted so a future change is
+    // deliberate: the streaming parse reports attachment metadata before the
+    // content stream has been drained, so `size` is never populated on the EML
+    // path — at any attachment size.
+    expect(details.attachments?.[0]?.size).toBeUndefined()
+    expect(details).toEqual(await parseEmlBufferInline(501, raw))
+  })
+
+  it('reads a message that is large because of many small parts', async () => {
+    const raw = manySmallParts(300)
+    expect(raw.length).toBeGreaterThan(EML_WORKER_MIN_BYTES)
+
+    const details = await parseEmlBuffer(502, raw)
+
+    expect(details.uid).toBe(502)
+    expect(details.envelope?.subject).toBe('Many parts')
+    expect(details.attachments?.length).toBe(300)
+    expect(details.attachments?.[0]?.cid).toBe('img0@example.com')
+    expect(details.attachments?.[299]?.filename).toBe('img299.png')
+    expect(details).toEqual(await parseEmlBufferInline(502, raw))
   })
 })

@@ -106,7 +106,13 @@
       "pin": "Error al fijar: {{error}}",
       "compose": "Error al crear: {{error}}",
       "attachment": "Error de archivo adjunto: {{error}}",
-      "openExternal": "Error al abrir el enlace: {{error}}"
+      "openExternal": "Error al abrir el enlace: {{error}}",
+      "presented": {
+        "offline": "Sin conexión con el servidor de correo. MailCopilot seguirá intentándolo.",
+        "timeout": "El servidor de correo no respondió a tiempo. MailCopilot seguirá intentándolo.",
+        "auth": "Inicio de sesión rechazado. Revisa la contraseña de la cuenta o vuelve a autorizarla en los ajustes.",
+        "unknown": "No se pudo completar la solicitud. Inténtalo de nuevo."
+      }
     },
     "authRecovery": {
       "googlePrompt": "La autorización de Google para {{account}} ha expirado. ¿Reconectar ahora?",
@@ -373,7 +379,9 @@
     },
     "attachments": {
       "download": "Descargar archivo adjunto",
-      "unnamed": "Archivo adjunto"
+      "unnamed": "Archivo adjunto",
+      "showMore": "Mostrar más ({{hidden}})",
+      "showLess": "Mostrar menos"
     },
     "list": {
       "filter": "Filtrar",
@@ -430,6 +438,14 @@
   "settings": {
     "title": "Configuración",
     "unsavedWarning": "Tiene cambios sin guardar. ¿Cerrar sin guardar?",
+    "aiDestination": {
+      "declinedTitle": "La dirección no ha cambiado",
+      "invalidTitle": "Dirección no aceptada",
+      "busyTitle": "Cambio de dirección no aplicado",
+      "unchangedFields": "Se sigue usando el valor anterior en: {{fields}}.",
+      "otherSettingsSaved": "Sus demás cambios de esta pantalla se guardaron.",
+      "retry": "Reintentar"
+    },
     "hint": "Personalice la apariencia y el comportamiento de la aplicación",
     "tabs": {
       "accounts": "Cuentas",
@@ -712,8 +728,9 @@
       "version": "Versión",
       "website": "Sitio web",
       "docs": "Documentación",
-      "sentryEnabled": "Enviar diagnósticos y datos de uso anónimos",
-      "sentryHint": "Incluye informes de fallos, métricas de rendimiento y eventos de uso anónimos (por ejemplo, qué funciones se utilizan). Nunca incluye el contenido de los mensajes, direcciones, asuntos o nombres de carpetas.",
+      "sentryEnabled": "Enviar diagnósticos y datos de uso",
+      "sentryHint": "Incluye informes de fallos, mediciones de rendimiento, eventos de uso (qué funciones se utilizan, qué proveedor y modelo de IA, el coste estimado de una petición) y un identificador aleatorio de la instalación que vincula sus sesiones. El contenido de los mensajes, los asuntos y los nombres de carpetas no se recopilan: nada de lo que se envía se compone de ellos, y las direcciones y las rutas de archivo se eliminan automáticamente del texto de error que devuelve su servidor de correo, en la medida en que se reconocen. La única dirección que se envía es la que usted escriba en el formulario de comentarios de abajo, para que puedan responderle.",
+      "sentryConsentPending": "Los diagnósticos permanecen desactivados mientras no se responda a la pregunta de consentimiento. MailCopilot lo preguntará una vez en el próximo inicio; hasta entonces este interruptor no tiene efecto.",
       "debugLogging": "Activar registro de depuración",
       "debugLoggingHint": "Escribe registros detallados en un archivo para la resolución de problemas. Los registros se almacenan localmente y nunca se envían automáticamente.",
       "system": {
@@ -736,7 +753,9 @@
         "title": "Actualizaciones",
         "autoDownload": "Descargar automáticamente las actualizaciones en segundo plano",
         "autoDownloadHint": "Si está activado, las nuevas versiones se descargan en silencio y se te pide reiniciar. Si está desactivado, tú decides si descargar cada actualización.",
-        "cannotSelfUpdateHint": "Esta instalación es de solo lectura (instalación a nivel de sistema). Las actualizaciones requieren un administrador.",
+        "cannotSelfUpdateHint": "La carpeta que contiene la aplicación no admite escritura, así que la actualización no puede instalarse en el sitio. Descarga la nueva versión manualmente o mueve la aplicación a una carpeta propia.",
+        "cannotSelfUpdateNoTarget": "Esta compilación no puede reemplazarse a sí misma (no se está ejecutando como AppImage ni como paquete del sistema). Descarga la nueva versión manualmente desde el sitio web.",
+        "cannotSelfUpdateUnknown": "Esta instalación no puede actualizarse automáticamente. Descarga la nueva versión manualmente desde el sitio web.",
         "checkNow": "Buscar actualizaciones",
         "checking": "Comprobando…",
         "upToDate": "Tienes la última versión",
@@ -749,6 +768,32 @@
         "unsupportedDev": "Las actualizaciones están desactivadas en esta compilación"
       }
     }
+  },
+  "telemetryConsent": {
+    "title": "¿Enviar datos de diagnóstico?",
+    "intro": "MailCopilot puede enviar datos de diagnóstico y de uso para que los fallos y las ralentizaciones puedan detectarse y corregirse. Nunca contienen el contenido de su correo, pero sí un identificador aleatorio de esta instalación, por lo que no son totalmente anónimos. No se envía nada sin su permiso. Su correo y el asistente de IA funcionan igual con cualquiera de las dos respuestas: si no lo permite, el formulario de comentarios de los ajustes se sustituye por un enlace a nuestro sitio web.",
+    "sentTitle": "Si lo permite, MailCopilot envía:",
+    "sent": {
+      "errors": "Errores y fallos: el tipo de error y la traza de la pila que indica en qué punto del código ocurrió",
+      "versions": "La versión de MailCopilot, su sistema operativo y la versión de este",
+      "performance": "La duración de las operaciones: sincronización de correo, búsqueda, envío, peticiones a la IA",
+      "usage": "Qué funciones ha usado y con qué frecuencia (búsqueda, redacción de mensajes, IA, reglas, plantillas, posponer), además del proveedor y el modelo de IA utilizados y el coste estimado de una petición",
+      "aiKeyStore": "Los accesos al almacén donde se guardan sus claves de IA: qué proveedor, si la clave se estaba leyendo, guardando o eliminando, y cómo terminó, incluido si allí había una clave. La clave en sí nunca se envía.",
+      "setup": "Datos básicos de configuración: cuántas cuentas tiene, el tipo de servicio de correo (por ejemplo, Gmail u Outlook), el método de inicio de sesión, el idioma de la interfaz y el tema",
+      "installId": "Un identificador aleatorio de esta instalación, creado en el primer arranque. No está vinculado a su dirección de correo, pero sí conecta los datos de sus distintas sesiones con la misma instalación."
+    },
+    "neverTitle": "MailCopilot nunca envía:",
+    "never": {
+      "bodies": "El texto de los mensajes, los asuntos y los nombres de sus carpetas no se recopilan: nada de lo que se envía se compone de ellos y en los datos solo aparece el tipo de carpeta, como Bandeja de entrada o Papelera. El único texto que no escribimos nosotros es el mensaje de error de un servidor de correo; las direcciones y las rutas de archivo se eliminan de él automáticamente antes del envío, en la medida en que se reconocen",
+      "addresses": "Direcciones de correo, ni las suyas ni las de nadie. La única excepción es el formulario de comentarios en Ajustes → Acerca de: la dirección que usted escriba allí se envía junto con su mensaje, para que puedan responderle",
+      "attachments": "Los archivos adjuntos ni sus nombres",
+      "searchQueries": "Lo que escribe en la búsqueda: solo se cuentan la longitud de la consulta y el número de resultados",
+      "aiPrompts": "El texto de las peticiones a la IA y de sus respuestas"
+    },
+    "changeLater": "Puede cambiar esta decisión en cualquier momento: Ajustes → Acerca de.",
+    "learnMore": "Qué se recopila — página de privacidad",
+    "allow": "Permitir",
+    "deny": "No permitir"
   },
   "account": {
     "title": "Conectar correo",
@@ -870,7 +915,19 @@
       },
       "smtpSeparate": "El usuario/contraseña SMTP es diferente",
       "imapDetected": "IMAP: {{host}}:{{port}}",
-      "smtpDetected": "SMTP: {{host}}:{{port}}"
+      "smtpDetected": "SMTP: {{host}}:{{port}}",
+      "oauthWaiting": {
+        "title": "Conectando {{provider}}",
+        "stage": {
+          "browser": "Esperando a que autorices el acceso en el navegador…",
+          "token": "Obteniendo acceso…",
+          "imap": "Comprobando el servidor de correo…",
+          "smtp": "Comprobando el servidor de envío…",
+          "saving": "Guardando la cuenta…"
+        },
+        "browserHint": "Debería haberse abierto una ventana del navegador. Autoriza el acceso ahí y vuelve aquí.",
+        "appHint": "Casi listo. Con una conexión lenta, las comprobaciones pueden tardar hasta un minuto."
+      }
     },
     "confirm": {
       "remove": "¿Eliminar la cuenta {{label}}? Se eliminará la caché local.",
@@ -1191,6 +1248,9 @@
       "errorPrefix": "Error",
       "notConfigured": "El proveedor de IA no está configurado. Configúrelo en Ajustes.",
       "invalidKey": "Clave API no válida. Verifique su clave en Configuración → IA.",
+      "noKey": "No hay ninguna clave API configurada para este proveedor. Introdúzcala en Configuración → IA.",
+      "keyMissing": "Se guardó una clave API para este proveedor, pero ya no está en el almacén de claves. Introdúzcala de nuevo en Configuración → IA.",
+      "storeUnavailable": "El almacén de claves del sistema no ha respondido, así que no se pudo leer la clave API. No hemos eliminado nada, pero ahora mismo no podemos comprobar si la clave sigue ahí. Inténtelo más tarde o reinicie la aplicación.",
       "noSubscription": "Autorícese vía `claude login` en la terminal.",
       "quotaExceeded": "Límite de mensajes alcanzado. Intente más tarde o cambie a una clave API.",
       "requestBudgetStopped": "Solicitud detenida: se alcanzó el límite de coste por solicitud. Cámbialo en Ajustes → IA.",
@@ -1261,7 +1321,7 @@
       "chooseProvider": "Elija el método de conexión:",
       "back": "Atrás",
       "resetProvider": "Restablecer configuración",
-      "resetConfirm": "¿Restablecer la configuración de AI? Se eliminará la clave API.",
+      "resetConfirm": "¿Restablecer la configuración de AI? Se eliminará la clave API de este proveedor. Las claves de otros proveedores se conservan.",
       "checkRequired": "Primero verifique la conexión",
       "memory": {
         "title": "Memoria IA",
@@ -1346,7 +1406,6 @@
     "disabledHint": "Los informes de errores están desactivados. Visite nuestro sitio web para obtener soporte."
   },
   "attachments": {
-    "previewAvailable": "Vista previa disponible",
     "downloadAction": "Descargar adjunto: {{name}}",
     "iconLabel": {
       "pdf": "Documento PDF",
@@ -1377,5 +1436,40 @@
     "cancelled": "Este evento ha sido cancelado",
     "notActionable": "Esta invitación no requiere respuesta",
     "originalTimezone": "Programado originalmente en {{tzid}}"
+  },
+  "window": {
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
+    "close": "Cerrar"
+  },
+  "contextMenu": {
+    "openLink": "Abrir enlace en el navegador",
+    "copyLinkAddress": "Copiar dirección del enlace",
+    "cut": "Cortar",
+    "copy": "Copiar",
+    "paste": "Pegar",
+    "selectAll": "Seleccionar todo"
+  },
+  "aiDestination": {
+    "confirmTitle": "¿Cambiar la dirección a la que se envían las solicitudes de IA?",
+    "confirmMessage": "Las solicitudes de IA pasarán a enviarse por otra dirección.",
+    "confirmDetail": "Continúe solo si usted mismo ha introducido esta dirección. Si no acaba de cambiar la configuración de IA, elija Cancelar.",
+    "endpointLabel": "Dirección del servicio de IA",
+    "proxyLabel": "Proxy para las solicitudes de IA",
+    "endpointRisk": "Cada solicitud de IA a esta dirección lleva su clave de API, así que quien la controle recibirá esa clave y todo lo que envíe el asistente.",
+    "endpointRiskCleartext": "Cada solicitud de IA a esta dirección lleva su clave de API, así que quien la controle recibirá esa clave y todo lo que envíe el asistente. La dirección empieza por http:// y no por https://, de modo que esas solicitudes no van cifradas: cualquiera en el trayecto de red puede leerlas, incluido un proxy.",
+    "endpointRiskInactive": "Esta dirección solo se usa cuando el proveedor de IA es un servicio compatible con OpenAI, que no es el proveedor en uso ahora mismo. Si se selecciona ese proveedor más adelante, cada solicitud de IA a esta dirección llevará su clave de API, así que quien la controle recibiría esa clave y todo lo que envíe el asistente.",
+    "endpointRiskInactiveCleartext": "Esta dirección solo se usa cuando el proveedor de IA es un servicio compatible con OpenAI, que no es el proveedor en uso ahora mismo. Si se selecciona ese proveedor más adelante, cada solicitud de IA a esta dirección llevará su clave de API, así que quien la controle recibiría esa clave y todo lo que envíe el asistente. Además, la dirección empieza por http:// y no por https://, de modo que esas solicitudes no irían cifradas: cualquiera en el trayecto de red podría leerlas, incluido un proxy.",
+    "proxyRisk": "Todas las solicitudes de IA pasarán por este proxy, así que quien lo controle verá a qué direcciones se conecta, cuánto y con qué frecuencia. Solo podrá leer su clave de API y el contenido de los mensajes si el proxy intercepta las conexiones cifradas con un certificado en el que este equipo confía.",
+    "proxyRiskCleartext": "Todas las solicitudes de IA pasarán por este proxy y la dirección del servicio de IA empieza por http:// y no por https://, de modo que esas solicitudes no van cifradas. Por tanto, quien controle el proxy podrá leer su clave de API y el contenido de los mensajes, no solo ver a qué direcciones se conecta.",
+    "currentValue": "Ahora",
+    "newValue": "Nueva",
+    "directValue": "sin proxy (conexión directa)",
+    "confirmButton": "Cambiar dirección",
+    "cancelButton": "Cancelar",
+    "declined": "La nueva dirección para las solicitudes de IA no se confirmó, así que se sigue usando la anterior.",
+    "invalid": "Esta dirección no sirve para las solicitudes de IA. Introduzca una dirección completa que empiece por http:// o https://; la dirección del servicio de IA no debe contener una cadena de consulta ni un #fragmento.",
+    "busy": "Ya hay abierta una confirmación de la dirección para las solicitudes de IA. Respóndala y vuelva a intentarlo."
   }
 }

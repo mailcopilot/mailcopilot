@@ -65,6 +65,12 @@
  *
  * State is per-webContents — callers key one router instance per window.
  */
+import { MAX_ROUTED_LINK_TEXT_LENGTH } from '@mailcopilot/core/mailLinks'
+
+// Re-exported so the routed-link reader below and its callers name the SAME
+// bound the writer applies, and so a test can assert the boundary without
+// reaching past this module.
+export { MAX_ROUTED_LINK_TEXT_LENGTH }
 
 /**
  * Two navigation events resolving to the IDENTICAL external URL within this
@@ -148,6 +154,36 @@ export function isAllowedExternalUrl(rawUrl: string): boolean {
  * Parse a `mailcopilot-link://` routed URL back into the original href + text.
  * Returns `null` for any URL that is not a routed mail link (including
  * malformed input). Pure — no Electron imports.
+ *
+ * THIS IS A TRUST BOUNDARY, not a decoder for our own output. A routed URL does
+ * not have to have been produced by {@link buildRoutedMailLink}: an email whose
+ * `href` `normalizeExternalUrl` cannot normalise is left UNTOUCHED in the
+ * rendered DOM by `rewriteMailHtmlLinks`, and `mailcopilot-link:` is not an
+ * allowed protocol there — so a sender can write a routed-looking URL himself
+ * and it survives verbatim into the iframe. Clicking it reaches
+ * `will-frame-navigate` → {@link decideMailLinkAction} → here. Every field read
+ * out of it is therefore attacker-controlled and must be re-validated on READ;
+ * the writer's constraints are promises the input never made.
+ *
+ * `t` is TRUNCATED, not rejected. It is a display-text heuristic (the input to
+ * the mismatch warning in `useMailLinkClick`), never an address, so shortening
+ * it cannot send the user anywhere other than where the link points — whereas
+ * shortening `u` would produce a DIFFERENT address, which is why `u` is never
+ * truncated (the same asymmetry `MAX_LINK_ADDRESS_LENGTH` in
+ * services/contextMenu.ts is built on, where an over-long address makes the item
+ * disappear instead). Rejecting the whole link on an over-long `t` was the other
+ * candidate and was rejected: it turns a rendered link into a dead one — a
+ * behaviour cliff a sender controls — while buying nothing, since a sender who
+ * wants the mismatch heuristic silent can simply send `t=` empty.
+ *
+ * `u` carries no length bound because the writer imposes none either, and
+ * nothing downstream is superlinear in its length: `normalizeExternalUrl` uses
+ * only anchored patterns and `new URL()` parsing, both linear. The one consumer
+ * that does have a length policy — the clipboard item in contextMenu.ts —
+ * enforces its own, for its own reason.
+ *
+ * The bound is the writer's own {@link MAX_ROUTED_LINK_TEXT_LENGTH}, so a link
+ * WE built round-trips through this function unchanged.
  */
 export function parseRoutedMailLink(rawUrl: string): { href: string; text: string } | null {
   try {
@@ -155,7 +191,7 @@ export function parseRoutedMailLink(rawUrl: string): { href: string; text: strin
     if (u.protocol !== ROUTED_LINK_PROTOCOL) return null
     const href = u.searchParams.get('u')
     if (!href) return null
-    const text = u.searchParams.get('t') || ''
+    const text = (u.searchParams.get('t') || '').slice(0, MAX_ROUTED_LINK_TEXT_LENGTH)
     return { href, text }
   } catch {
     return null

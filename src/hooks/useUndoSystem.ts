@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MailSummary } from '../../packages/net/types'
+// §2.127 — `presentedError` lives in src/utils/errorPresentation.ts. Both call
+// sites here are IMAP-backed (`net:move`, `mail:cancelSend`), so the raw text
+// is both machine-tagged and third-party prose; it stays in the main-process
+// log (`describeErrorForLog`) and nowhere else. It is deliberately NOT in the
+// renderer console: console output is captured as Sentry breadcrumbs (default
+// integrations, src/sentry.ts), so `presentedError` prints the verdict alone.
+import { presentedError, type Translate } from '../utils/errorPresentation'
 
 export type UndoInfo = {
   accountId: number
@@ -25,7 +32,7 @@ export interface UseUndoSystemParams {
   setMails: React.Dispatch<React.SetStateAction<MailSummary[]>>
   setError: (msg: string) => void
   loadOutbox: (accountId: number) => Promise<void>
-  t: (key: string, opts?: Record<string, unknown>) => string
+  t: Translate
   /**
    * §2.7 iter2: external ref owned by the caller (App.tsx) so list-fetch
    * call sites — many of which run earlier in the component tree than this
@@ -190,7 +197,7 @@ export function useUndoSystem({
       // fetch in flight against the larger pending set is discarded.
       pendingMoveEpochRef.current++
       void window.api.invoke('net:move', accountId, fromFolder, toFolder, uids)
-        .catch(e => { setError(t('app.errors.move', { error: String(e) })) })
+        .catch(e => { setError(t('app.errors.move', { error: presentedError(t, e) })) })
         .finally(() => {
           // §2.7: server move settled — drop suppression.
           void window.api.invoke('net:move:pendingRemove', accountId, fromFolder, uids).catch(() => {})
@@ -245,7 +252,7 @@ export function useUndoSystem({
       const messageData = (canceled && typeof canceled.messageData === 'object') ? canceled.messageData : null
       await window.api.invoke('ui:openCompose', accountId, messageData)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     }
   }, [clearSendUndo, currentAccountIdRef, loadOutbox, setError, t])
 

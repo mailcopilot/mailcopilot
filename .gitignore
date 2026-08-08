@@ -36,6 +36,7 @@ docs/qa/
 .env
 .env.*
 !.env.integration.example
+!.env.example
 .env.test
 .env.local
 
@@ -77,7 +78,8 @@ PRD.md
 !docs/PRD.md
 review.md
 analysis.md
-demo-oauth.mp4
+# Demo recordings for Google OAuth verification, including trimmed/edited cuts.
+demo-oauth*.mp4
 
 # Internal sprint/planning docs
 SPRINT_*.md

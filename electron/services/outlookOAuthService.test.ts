@@ -64,6 +64,7 @@ import {
   clearOutlookTokenCache,
   forceRefreshOutlookAccessToken,
   connectOutlookAccount,
+  classifyConnectionTestFailure,
 } from './outlookOAuthService'
 import { getOauthRefreshTokenWithSource } from '../../packages/net/index'
 import { refreshMicrosoftAccessToken, runMicrosoftOAuthFlow, isMicrosoftOAuthBusy } from '../microsoftOAuth'
@@ -94,6 +95,7 @@ beforeEach(() => {
   mockRefreshMicrosoftAccessToken.mockResolvedValue({ accessToken: 'at-refreshed', expiresAt: Date.now() + 3600_000 })
   mockRunMicrosoftOAuthFlow.mockResolvedValue({
     email: 'user@outlook.com',
+    displayName: 'Outlook User',
     accessToken: 'at-fresh',
     expiresAt: Date.now() + 3600_000,
     refreshToken: 'rt-fresh',
@@ -728,6 +730,108 @@ describe('connectOutlookAccount', () => {
     )
   })
 
+  // §2.94 — a freshly connected account used to be saved with no name at all,
+  // so every account picker fell back to the address (or to `#id`).
+  it('names a brand-new account from the profile', async () => {
+    await connectOutlookAccount(defaultParams())
+
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Outlook User' }),
+    )
+  })
+
+  it('leaves the name unset when the provider returned none', async () => {
+    mockRunMicrosoftOAuthFlow.mockResolvedValueOnce({
+      email: 'user@outlook.com',
+      displayName: '',
+      accessToken: 'at-fresh',
+      expiresAt: Date.now() + 3600_000,
+      refreshToken: 'rt-fresh',
+    })
+
+    await connectOutlookAccount(defaultParams())
+
+    // `undefined`, not an empty string: the account schema requires a
+    // non-empty name when present, and downstream label helpers treat
+    // "absent" as "fall back to the address".
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: undefined }),
+    )
+  })
+
+  // codex-bg-review Medium #5: the read schema accepts `name: ''` while the
+  // write schema requires a non-empty name, so a nullish-only fallback carried
+  // the blank through and made the save fail outright.
+  it('fills in the profile name when the existing record has a blank one', async () => {
+    mockGetAccountMeta.mockReturnValue({
+      id: 10,
+      name: '',
+      authType: 'oauth2',
+      providerId: 'outlook',
+      transportType: 'imap-smtp',
+      imap: { host: 'outlook.office365.com', port: 993, secure: true, user: 'old@outlook.com' },
+      smtp: { host: 'smtp-mail.outlook.com', port: 587, secure: false, user: 'old@outlook.com' },
+      folderRoles: {},
+    } as ReturnType<typeof getAccountMeta>)
+
+    await connectOutlookAccount({ ...defaultParams(), existingAccountId: 10 })
+
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Outlook User' }),
+    )
+  })
+
+  it('treats a whitespace-only existing name as absent', async () => {
+    mockGetAccountMeta.mockReturnValue({
+      id: 10,
+      name: '   ',
+      authType: 'oauth2',
+      providerId: 'outlook',
+      transportType: 'imap-smtp',
+      imap: { host: 'outlook.office365.com', port: 993, secure: true, user: 'old@outlook.com' },
+      smtp: { host: 'smtp-mail.outlook.com', port: 587, secure: false, user: 'old@outlook.com' },
+      folderRoles: {},
+    } as ReturnType<typeof getAccountMeta>)
+
+    await connectOutlookAccount({ ...defaultParams(), existingAccountId: 10 })
+
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Outlook User' }),
+    )
+  })
+
+  // §2.94 — the wizard swaps to a waiting step and needs to know how far the
+  // flow has got; without these the step would sit on its seeded first stage
+  // through the long server-probing stretch.
+  it('broadcasts connect progress through the server-probing stages', async () => {
+    const params = defaultParams()
+    await connectOutlookAccount(params)
+
+    const stages = params.broadcast.mock.calls
+      .filter((c: unknown[]) => c[0] === 'oauth:progress')
+      .map((c: unknown[]) => (c[1] as { stage: string }).stage)
+
+    expect(stages).toEqual(['imap', 'smtp', 'saving'])
+    // Payload must stay identity-free — it reaches every open window.
+    for (const call of params.broadcast.mock.calls.filter((c: unknown[]) => c[0] === 'oauth:progress')) {
+      expect(Object.keys(call[1] as object).sort()).toEqual(['provider', 'stage'])
+      expect((call[1] as { provider: string }).provider).toBe('outlook')
+    }
+  })
+
+  it('does not fail the connect flow when a progress listener throws', async () => {
+    const params = {
+      ...defaultParams(),
+      broadcast: vi.fn((channel: string) => {
+        if (channel === 'oauth:progress') throw new Error('listener blew up')
+      }),
+    }
+
+    const result = await connectOutlookAccount(params)
+
+    expect(result.ok).toBe(true)
+  })
+
   it('pre-writes refresh token for non-OAuth existing accounts', async () => {
     const { setOauthRefreshToken } = await import('../../packages/net/index')
     const mockSetToken = vi.mocked(setOauthRefreshToken)
@@ -904,5 +1008,56 @@ describe('connectOutlookAccount', () => {
   it('uses IMAP result error message in thrown error', async () => {
     mockTestImapConnection.mockResolvedValue({ ok: false, error: '' })
     await expect(connectOutlookAccount(defaultParams())).rejects.toThrow('IMAP: error')
+  })
+})
+
+// §2.82 iter2 finding 1 (audit half) — the Outlook connection test used to
+// interpolate `imapRes.error` / `smtpRes.error` straight into the message it
+// captured, and to forward the raw thrown error. Both are verbatim server text;
+// Exchange names the mailbox in its authentication failures, and the consent
+// screen promises addresses are never sent.
+describe('classifyConnectionTestFailure', () => {
+  it('buckets by cause and returns only closed-set literals', () => {
+    expect(classifyConnectionTestFailure('AUTHENTICATE failed for ivan@contoso.com')).toBe('auth')
+    expect(classifyConnectionTestFailure('AADSTS50076: MFA required')).toBe('auth')
+    expect(classifyConnectionTestFailure(new Error('IMAP timeout (30s)'))).toBe('timeout')
+    expect(classifyConnectionTestFailure('connect ECONNREFUSED 40.99.1.1:993')).toBe('refused')
+    expect(classifyConnectionTestFailure('getaddrinfo ENOTFOUND outlook.office365.com')).toBe('network')
+    expect(classifyConnectionTestFailure('SELF_SIGNED_CERT_IN_CHAIN')).toBe('cert')
+    expect(classifyConnectionTestFailure('something else entirely')).toBe('unknown')
+  })
+
+  it('never returns any part of its input', () => {
+    const hostile = 'LOGIN failed for ivan@contoso.com in mailbox "Отправленные"'
+    const out = classifyConnectionTestFailure(hostile)
+    expect(out).toBe('auth')
+    expect(out).not.toContain('ivan')
+    expect(out).not.toContain('Отправленные')
+  })
+
+  it('is total over degenerate input', () => {
+    for (const e of [null, undefined, 0, {}, [], new Error('')]) {
+      expect(['auth', 'network', 'timeout', 'cert', 'refused', 'unknown'])
+        .toContain(classifyConnectionTestFailure(e))
+    }
+  })
+})
+
+describe('connectOutlookAccount — telemetry PII boundary', () => {
+  it('sends only the bucket when the IMAP test fails, never the server text', async () => {
+    captureExceptionMock.mockClear()
+    mockTestImapConnection.mockResolvedValue({
+      ok: false,
+      error: 'AUTHENTICATE failed for ivan@contoso.com in mailbox "Отправленные"',
+    })
+    await expect(connectOutlookAccount(defaultParams())).rejects.toThrow(/^IMAP:/)
+
+    expect(captureExceptionMock).toHaveBeenCalled()
+    const [captured, ctx] = captureExceptionMock.mock.calls[0] as [Error, Record<string, unknown>]
+    const outgoing = `${captured.message} ${JSON.stringify(ctx)}`
+    expect(outgoing).not.toContain('ivan@contoso.com')
+    expect(outgoing).not.toContain('Отправленные')
+    expect(captured.message).toBe('outlook_imap_test_failed: auth')
+    expect(ctx).toMatchObject({ source: 'MicrosoftOAuth', stage: 'imap_test' })
   })
 })

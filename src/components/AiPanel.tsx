@@ -9,6 +9,12 @@ import remarkGfm from 'remark-gfm'
 import { X, Plus, Send, Square, Sparkles, Loader2, ShieldCheck, Key, ExternalLink, History, Trash2, Mail, FolderOpen, AlertCircle } from 'lucide-react'
 import { normalizeMailrefs } from '../utils/normalizeMailrefs'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
+// §2.127 — `presentedError` lives in src/utils/errorPresentation.ts. Applies to
+// `invoke()` rejections only: the `{ ok: false, reason }` / stream-event
+// messages elsewhere in this panel are envelopes composed by our AI service and
+// carry no closed-vocabulary tag.
+import { presentedError } from '../utils/errorPresentation'
+import { isApiKeyProvider, type AiApiKeySavedMap } from '../utils/aiApiKey'
 import AiActionConfirmation, { type PendingActionSummary } from './AiActionConfirmation'
 
 // --- Types ---
@@ -41,9 +47,21 @@ type AiStreamEvent =
   | { type: 'notice'; requestId: string; code: 'request_budget_exceeded'; message: string }
   | { type: 'status'; requestId: string; status: 'thinking' | 'using_tool' | 'streaming' | 'done' }
 
+/**
+ * Mirrors `AuthStatus` in electron/services/ai.ts. §2.122 split the single
+ * `invalid_key` verdict into three, because the panel was telling users their
+ * key was wrong in the two cases where nothing had been read at all:
+ *   - `no_key`            — the store answered and holds no key for this
+ *                           provider. Ask for one; do not blame the user.
+ *   - `store_unavailable` — the store itself failed. We do NOT know whether a
+ *                           key exists, so the copy must not imply it is gone.
+ *   - `invalid_key`       — a key WAS read and rejected.
+ */
 type AuthStatus =
   | { status: 'authenticated'; email?: string }
   | { status: 'not_configured' }
+  | { status: 'no_key' }
+  | { status: 'store_unavailable' }
   | { status: 'invalid_key' }
   | { status: 'no_subscription' }
   | { status: 'error'; message: string }
@@ -114,6 +132,15 @@ export default function AiPanel({
   const [isStreaming, setIsStreaming] = useState(false)
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null)
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
+  /**
+   * §2.122 — our own recollection (`settings.aiApiKeySaved[provider]`, written
+   * by the main process only) that a key for the current provider was once
+   * saved. WORDING ONLY: it turns "no key is set" into "a key was saved but is
+   * gone — enter it again". It never gates anything, never triggers a delete or
+   * a re-auth, and is never consulted instead of a real store read — the OS
+   * secret store owns that truth (CLAUDE.md §5 "Кто владеет правдой").
+   */
+  const [keyPreviouslySaved, setKeyPreviouslySaved] = useState(false)
   const [streamStatus, setStreamStatus] = useState<string | null>(null)
   const [showPrivacy, setShowPrivacy] = useState(false)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -235,7 +262,7 @@ export default function AiPanel({
     } catch (e) {
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: `**${t('ai.errors.errorPrefix')}:** ${String((e as Error).message ?? e)}` },
+        { role: 'assistant', content: `**${t('ai.errors.errorPrefix')}:** ${presentedError(t, e)}` },
       ])
       return
     }
@@ -274,8 +301,10 @@ export default function AiPanel({
     if (!open) return
     if (!aiProvider) {
       setAuthStatus({ status: 'not_configured' })
+      setKeyPreviouslySaved(false)
       return
     }
+    let cancelled = false
     void (async () => {
       try {
         // Pass aiProvider explicitly — avoids race condition when saving settings.
@@ -283,11 +312,30 @@ export default function AiPanel({
         // cold start (AiPanel open-effect + aiProvider-settle effect +
         // StrictMode double-invoke in dev). §1.4 renderer dedup.
         const status = await singleFlightInvoke<AuthStatus>('ai:checkAuth', [aiProvider])
+        if (cancelled) return
         setAuthStatus(status)
+        // §2.122 — only the "the store answered and holds nothing" verdict has
+        // two possible readings for the user; ask for our marker only then, and
+        // only to pick the sentence.
+        if (status.status === 'no_key' && isApiKeyProvider(aiProvider)) {
+          let saved = false
+          try {
+            const s = await window.api.invoke('settings:get') as
+              { aiApiKeySaved?: AiApiKeySavedMap } | null
+            saved = s?.aiApiKeySaved?.[aiProvider] === true
+          } catch {
+            // No marker readable → fall back to the neutral "no key" wording.
+            saved = false
+          }
+          if (!cancelled) setKeyPreviouslySaved(saved)
+        } else if (!cancelled) {
+          setKeyPreviouslySaved(false)
+        }
       } catch {
-        setAuthStatus({ status: 'error', message: t('ai.errors.authCheck') })
+        if (!cancelled) setAuthStatus({ status: 'error', message: t('ai.errors.authCheck') })
       }
     })()
+    return () => { cancelled = true }
   }, [open, aiProvider, t])
 
   // Show privacy dialog on first use
@@ -860,7 +908,7 @@ export default function AiPanel({
                     return
                   }
                 } catch (e) {
-                  setAuthStatus({ status: 'error', message: String(e) })
+                  setAuthStatus({ status: 'error', message: presentedError(t, e) })
                   return
                 }
                 onSettingsChange?.('aiProvider', 'subscription')
@@ -897,8 +945,13 @@ export default function AiPanel({
 
   // --- Authorization error ---
   if (authStatus && authStatus.status !== 'authenticated') {
+    // §2.122 — one sentence per storage outcome. "invalidKey" is reserved for
+    // the case where a key was actually read and rejected; an empty store and
+    // an unreachable store each get their own, non-accusing copy.
     const errorKey = authStatus.status === 'invalid_key' ? 'invalidKey'
       : authStatus.status === 'no_subscription' ? 'noSubscription'
+      : authStatus.status === 'no_key' ? (keyPreviouslySaved ? 'keyMissing' : 'noKey')
+      : authStatus.status === 'store_unavailable' ? 'storeUnavailable'
       : 'notConfigured'
     return (
       <div className="ai-panel" data-testid="ai-panel">
@@ -918,14 +971,20 @@ export default function AiPanel({
             <button className="btn btn-primary" onClick={() => void window.api.invoke('ui:openSettings')}>
               {t('ai.onboarding.configure')}
             </button>
-            <button className="btn btn-secondary" onClick={async () => {
-              try {
-                await window.api.invoke('ai:deleteApiKey')
-                onSettingsChange?.('aiProvider', '')
-                setAuthStatus({ status: 'not_configured' })
-              } catch (e) {
-                setAuthStatus({ status: 'error', message: String(e) })
-              }
+            {/*
+              §2.122 — changing the provider is a SETTINGS change, nothing else.
+              This button used to call `ai:deleteApiKey` with no argument, which
+              the main process read as "delete every provider's key": one click
+              destroyed all three stored keys, with no confirmation, from a
+              screen the app reached by mistakenly claiming the key was invalid.
+              Providers do not conflict — keeping the keys costs nothing and
+              switching back has to just work. Deleting a key is a separate,
+              explicit, per-provider action behind a confirmation, and it lives
+              in Settings → AI ("Reset configuration").
+            */}
+            <button className="btn btn-secondary" onClick={() => {
+              onSettingsChange?.('aiProvider', '')
+              setAuthStatus({ status: 'not_configured' })
             }}>
               {t('ai.errors.changeProvider')}
             </button>

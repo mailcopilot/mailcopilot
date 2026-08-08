@@ -328,6 +328,11 @@ describe('TLS trust rework (Phase A2) — cert recovery funnel events', () => {
       // dialog for that endpoint/certificate. Non-zero = UI bug or attempt.
       'no_pending_offer',
       'offer_fingerprint_mismatch',
+      // Native confirmation gate (main-process dialog.showMessageBox): the
+      // human said no, or something tried to stack a second modal on an
+      // endpoint that already had one open (a real renderer never does).
+      'user_declined',
+      'confirm_in_flight',
     ])
   })
 
@@ -386,5 +391,56 @@ describe('§2.51 — db.ai_reserve_denied schema', () => {
 
   it('aggregates — a capped account re-denies on every call, so bursts collapse', () => {
     expect(METRIC_EVENTS[NAME].aggregate).toBe(true)
+  })
+})
+
+// --- §2.122 — ai.api_key_store_op schema hardening --------------------------
+//
+// Emitted from electron/services/ai.ts (journalAiKeySecretOp) on every read/
+// write/delete of an AI provider's stored key. The question it answers: do
+// stored keys stay stored? Three invariants must hold:
+//
+//   1. kind=event, aggregate=true — a read happens on every AI request, so
+//      per-call envelopes would flood the sink; counts are what get acted on.
+//   2. mainOnly=true — the renderer bridge must reject a forged storage
+//      history (tested in ipc.test.ts).
+//   3. All three tags are closed enum domains, never free-form strings — the
+//      key material structurally cannot ride along even as a mistake, because
+//      there is no 'string' tag type here to misuse.
+
+describe('§2.122 — ai.api_key_store_op schema hardening', () => {
+  const NAME = 'ai.api_key_store_op' as const
+
+  it('is registered in METRIC_EVENTS as an event', () => {
+    expect(METRIC_EVENTS[NAME]).toBeDefined()
+    expect(METRIC_EVENTS[NAME].kind).toBe('event')
+  })
+
+  it('mainOnly is true — renderer bridge must reject this event', () => {
+    expect(METRIC_EVENTS[NAME].mainOnly).toBe(true)
+  })
+
+  it('aggregates — a read fires on every AI request', () => {
+    expect(METRIC_EVENTS[NAME].aggregate).toBe(true)
+  })
+
+  it('carries ONLY op / provider / outcome — no key, no key id, no free text', () => {
+    expect(METRIC_EVENTS[NAME].tags).toEqual({
+      op: 'ai_key_op',
+      provider: 'ai_key_provider',
+      outcome: 'ai_key_outcome',
+    })
+  })
+
+  it('ai_key_provider is closed to the three providers with a stored key', () => {
+    expect(DOMAINS.ai_key_provider).toEqual(['anthropic-api', 'openai-api', 'gemini-api'])
+  })
+
+  it('ai_key_op is closed to the three secret-store operations', () => {
+    expect(DOMAINS.ai_key_op).toEqual(['read', 'write', 'delete'])
+  })
+
+  it('ai_key_outcome is closed to the four outcomes — "found"/"absent" split the read, "store_error" is the previously-invisible fault', () => {
+    expect(DOMAINS.ai_key_outcome).toEqual(['found', 'absent', 'ok', 'store_error'])
   })
 })

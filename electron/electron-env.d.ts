@@ -4,6 +4,12 @@
 declare const __SENTRY_DSN__: string
 declare const __APP_VERSION__: string
 
+// Vite define substitutions (Google OAuth Desktop client, main bundle only).
+// Empty string when the build was made without credentials — see
+// electron/googleOAuthConfig.ts.
+declare const __GOOGLE_OAUTH_CLIENT_ID__: string
+declare const __GOOGLE_OAUTH_CLIENT_SECRET__: string
+
 declare namespace NodeJS {
   interface ProcessEnv {
     /**
@@ -31,7 +37,7 @@ interface Window {
   api: {
     /** Initial theme detected synchronously from additionalArguments (no IPC round-trip). */
     initialTheme: 'dark' | 'light'
-    /** Anonymous install-id hash (16 hex chars) propagated from main. Empty string in dev/e2e. */
+    /** Pseudonymous install-id hash (16 hex chars) propagated from main. Empty string in dev/e2e. */
     installIdHash: string
     /** Persisted sentryEnabled flag, propagated from main via additionalArguments. */
     sentryEnabled: boolean
@@ -89,7 +95,11 @@ interface Window {
         | 'tls:getServerCert'
         // TLS trust rework Phase A2 — cert-recovery dialog actions.
         //   net:trustCert ({ accountId: number; host: string; port: number;
-        //     fingerprintSha256: string }) → { ok: true }
+        //     fingerprintSha256: string })
+        //     → { ok: true }                        pin stored
+        //     → { ok: false; cancelled: true }      user refused main's native
+        //       confirmation (gate 5): nothing probed, nothing written, the
+        //       offer stays open so the renderer must keep its dialog up.
         //   cert:dismiss ({ host: string }) → { ok: true }
         | 'net:trustCert'
         | 'cert:dismiss'
@@ -113,6 +123,12 @@ interface Window {
         | 'offline:status'
         | 'settings:get'
         | 'settings:save'
+        // §2.82 — first-run telemetry consent. `telemetry:consentState` answers
+        // `{ needed, version }` (read-only, "should the screen be shown");
+        // `telemetry:setConsent` takes `{ granted }` and nothing else — main
+        // stamps the disclosure version and the timestamp itself.
+        | 'telemetry:consentState'
+        | 'telemetry:setConsent'
         | 'e2e:localizeMails'
         | 'compose:getInit'
         | 'ui:openSettings'
@@ -242,8 +258,10 @@ interface Window {
     //     fingerprintSha256: string; systemOnly: boolean; rawMessage: string }
     //     (server-derived strings are UNTRUSTED — render as text only).
     //   cert:interceptionNotice payload = { host: string; issuerCn: string }.
-    on: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice', listener: (...args: unknown[]) => void) => void
-    off: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice', listener: (...args: unknown[]) => void) => void
-    removeAll: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice') => void
+    // §2.94 — oauth:progress payload = { provider: 'gmail' | 'outlook';
+    //   stage: OAuthConnectStage } (no addresses, names or tokens).
+    on: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice' | 'oauth:progress', listener: (...args: unknown[]) => void) => void
+    off: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice' | 'oauth:progress', listener: (...args: unknown[]) => void) => void
+    removeAll: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice' | 'oauth:progress') => void
   }
 }

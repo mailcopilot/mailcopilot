@@ -54,6 +54,12 @@ Colonna destra: intestazioni, corpo del messaggio, allegati e pulsanti di azione
 
 Trascina il bordo tra le colonne. La tua preferenza viene salvata tra le sessioni.
 
+## Selezione e modifica del testo
+
+Fai clic destro in qualsiasi campo di testo -- la barra di ricerca, un messaggio che stai componendo, il campo del prompt dell'assistente IA o qualsiasi altra casella modificabile -- per aprire un piccolo menu contestuale con **Taglia**, **Copia**, **Incolla** e **Seleziona tutto**. Il clic destro su testo selezionato e non modificabile (per esempio un passaggio evidenziato nel corpo di un messaggio) offre solo **Copia**.
+
+Il clic destro su un link nel corpo di un messaggio apre un menu diverso con opzioni per aprire o copiare il link; vedi [Clic destro su un link](./reading-emails#clic-destro-su-un-link).
+
 ## Barra di stato
 
 Una barra di stato persistente attraversa la parte inferiore della finestra, simile a quella di VS Code. Mostra l'attivita in background che prima era visibile solo dentro il pannello di ricerca:

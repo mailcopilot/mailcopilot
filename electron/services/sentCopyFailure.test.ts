@@ -17,6 +17,7 @@ const recordEventMock = vi.hoisted(() => vi.fn())
 vi.mock('../metrics', () => ({ recordEvent: recordEventMock }))
 
 import {
+  buildSentCopyAppendDiag,
   classifySentCopyAppendFailure,
   normalizeSentCopyProviderId,
   reportSentCopyAppendFailure,
@@ -238,5 +239,177 @@ describe('reportSentCopyAppendFailure', () => {
       accountId: 2,
       folder: 'Sent Items',
     })
+  })
+})
+
+// §2.82 iter2 finding 1 — the diagnostics payload. Before the fix the caller
+// built this inline in electron/main.ts and it carried the Sent folder NAME,
+// the Message-ID, and up to 500 characters of raw IMAP response. The consent
+// screen promises, without qualification, that folder names and addresses are
+// never sent, so a single account with a persistently failing APPEND turned
+// that promise into a standing leak requiring no user action to trigger.
+describe('buildSentCopyAppendDiag — PII boundary', () => {
+  const FOLDER = 'Отправленные/Архив 2026'
+  const MESSAGE_ID = '<9f2c@mail.ivanov-family.example>'
+
+  function fullDiag() {
+    return buildSentCopyAppendDiag(
+      imapErr({
+        message: `APPEND to "${FOLDER}" failed for ivan@example.com`,
+        code: 'NO',
+        response: `NO [OVERQUOTA] ${FOLDER} over quota for ivan@example.com`,
+        responseText: `${FOLDER} over quota`,
+        responseStatus: 'NO',
+        serverResponseCode: 'OVERQUOTA',
+        command: 'APPEND',
+      }),
+      {
+        accountId: 12,
+        providerId: 'generic-imap',
+        sentFolder: FOLDER,
+        rawSize: 4096,
+        messageId: MESSAGE_ID,
+      },
+    )
+  }
+
+  it('carries no folder name, no Message-ID and no server text', () => {
+    const serialized = JSON.stringify(fullDiag())
+    expect(serialized).not.toContain(FOLDER)
+    expect(serialized).not.toContain('Отправленные')
+    expect(serialized).not.toContain('Архив')
+    expect(serialized).not.toContain(MESSAGE_ID)
+    expect(serialized).not.toContain('9f2c')
+    expect(serialized).not.toContain('ivanov-family')
+    expect(serialized).not.toContain('ivan@example.com')
+    expect(serialized).not.toContain('over quota')
+  })
+
+  it('substitutes the folder ROLE and the folder name length', () => {
+    const diag = fullDiag()
+    expect(diag.sentFolderRole).toBe('sent')
+    expect(diag.sentFolderLen).toBe(FOLDER.length)
+  })
+
+  it('substitutes an irreversible, domain-separated hash for the Message-ID', () => {
+    const diag = fullDiag()
+    expect(diag.messageIdHash).toMatch(/^[0-9a-f]{12}$/)
+    // Stable for the same id (so repeated failures of ONE message collapse)…
+    expect(buildSentCopyAppendDiag(null, { accountId: 1, messageId: MESSAGE_ID }).messageIdHash)
+      .toBe(diag.messageIdHash)
+    // …and different for a different id.
+    expect(buildSentCopyAppendDiag(null, { accountId: 1, messageId: '<other@x.example>' }).messageIdHash)
+      .not.toBe(diag.messageIdHash)
+  })
+
+  it('substitutes a length for the free-form server text', () => {
+    const diag = fullDiag()
+    expect(typeof diag.errorTextLen).toBe('number')
+    expect(diag.errorTextLen).toBeGreaterThan(0)
+  })
+
+  // §2.82 iter3 finding 1 — the four structured fields are gated by CLOSED
+  // VOCABULARIES, not by a token SHAPE. `/^[A-Za-z0-9_-]{1,40}$/` accepted
+  // `ALICE`, `SENT` and `IVANOV`, so a mailbox name or a person's name landing
+  // in a "response code" field shipped as protocol diagnostics — the same leak
+  // this builder exists to prevent, through a different door.
+  it('drops short server-chosen words that merely LOOK like protocol codes', () => {
+    const IMPOSTORS = ['ALICE', 'SENT', 'IVANOV', 'Отправленные', 'Alice', 'sent-2026', 'INBOX_PRIVATE']
+    for (const impostor of IMPOSTORS) {
+      const diag = buildSentCopyAppendDiag(
+        imapErr({
+          message: 'Command failed',
+          code: impostor,
+          responseStatus: impostor,
+          serverResponseCode: impostor,
+          command: impostor,
+        }),
+        { accountId: 7 },
+      )
+      expect(diag.errorCode).toBeUndefined()
+      expect(diag.errorResponseStatus).toBeUndefined()
+      expect(diag.errorServerResponseCode).toBeUndefined()
+      expect(diag.errorCommand).toBeUndefined()
+      // Serialize only the protocol fields: `sentFolderRole` legitimately
+      // contains the substring "sent" and would confuse a whole-object scan.
+      const protocolFields = JSON.stringify({
+        errorCode: diag.errorCode,
+        errorResponseStatus: diag.errorResponseStatus,
+        errorServerResponseCode: diag.errorServerResponseCode,
+        errorCommand: diag.errorCommand,
+      }).toUpperCase()
+      expect(protocolFields).not.toContain(impostor.toUpperCase())
+    }
+  })
+
+  it('keeps a real code only in the field whose vocabulary contains it', () => {
+    // `OVERQUOTA` is a response code, not a socket error code and not a
+    // command — membership is per field, not one shared bag of "known words".
+    const diag = buildSentCopyAppendDiag(
+      imapErr({ code: 'OVERQUOTA', responseStatus: 'APPEND', serverResponseCode: 'ETIMEDOUT', command: 'NO' }),
+      { accountId: 1 },
+    )
+    expect(diag.errorCode).toBeUndefined()
+    expect(diag.errorResponseStatus).toBeUndefined()
+    expect(diag.errorServerResponseCode).toBeUndefined()
+    expect(diag.errorCommand).toBeUndefined()
+  })
+
+  it('keeps recognised protocol codes and drops everything else', () => {
+    const diag = buildSentCopyAppendDiag(
+      imapErr({
+        message: 'nope',
+        code: 'ETIMEDOUT',
+        responseStatus: 'no',
+        serverResponseCode: 'OVERQUOTA',
+        command: 'APPEND',
+      }),
+      { accountId: 1 },
+    )
+    expect(diag.errorCode).toBe('ETIMEDOUT')
+    expect(diag.errorResponseStatus).toBe('NO')
+    expect(diag.errorServerResponseCode).toBe('OVERQUOTA')
+    expect(diag.errorCommand).toBe('APPEND')
+
+    // An allowlist, not a blocklist: a server that puts an address or a folder
+    // path where a code belongs gets dropped, not forwarded.
+    const hostile = buildSentCopyAppendDiag(
+      imapErr({
+        code: 'user ivan@example.com is over quota',
+        responseStatus: 'NO [OVERQUOTA] Отправленные',
+        command: 'APPEND "Отправленные"',
+        serverResponseCode: 'a'.repeat(64),
+      }),
+      { accountId: 1 },
+    )
+    expect(hostile.errorCode).toBeUndefined()
+    expect(hostile.errorResponseStatus).toBeUndefined()
+    expect(hostile.errorCommand).toBeUndefined()
+    expect(hostile.errorServerResponseCode).toBeUndefined()
+    expect(JSON.stringify(hostile)).not.toContain('ivan@example.com')
+  })
+
+  it('reports a null role when folder resolution never happened', () => {
+    const diag = buildSentCopyAppendDiag(new Error('Invalid credentials'), {
+      accountId: 3,
+      providerId: 'gmail',
+      sentFolder: null,
+    })
+    expect(diag.sentFolderRole).toBeNull()
+    expect(diag.sentFolderLen).toBeUndefined()
+    expect(diag.rawSize).toBeNull()
+    expect(diag.reason).toBe('auth')
+  })
+
+  it('narrows an unexpected providerId to the closed domain', () => {
+    expect(buildSentCopyAppendDiag(null, { accountId: 1, providerId: 'yandex' }).providerId)
+      .toBe('unknown')
+  })
+
+  it('never throws on hostile or degenerate input', () => {
+    for (const e of [null, undefined, 42, 'boom', { message: { nested: true } }]) {
+      expect(() => buildSentCopyAppendDiag(e, { accountId: 1 })).not.toThrow()
+    }
+    expect(buildSentCopyAppendDiag(null, { accountId: 1 }).messageIdHash).toBeUndefined()
   })
 })

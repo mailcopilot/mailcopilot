@@ -8,7 +8,9 @@ import {
   decideMailLinkAction,
   isAllowedExternalUrl,
   parseRoutedMailLink,
+  MAX_ROUTED_LINK_TEXT_LENGTH,
 } from './mailLinkRouter'
+import { buildRoutedMailLink } from '@mailcopilot/core/mailLinks'
 
 /**
  * BACKLOG §2.25 — runaway `shell.openExternal` loop regression suite.
@@ -625,5 +627,68 @@ describe('§2.25 pure helpers — isAllowedExternalUrl / parseRoutedMailLink', (
     expect(parseRoutedMailLink('mailcopilot-link://route')).toBeNull() // no `u`
     expect(parseRoutedMailLink('not a url')).toBeNull()
     expect(parseRoutedMailLink('')).toBeNull()
+  })
+})
+
+/**
+ * BACKLOG §2.133 — the routed-link boundary bounds `t` on READ.
+ *
+ * `buildRoutedMailLink` caps the visible link text at
+ * MAX_ROUTED_LINK_TEXT_LENGTH, but that cap only ever applied to links WE
+ * build. `rewriteMailHtmlLinks` leaves an href it cannot normalise untouched in
+ * the DOM, and `mailcopilot-link:` is not one of its allowed protocols — so a
+ * sender can plant `mailcopilot-link://open?u=https://ok.example&t=<200 KB>`
+ * himself and it survives verbatim into the iframe. Clicking it used to hand
+ * the whole blob to the renderer.
+ *
+ * These tests are at the boundary deliberately: they hold regardless of what
+ * the renderer does with `text`, so the guarantee does not depend on the
+ * consumer staying careful.
+ */
+describe('§2.133 — routed-link text bound (read side)', () => {
+  const routed = (href: string, text: string) => {
+    const u = new URL('mailcopilot-link://open')
+    u.searchParams.set('u', href)
+    u.searchParams.set('t', text)
+    return u.toString()
+  }
+
+  it('truncates an over-long `t` to MAX_ROUTED_LINK_TEXT_LENGTH', () => {
+    const hostile = 'x'.repeat(200_000)
+    const parsed = parseRoutedMailLink(routed('https://ok.example/', hostile))
+    expect(parsed).not.toBeNull()
+    expect(parsed?.text.length).toBe(MAX_ROUTED_LINK_TEXT_LENGTH)
+    expect(parsed?.href).toBe('https://ok.example/')
+  })
+
+  it('bounds `t` on the decision function too — the path will-frame-navigate uses', () => {
+    // decideMailLinkAction is what main.ts actually calls; the bound must hold
+    // there, not merely in the helper underneath it.
+    const action = decideMailLinkAction({
+      url: routed('https://ok.example/', 'a-'.repeat(100_000)),
+      isMainFrame: false,
+    })
+    expect(action.kind).toBe('routed')
+    if (action.kind !== 'routed') throw new Error('expected routed action')
+    expect(action.payload.text.length).toBe(MAX_ROUTED_LINK_TEXT_LENGTH)
+  })
+
+  it('round-trips a link built by buildRoutedMailLink unchanged', () => {
+    // The bound is the writer's own constant, so our own links never notice it —
+    // including one whose text is exactly at the cap.
+    const text = 'S'.repeat(MAX_ROUTED_LINK_TEXT_LENGTH)
+    const parsed = parseRoutedMailLink(buildRoutedMailLink('https://bank.example/login', text))
+    expect(parsed).toEqual({ href: 'https://bank.example/login', text })
+  })
+
+  it('leaves a normal short `t` untouched', () => {
+    expect(parseRoutedMailLink(routed('https://ok.example/', 'Sign in'))?.text).toBe('Sign in')
+  })
+
+  it('does NOT truncate `u` — a shortened address is a different address', () => {
+    // Asymmetry with `t`: display text is a heuristic input, an address is the
+    // destination. A long-but-legitimate tracking URL must survive intact.
+    const longHref = `https://ok.example/r/${'q'.repeat(4000)}`
+    expect(parseRoutedMailLink(routed(longHref, 'Click'))?.href).toBe(longHref)
   })
 })

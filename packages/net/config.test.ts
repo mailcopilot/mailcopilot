@@ -36,6 +36,7 @@ import {
   saveAccount,
   getAccountMeta,
   getSettings,
+  getRawPersistedSettings,
   saveSettings,
   deleteAccount,
   getAccountConfig,
@@ -67,6 +68,7 @@ import {
   setMcpEnvSanitizationListener,
   __resetMcpEnvSanitizationAuditFlagForTest,
   setSecretBackend,
+  setAiApiKeySavedFlag,
   type KeytarGetter,
 } from './config'
 import type { Settings, SecretBackend, SecretSurface } from './config'
@@ -250,6 +252,48 @@ describe('packages/net/config', () => {
     it('settingsSchema — sentryEnabled accepts false', () => {
       const result = settingsSchema.parse({ theme: 'light', cacheDays: 30, sentryEnabled: false })
       expect(result.sentryEnabled).toBe(false)
+    })
+
+    // §2.82 — the raw settingsSchema shape for the consent record. The
+    // renderer-writable rejection is covered separately in
+    // electron/telemetryConsent.test.ts (AC9); this pins the parse contract
+    // itself, which nothing else exercises.
+    it('settingsSchema — telemetryConsent is absent by default (no record means "not answered yet")', () => {
+      const result = settingsSchema.parse({ theme: 'light', cacheDays: 30 })
+      expect(result.telemetryConsent).toBeUndefined()
+    })
+
+    it('settingsSchema — telemetryConsent accepts a well-formed record', () => {
+      const result = settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { granted: true, version: 1, at: '2026-07-27T10:00:00.000Z' },
+      })
+      expect(result.telemetryConsent).toEqual({ granted: true, version: 1, at: '2026-07-27T10:00:00.000Z' })
+    })
+
+    it('settingsSchema — telemetryConsent rejects a non-integer version', () => {
+      expect(() => settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { granted: true, version: 1.5, at: '2026-07-27T10:00:00.000Z' },
+      })).toThrow()
+    })
+
+    it('settingsSchema — telemetryConsent rejects an empty timestamp', () => {
+      expect(() => settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { granted: true, version: 1, at: '' },
+      })).toThrow()
+    })
+
+    it('settingsSchema — telemetryConsent rejects a missing `granted`', () => {
+      expect(() => settingsSchema.parse({
+        theme: 'light',
+        cacheDays: 30,
+        telemetryConsent: { version: 1, at: '2026-07-27T10:00:00.000Z' },
+      })).toThrow()
     })
 
     it('settingsSchema — aiMaxTurns default=30', () => {
@@ -1297,6 +1341,57 @@ describe('packages/net/config', () => {
       const settings = getSettings()
       // Should switch to the remaining account
       expect(settings.currentAccountId).toBe(2)
+    })
+  })
+
+  // --- §2.122 — setAiApiKeySavedFlag ---
+
+  describe('setAiApiKeySavedFlag', () => {
+    it('records a saved marker for the given provider only', () => {
+      setAiApiKeySavedFlag('anthropic-api', true)
+      const settings = getSettings()
+      expect(settings.aiApiKeySaved).toEqual({ 'anthropic-api': true })
+    })
+
+    it('keeps other providers untouched (mirrors the deleteApiKey per-provider fix)', () => {
+      setAiApiKeySavedFlag('anthropic-api', true)
+      setAiApiKeySavedFlag('openai-api', true)
+      setAiApiKeySavedFlag('anthropic-api', false)
+
+      const settings = getSettings()
+      expect(settings.aiApiKeySaved).toEqual({
+        'anthropic-api': false,
+        'openai-api': true,
+      })
+    })
+
+    it('clears the marker back to false', () => {
+      setAiApiKeySavedFlag('gemini-api', true)
+      expect(getSettings().aiApiKeySaved?.['gemini-api']).toBe(true)
+
+      setAiApiKeySavedFlag('gemini-api', false)
+      expect(getSettings().aiApiKeySaved?.['gemini-api']).toBe(false)
+    })
+
+    it('never carries key material — value is a boolean and nothing else', () => {
+      setAiApiKeySavedFlag('openai-api', true)
+      const raw = JSON.stringify(getSettings().aiApiKeySaved)
+      expect(raw).toBe('{"openai-api":true}')
+    })
+
+    it('is absent from getSettings() until the first call — distinguishable from "never saved"', () => {
+      expect(getSettings().aiApiKeySaved).toBeUndefined()
+    })
+
+    it('is rejected by rendererWritableSettingsSchema (main-only field)', () => {
+      const result = rendererWritableSettingsSchema.safeParse({
+        aiApiKeySaved: { 'anthropic-api': true },
+      })
+      expect(result.success).toBe(false)
+    })
+
+    it('is registered in MAIN_ONLY_SETTINGS_FIELDS', () => {
+      expect(MAIN_ONLY_SETTINGS_FIELDS).toContain('aiApiKeySaved')
     })
   })
 
@@ -3874,5 +3969,145 @@ describe('§2.33 PR2a — default backend error semantics (no config-local telem
 
     const result = await getOauthRefreshTokenWithSource('gmail', 1)
     expect(result).toEqual({ token: 'legacy-token-value', source: 'legacy' })
+  })
+})
+
+// §2.82 iter2 finding 4 — the consent migration must be able to tell "the key
+// was never written" from "the user explicitly turned it off". `getSettings()`
+// cannot: zod substitutes a default for every absent field, so the distinction
+// currently survives only because `sentryEnabled` happens to default to `true`.
+// `getRawPersistedSettings` is the explicit answer.
+describe('§2.82 — getRawPersistedSettings', () => {
+  beforeEach(() => {
+    storeData.clear()
+    vi.clearAllMocks()
+  })
+
+  it('returns undefined when nothing has been persisted yet', () => {
+    expect(getRawPersistedSettings()).toBeUndefined()
+  })
+
+  it('reports an absent key as absent, while getSettings() shows the default', () => {
+    storeData.set('settings', { theme: 'dark' })
+
+    expect(getRawPersistedSettings()).toEqual({ theme: 'dark' })
+    expect(getRawPersistedSettings()!.sentryEnabled).toBeUndefined()
+    // The parsed view cannot make the distinction — that is the whole point.
+    expect(getSettings().sentryEnabled).toBe(settingsSchema.parse({ theme: 'dark' }).sentryEnabled)
+  })
+
+  it('reports an explicitly persisted false as false', () => {
+    storeData.set('settings', { theme: 'dark', sentryEnabled: false })
+    expect(getRawPersistedSettings()!.sentryEnabled).toBe(false)
+  })
+
+  it('applies no defaults and no migrations', () => {
+    storeData.set('settings', { sentryEnabled: false })
+    // Byte-for-byte what is on disk: no cacheDays, no language, no theme.
+    expect(getRawPersistedSettings()).toEqual({ sentryEnabled: false })
+  })
+
+  it('returns undefined for a non-object stored value', () => {
+    for (const bogus of ['string', 42, [], null]) {
+      storeData.set('settings', bogus)
+      expect(getRawPersistedSettings()).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * §2.132 — the direct-keytar default backend must refuse to run under
+ * `MAILCOPILOT_E2E=1`.
+ *
+ * In the app `electron/main.ts` injects the secretStore-backed backend, which
+ * serves e2e runs from the per-data-dir encrypted fallback. This suite pins the
+ * behaviour if that wiring is ever missed: keychain entries are addressed
+ * per-USER (`imap:<id>`, `oauth-refresh:gmail:<id>`), and e2e account ids start
+ * at 1, so falling through to keytar means a test overwrites or deletes real
+ * credentials — the failure mode that cost a live AI key on 2026-08-05.
+ */
+describe('§2.132 — default secret backend under MAILCOPILOT_E2E', () => {
+  // This block sits outside the main `packages/net/config` describe, so it does
+  // not inherit its beforeEach — without this, keytar mock call counts leak in
+  // from the previous case and a "was never called" assertion is meaningless.
+  beforeEach(() => {
+    storeData.clear()
+    keytarStore.clear()
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    setSecretBackend(null)
+    keytarStore.clear()
+  })
+
+  it('writes nothing to the user keychain when no backend was injected', async () => {
+    setSecretBackend(null) // direct keytar — the un-wired state
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    // This path swallows secret-backend failures by design (a keychain fault
+    // must not break a save flow), so the observable is the keychain itself.
+    await setOauthRefreshToken('gmail', 1, 'e2e-token')
+
+    expect(keytarStore.has('oauth-refresh:gmail:1')).toBe(false)
+  })
+
+  it('surfaces the refusal on a path that does not swallow it', async () => {
+    setSecretBackend(null)
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    await expect(
+      saveAccount({
+        name: 'e2e',
+        email: 'e2e@example.com',
+        imap: { host: 'imap.example.com', port: 993, secure: true, user: 'e2e', pass: 'secret' },
+        smtp: { host: 'smtp.example.com', port: 465, secure: true, user: 'e2e', pass: 'secret' },
+      }),
+    ).rejects.toThrow(/MAILCOPILOT_E2E/)
+
+    expect([...keytarStore.keys()]).toEqual([])
+  })
+
+  it('does not read a real credential out of the keychain either', async () => {
+    setSecretBackend(null)
+    keytarStore.set('oauth-refresh:gmail:1', 'live-user-token')
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    // The per-key swallow inside the new→legacy lookup turns the refusal into a
+    // clean null; what matters is that the live token is not handed out.
+    expect(await getOauthRefreshToken('gmail', 1)).toBeNull()
+    expect(keytarStore.get('oauth-refresh:gmail:1')).toBe('live-user-token')
+  })
+
+  it('is inert outside e2e: the same call still reaches keytar', async () => {
+    setSecretBackend(null)
+
+    await setOauthRefreshToken('gmail', 1, 'normal-token')
+    expect(keytarStore.get('oauth-refresh:gmail:1')).toBe('normal-token')
+  })
+
+  /**
+   * codex-security-review test-gap (§2.132, iteration 1): the tests above infer
+   * safety from map contents, which cannot distinguish "no call was made" from
+   * "a call was made and happened to write nothing". Assert the call counts of
+   * all three keytar methods directly, across the write, read and delete paths.
+   */
+  it('makes zero keytar calls under the flag — read, write and delete alike', async () => {
+    const keytarMock = (await import('keytar')).default as unknown as {
+      getPassword: ReturnType<typeof vi.fn>
+      setPassword: ReturnType<typeof vi.fn>
+      deletePassword: ReturnType<typeof vi.fn>
+    }
+    setSecretBackend(null)
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    await setOauthRefreshToken('gmail', 1, 'e2e-token')
+    await getOauthRefreshToken('gmail', 1)
+    await setOauthRefreshToken('gmail', 1, null) // delete path
+
+    expect(keytarMock.getPassword).not.toHaveBeenCalled()
+    expect(keytarMock.setPassword).not.toHaveBeenCalled()
+    expect(keytarMock.deletePassword).not.toHaveBeenCalled()
   })
 })

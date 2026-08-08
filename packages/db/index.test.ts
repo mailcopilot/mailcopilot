@@ -1587,6 +1587,361 @@ PmzvC1E/Xy2DSACclKcSo2N8JqtEHDZqj75aK7S2pA0dZAn5xa5HxbAYvwcdyrg=
     }
   })
 
+  // --- §2.115: the cost of "nothing to do" ---
+  //
+  // The body indexer asks the DB every tick whether anything is left to index.
+  // Before the partial indexes that answer cost a full pass over the corpus,
+  // which is why 99.77% of ticks on a live instance did no work and still ate
+  // 480-800 ms of main thread each. The tests below pin the two things that
+  // make the answer cheap: the index exists, and the planner actually uses it.
+  // An index the planner ignores would be invisible to every other test.
+
+  /**
+   * Record the SQL text a DB helper prepares, so query-plan assertions run
+   * against the real query instead of a copy that can silently drift.
+   */
+  function captureSql(mod: DbModule, run: () => void): string[] {
+    const handle = mod.default as unknown as { prepare: (sql: string) => unknown }
+    const original = handle.prepare.bind(handle)
+    const seen: string[] = []
+    handle.prepare = (sql: string) => {
+      seen.push(sql)
+      return original(sql)
+    }
+    try {
+      run()
+    } finally {
+      handle.prepare = original
+    }
+    return seen
+  }
+
+  function queryPlan(mod: DbModule, sql: string, params: unknown[] = []): string {
+    const rows = mod.default.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params as never[]) as Array<{ detail: string }>
+    return rows.map(r => r.detail).join('\n')
+  }
+
+  function seedCorpus(mod: DbModule, accountId: number, folder: string, count: number, withBody: boolean) {
+    mod.upsertMessages(accountId, folder, Array.from({ length: count }, (_, i) => ({
+      uid: i + 1,
+      subject: `subject ${i}`,
+      fromAddr: 'a@test',
+      date: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+      unread: false,
+      ...(withBody ? { bodyText: `body ${i}`, attachmentFilenames: `file${i}.pdf` } : {}),
+    })))
+  }
+
+  testDb('§2.115: partial backlog indexes exist and are idempotent', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      const rows = mod.default.prepare(
+        `SELECT name, sql FROM sqlite_master WHERE type='index' AND name IN ('idx_messages_body_pending','idx_messages_filenames_pending')`,
+      ).all() as Array<{ name: string; sql: string }>
+      expect(rows.map(r => r.name).sort()).toEqual(['idx_messages_body_pending', 'idx_messages_filenames_pending'])
+      // Partial, not full: the WHERE clause is what keeps the index the size of
+      // the backlog instead of the size of the mailbox.
+      expect(rows.find(r => r.name === 'idx_messages_body_pending')?.sql).toContain('WHERE body_text IS NULL')
+      expect(rows.find(r => r.name === 'idx_messages_filenames_pending')?.sql).toContain('WHERE attachment_filenames IS NULL')
+
+      // Re-running the migration statement on an existing DB is a no-op.
+      expect(() => mod.default.exec(
+        `CREATE INDEX IF NOT EXISTS idx_messages_body_pending ON messages(account_id, folder_path, uid DESC) WHERE body_text IS NULL`,
+      )).not.toThrow()
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('§2.115: getUidsWithoutBodyText is answered by the partial index, not a folder scan', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      seedCorpus(mod, 1, 'INBOX', 300, true)
+      seedCorpus(mod, 1, 'Sent', 20, false)
+
+      const sql = captureSql(mod, () => { mod.getUidsWithoutBodyText(1, 'INBOX', 200) })
+        .find(s => s.includes('body_text IS NULL'))
+      expect(sql).toBeTruthy()
+
+      const plan = queryPlan(mod, sql!, [1, 'INBOX', 200])
+      expect(plan).toContain('idx_messages_body_pending')
+      // The index also carries the ORDER BY, so no sort buffer is built.
+      expect(plan).not.toContain('TEMP B-TREE')
+
+      // Behaviour is unchanged: fully indexed folder answers empty, the other
+      // one answers with its backlog newest-first.
+      expect(mod.getUidsWithoutBodyText(1, 'INBOX', 200)).toEqual([])
+      expect(mod.getUidsWithoutBodyText(1, 'Sent', 3)).toEqual([20, 19, 18])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('§2.115: listFoldersWithPendingBodies walks the backlog only, and skips excluded folders', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertFolderPref(1, 'Spam', { visible: true, indexInSearch: false })
+      seedCorpus(mod, 1, 'INBOX', 50, true)   // fully indexed — must not appear
+      seedCorpus(mod, 1, 'Sent', 4, false)    // backlog
+      seedCorpus(mod, 1, 'Spam', 7, false)    // excluded from search — never drains
+      seedCorpus(mod, 2, 'INBOX', 2, false)   // backlog on another account
+
+      const sql = captureSql(mod, () => { mod.listFoldersWithPendingBodies() })
+        .find(s => s.includes('body_text IS NULL'))
+      expect(sql).toBeTruthy()
+      expect(queryPlan(mod, sql!)).toContain('idx_messages_body_pending')
+
+      const pending = mod.listFoldersWithPendingBodies()
+      expect(pending.map(p => `${p.accountId}:${p.folder}=${p.pending}`).sort())
+        .toEqual(['1:Sent=4', '2:INBOX=2'])
+
+      // Draining a folder removes it from the work list entirely.
+      for (const uid of mod.getUidsWithoutBodyText(2, 'INBOX', 10)) {
+        mod.updateMessageBodyText(2, 'INBOX', uid, '')
+      }
+      expect(mod.listFoldersWithPendingBodies().map(p => p.folder)).toEqual(['Sent'])
+
+      // And a fully indexed mailbox reports no work at all.
+      for (const uid of mod.getUidsWithoutBodyText(1, 'Sent', 10)) {
+        mod.updateMessageBodyText(1, 'Sent', uid, 'text')
+      }
+      expect(mod.listFoldersWithPendingBodies()).toEqual([])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('§2.115: listFoldersWithPendingBodies follows a folder_prefs change without restart', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      seedCorpus(mod, 1, 'Junk', 3, false)
+      expect(mod.listFoldersWithPendingBodies().map(p => p.folder)).toEqual(['Junk'])
+
+      mod.upsertFolderPref(1, 'Junk', { visible: true, indexInSearch: false })
+      expect(mod.listFoldersWithPendingBodies()).toEqual([])
+
+      mod.upsertFolderPref(1, 'Junk', { visible: true, indexInSearch: true })
+      expect(mod.listFoldersWithPendingBodies().map(p => p.folder)).toEqual(['Junk'])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('§2.115: getSearchIndexStats aggregates over indexes instead of the table heap', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      seedCorpus(mod, 1, 'INBOX', 200, true)
+      seedCorpus(mod, 1, 'Sent', 30, false)
+
+      const statements = captureSql(mod, () => { mod.getSearchIndexStats([1]) })
+      const totals = statements.find(s => s.includes('COUNT(*)') && !s.includes('IS NULL'))
+      const bodyPending = statements.find(s => s.includes('body_text IS NULL'))
+      const namesPending = statements.find(s => s.includes('attachment_filenames IS NULL'))
+      expect(totals && bodyPending && namesPending).toBeTruthy()
+
+      // No correlated per-row subquery against folder_prefs any more, and no
+      // pass over the table heap: totals come from a covering index, the two
+      // backlogs from their partial indexes.
+      const totalsPlan = queryPlan(mod, totals!, [1])
+      expect(totalsPlan).toMatch(/USING COVERING INDEX/)
+      expect(totalsPlan).not.toContain('CORRELATED')
+      expect(queryPlan(mod, bodyPending!, [1])).toContain('idx_messages_body_pending')
+      expect(queryPlan(mod, namesPending!, [1])).toContain('idx_messages_filenames_pending')
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('§2.115: getSearchIndexStats keeps its pre-rewrite semantics', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertFolderPref(1, 'Spam', { visible: true, indexInSearch: false })
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 1, subject: 's1', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false, bodyText: 'body', attachmentFilenames: 'a.pdf' },
+        { uid: 2, subject: 's2', fromAddr: 'a@test', date: '2026-01-02T00:00:00Z', unread: false, bodyText: '' },
+        { uid: 3, subject: 's3', fromAddr: 'a@test', date: '2026-01-03T00:00:00Z', unread: false },
+      ])
+      // Excluded folder: never counted, in numerator or denominator.
+      mod.upsertMessages(1, 'Spam', [
+        { uid: 1, subject: 'spam', fromAddr: 'z@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      // Another account, not asked about.
+      mod.upsertMessages(2, 'INBOX', [
+        { uid: 1, subject: 'other', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      const stats = mod.getSearchIndexStats([1])
+      expect(stats.totalMessages).toBe(3)
+      // body_text = '' counts as indexed (message has no text parts).
+      expect(stats.bodyIndexed).toBe(2)
+      expect(stats.filenamesIndexed).toBe(1)
+
+      const both = mod.getSearchIndexStats([1, 2])
+      expect(both.totalMessages).toBe(4)
+      expect(both.bodyIndexed).toBe(2)
+
+      expect(mod.getSearchIndexStats([])).toEqual({ totalMessages: 0, bodyIndexed: 0, filenamesIndexed: 0 })
+      expect(mod.getSearchIndexStats([999])).toEqual({ totalMessages: 0, bodyIndexed: 0, filenamesIndexed: 0 })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('§2.115: new mail lands in the backlog index and leaves it once indexed', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      seedCorpus(mod, 1, 'INBOX', 100, true)
+      expect(mod.listFoldersWithPendingBodies()).toEqual([])
+
+      // Header sync inserts a new message with no body.
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 101, subject: 'fresh', fromAddr: 'a@test', date: '2026-02-01T00:00:00Z', unread: true },
+      ])
+      expect(mod.listFoldersWithPendingBodies()).toEqual([{ accountId: 1, folder: 'INBOX', pending: 1 }])
+      expect(mod.getUidsWithoutBodyText(1, 'INBOX', 200)).toEqual([101])
+
+      mod.updateMessageBodyText(1, 'INBOX', 101, 'fresh body')
+      expect(mod.listFoldersWithPendingBodies()).toEqual([])
+      const stats = mod.getSearchIndexStats([1])
+      expect(stats.totalMessages).toBe(101)
+      expect(stats.bodyIndexed).toBe(101)
+      // The body really is searchable, not just accounted for.
+      expect(mod.searchMessages(1, 'INBOX', 'body:fresh', 10, 0).map(m => m.uid)).toEqual([101])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  // Every test above starts from a schema this build created and seeds rows
+  // afterwards, so the partial indexes are always born empty and filled by
+  // ordinary INSERTs. That is nobody's upgrade path. The path every existing
+  // user takes is the opposite one: a cache.db that already holds their whole
+  // mailbox (the instance that motivated §2.115 carried 845 MB / 106 667
+  // messages) is opened by a build whose migration block adds the indexes for
+  // the first time, and SQLite has to backfill them from rows that are already
+  // there. This test starts from a genuinely pre-migration `messages` table —
+  // no partial indexes, and none of the columns later builds add by ALTER —
+  // populates it, and then lets the module migrate it.
+  testDb('§2.115: partial backlog indexes are backfilled when a populated legacy cache is upgraded, and the upgrade is idempotent', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mailcopilot-bodyidx-mig-'))
+    const prevDataDir = process.env.MAILCOPILOT_DATA_DIR
+    const { default: Database } = await import('better-sqlite3')
+
+    // A pre-§2.115 cache.db: the `messages` table as it was before the partial
+    // indexes existed, and without the columns added later by ALTER guards
+    // (attachment_filenames, pinned, cached_detail) — so this also exercises
+    // the column migrations running against a non-empty table.
+    const legacy = new Database(path.join(dir, 'cache.db'))
+    legacy.exec(`
+      CREATE TABLE messages(
+        id INTEGER PRIMARY KEY, account_id INTEGER, folder_path TEXT, uid INTEGER,
+        subject TEXT,
+        from_addr TEXT,
+        from_name TEXT,
+        to_addr TEXT,
+        body_text TEXT,
+        date TEXT,
+        unread INTEGER,
+        flagged INTEGER DEFAULT 0,
+        has_attachments INTEGER DEFAULT 0,
+        body_downloaded INTEGER DEFAULT 0,
+        message_size INTEGER DEFAULT 0,
+        message_id TEXT,
+        in_reply_to TEXT,
+        "references" TEXT,
+        UNIQUE(account_id, folder_path, uid)
+      );
+      CREATE INDEX idx_messages_folder_uid ON messages(account_id, folder_path, uid);
+    `)
+    const insert = legacy.prepare(
+      `INSERT INTO messages(account_id, folder_path, uid, subject, from_addr, body_text, date, unread)
+       VALUES(?, ?, ?, ?, ?, ?, ?, 0)`,
+    )
+    legacy.transaction(() => {
+      // 200 already-indexed INBOX messages …
+      for (let uid = 1; uid <= 200; uid++) {
+        insert.run(1, 'INBOX', uid, `legacy subject ${uid}`, 'a@test', `legacy body ${uid}`, '2026-01-01T00:00:00Z')
+      }
+      // … 50 that never got a body …
+      for (let uid = 201; uid <= 250; uid++) {
+        insert.run(1, 'INBOX', uid, `pending subject ${uid}`, 'a@test', null, '2026-01-02T00:00:00Z')
+      }
+      // … and a whole folder that was never touched by the indexer.
+      for (let uid = 1; uid <= 50; uid++) {
+        insert.run(1, 'Sent', uid, `sent subject ${uid}`, 'me@test', null, '2026-01-03T00:00:00Z')
+      }
+    })()
+    // Pre-condition: this really is a pre-migration database.
+    expect(legacy.prepare(
+      `SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name LIKE '%_pending'`,
+    ).get()).toEqual({ c: 0 })
+    legacy.close()
+
+    vi.resetModules()
+    process.env.MAILCOPILOT_DATA_DIR = dir
+    let mod = await import('./index')
+    try {
+      // 1. The data survived the migration untouched.
+      const total = mod.default.prepare(`SELECT COUNT(*) as c FROM messages`).get() as { c: number }
+      expect(total.c).toBe(300)
+      const sample = mod.default.prepare(
+        `SELECT subject, body_text as bodyText FROM messages WHERE account_id=1 AND folder_path='INBOX' AND uid=7`,
+      ).get() as { subject: string; bodyText: string }
+      expect(sample).toEqual({ subject: 'legacy subject 7', bodyText: 'legacy body 7' })
+
+      // 2. Both partial indexes now exist, as partial indexes.
+      const indexes = mod.default.prepare(
+        `SELECT name, sql FROM sqlite_master WHERE type='index' AND name IN ('idx_messages_body_pending','idx_messages_filenames_pending')`,
+      ).all() as Array<{ name: string; sql: string }>
+      expect(indexes.map(i => i.name).sort()).toEqual(['idx_messages_body_pending', 'idx_messages_filenames_pending'])
+      expect(indexes.find(i => i.name === 'idx_messages_body_pending')?.sql).toContain('WHERE body_text IS NULL')
+
+      // 3. They were BACKFILLED from the pre-existing rows, not merely created
+      //    for future inserts: the legacy backlog is visible through them.
+      expect(mod.listFoldersWithPendingBodies().map(f => `${f.accountId}:${f.folder}=${f.pending}`).sort())
+        .toEqual(['1:INBOX=50', '1:Sent=50'])
+      expect(mod.getUidsWithoutBodyText(1, 'INBOX', 3)).toEqual([250, 249, 248])
+      // attachment_filenames was added by the ALTER guard as NULL for every
+      // legacy row, so the whole corpus is in the filename backlog.
+      expect(mod.getSearchIndexStats([1])).toEqual({
+        totalMessages: 300,
+        bodyIndexed: 200,
+        filenamesIndexed: 0,
+      })
+
+      // 4. The pending-work query is answered BY the index on the upgraded DB —
+      //    a backfilled index the planner ignores would fix nothing, and this
+      //    reads the function's real SQL rather than a copy of it.
+      const pendingSql = captureSql(mod, () => { mod.getUidsWithoutBodyText(1, 'INBOX', 200) })
+        .find(s => s.includes('body_text IS NULL'))
+      expect(pendingSql).toBeTruthy()
+      const plan = queryPlan(mod, pendingSql!, [1, 'INBOX', 200])
+      expect(plan).toContain('idx_messages_body_pending')
+      expect(plan).not.toContain('TEMP B-TREE')
+
+      // 5. Reopening the SAME upgraded dir must be a no-op: no duplicate
+      //    indexes, no thrown CREATE, no data loss.
+      mod.default.close()
+      vi.resetModules()
+      process.env.MAILCOPILOT_DATA_DIR = dir
+      mod = await import('./index')
+
+      expect(mod.default.prepare(
+        `SELECT COUNT(*) as c FROM sqlite_master WHERE type='index' AND name LIKE 'idx_messages_%_pending'`,
+      ).get()).toEqual({ c: 2 })
+      expect((mod.default.prepare(`SELECT COUNT(*) as c FROM messages`).get() as { c: number }).c).toBe(300)
+      expect(mod.listFoldersWithPendingBodies().map(f => `${f.accountId}:${f.folder}=${f.pending}`).sort())
+        .toEqual(['1:INBOX=50', '1:Sent=50'])
+
+      // 6. And the upgraded index tracks writes normally afterwards.
+      mod.updateMessageBodyText(1, 'Sent', 50, 'filled in after the upgrade')
+      expect(mod.listFoldersWithPendingBodies().map(f => `${f.accountId}:${f.folder}=${f.pending}`).sort())
+        .toEqual(['1:INBOX=50', '1:Sent=49'])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
   testDb('searchMessages: 1000-message searches stay well under 1s (coarse catastrophic-slowdown guard)', async () => {
     // Coarse guard against a CATASTROPHIC slowdown only (an accidental O(n²) or
     // a query that hangs) — such a regression blows well past 1s. It is NOT a
@@ -4246,6 +4601,220 @@ PmzvC1E/Xy2DSACclKcSo2N8JqtEHDZqj75aK7S2pA0dZAn5xa5HxbAYvwcdyrg=
       // regression that stores `undefined`/`null` instead of `false`.
       expect(created.enabled).toBe(false)
       expect(typeof created.enabled).toBe('boolean')
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  // --- mail_rules_state: the rule-pipeline watermark (2026-07-30) ---
+
+  testDb('mail rules state is absent until the runner writes it, then round-trips', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      expect(mod.getMailRulesState(1, 'INBOX')).toBeUndefined()
+
+      mod.setMailRulesState(1, 'INBOX', 42, 7)
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 42, uidValidity: 7 })
+
+      // Same (account, folder) updates in place rather than accumulating rows.
+      mod.setMailRulesState(1, 'INBOX', 43, 7)
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 43, uidValidity: 7 })
+
+      // Scoped per folder and per account.
+      expect(mod.getMailRulesState(1, 'Archive')).toBeUndefined()
+      expect(mod.getMailRulesState(2, 'INBOX')).toBeUndefined()
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('mail rules state stores a null uidValidity when the server value is unknown', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.setMailRulesState(1, 'INBOX', 5, null)
+      // Must be a real null, not undefined — the runner compares it against the
+      // live UIDVALIDITY to decide whether to re-baseline.
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 5, uidValidity: null })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('getUidsForRulesSince returns unevaluated UIDs ascending, scoped and capped', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 5, subject: 's5', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+        { uid: 7, subject: 's7', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+        { uid: 6, subject: 's6', fromAddr: 'c@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(1, 'Archive', [
+        { uid: 9, subject: 's9', fromAddr: 'd@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(2, 'INBOX', [
+        { uid: 8, subject: 's8', fromAddr: 'e@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      // Ascending order is load-bearing: the runner advances the watermark per
+      // message, so an interrupted pass must leave a contiguous tail.
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 0, 10)).toEqual([5, 6, 7])
+      // Strictly greater than the watermark — the watermark itself is done.
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 5, 10)).toEqual([6, 7])
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 7, 10)).toEqual([])
+      // Cap applies to the oldest end, so the next pass resumes contiguously.
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 0, 2)).toEqual([5, 6])
+      // Other folders and accounts are invisible to this pass.
+      expect(mod.getUidsForRulesSince(1, 'Archive', 0, 10)).toEqual([9])
+      expect(mod.getUidsForRulesSince(2, 'INBOX', 0, 10)).toEqual([8])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache anchors every cached folder at MAX(uid) with its recorded UIDVALIDITY', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 5, subject: 's5', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+        { uid: 9, subject: 's9', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(1, 'Archive', [
+        { uid: 3, subject: 's3', fromAddr: 'c@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertMessages(2, 'INBOX', [
+        { uid: 100, subject: 's100', fromAddr: 'd@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      // INBOX of account 1 has been synced; Archive has not.
+      mod.upsertSyncState(1, 'INBOX', null, 42)
+
+      const seeded = mod.seedMailRulesStateFromCache()
+
+      expect(seeded).toBe(3)
+      // Anchored at the highest cached UID, per (account, folder) pair — this is
+      // what stops the first launch of the fix from sweeping an existing mailbox
+      // and, more importantly, is done BEFORE any sync so the runner's own lazy
+      // baseline never sees mail that just arrived.
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 9, uidValidity: 42 })
+      // No sync_state row yet → uidValidity unknown, stored as a real NULL. The
+      // runner adopts it on the first sync instead of reading it as a bump.
+      expect(mod.getMailRulesState(1, 'Archive')).toEqual({ watermarkUid: 3, uidValidity: null })
+      expect(mod.getMailRulesState(2, 'INBOX')).toEqual({ watermarkUid: 100, uidValidity: null })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache is idempotent — a repeat call never moves an existing watermark', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 5, subject: 's5', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      expect(mod.seedMailRulesStateFromCache()).toBe(1)
+
+      // The runner has since evaluated nothing new, but mail arrived and a
+      // pass advanced the watermark by hand.
+      mod.setMailRulesState(1, 'INBOX', 7, 42)
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 20, subject: 's20', fromAddr: 'b@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      // Second launch: the seed must not re-anchor to MAX(uid)=20, which would
+      // declare uid 20 old and hide it from every rule forever.
+      expect(mod.seedMailRulesStateFromCache()).toBe(0)
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 7, uidValidity: 42 })
+      expect(mod.getUidsForRulesSince(1, 'INBOX', 7, 10)).toEqual([20])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache anchors a KNOWN but EMPTY folder at 0 (§2.86 iter3)', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      // Each of these folders is known to this install through a different
+      // table and has NO cached message. A seed driven by `messages` alone
+      // skipped all of them, and their first arriving message then met the
+      // runner's LAZY baseline — which runs after the fetch persisted it, so
+      // `MAX(uid)` already included it and it was declared pre-existing
+      // forever. That is the original §2.86 defect, one folder at a time.
+      mod.upsertSyncState(1, 'Drafts', null, 11)
+      mod.upsertFolderPref(1, 'Newsletters', { headerSyncMode: 'period' })
+      mod.upsertFolderCrawlState(1, 'Receipts', { status: 'not_started' })
+
+      expect(mod.seedMailRulesStateFromCache()).toBe(3)
+
+      // Anchored at 0, not skipped: uid 1 arriving next is above the watermark
+      // and therefore gets evaluated.
+      expect(mod.getMailRulesState(1, 'Drafts')).toEqual({ watermarkUid: 0, uidValidity: 11 })
+      expect(mod.getMailRulesState(1, 'Newsletters')).toEqual({ watermarkUid: 0, uidValidity: null })
+      expect(mod.getMailRulesState(1, 'Receipts')).toEqual({ watermarkUid: 0, uidValidity: null })
+
+      mod.upsertMessages(1, 'Drafts', [
+        { uid: 1, subject: 's1', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      expect(mod.getUidsForRulesSince(1, 'Drafts', 0, 10)).toEqual([1])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache counts a folder known through several tables once', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      // The union must de-duplicate: `messages` + `folder_prefs` + `sync_state`
+      // all name the same pair, and a per-source row would collide on the
+      // primary key (INSERT OR IGNORE would hide it, but the count would lie).
+      mod.upsertMessages(1, 'INBOX', [
+        { uid: 4, subject: 's4', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+      mod.upsertFolderPref(1, 'INBOX', { headerSyncMode: 'full' })
+      mod.upsertSyncState(1, 'INBOX', null, 3)
+      mod.upsertFolderCrawlState(1, 'INBOX', { status: 'covered_full' })
+
+      expect(mod.seedMailRulesStateFromCache()).toBe(1)
+      // A folder that does have mail is still anchored at MAX(uid), not 0 —
+      // seeding it at 0 would sweep the whole mailbox on first launch.
+      expect(mod.getMailRulesState(1, 'INBOX')).toEqual({ watermarkUid: 4, uidValidity: 3 })
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('seedMailRulesStateFromCache leaves a known-empty folder alone on a repeat call', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      // Idempotence has to hold for the 0-anchored rows too: re-anchoring them
+      // to MAX(uid) on the next launch would swallow everything that arrived in
+      // between, which is the defect this seed exists to prevent.
+      mod.upsertFolderPref(1, 'Newsletters', { headerSyncMode: 'period' })
+      expect(mod.seedMailRulesStateFromCache()).toBe(1)
+
+      mod.upsertMessages(1, 'Newsletters', [
+        { uid: 12, subject: 's12', fromAddr: 'a@test', date: '2026-01-01T00:00:00Z', unread: false },
+      ])
+
+      expect(mod.seedMailRulesStateFromCache()).toBe(0)
+      expect(mod.getMailRulesState(1, 'Newsletters')).toEqual({ watermarkUid: 0, uidValidity: null })
+      expect(mod.getUidsForRulesSince(1, 'Newsletters', 0, 10)).toEqual([12])
+    } finally {
+      cleanup(dir, mod, prevDataDir)
+    }
+  })
+
+  testDb('deleting an account drops its rule watermark rows', async () => {
+    const { dir, mod, prevDataDir } = await loadDbModule()
+    try {
+      mod.setMailRulesState(3, 'INBOX', 11, 1)
+      mod.setMailRulesState(4, 'INBOX', 12, 1)
+      expect(mod.getMailRulesState(3, 'INBOX')).toBeDefined()
+
+      mod.deleteAccountData(3)
+
+      // A stale watermark surviving account removal would silently suppress
+      // rules for a re-added account until its next re-baseline.
+      expect(mod.getMailRulesState(3, 'INBOX')).toBeUndefined()
+      expect(mod.getMailRulesState(4, 'INBOX')).toEqual({ watermarkUid: 12, uidValidity: 1 })
     } finally {
       cleanup(dir, mod, prevDataDir)
     }

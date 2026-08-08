@@ -54,6 +54,12 @@ Rechte Spalte: Kopfzeilen, Nachrichtentext, Anhaenge und Aktions-Buttons (Antwor
 
 Ziehen Sie die Spaltengrenze, um die Breite anzupassen.
 
+## Textauswahl und Bearbeitung
+
+Rechtsklick in ein beliebiges Textfeld -- die Suchleiste, eine Nachricht, die Sie gerade verfassen, das Eingabefeld des KI-Assistenten oder jedes andere bearbeitbare Feld -- oeffnet ein kleines Kontextmenue mit **Ausschneiden**, **Kopieren**, **Einfügen** und **Alles auswählen**. Rechtsklick auf ausgewaehlten, nicht bearbeitbaren Text (zum Beispiel eine markierte Passage im Nachrichtentext) bietet nur **Kopieren** an.
+
+Rechtsklick auf einen Link im Nachrichtentext oeffnet ein anderes Menue mit Optionen zum Oeffnen oder Kopieren des Links; siehe [Rechtsklick auf einen Link](./reading-emails#rechtsklick-auf-einen-link).
+
 ## Statusleiste
 
 Eine dauerhaft sichtbare Statusleiste verlaeuft am unteren Rand des Fensters, aehnlich der von VS Code. Sie zeigt Hintergrundaktivitaeten, die zuvor nur im Suchpanel sichtbar waren:

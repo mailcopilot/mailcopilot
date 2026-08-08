@@ -13,7 +13,12 @@
  *   - Only structural fields: enums, counts, durations, buckets, booleans,
  *     canonical folder roles (inbox/sent/archive/...), provider kinds.
  *   - Account identity, if needed, is an integer id — never the email.
- *   - Install identity is a hashed UUID emitted ONLY in session events.
+ *   - Install identity is a hashed UUID. The `install_id_hash` TAG belongs on
+ *     the three session events only (cardinality) — but note that the same
+ *     hash is attached SDK-wide as the Sentry `user.id`, so it accompanies
+ *     every event and transaction regardless. Unlinkability is not a property
+ *     this pipeline has; the content rules above are what protect the user.
+ *     See electron/installId.ts.
  */
 
 // --- Low-cardinality enum domains ------------------------------------------
@@ -48,12 +53,19 @@ export const DOMAINS = {
   // Why a trust click did NOT end in a stored pin. `no_pending_offer` /
   // `offer_fingerprint_mismatch` are the authorization gate firing: something
   // asked to pin a certificate without an open recovery dialog for it, which
-  // is either a UI bug or an attempt.
+  // is either a UI bug or an attempt. `user_declined` / `confirm_in_flight`
+  // come from the native confirmation gate: the first is the human saying no
+  // (a healthy rate is fine; a spike means the prompt reads as alarming or a
+  // renderer is asking for pins nobody requested), the second means something
+  // tried to stack a second modal on an endpoint that already had one — a
+  // legitimate renderer never does that.
   cert_trust_reject_reason: [
     'fingerprint_mismatch',
     'pin_write_failed',
     'no_pending_offer',
     'offer_fingerprint_mismatch',
+    'user_declined',
+    'confirm_in_flight',
   ] as const,
   // Closed set of AI-budget denial reasons, produced by literals in
   // packages/db. Declared as a DOMAIN rather than a bare 'string' so the tag
@@ -75,6 +87,44 @@ export const DOMAINS = {
   // records timing only; Phase 1 will use this tag to give the interactive
   // tier priority over background indexer / sync.
   imap_pool_requester: ['interactive', 'background', 'indexer', 'sync', 'other'] as const,
+  // §2.124 — where one EML parse actually ran. The whole point of the metric
+  // is that these are NOT interchangeable: 'inline_below_threshold' is the
+  // healthy, expected path for ordinary messages, while 'inline_unavailable'
+  // means the off-thread parse silently stopped existing and every large
+  // message is back to freezing the main loop for seconds. Both look identical
+  // to the user (the app works, only slower), so nothing but this tag can tell
+  // them apart. 'worker_failed' is a parse that died inside the worker on
+  // these particular bytes — one message lost, feature intact —
+  // and 'worker_aborted' is the caller walking away (message closed
+  // mid-parse), split out so an abandoned open is never counted as a failure.
+  eml_parse_path: [
+    'worker',
+    'worker_failed',
+    'worker_aborted',
+    'inline_below_threshold',
+    'inline_unavailable',
+  ] as const,
+  // §2.124 — why off-thread parsing stopped being possible, reported once per
+  // session on the transition. 'script_missing' is the build/packaging failure
+  // (the worker chunk is not next to the main bundle — the mode that leaves
+  // the app working and 10× slower with no other symptom), 'spawn_failed' is
+  // the `new Worker()` constructor refusing, 'startup_failed' a worker that
+  // died before ever answering a job. 'not_main_thread' is a defensive branch:
+  // the worker entry parses inline by construction, so it means somebody wired
+  // the offloading entry point into the worker itself.
+  eml_worker_unavailable_reason: [
+    'script_missing',
+    'spawn_failed',
+    'startup_failed',
+    'not_main_thread',
+  ] as const,
+  // §2.124 — raw `.eml` size band of a parse dispatch. Deliberately the same
+  // five bands `bucketBodySize()` produces for `smtp.send`, so one vocabulary
+  // covers message size everywhere; packages/net/eml.test.ts asserts the two
+  // stay in step. Coarse by design — the narrowest band spans a kilobyte and
+  // the widest is unbounded, so a value is an aggregate over a huge population
+  // of sizes and cannot single out a message.
+  eml_size_bucket: ['<1KB', '1-10KB', '10-100KB', '100KB-1MB', '1MB+'] as const,
   // §3.10 P0: every mutating MCP tool now goes through preview→apply.
   // The `kind` tag identifies which family of action audit events refer to.
   // Adding a new mutating tool? Add the tag here AND in
@@ -183,6 +233,12 @@ export const DOMAINS = {
   // `mainOnly: true`, so a compromised renderer cannot emit it; this domain is
   // the second-line guard that rejects any out-of-enum value at the IPC bridge.
   external_open_source: ['window_open', 'ui_ipc', 'update_dialog', 'unsubscribe', 'oauth'] as const,
+  // §2.93(a) — which section the native context menu offered. Structural by
+  // construction: derived from the menu plan (electron/services/contextMenu.ts),
+  // never from the link URL or the selected text.
+  context_menu_context: ['link', 'editable', 'selection'] as const,
+  // §2.93(a) — which link item of the native context menu was activated.
+  context_menu_link_action: ['open', 'copy_address'] as const,
   // §2.23 PR1 — Sent-copy APPEND failure buckets. SMTP delivery succeeded but
   // the IMAP APPEND of the copy into the Sent folder failed. `reason` is the
   // low-cardinality classification produced by classifySentCopyAppendFailure
@@ -206,6 +262,28 @@ export const DOMAINS = {
   // sync (a drift is caught by typecheck, since call sites pass string literals
   // against the union).
   secret_store_surface: ['imap_smtp', 'oauth_refresh', 'ai_keys', 'unknown'] as const,
+  // §2.122 — which AI provider's stored key an operation touched. Mirrors
+  // `ApiKeyProvider` in electron/services/ai.ts (AiProvider minus
+  // 'subscription', which has no stored key). Closed enum: the tag can never
+  // start carrying a key, a key id, or free text.
+  ai_key_provider: ['anthropic-api', 'openai-api', 'gemini-api'] as const,
+  // §2.122 — which secret-store operation on an AI key.
+  ai_key_op: ['read', 'write', 'delete'] as const,
+  // §2.122 — its outcome. 'found' / 'absent' split the read: "the store
+  // answered and there is a key" vs "the store answered and there is none".
+  // 'store_error' is the third state that used to be invisible — the store
+  // itself failed, so we know NOTHING about whether a key exists. 'ok' is the
+  // success of a write or a delete.
+  ai_key_outcome: ['found', 'absent', 'ok', 'store_error'] as const,
+  // §2.119 — which AI destination setting a confirmation was about. Two
+  // members and nothing else: 'endpoint' is `aiOpenAiBaseUrl`, 'proxy' is
+  // `aiProxyUrl`. The ADDRESS never appears in telemetry — not the host, not a
+  // hash of it, not its length.
+  ai_destination_field: ['endpoint', 'proxy'] as const,
+  // §2.119 — how the confirmation ended. 'blocked_invalid' is a requested
+  // address that is not a usable http(s) URL (refused without a dialog),
+  // 'blocked_busy' a change that arrived while another confirmation was open.
+  ai_destination_outcome: ['accepted', 'declined', 'blocked_invalid', 'blocked_busy'] as const,
 } as const
 
 export type DomainName = keyof typeof DOMAINS
@@ -659,7 +737,7 @@ export const METRIC_EVENTS = {
   },
   'cert.trust_rejected': {
     kind: 'event',
-    purpose: 'User accepted the certificate but no pin was stored — either the endpoint served a different certificate than the dialog showed (rotation / load balancer / active swap) or the pin store rejected the write. Pairs with cert.trust_clicked to show how often the trust step dead-ends.',
+    purpose: 'A trust request did not end in a stored pin — the user declined main\'s native confirmation, the authorization gate found no matching recovery dialog, the endpoint served a different certificate than the dialog showed (rotation / load balancer / active swap), or the pin store rejected the write. Pairs with cert.trust_clicked to show how often the trust step dead-ends, and `reason` separates human refusals from gate rejections.',
     tags: {
       provider: 'provider',
       reason: 'cert_trust_reject_reason',
@@ -721,6 +799,69 @@ export const METRIC_EVENTS = {
       requester: 'imap_pool_requester',
       wait_ms_bucket: 'string',
     },
+  },
+  // §2.124 — off-thread MIME parsing exists because the MIME splitter yields
+  // to the event loop once per ~77 bytes, and a turn on the Electron main loop
+  // costs ~0.1–0.25 ms: a 9.6 MB message froze the UI for 17.5 s. The client
+  // deliberately falls back to the inline parse when the worker cannot start,
+  // which is the right failure policy and also the reason this metric has to
+  // exist — a missing build chunk, a dev/packaged path difference or an
+  // Electron restriction on worker_threads would leave the app fully working
+  // and 10× slower, with nothing anywhere saying so. The app's own UiFreeze
+  // watchdog cannot see it either: `monitorEventLoopDelay` measures the worst
+  // SINGLE gap between iterations, and this failure mode is thousands of
+  // microsecond yields — a 27 s inline parse never trips it (measured).
+  //
+  // What we act on:
+  //  - 'inline_unavailable' above a trickle → the feature is dead in the
+  //    field; open a build/packaging bug. This is the alarm.
+  //  - the split of 'inline_below_threshold' across size buckets → whether
+  //    EML_WORKER_MIN_BYTES (64 KiB, picked from a turn-cost model, never
+  //    validated in the field) leaves a real population of borderline parses
+  //    on the main loop. A 10-100KB band that dominates says lower it.
+  //  - 'worker_failed' concentrated in one size bucket → the worker's
+  //    resourceLimits ceiling is too low for real messages, not a pathology.
+  //
+  // PII-clean by construction: two closed enum tags. The size bucket is the
+  // same five-band vocabulary `smtp.send` already uses; no length, no UID, no
+  // folder, no filename, nothing derived from message content.
+  //
+  // NOT aggregated on purpose. Aggregation buffers for 10 s and — being itself
+  // a consent-bearing act — emits nothing at all while collection is off,
+  // which would take the local `Metrics` log line away exactly when it is the
+  // only evidence available (a fresh profile, an e2e run, a user who declined
+  // telemetry). Volume is bounded by user opens, so a record per dispatch is
+  // affordable.
+  //
+  // `mainOnly: true` — emitted from packages/net through the reportNetEvent
+  // seam, which only the main process wires. A renderer must not be able to
+  // fabricate evidence that off-thread parsing is healthy.
+  'eml.parse_dispatch': {
+    kind: 'event',
+    purpose: 'One EML parse dispatch, tagged with the path it actually took (worker / inline below threshold / inline because the worker is unavailable / failed / aborted) and the message size band. Answers "is off-thread parsing alive in the field, and is the offload threshold in the right place?".',
+    tags: {
+      path: 'eml_parse_path',
+      size_bucket: 'eml_size_bucket',
+    },
+    mainOnly: true,
+  },
+  // §2.124 — the transition, not the ongoing cost. Fired ONCE per session, on
+  // the flip into "off-thread parsing is not possible here"; `eml.parse_dispatch`
+  // carries what it costs from then on. A counter tick per message would bury
+  // the moment of failure in the volume it causes, and the reason — which is
+  // what tells a maintainer whether to look at the build, the packaging or the
+  // runtime — is only knowable at the flip.
+  //
+  // Pairs with the sanitised Sentry report the same transition emits through
+  // `reportNetError('eml.parse.worker', ...)`, which carries the closed error
+  // class and never the raw error (see services/netErrorTelemetry.ts).
+  'eml.parse_worker_unavailable': {
+    kind: 'event',
+    purpose: 'Off-thread EML parsing became impossible for the rest of the session, tagged with why. Fired once on the transition, not per message. Answers "did the parse worker silently stop existing in this build?".',
+    tags: {
+      reason: 'eml_worker_unavailable_reason',
+    },
+    mainOnly: true,
   },
 
   // --- DB data-loss signals -------------------------------------------------
@@ -1246,6 +1387,39 @@ export const METRIC_EVENTS = {
     mainOnly: true,
   },
 
+  // --- §2.93(a) — native context menu --------------------------------------
+  //
+  // Usage signal for the context menu the app gained in §2.93(a): is it live,
+  // and what do people right-click on? `ui.context_menu_shown` fires once per
+  // popped menu with the SECTION it offered; `ui.context_menu_link_action`
+  // fires when one of the two link items is activated (the edit items use
+  // Electron menu roles, which ignore `click`, so they have no per-action
+  // record — the shown event covers them).
+  //
+  // Both are `mainOnly: true` — they are emitted from the main-process
+  // `context-menu` handler only, so a compromised renderer cannot forge them
+  // at the metrics IPC bridge. PII-clean by construction: the tags are fixed
+  // enums computed from the menu plan; the link URL, the link text and the
+  // selected text never leave the handler.
+  'ui.context_menu_shown': {
+    kind: 'event',
+    purpose: 'The native context menu was shown; `context` says which section it offered (link / editable field / selection).',
+    tags: {
+      context: 'context_menu_context',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  'ui.context_menu_link_action': {
+    kind: 'event',
+    purpose: 'A link item of the native context menu was activated (open in browser / copy link address).',
+    tags: {
+      action: 'context_menu_link_action',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+
   // --- §2.34 ship-first observability — OS secret store unavailable ---------
   //
   // Fired when a keytar / libsecret / Secret Service read FAILS (the backend
@@ -1277,6 +1451,102 @@ export const METRIC_EVENTS = {
     tags: {
       surface: 'secret_store_surface',
       platform: 'platform',
+    },
+    mainOnly: true,
+  },
+  // --- §2.122 — AI API key storage operations --------------------------------
+  //
+  // The question this answers: do stored AI keys stay stored? A user lost five
+  // of them, and the local log held zero lines about the secret store for a
+  // whole day of runtime, so "the key survived a restart, but that does not
+  // always happen" could not be checked against anything. The counter makes the
+  // shape visible in aggregate: writes that succeed followed by reads that come
+  // back 'absent' is a key evaporating; 'store_error' is the keychain being
+  // unreachable, which is a different failure with a different fix.
+  //
+  // We will act on it: a non-trivial absent-after-write rate reopens the
+  // storage path, and a store_error rate reopens the keychain fallback.
+  //
+  // PII-clean by construction: three closed enum tags. The key itself never
+  // appears — not as a value, not as a length, not as a hash. Neither does the
+  // backend's error text (that stays in the local log as a class name plus a
+  // message LENGTH, and in the captured exception).
+  //
+  // `mainOnly: true` — emitted only by electron/services/ai.ts in the main
+  // process; a compromised renderer must not be able to fabricate a storage
+  // history through the `metrics:record` bridge.
+  //
+  // `aggregate: true` — a read happens on every AI request, so the events are
+  // buffered and flushed as counts rather than one envelope per keystroke of
+  // work.
+  // §2.119 — a change of the address AI requests (and with them the API key)
+  // are sent to was put in front of the user. We will act on it: a decline
+  // rate that is anything but near-zero means the prompt is firing for changes
+  // the user did not make — either a normalisation gap in
+  // electron/services/aiDestination.ts (the same destination asked about
+  // twice) or something writing the setting behind the user's back, and both
+  // are bugs to open. A 'blocked_busy' that is not vanishingly rare means
+  // something is driving `settings:save` in a loop.
+  //
+  // PII-clean by construction: two closed enum tags, and the destination is
+  // not one of them.
+  //
+  // `mainOnly: true` — only electron/services/aiDestinationGuard.ts emits it;
+  // a compromised renderer must not be able to fabricate a history of
+  // confirmations it never obtained through the `metrics:record` bridge.
+  'ai.destination_confirm': {
+    kind: 'event',
+    purpose: 'A change of the AI endpoint or proxy address was put to the user for native confirmation, tagged with the field and the outcome. Answers "is the destination gate firing only when a human really changed the address, and what do they answer?".',
+    tags: {
+      field: 'ai_destination_field',
+      outcome: 'ai_destination_outcome',
+    },
+    mainOnly: true,
+  },
+  'ai.api_key_store_op': {
+    kind: 'event',
+    purpose: 'An AI API key was read from / written to / deleted from the OS secret store, tagged with the provider and the outcome. Answers "do stored keys stay stored, and when they do not, was it an empty store or a broken one?".',
+    tags: {
+      op: 'ai_key_op',
+      provider: 'ai_key_provider',
+      outcome: 'ai_key_outcome',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  // §2.82 — the user pressed "allow" on the consent screen. That is the ONLY
+  // emitter: the metric is recorded by
+  // electron/services/telemetryConsentService.ts on `telemetry:setConsent`,
+  // which is the screen's own channel. Flipping the Settings → About switch
+  // back on does NOT write this event — that path goes through `settings:save`
+  // / `applyAboutToggle` and emits nothing. (The screen does re-appear after a
+  // disclosure-version bump, and answering it there does emit — but through
+  // the screen, not through the switch, which stays disabled while an answer
+  // is pending.) So this counts ANSWERS TO THE SCREEN, not opt-ins.
+  //
+  // Emitted ONLY on a grant. A refusal produces no event at all: sending one
+  // would itself be a transmission from a user who just said no, which is
+  // exactly what ePrivacy art. 5(3) forbids. Accepted consequence, decided
+  // deliberately — we cannot measure the refusal rate, only the absolute
+  // number of installs that opted in. Do not "fix" this by adding a
+  // consent_denied counter.
+  //
+  // Ordering matters at the call site: the metric is recorded AFTER the
+  // consent state has been applied to the SDK, otherwise the very first
+  // post-consent event would be dropped by the still-disabled client.
+  //
+  // `version` is the disclosure-composition version (TELEMETRY_CONSENT_VERSION),
+  // an integer — not the app version, and never a timestamp (which would be a
+  // per-install identifier).
+  //
+  // `mainOnly: true` — only electron/services/telemetryConsentService.ts emits
+  // it; a compromised renderer must not be able to fabricate a consent signal
+  // through the `metrics:record` bridge.
+  'telemetry.consent_granted': {
+    kind: 'event',
+    purpose: 'The user pressed "allow" on the consent screen, tagged with the disclosure version they saw. Answers "how many installs accepted the screen, and under which disclosure". Not a general opt-in counter: re-enabling the Settings → About switch emits nothing.',
+    tags: {
+      version: 'number',
     },
     mainOnly: true,
   },
@@ -1371,6 +1641,31 @@ export const ELECTRON_SPANS = {
       cache_hit_level: 'cache_hit_level',
       body_size_bucket: 'string',
       attachments_count: 'number',
+    },
+  },
+  // §2.82 iter2 — the AI chat request span. It predates the typed span registry
+  // and used to be opened with a direct `startInactiveSpan` call in
+  // electron/services/ai.ts, which is exactly the shape the consent gate exists
+  // to make impossible: a collection point the gate does not know about. Now it
+  // goes through `startMetricSpan`, so it is registered here and inherits the
+  // gate and the `parentSpan: null` sampling guard like every other span.
+  //
+  // Attribute keys keep their historical dotted `ai.*` form so existing Sentry
+  // queries and dashboards continue to resolve. Values are aggregates only:
+  // provider/model identifiers and the context KIND — never the prompt, the
+  // answer, the thread, or any address.
+  'ai.chat': {
+    purpose: 'One AI chat request lifecycle (§3.3): provider stream open → tool calls → completion or abort. Opened once per aiChat() invocation that passed budget admission.',
+    attributes: {
+      'ai.provider': 'string',
+      'ai.model': 'string',
+      'ai.context_type': 'string',
+      'ai.has_history': 'boolean',
+      'ai.session_resumed': 'boolean',
+      'ai.tool_call_count': 'number',
+      'ai.tools_used': 'string',
+      'ai.aborted': 'boolean',
+      'ai.cost_usd': 'number',
     },
   },
   // §3.3 B2 Thread AI Summary — one span per ACTUAL generation (never on a
@@ -1500,6 +1795,7 @@ export const METRIC_SPAN_OP: Record<MetricSpanName, string> = {
   'offline.replay': 'offline.replay',
   'search.fts': 'search.fts',
   'net.message_details': 'net.message_details',
+  'ai.chat': 'ai.chat',
   'ai.thread_summary.generate': 'ai.thread_summary.generate',
   'ai.quick_action.rewrite': 'ai.quick_action.rewrite',
   'ai.instant_reply.generate': 'ai.instant_reply.generate',

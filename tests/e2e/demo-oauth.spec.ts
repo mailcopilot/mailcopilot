@@ -49,8 +49,11 @@ function getScreenResolution(): { width: number; height: number } {
 }
 
 // Pause between actions so the viewer can follow along.
-const STEP_PAUSE = 2500
-const SHORT_PAUSE = 1500
+// A reviewer sees this app for the first time and has no idea where to look.
+// 2.5s was enough for us and not for them; the video may be four minutes long
+// as long as every step is followable.
+const STEP_PAUSE = 4000
+const SHORT_PAUSE = 2500
 
 // --- Utilities ---
 
@@ -132,8 +135,14 @@ function startFfmpeg(display: string, outputPath: string, width: number, height:
     '-framerate', String(VIDEO_FPS),
     '-i', `${display}.0`,
     '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-crf', '23',
+    // `ultrafast` + crf 23 produced ~930 kbps at 2880x1800, which turns small
+    // UI text into mush — the February submission was rejected as "does not
+    // sufficiently demonstrate the functionality of your app", and unreadable
+    // text is the most likely reason a reviewer could not see what happened.
+    // Screen capture is mostly static frames, so a slower preset costs little
+    // and buys a lot of legibility.
+    '-preset', 'veryfast',
+    '-crf', '18',
     '-pix_fmt', 'yuv420p',
     outputPath,
   ], { stdio: 'pipe' })
@@ -222,6 +231,31 @@ test('demo: OAuth consent screen workflow for Google verification', async () => 
     await sleep(SHORT_PAUSE)
 
     // =========================================================
+    // Step 0: First-run telemetry consent (§2.82)
+    //
+    // This gate comes BEFORE everything else and is the reason an earlier
+    // version of this script could never get past step 1: `<App/>` is not
+    // mounted at all while the consent screen is up (see src/Root.tsx), so the
+    // account wizard never opens and waiting for it times out.
+    //
+    // Keeping it in frame is a feature, not a chore: the reviewer sees the app
+    // asking permission to collect diagnostics BEFORE it is granted any access
+    // to mail. We answer "deny" so the recording sends no telemetry and shows
+    // that refusing does not break anything.
+    // =========================================================
+    console.log('\n--- Step 0: First-run telemetry consent ---\n')
+
+    const consentDialog = mainPage.getByTestId('telemetry-consent-dialog')
+    if (await consentDialog.isVisible({ timeout: 15_000 }).catch(() => false)) {
+      // Long pause: this is dense text and the reviewer is reading it cold.
+      await sleep(STEP_PAUSE * 2)
+      await mainPage.getByTestId('telemetry-consent-deny').click()
+      await sleep(SHORT_PAUSE)
+    } else {
+      console.log('  (no consent screen — this profile has already answered)')
+    }
+
+    // =========================================================
     // Step 1: Fresh app — Account window opens automatically
     // (No accounts configured -> ui:openAccount is called)
     // =========================================================
@@ -236,15 +270,17 @@ test('demo: OAuth consent screen workflow for Google verification', async () => 
     // =========================================================
     console.log('\n--- Step 2: Clicking "Google Sign In" ---\n')
 
-    // The Google Sign In button is the first button in account-wizard-type section.
-    const wizardSection = accountPage.locator('[data-testid="account-wizard-type"]')
-    await expect(wizardSection).toBeVisible({ timeout: 10_000 })
-    await sleep(SHORT_PAUSE)
+    // The wizard now opens on a provider picker (§2.1-C): Gmail / Outlook /
+    // generic IMAP. The old `account-wizard-type` section only appears further
+    // in, for the generic path — waiting for it here is what made the previous
+    // recording attempt fail.
+    const providerSection = accountPage.locator('[data-testid="account-wizard-provider"]')
+    await expect(providerSection).toBeVisible({ timeout: 10_000 })
+    await sleep(STEP_PAUSE)
 
-    // Click the Google button (first button; the second is IMAP/SMTP).
-    const googleBtn = wizardSection.locator('button').first()
-    await expect(googleBtn).toBeVisible()
-    await googleBtn.click()
+    const gmailCard = accountPage.locator('#provider-card-gmail')
+    await expect(gmailCard).toBeVisible()
+    await gmailCard.click()
 
     // =========================================================
     // Step 3: MANUAL — User completes Google OAuth in the browser
@@ -382,6 +418,35 @@ test('demo: OAuth consent screen workflow for Google verification', async () => 
       }
       await mainPage.bringToFront()
       await sleep(SHORT_PAUSE)
+    }
+
+    // =========================================================
+    // Step 8b: Show the account identity — proves the `openid`, `email` and
+    // `profile` scopes are actually used, not just requested. Reading and
+    // sending cover `https://mail.google.com/`, but nothing in the previous
+    // steps shows the reviewer where the signed-in user's address and display
+    // name end up. Best-effort: a failure here must not lose the recording.
+    // =========================================================
+    console.log('\n--- Step 8b: Account identity (openid / email / profile scopes) ---\n')
+
+    try {
+      await mainPage.getByTestId('open-settings').click()
+      const settingsPage = await waitForPage(browser, p => p.url().includes('#/settings'), 15_000)
+      await settingsPage.waitForLoadState('domcontentloaded')
+      await sleep(STEP_PAUSE)
+
+      // The identities section carries the address and display name that came
+      // from the Google profile.
+      const identities = settingsPage.getByTestId('settings-signature')
+        .or(settingsPage.getByText(/identit/i).first())
+      if (await identities.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await identities.scrollIntoViewIfNeeded().catch(() => {})
+        await sleep(STEP_PAUSE)
+      }
+      await settingsPage.close().catch(() => {})
+      await sleep(SHORT_PAUSE)
+    } catch (e) {
+      console.log('  (skipped: could not open settings —', String(e).split('\n')[0], ')')
     }
 
     // =========================================================

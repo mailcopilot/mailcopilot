@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 
+// The service imports the metrics pipeline (Sentry SDK, electron-log). The
+// mirror only needs the pure diag builder, so stub the sink.
+vi.mock('./metrics', () => ({ recordEvent: vi.fn() }))
+
+import { buildSentCopyAppendDiag } from './services/sentCopyFailure'
+
 /**
  * §2.23 PR1 — append-copy-to-Sent flow in `sendMailWithAccountConfig`
  * (electron/main.ts). The flow is inline in the main.ts hotspot, so —
@@ -58,35 +64,21 @@ async function appendSentCopyMirror(
       deps.logWarn(`Sent folder not resolved for account=${accountId} provider=${providerId} — APPEND skipped, message delivered via SMTP only`)
     }
   } catch (e) {
-    // Mirror of the §2.23 diag block in main.ts — keep verbatim.
-    const err = e as {
-      code?: unknown
-      response?: unknown
-      responseStatus?: unknown
-      responseText?: unknown
-      serverResponseCode?: unknown
-      command?: unknown
-      message?: unknown
-    } | null | undefined
-    const pickStr = (v: unknown): string | undefined =>
-      typeof v === 'string' && v.length > 0 ? v.slice(0, 500) : undefined
-    const diag = {
+    // Mirror of the §2.82-iter2 catch block in main.ts — keep verbatim. The
+    // diag itself is NOT mirrored any more: it is built by the real service
+    // function, which owns the PII boundary, so this test cannot pass while
+    // production sends something the builder does not produce.
+    const diag = buildSentCopyAppendDiag(e, {
       accountId,
-      providerId: providerId ?? null,
+      providerId,
       sentFolder: sentFolderForDiag ?? null,
       rawSize: rawSizeForDiag ?? null,
       messageId: messageId ?? null,
-      errorMessage: pickStr(err?.message)
-        ?? (e instanceof Error ? e.message : String(e)).slice(0, 500),
-      errorCode: pickStr(err?.code),
-      errorResponse: pickStr(err?.response),
-      errorResponseStatus: pickStr(err?.responseStatus),
-      errorResponseText: pickStr(err?.responseText),
-      errorServerResponseCode: pickStr(err?.serverResponseCode),
-      errorCommand: pickStr(err?.command),
-    }
+    })
     deps.logWarn('Could not save copy to Sent (diag):', diag)
-    deps.captureException(e, { source: 'sendMail:appendToSent', ...diag })
+    const appendErr = new Error(`sent_copy_append_failed: ${diag.reason}`)
+    appendErr.name = 'SentCopyAppendError'
+    deps.captureException(appendErr, { source: 'sendMail:appendToSent', ...diag })
     // §2.23 PR1 — mirror of the reportSentCopyAppendFailure call.
     deps.report(e, {
       accountId,
@@ -149,8 +141,8 @@ describe('append-copy-to-Sent flow (mirror of main.ts sendMailWithAccountConfig)
     })
   })
 
-  describe('APPEND failure path — diag block (retroactive §2.23 coverage)', () => {
-    it('extracts every ImapFlow error field into diag and captures with source', async () => {
+  describe('APPEND failure path — diag block (§2.82 iter2 PII boundary)', () => {
+    it('captures a synthetic error with the sanitized diag and the source tag', async () => {
       const e = imapErr({
         message: 'Command failed',
         code: 'NO',
@@ -163,60 +155,88 @@ describe('append-copy-to-Sent flow (mirror of main.ts sendMailWithAccountConfig)
       const deps = makeDeps({ appendToMailbox: () => Promise.reject(e) })
       await appendSentCopyMirror(7, 'gmail', '<mid@host>', deps)
 
-      const expectedDiag = {
+      expect(deps.captureException).toHaveBeenCalledTimes(1)
+      const [captured, ctx] = deps.captureException.mock.calls[0] as [Error, Record<string, unknown>]
+      // The raw ImapFlow rejection must NOT be the captured object — its
+      // message and stack are server- and library-authored.
+      expect(captured).not.toBe(e)
+      expect(captured.name).toBe('SentCopyAppendError')
+      expect(captured.message).toBe('sent_copy_append_failed: quota')
+      expect(ctx).toMatchObject({
+        source: 'sendMail:appendToSent',
         accountId: 7,
         providerId: 'gmail',
-        sentFolder: 'Sent',
+        sentFolderRole: 'sent',
+        sentFolderLen: 4,
         rawSize: Buffer.byteLength('raw-message-bytes', 'utf8'),
-        messageId: '<mid@host>',
-        errorMessage: 'Command failed',
-        errorCode: 'NO',
-        errorResponse: 'NO [OVERQUOTA] Quota exceeded',
+        reason: 'quota',
         errorResponseStatus: 'NO',
-        errorResponseText: 'Quota exceeded',
         errorServerResponseCode: 'OVERQUOTA',
         errorCommand: 'APPEND',
-      }
-      expect(deps.logWarn).toHaveBeenCalledWith('Could not save copy to Sent (diag):', expectedDiag)
-      expect(deps.captureException).toHaveBeenCalledTimes(1)
-      expect(deps.captureException).toHaveBeenCalledWith(e, {
-        source: 'sendMail:appendToSent',
-        ...expectedDiag,
       })
+      // §2.82 iter3 finding 1 — each field is checked against its OWN closed
+      // vocabulary, so `NO` (a tagged-response status) is dropped from the
+      // socket-error-code field even though it is a real protocol word.
+      expect(ctx.errorCode).toBeUndefined()
+      // Both sinks get the SAME object.
+      expect(deps.logWarn).toHaveBeenCalledWith(
+        'Could not save copy to Sent (diag):',
+        expect.objectContaining({ reason: 'quota', sentFolderRole: 'sent' }),
+      )
     })
 
-    it('caps every string field at 500 chars (codex §2.24 MEDIUM-3)', async () => {
-      const long = 'x'.repeat(601)
-      const e = imapErr({ message: long, response: long, responseText: long })
-      const deps = makeDeps({ appendToMailbox: () => Promise.reject(e) })
-      await appendSentCopyMirror(1, 'outlook', null, deps)
-      const diag = deps.captureException.mock.calls[0][1] as Record<string, string>
-      expect(diag.errorMessage).toHaveLength(500)
-      expect(diag.errorResponse).toHaveLength(500)
-      expect(diag.errorResponseText).toHaveLength(500)
-    })
+    // The regression test for §2.82 iter2 finding 1. Before the fix the folder
+    // name, the Message-ID and 500 chars of server response went out verbatim,
+    // contradicting the consent screen's unqualified promise about folder names
+    // and addresses.
+    it('sends neither the folder name, the Message-ID, nor the server response text', async () => {
+      const FOLDER = 'Отправленные/2026'
+      const MESSAGE_ID = '<abc123@mail.ivanov-family.example>'
+      const e = imapErr({
+        message: `APPEND failed for mailbox "${FOLDER}": user ivan@example.com over quota`,
+        response: `NO [OVERQUOTA] ${FOLDER} exceeded for ivan@example.com`,
+        responseText: `${FOLDER} exceeded`,
+        responseStatus: 'NO',
+      })
+      const deps = makeDeps({
+        resolveSentFolder: () => Promise.resolve(FOLDER),
+        appendToMailbox: () => Promise.reject(e),
+      })
+      await appendSentCopyMirror(3, 'generic-imap', MESSAGE_ID, deps)
 
-    it('falls back to capped String(e) for non-Error throwables', async () => {
-      const deps = makeDeps({ appendToMailbox: () => Promise.reject('boom-' + 'y'.repeat(600)) })
-      await appendSentCopyMirror(1, null, null, deps)
-      const diag = deps.captureException.mock.calls[0][1] as Record<string, unknown>
-      expect(diag.errorMessage).toHaveLength(500)
-      expect(String(diag.errorMessage).startsWith('boom-')).toBe(true)
-      expect(diag.errorCode).toBeUndefined()
+      const [captured, ctx] = deps.captureException.mock.calls[0] as [Error, Record<string, unknown>]
+      // Everything that leaves the process for this failure: the exception's
+      // own text plus every context value, serialized.
+      const outgoing = `${captured.name} ${captured.message} ${JSON.stringify(ctx)}`
+      expect(outgoing).not.toContain(FOLDER)
+      expect(outgoing).not.toContain('Отправленные')
+      expect(outgoing).not.toContain(MESSAGE_ID)
+      expect(outgoing).not.toContain('abc123')
+      expect(outgoing).not.toContain('ivanov-family')
+      expect(outgoing).not.toContain('ivan@example.com')
+      expect(outgoing).not.toContain('exceeded')
+      // ...and what it DOES carry instead.
+      expect(ctx.sentFolderRole).toBe('sent')
+      expect(ctx.sentFolderLen).toBe(FOLDER.length)
+      expect(ctx.reason).toBe('quota')
+      expect(typeof ctx.messageIdHash).toBe('string')
+      expect(ctx.messageIdHash).toMatch(/^[0-9a-f]{12}$/)
+      expect(typeof ctx.errorTextLen).toBe('number')
     })
 
     it('never throws on a null rejection (defensive err narrowing)', async () => {
       const deps = makeDeps({ appendToMailbox: () => Promise.reject(null) })
       await expect(appendSentCopyMirror(1, null, null, deps)).resolves.toBeUndefined()
       const diag = deps.captureException.mock.calls[0][1] as Record<string, unknown>
-      expect(diag.errorMessage).toBe('null')
+      expect(diag.reason).toBe('unknown')
     })
 
-    it('reports null sentFolder/rawSize when resolution fails before APPEND', async () => {
+    it('reports a null folder role and null rawSize when resolution fails before APPEND', async () => {
       const deps = makeDeps({ resolveSentFolder: () => Promise.reject(new Error('Invalid credentials')) })
       await appendSentCopyMirror(2, 'generic-imap', null, deps)
       const diag = deps.captureException.mock.calls[0][1] as Record<string, unknown>
-      expect(diag.sentFolder).toBeNull()
+      expect(diag.sentFolderRole).toBeNull()
+      expect(diag.sentFolderLen).toBeUndefined()
       expect(diag.rawSize).toBeNull()
     })
 
@@ -224,7 +244,7 @@ describe('append-copy-to-Sent flow (mirror of main.ts sendMailWithAccountConfig)
       const deps = makeDeps({ buildRaw: () => Promise.reject(new Error('compose failed')) })
       await appendSentCopyMirror(2, 'gmail', null, deps)
       const diag = deps.captureException.mock.calls[0][1] as Record<string, unknown>
-      expect(diag.sentFolder).toBe('Sent')
+      expect(diag.sentFolderRole).toBe('sent')
       expect(diag.rawSize).toBeNull()
     })
   })
@@ -271,10 +291,16 @@ describe('mirror-drift tripwire — production wiring in electron/main.ts', () =
     const { resolve } = await import('node:path')
     const src = readFileSync(resolve(__dirname, 'main.ts'), 'utf8')
 
-    // (c) Module-level import of the service.
+    // (c) Module-level import of the service — both entry points.
     expect(src).toMatch(
       /import\s*\{[^}]*reportSentCopyAppendFailure[^}]*\}\s*from\s*['"]\.\/services\/sentCopyFailure['"]/,
     )
+    expect(src).toMatch(
+      /import\s*\{[^}]*buildSentCopyAppendDiag[^}]*\}\s*from\s*['"]\.\/services\/sentCopyFailure['"]/,
+    )
+    // (d) §2.82 iter2 — the catch block must build the diag through the
+    //     service, never inline. An inline object is how the leak got in.
+    expect(src).toMatch(/const diag = buildSentCopyAppendDiag\(e, \{/)
 
     // Locate the catch-block anchor — this string is unique in the file.
     const anchorIdx = src.indexOf("'sendMail:appendToSent'")
@@ -282,8 +308,10 @@ describe('mirror-drift tripwire — production wiring in electron/main.ts', () =
 
     // (b) captureException is called immediately before the anchor on the same
     //     line: captureException(e, { source: 'sendMail:appendToSent', ...diag })
-    const captureRegion = src.slice(Math.max(0, anchorIdx - 60), anchorIdx + 10)
+    const captureRegion = src.slice(Math.max(0, anchorIdx - 90), anchorIdx + 10)
     expect(captureRegion).toMatch(/captureException\s*\(/)
+    // ...and it must capture the SYNTHETIC error, not the raw rejection.
+    expect(captureRegion).toContain('appendErr')
 
     // (a) reportSentCopyAppendFailure follows captureException in the same
     //     catch block — within ~500 chars after the anchor.

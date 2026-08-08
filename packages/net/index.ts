@@ -76,7 +76,13 @@ export {
 } from './config'
 export type { RendererWritableSettings, MainOnlySettingsField, SanitizeMcpConnectionsEnvResult, McpEnvSanitizationListener } from './config'
 export { fetchMessageDetails, fetchMessageBody, fetchMessageBodyViaMain, downloadMessagePart, downloadRawMessage, downloadRawMessagePerAccount } from './message'
-export { parseEmlBuffer, extractEmlAttachment, EML_ATTACHMENT_PART_PREFIX } from './eml'
+export {
+  parseEmlBuffer,
+  parseEmlBufferInline,
+  extractEmlAttachment,
+  EML_ATTACHMENT_PART_PREFIX,
+} from './eml'
+export { EML_WORKER_MIN_BYTES } from './emlWorkerClient'
 export { saveEml, readEml, emlExists, deleteEml, deleteEmls, deleteAccountEmls, emlCacheSizeBytes } from './mailStore'
 export { autoconfig } from './autoconfig'
 export { normalizeFingerprintSha256, buildTlsOptions } from './tls'

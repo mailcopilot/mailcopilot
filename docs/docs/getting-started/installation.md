@@ -65,7 +65,7 @@ You can move the AppImage to any convenient location, such as `~/Applications/`.
 
 ## First Launch
 
-When you start MailCopilot for the first time, you will see the account setup wizard. The application will guide you through connecting your first email account.
+When you start MailCopilot for the first time, you first see a consent screen titled **Send diagnostic data?**, asking whether MailCopilot may send diagnostic and usage data -- see [Telemetry](../privacy/telemetry) for exactly what that means. Nothing is sent until you answer, and your choice does not affect mail sync or the AI assistant. It does change one thing in Settings → About: with diagnostics off, the built-in feedback form is replaced with a link to the MailCopilot website instead. After you respond, the account setup wizard opens and guides you through connecting your first email account.
 
 Your passwords are securely stored in the system keychain (via keytar) and are never written to plain-text configuration files.
 
@@ -74,5 +74,5 @@ Your passwords are securely stored in the system keychain (via keytar) and are n
 MailCopilot checks for updates automatically. When a new version is available, a notification will appear in the application. You can download the update and restart with one click.
 
 :::note
-In-app self-update is available only when MailCopilot is installed in a writable location — for example, an AppImage stored in your home directory. When installed from a `.deb` or `.rpm` system package, the install directory is typically owned by root and is not writable by your user account, so MailCopilot disables the in-app updater automatically. In that case, update through your package manager (`apt`/`dnf`) or by downloading and reinstalling the latest package from the website.
+MailCopilot's built-in update mechanism can attempt to update itself in place for AppImage, `.deb`/`.rpm`/pacman, Windows, and macOS installs. For an AppImage, MailCopilot replaces the `.AppImage` file itself, so it needs to be stored somewhere writable by your user account -- for example, your home directory. For a `.deb`/`.rpm`/pacman package, the update mechanism requests administrator privileges (`pkexec`/`sudo`) before attempting to write the update, the same way `apt`/`dnf`/`pacman` would -- the fact that the install directory is owned by root does not stop it, though the final outcome depends on that privilege prompt and the package manager, not on MailCopilot. Self-update is unavailable ahead of time only when MailCopilot isn't running as one of these packaged forms (for example, an extracted AppImage or a raw unpacked folder), or when the folder MailCopilot would need to write into isn't writable -- an AppImage's own folder, or on Windows and macOS the folder holding the installed executable. In those cases, update through your package manager or administrator privileges, or by downloading and reinstalling the latest package from the website.
 :::

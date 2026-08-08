@@ -86,6 +86,16 @@
  * Net invariant: a pin can only ever be created for a certificate main itself
  * displayed to the user, for the account and endpoint main itself flagged.
  *
+ * What the offer does NOT prove: that a human agreed. Every field of an offer
+ * is known to the renderer — main broadcast them in `cert:recoveryRequired`
+ * — so a compromised renderer can satisfy `peekTrustOffer` by replaying its own
+ * payload without showing anything to anyone. The human half of the proof is
+ * gate 5 in `electron/main.ts` (`confirmCertTrustNatively`): a native
+ * `dialog.showMessageBox`, drawn by the OS and naming the fingerprint, which
+ * the renderer cannot script or pre-answer. The offer says "main flagged this
+ * endpoint and put this certificate on screen"; the native confirmation says
+ * "a person looked at it and agreed". A pin needs both.
+ *
  * Error containment: nothing in this service may propagate into the sync /
  * retry paths. Every entry point is wrapped; failures are logged via
  * createLogger('CertRecovery') and reported via captureException with

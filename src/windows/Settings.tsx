@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Save, Loader2, Minus, Square, Copy, X, Settings as SettingsIcon, Gauge, Folder, FileText, LayoutTemplate, Download, Users, Plus, Trash2, Pencil, CheckCircle, Sparkles, Shield, Info, ExternalLink, MessageSquare, Send, Palette, Type, Image, Globe, Filter, UserCircle } from 'lucide-react'
-import { AI_RULE_MAX_ENABLED_PER_ACCOUNT } from '@mailcopilot/core'
+import { Save, Loader2, X, Settings as SettingsIcon, Gauge, Folder, FileText, LayoutTemplate, Download, Users, Plus, Trash2, Pencil, CheckCircle, Sparkles, Shield, Info, ExternalLink, MessageSquare, Send, Palette, Type, Image, Globe, Filter, UserCircle } from 'lucide-react'
+import {
+  AI_RULE_MAX_ENABLED_PER_ACCOUNT,
+  ERROR_PRESENTATION_I18N_KEYS,
+  decodeErrorPresentation,
+  stripErrorPresentation,
+} from '@mailcopilot/core'
 import { useTranslation } from 'react-i18next'
 import i18n, { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, type Language } from '../i18n'
 import { sendFeedback, captureException } from '../sentry'
@@ -11,11 +16,19 @@ import Select from '../components/Select'
 import IdentitiesTab, { type IdentityDraft } from '../components/IdentitiesTab'
 import SystemInfo from '../components/Settings/SystemInfo'
 import AiPrivacyPanel from '../components/Settings/AiPrivacyPanel'
+import AiDestinationRejectionNotice from '../components/Settings/AiDestinationRejectionNotice'
+import { useAiDestinationRejection } from '../hooks/useAiDestinationRejection'
 import { buildAccountSavePayloadPatch, buildAvatarSavePayloadPatch } from '../utils/accountSavePayload'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
+import { useTelemetryConsentNeeded } from '../hooks/useTelemetryConsent'
 import { AVATAR_ICONS, getAvatarIcon } from '../utils/avatarIcons'
 import { parseShellArgs } from '../utils/parseShellArgs'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
+import {
+  deleteAiApiKeyForProvider,
+  isAiKeyFieldMasked,
+  type ApiKeyProviderId,
+} from '../utils/aiApiKey'
 import type { SortMode } from '../hooks/useMailListView'
 
 type AiProviderId = 'subscription' | 'anthropic-api' | 'openai-api' | 'gemini-api'
@@ -23,6 +36,21 @@ type VisibleAiProviderId = 'subscription' | 'anthropic-api' | 'openai-api' | 'ge
 
 function isVisibleAiProvider(value: unknown): value is VisibleAiProviderId {
   return value === 'subscription' || value === 'anthropic-api' || value === 'openai-api' || value === 'gemini-api'
+}
+
+/**
+ * §2.122 — "Check connection" used to print the raw machine verdict
+ * (`invalid_key`) into the UI, and the two new verdicts (`no_key`,
+ * `store_unavailable`) would have leaked the same way. Known verdicts get the
+ * same sentence the assistant panel shows; anything unknown still falls back to
+ * the adapter's own message.
+ */
+const AI_AUTH_STATUS_MESSAGE_KEYS: Record<string, string> = {
+  not_configured: 'ai.errors.notConfigured',
+  no_key: 'ai.errors.noKey',
+  store_unavailable: 'ai.errors.storeUnavailable',
+  invalid_key: 'ai.errors.invalidKey',
+  no_subscription: 'ai.errors.noSubscription',
 }
 
 /** Badge in the TLS pin list telling a full trust anchor apart from a
@@ -72,6 +100,13 @@ type SettingsData = {
   sendDelaySeconds?: number
   offlineMaxSizeKB?: number
   aiProvider?: AiProviderId
+  /**
+   * §2.122 — main-process record of "we wrote a key for this provider". Read
+   * only: it is absent from `rendererWritableSettingsSchema`, and it is used
+   * here for presentation (whether the key field starts masked) — never as a
+   * substitute for reading the store, and never to block or trigger anything.
+   */
+  aiApiKeySaved?: Partial<Record<ApiKeyProviderId, boolean>>
   aiModel?: string
   aiPrivacyConsent?: boolean
   aiSendOnEnter?: boolean
@@ -187,7 +222,12 @@ function defaultFolderPref(role: string | null): Pick<FolderPreference, 'visible
 
 export default function Settings() {
   const { t } = useTranslation()
-  const maximized = useMaximized()
+  // `t` gets a new identity on every language change. Callbacks that only need
+  // it inside a catch block read it through this ref so switching the UI
+  // language does not invalidate them — `refreshFolders` in particular sits in
+  // an effect dependency list and would re-hit IMAP for the folder list.
+  const tRef = useRef(t)
+  tRef.current = t
   const [tab, setTab] = useState<Tab>('general')
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [language, setLanguage] = useState<Language>(DEFAULT_LANGUAGE)
@@ -273,6 +313,10 @@ export default function Settings() {
   // account's entry is not `true`.
   const [aiInstantReplyEnabled, setAiInstantReplyEnabled] = useState<Record<string, boolean>>({})
   const [sentryEnabled, setSentryEnabled] = useState(true)
+  // §2.82 — while no consent record exists, main clamps `sentryEnabled` to
+  // false on save (applyAboutToggle), so an enabled switch here would silently
+  // bounce back. Render the reason instead of a dead control.
+  const telemetryConsentNeeded = useTelemetryConsentNeeded()
   const [debugLogging, setDebugLogging] = useState(false)
   // §2.19 — auto-update opt-in. Default false (the schema default) so users
   // see every download surface in the UI before installing. Persisted via
@@ -287,6 +331,10 @@ export default function Settings() {
   const [aiKeyMasked, setAiKeyMasked] = useState(false)
   const [aiMemory, setAiMemory] = useState('')
   const [aiMemoryDirty, setAiMemoryDirty] = useState(false)
+  // §2.119 — a `settings:save` whose AI-destination change main refused comes
+  // back `{ ok: true }` with the refusal attached. The window must not close on
+  // one: closing is this window's only "saved" signal.
+  const { aiDestinationRejection, recordSettingsSaveResult } = useAiDestinationRejection()
 
   // MCP Export
   const [mcpExportEnabled, setMcpExportEnabled] = useState(false)
@@ -513,13 +561,18 @@ export default function Settings() {
         setAiConnectionStatus('ok')
       } else {
         setAiConnectionStatus('error')
-        setAiConnectionError(result.message || result.status)
+        const messageKey = AI_AUTH_STATUS_MESSAGE_KEYS[result.status]
+        setAiConnectionError(messageKey ? t(messageKey) : (result.message || result.status))
       }
     } catch (e) {
       setAiConnectionStatus('error')
-      setAiConnectionError(String(e))
+      // Connection *test*: the provider's own words ("401 Unauthorized",
+      // "model not found") are the point of pressing the button, so the text
+      // stays — only the machine tag the IPC funnel prepends is removed
+      // (§2.127).
+      setAiConnectionError(stripErrorPresentation(String(e)))
     }
-  }, [aiApiKey, aiKeyMasked, aiProvider, aiProxyUrl, aiOpenAiBaseUrl])
+  }, [aiApiKey, aiKeyMasked, aiProvider, aiProxyUrl, aiOpenAiBaseUrl, t])
 
   const refreshFolders = useCallback(async (id: number) => {
     setLoadingFolders(true)
@@ -530,7 +583,11 @@ export default function Settings() {
       setAutoRoles(res.detected)
       setFolderPrefs(res.prefs ?? {})
     } catch (e) {
-      setFoldersError(String(e))
+      // Listing mailboxes fails for exactly the reasons the vocabulary covers
+      // (no connection / timeout / rejected credentials); the raw text was
+      // "Error invoking remote method 'net:mailboxesAndRoles': …" and told the
+      // user nothing. §2.127.
+      setFoldersError(tRef.current(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
     } finally {
       setLoadingFolders(false)
     }
@@ -612,7 +669,14 @@ export default function Settings() {
           } else {
             setAiInstantReplyEnabled({})
           }
-          setAiKeyMasked(s.aiProvider === 'anthropic-api' || s.aiProvider === 'openai-api')
+          // §2.122 — mask on the fact that a key exists, not on the provider's
+          // name. The old condition listed two providers by hand, so a stored
+          // Gemini key was never masked at all, and a provider with no key
+          // still showed dots. `aiApiKeySaved` is the main process's own record
+          // of having written one — presentation only: the field unmasks on
+          // focus, so a stale marker can never stop anyone entering a key, and
+          // nothing here is treated as proof that the store holds it.
+          setAiKeyMasked(isAiKeyFieldMasked(s.aiProvider, s.aiApiKeySaved))
           setSentryEnabled(s.sentryEnabled ?? true)
           setDebugLogging(s.debugLogging ?? false)
           setAutoUpdateEnabled(s.autoUpdateEnabled === true)
@@ -898,7 +962,10 @@ export default function Settings() {
       await refreshFolders(accountId)
       setRole(role, path)
     } catch (e) {
-      setFoldersError(String(e))
+      // Unlike the folder listing above, CREATE fails for reasons only the
+      // server can explain ("Mailbox already exists", namespace/quota
+      // refusals), so the text is kept and only the §2.127 tag is stripped.
+      setFoldersError(stripErrorPresentation(String(e)))
     } finally {
       setCreatingRole(null)
       setCreateFolderDialog(null)
@@ -1040,7 +1107,12 @@ export default function Settings() {
         setIdentitiesSaveError('')
       }
     } catch (e) {
-      console.error('saveAvatarSettings failed:', e)
+      // Verdict, never the value: renderer console output is a Sentry
+      // breadcrumb source (default integrations, src/sentry.ts), and the text
+      // after `[mcerr:*]` is third-party prose left raw on purpose. See the
+      // note in src/utils/errorPresentation.ts. `accounts:save` reaches IMAP
+      // validation, so this catch does see server text.
+      console.error('saveAvatarSettings failed:', decodeErrorPresentation(e))
     }
   }, [accountId, accounts, identities, identitiesDirty, signature])
 
@@ -1094,7 +1166,7 @@ export default function Settings() {
       }
     }
 
-    await window.api.invoke('settings:save', {
+    const saveResult = await window.api.invoke('settings:save', {
       theme,
       bodyRetentionDays,
       language,
@@ -1141,6 +1213,13 @@ export default function Settings() {
       // Including it here would be rejected with `{ ok: false, reason: 'forbidden_field' }`.
       trustedDomains: trustedDomains || undefined,
     })
+    // §2.119 — read the reply BEFORE the rest of the save runs, but act on it
+    // at the very end. Main applies every non-destination edit even when it
+    // refuses the address, so the remaining steps below (API key, folder roles,
+    // identities) must still run: the person changed several things and only
+    // one of them was held back. What the refusal costs is the CLOSE, nothing
+    // else.
+    const aiDestinationApplied = recordSettingsSaveResult(saveResult)
     // Save the API key via keytar for API providers.
     if (aiProvider && aiProvider !== 'subscription' && aiApiKey && !aiKeyMasked) {
       await window.api.invoke('ai:saveApiKey', aiApiKey, aiProvider)
@@ -1174,7 +1253,9 @@ export default function Settings() {
           setIdentitiesDirty(false)
           setIdentitiesSaveError('')
         } catch (e) {
-          setIdentitiesSaveError(e instanceof Error ? e.message : String(e))
+          // A failed `accounts:save` has no server-side story to tell — the
+          // old text was the raw IPC wrapper. §2.127 vocabulary instead.
+          setIdentitiesSaveError(t(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
           return
         }
       }
@@ -1183,13 +1264,18 @@ export default function Settings() {
     // is enforced by the periodic pruneOldEmls() task in main, which the
     // settings:save handler kicks immediately on shrink.
     prevBodyRetentionRef.current = bodyRetentionDays
+    // §2.119 — the address the user asked for is not the one in use. Leave the
+    // window open with the notice `recordSettingsSaveResult` just raised, and
+    // leave `savedRef` alone so the unsaved-changes guard still fires on close:
+    // there IS an unsaved change, namely the field on screen.
+    if (!aiDestinationApplied) return
     savedRef.current = true
     window.close()
     // Note: `mcpEnableStdio` intentionally not in the dep array — it's no
     // longer emitted through this settings:save path (§3.10 P0). The state
     // still mirrors the main-side flag for UI rendering, but flipping it
     // goes through `mcp:requestStdioEnable` which has its own side-effect path.
-  }, [accountId, aiApiKey, aiConnectionStatus, aiDailyBudgetUsd, aiEgressPolicy, aiKeyMasked, aiLocale, aiMaxBudgetPerRequest, aiMaxTurns, aiModel, aiMonthlyBudgetUsd, aiOpenAiBaseUrl, aiProvider, aiProxyUrl, aiSendOnEnter, aiShowSources, aiThreadSummaryEnabled, aiInstantReplyEnabled, alwaysLoadImages, autoAdvance, autoUpdateEnabled, bodyRetentionDays, conversationOrder, darkModeEmails, debugLogging, defaultMailApp, draftSyncEnabled, folderRoles, gravatarInMail, groupConversations, hiddenUnreadFolders, hotkeysPreset, identities, identitiesDirty, imapIdleEnabled, language, mcpExportEnabled, mcpExportPort, mcpExportWhitelist, notificationsEnabled, offlineMaxSizeKB, periodicSyncIntervalMin, savedAiProvider, sendDelaySeconds, sentryEnabled, signature, sortMode, syncIntervalMinutes, t, theme, trustedDomains])
+  }, [accountId, aiApiKey, aiConnectionStatus, aiDailyBudgetUsd, aiEgressPolicy, aiKeyMasked, aiLocale, aiMaxBudgetPerRequest, aiMaxTurns, aiModel, aiMonthlyBudgetUsd, aiOpenAiBaseUrl, aiProvider, aiProxyUrl, aiSendOnEnter, aiShowSources, aiThreadSummaryEnabled, aiInstantReplyEnabled, alwaysLoadImages, autoAdvance, autoUpdateEnabled, bodyRetentionDays, conversationOrder, darkModeEmails, debugLogging, defaultMailApp, draftSyncEnabled, folderRoles, gravatarInMail, groupConversations, hiddenUnreadFolders, hotkeysPreset, identities, identitiesDirty, imapIdleEnabled, language, mcpExportEnabled, mcpExportPort, mcpExportWhitelist, notificationsEnabled, offlineMaxSizeKB, periodicSyncIntervalMin, recordSettingsSaveResult, savedAiProvider, sendDelaySeconds, sentryEnabled, signature, sortMode, syncIntervalMinutes, t, theme, trustedDomains])
 
   // Account selector — shared across Folders and Signature tabs
   const accountSelector = accounts.length > 1 && (
@@ -1212,24 +1298,15 @@ export default function Settings() {
 
   return (
     <>
-    {/* Custom titlebar for frameless window */}
-    <div className="child-titlebar">
-      <span className="child-titlebar-title">{t('settings.title')}</span>
-      <div className="titlebar-controls">
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')}>
-          <Minus size={14} />
-        </button>
-        <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')}>
-          {maximized ? <Copy size={12} /> : <Square size={12} />}
-        </button>
-        <button className="titlebar-btn titlebar-btn-close" onClick={() => {
-          if (hasUnsavedChanges && !window.confirm(t('settings.unsavedWarning'))) return
-          window.close()
-        }}>
-          <X size={14} />
-        </button>
-      </div>
-    </div>
+    {/* Custom titlebar for frameless window. Close keeps the unsaved-changes
+        guard, hence the explicit handler. */}
+    <WindowTitlebar
+      title={t('settings.title')}
+      onClose={() => {
+        if (hasUnsavedChanges && !window.confirm(t('settings.unsavedWarning'))) return
+        window.close()
+      }}
+    />
     <div className="settings-layout">
       {/* Vertical tabs */}
       <nav className="settings-tabs">
@@ -1566,7 +1643,10 @@ export default function Settings() {
                           setShowTlsPinDialog(false)
                         }
                       } catch (e) {
-                        setTlsFetchError(t('account.tls.fetchError', { error: String(e) }))
+                        // Certificate probe: the transport-level reason
+                        // ("self signed certificate", ENOTFOUND) is what the
+                        // user came here to see. Keep it, drop the tag.
+                        setTlsFetchError(t('account.tls.fetchError', { error: stripErrorPresentation(String(e)) }))
                       } finally {
                         setTlsFetching(false)
                       }
@@ -2180,7 +2260,9 @@ export default function Settings() {
                         }
                       } catch (e) {
                         setAiConnectionStatus('error')
-                        setAiConnectionError(String(e))
+                        // Same reasoning as checkAiConnection: this is a probe,
+                        // its output is diagnostic. Tag stripped (§2.127).
+                        setAiConnectionError(stripErrorPresentation(String(e)))
                         return
                       }
                       setAiProvider('subscription')
@@ -2361,7 +2443,13 @@ export default function Settings() {
                     onClick={async () => {
                       if (!window.confirm(t('ai.settings.resetConfirm'))) return
                       try {
-                        await window.api.invoke('ai:deleteApiKey')
+                        // §2.122 — the delete is ADDRESSED: it names the
+                        // provider being reset, and it happens only for a
+                        // provider that actually has a stored key. Calling the
+                        // channel bare used to mean "delete all three"; it now
+                        // fails zod validation in main, which is exactly why
+                        // the argument cannot be left to chance here.
+                        await deleteAiApiKeyForProvider(window.api.invoke, savedAiProvider)
                         // settings:save merges the payload into current settings
                         // server-side, so send ONLY the field we clear. Do NOT
                         // spread settings:get() — it carries main-only fields
@@ -2383,7 +2471,10 @@ export default function Settings() {
                         setAiConnectionError('')
                       } catch (e) {
                         setAiConnectionStatus('error')
-                        setAiConnectionError(String(e))
+                        // "Reset provider" is a local settings write, not a
+                        // probe — there is no diagnostic text worth showing,
+                        // so this one takes the §2.127 vocabulary.
+                        setAiConnectionError(t(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
                       }
                     }}
                   >
@@ -3025,7 +3116,11 @@ export default function Settings() {
                           setMcpTestResult({ message: formatMcpTestError(res.reason), success: false })
                         }
                       } catch (err) {
-                        setMcpTestResult({ message: err instanceof Error ? err.message : String(err), success: false })
+                        // Connection test: `persistMcpConnection` throws an
+                        // already-localized message, and an MCP server's own
+                        // refusal is the diagnostic the button exists for.
+                        // Keep both; strip only the §2.127 tag.
+                        setMcpTestResult({ message: stripErrorPresentation(err instanceof Error ? err.message : String(err)), success: false })
                       }
                       setMcpTesting(false)
                     }}
@@ -3048,7 +3143,10 @@ export default function Settings() {
                         // (e.g. forbidden_env_key). Prior to the fix the
                         // `await` resolved with `{ ok: false }` and the
                         // UI optimistically added a phantom connection.
-                        setMcpTestResult({ message: err instanceof Error ? err.message : String(err), success: false })
+                        // That localized message must survive verbatim, so this
+                        // site strips the §2.127 tag rather than replacing the
+                        // text with the vocabulary.
+                        setMcpTestResult({ message: stripErrorPresentation(err instanceof Error ? err.message : String(err)), success: false })
                       }
                     }}
                   >
@@ -3411,7 +3509,11 @@ export default function Settings() {
                         setApplyToExisting(false)
                         void loadMailRules()
                       } catch (err) {
-                        console.error('Failed to save rule:', err)
+                        // Verdict, never the value — same reason as
+                        // `saveAvatarSettings` above. `rules:applyToFolder`
+                        // runs the rule against a live mailbox, so a failure
+                        // here can carry the server's own words.
+                        console.error('Failed to save rule:', decodeErrorPresentation(err))
                         window.alert(t('settings.rules.saveFailed'))
                       }
                     }} disabled={!editingRule.name.trim()}>
@@ -3666,12 +3768,18 @@ export default function Settings() {
               <input
                 type="checkbox"
                 data-testid="settings-about-sentry"
-                checked={sentryEnabled}
+                checked={sentryEnabled && !telemetryConsentNeeded}
+                disabled={telemetryConsentNeeded}
                 onChange={e => setSentryEnabled(e.target.checked)}
               />
               {t('settings.about.sentryEnabled')}
             </label>
             <p className="hint">{t('settings.about.sentryHint')}</p>
+            {telemetryConsentNeeded && (
+              <p className="hint" data-testid="settings-about-consent-pending">
+                {t('settings.about.sentryConsentPending')}
+              </p>
+            )}
 
             <label className="setting-check">
               <input
@@ -3749,6 +3857,14 @@ export default function Settings() {
             )}
           </section>
         )}
+
+        {/* §2.119 — sits directly above Save, not inside the AI tab: the save
+            is window-wide, so the answer to "did my save go through?" has to be
+            where the person pressed the button, whatever tab they are on. */}
+        <AiDestinationRejectionNotice
+          rejection={aiDestinationRejection}
+          onRetry={() => void save()}
+        />
 
         <button data-testid="settings-save" className="btn-primary settings-save-btn" onClick={() => void save()}>
           <Save size={14} /> {t('common.save')}

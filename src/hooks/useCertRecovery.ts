@@ -57,6 +57,12 @@ import { captureException } from '../sentry'
  *      re-read) therefore end by rendering the new fingerprint / issuer /
  *      subject and returning — the user confirms the updated values with a
  *      separate, deliberate click.
+ *   6. The click in this dialog REQUESTS a pin, it does not grant one. Main
+ *      answers `net:trustCert` with a native OS confirmation naming the
+ *      endpoint and fingerprint, because a renderer that parses email is inside
+ *      the threat model and could otherwise replay the broadcast it just
+ *      received to pin a certificate nobody was shown. `{ cancelled: true }`
+ *      means the user said no there: keep the prompt open and unchanged.
  */
 
 /** Payload of the `cert:recoveryRequired` broadcast. Mirror of
@@ -532,12 +538,22 @@ export function useCertRecovery(): UseCertRecoveryReturn {
       try {
         // Exactly the fingerprint rendered in the dialog — never a probe result
         // obtained inside this same call.
-        await window.api.invoke('net:trustCert', {
+        const outcome = await window.api.invoke('net:trustCert', {
           accountId: request.accountId,
           host,
           port: request.port,
           fingerprintSha256: current.fingerprint,
-        })
+        }) as { ok?: boolean; cancelled?: boolean } | undefined
+        // Main confirms the pin behind a native OS dialog (gate 5) — the click
+        // in THIS dialog only asks for that prompt. A refusal there is a
+        // decision, not a failure: main probed nothing and wrote nothing, and
+        // the offer is still open, so the prompt has to stay exactly where it
+        // was (advancing the queue here would retire the only warning the user
+        // gets for this endpoint this session).
+        if (outcome?.cancelled === true) {
+          dispatch({ type: 'patch', host, patch: { trusting: false, errorKey: null } })
+          return
+        }
         dispatch({ type: 'advance', host })
       } catch (err) {
         captureException(err, { source: 'useCertRecovery.trust' })

@@ -17,7 +17,12 @@ import { createHash } from 'node:crypto'
 // Mock heavy / native imports so importing the module is cheap and side-effect
 // free. The DI seams below mean these mocks are never actually exercised by the
 // logic under test.
-vi.mock('electron', () => ({ app: { getPath: () => os.tmpdir() } }))
+// `isPackaged` is mutable per test: §2.132 gates the e2e disk-fallback policy on
+// an UNPACKAGED build, so both sides of that gate need to be drivable.
+const { electronApp } = vi.hoisted(() => ({
+  electronApp: { getPath: () => os.tmpdir(), isPackaged: false },
+}))
+vi.mock('electron', () => ({ app: electronApp }))
 vi.mock('keytar', () => ({
   default: {
     getPassword: vi.fn(async () => null),
@@ -826,5 +831,177 @@ describe('§2.33 — probe reset hook explicit contract', () => {
     expect(await store2.get('x', 'unknown')).toBe('from-keytar')
     // Confirm the probe was re-run (not still cached as fallback after reset).
     expect(healthyGet).toHaveBeenCalledWith('mailcopilot', PROBE_ACCOUNT)
+  })
+})
+
+describe('§2.132 — e2e runs never touch the OS keychain', () => {
+  // `unstubEnvs` is not enabled project-wide, so the flag is cleared explicitly
+  // — a leaked MAILCOPILOT_E2E would silently reroute every later test in this
+  // file to the disk fallback.
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    electronApp.isPackaged = false
+  })
+
+  /**
+   * The policy needs BOTH variables: the flag alone would resolve the fallback
+   * to the normal profile, so the store refuses it (see the throw in
+   * `ensureBackend`). Every launcher in tests/e2e/helpers.ts sets the pair.
+   */
+  function enableE2E() {
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+    vi.stubEnv('MAILCOPILOT_DATA_DIR', dataDir)
+  }
+
+  /**
+   * The bug this pins: a keychain entry is addressed by (service, account),
+   * which belongs to the logged-in USER, while `MAILCOPILOT_DATA_DIR` only
+   * isolates disk state. E2E specs drive the real IPC stack, so every
+   * save/delete they performed landed in the developer's own keychain — a gate
+   * run on 2026-08-05 deleted a live `openai_api_key` and left a test string
+   * behind it. Under `MAILCOPILOT_E2E=1` the store must therefore serve
+   * everything from the per-data-dir encrypted fallback and issue no keychain
+   * call at all — not even the reachability probe, which is itself a
+   * `getPassword`.
+   */
+  it('serves get/set/delete from the disk fallback and issues zero keytar calls', async () => {
+    enableE2E()
+    const keytar = fakeKeytar({
+      // A healthy keychain holding a real credential: the point is that none of
+      // this is read, written or deleted.
+      getPassword: vi.fn(async (_s, account) => (account === PROBE_ACCOUNT ? null : 'live-user-secret')),
+    })
+    const store = makeStore({ keytar })
+
+    await store.set('openai_api_key', 'e2e-test-key', 'ai_keys')
+    expect(await store.get('openai_api_key', 'ai_keys')).toBe('e2e-test-key')
+    await store.delete('openai_api_key', 'ai_keys')
+    expect(await store.get('openai_api_key', 'ai_keys')).toBeNull()
+
+    expect(keytar.getPassword).not.toHaveBeenCalled()
+    expect(keytar.setPassword).not.toHaveBeenCalled()
+    expect(keytar.deletePassword).not.toHaveBeenCalled()
+    // The value went to the per-data-dir store instead.
+    expect(fs.existsSync(fallbackPath())).toBe(true)
+  })
+
+  it('does not read a credential that only exists in the keychain', async () => {
+    enableE2E()
+    const keytar = fakeKeytar({ getPassword: vi.fn(async () => 'live-user-secret') })
+    const store = makeStore({ keytar })
+
+    // Nothing was written to the fallback, so the answer is "no secret" — the
+    // real one stays invisible rather than being handed to (and then deleted
+    // by) a test.
+    expect(await store.get('imap:1', 'imap_smtp')).toBeNull()
+    expect(keytar.getPassword).not.toHaveBeenCalled()
+  })
+
+  it('reports nothing: choosing not to use a healthy keychain is not an incident', async () => {
+    enableE2E()
+    const store = makeStore({ keytar: fakeKeytar() })
+
+    await store.set('k', 'v', 'unknown')
+    await store.get('k', 'unknown')
+
+    expect(reportMock).not.toHaveBeenCalled()
+  })
+
+  it('leaves no latched decision behind for a later non-e2e store', async () => {
+    enableE2E()
+    await makeStore({ keytar: fakeKeytar() }).get('k', 'unknown')
+
+    // Same process, flag gone (the ordering a mixed test run produces): the
+    // keychain path must come back WITHOUT a probe-cache reset, i.e. the e2e
+    // decision must never have been cached.
+    vi.stubEnv('MAILCOPILOT_E2E', '')
+    const healthyGet = vi.fn(async (_s: string, account: string): Promise<string | null> =>
+      account === PROBE_ACCOUNT ? null : 'from-keytar',
+    )
+    const store = makeStore({ keytar: fakeKeytar({ getPassword: healthyGet }) })
+    expect(await store.get('k', 'unknown')).toBe('from-keytar')
+  })
+
+  /**
+   * codex-security-review HIGH (§2.132, iteration 1). `MAILCOPILOT_E2E` is an
+   * environment variable, so anything running as the user can set it. Without
+   * the packaging check it would move a SHIPPED build's secrets out of the OS
+   * keychain into a file whose key derives from a non-secret machine id plus a
+   * salt sitting beside the ciphertext — readable by that same user. Same guard
+   * pair as `assertE2EHandlerAllowed` (electron/main.ts) and the consent bypass.
+   */
+  it('ignores the flag in a packaged build: keychain stays in use', async () => {
+    enableE2E()
+    electronApp.isPackaged = true
+    const healthyGet = vi.fn(async (_s: string, account: string): Promise<string | null> =>
+      account === PROBE_ACCOUNT ? null : 'live-user-secret',
+    )
+    const keytar = fakeKeytar({ getPassword: healthyGet })
+    const store = makeStore({ keytar })
+
+    expect(await store.get('openai_api_key', 'ai_keys')).toBe('live-user-secret')
+    await store.set('openai_api_key', 'from-packaged', 'ai_keys')
+    await store.delete('openai_api_key', 'ai_keys')
+
+    expect(keytar.setPassword).toHaveBeenCalledWith('mailcopilot', 'openai_api_key', 'from-packaged')
+    expect(keytar.deletePassword).toHaveBeenCalledWith('mailcopilot', 'openai_api_key')
+    // Nothing was diverted to disk.
+    expect(fs.existsSync(fallbackPath())).toBe(false)
+  })
+
+  /**
+   * The gate reads `app.isPackaged` through electron; if that read ever throws,
+   * the answer must be "assume packaged" — i.e. keep the keychain — rather than
+   * defaulting a shipped build into file storage.
+   */
+  it('treats an unreadable isPackaged as packaged and keeps using the keychain', async () => {
+    enableE2E()
+    Object.defineProperty(electronApp, 'isPackaged', {
+      configurable: true,
+      get() {
+        throw new Error('electron app unavailable')
+      },
+    })
+    try {
+      const healthyGet = vi.fn(async (_s: string, account: string): Promise<string | null> =>
+        account === PROBE_ACCOUNT ? null : 'live-user-secret',
+      )
+      const store = makeStore({ keytar: fakeKeytar({ getPassword: healthyGet }) })
+
+      expect(await store.get('openai_api_key', 'ai_keys')).toBe('live-user-secret')
+      expect(fs.existsSync(fallbackPath())).toBe(false)
+    } finally {
+      Object.defineProperty(electronApp, 'isPackaged', {
+        configurable: true,
+        writable: true,
+        value: false,
+      })
+    }
+  })
+
+  /**
+   * codex-security-review MEDIUM (§2.132, iteration 1). The flag alone does not
+   * isolate anything: without `MAILCOPILOT_DATA_DIR` the fallback resolves to
+   * the NORMAL profile, so a half-configured launcher would write into — and
+   * delete out of — the secrets of a user whose keychain is unavailable.
+   */
+  it('refuses the policy when the run has no isolated data dir', async () => {
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+    vi.stubEnv('MAILCOPILOT_DATA_DIR', '')
+    const keytar = fakeKeytar()
+    const store = makeStore({ keytar })
+
+    await expect(store.set('k', 'v', 'unknown')).rejects.toThrow(/MAILCOPILOT_DATA_DIR/)
+    await expect(store.get('k', 'unknown')).rejects.toThrow(/MAILCOPILOT_DATA_DIR/)
+    await expect(store.delete('k', 'unknown')).rejects.toThrow(/MAILCOPILOT_DATA_DIR/)
+
+    // Refusal means refusal: neither backend was touched.
+    expect(keytar.getPassword).not.toHaveBeenCalled()
+    expect(keytar.setPassword).not.toHaveBeenCalled()
+    expect(keytar.deletePassword).not.toHaveBeenCalled()
+    // No partial state either — the refusal lands before key derivation, so
+    // neither the entries file nor the salt that would bind it can appear.
+    expect(fs.existsSync(fallbackPath())).toBe(false)
+    expect(fs.existsSync(saltPath())).toBe(false)
   })
 })

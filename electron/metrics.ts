@@ -12,12 +12,21 @@
  * is a TypeScript error; doing the same in a runtime string would be caught
  * by scripts/check-telemetry-schema.mjs in CI.
  *
+ * Consent (§2.82): every sink and every buffer in this module is gated on
+ * `isTelemetryCollectionAllowed()` from electron/telemetryGate.ts. The gate
+ * stops COLLECTION, not just transmission — aggregate buckets are never opened
+ * while it is off, and a consent transition drops the ones that exist. The
+ * local electron-log line is the one thing that keeps flowing: it never leaves
+ * the machine.
+ *
  * Privacy rules — if you break these, it's a security bug:
  *   - NEVER emit query text, email addresses, folder paths, subjects, UIDs,
  *     or any content. Only structural fields.
  *   - Account identity, if needed, must be an integer id — never the email.
- *   - Install identity is a hashed UUID and must appear ONLY in session
- *     events (see installId.ts).
+ *   - Install identity is a hashed UUID; keep the `install_id_hash` TAG on the
+ *     session events only. It is NOT an unlinkability guarantee — the same
+ *     hash is the Sentry `user.id` and therefore rides on everything (see
+ *     electron/installId.ts).
  */
 
 import { sentryLogger, startInactiveSpan } from './sentry'
@@ -31,8 +40,26 @@ import {
   type TagValue,
 } from './metricsSchema'
 import { markFeatureReachFromEvent } from './featureReach'
+import { isTelemetryCollectionAllowed, registerTelemetryCollectionResetHook } from './telemetryGate'
 
 const logMetrics = createLogger('Metrics')
+
+/**
+ * §2.82 — the Sentry sink is consent-gated at the source.
+ *
+ * The local electron-log line is NOT gated: it never leaves the machine (and
+ * in packaged builds it is written only when the user turned debug logging on
+ * themselves), and losing it would take local diagnosability away from exactly
+ * the users who declined telemetry. What the gate stops is the transmitting
+ * sink and, more importantly, everything that ACCUMULATES for later
+ * transmission — see telemetryGate.ts.
+ */
+function emit(name: string, payload: Record<string, string | number | boolean>, localLine: string): void {
+  if (isTelemetryCollectionAllowed()) {
+    try { sentryLogger.info(name, payload) } catch { /* Sentry not ready */ }
+  }
+  try { logMetrics.info(localLine, Object.keys(payload).length > 0 ? payload : '') } catch { /* ignore */ }
+}
 
 type TagsInput = Record<string, TagValue>
 
@@ -111,12 +138,10 @@ export function flushAggregator(): void {
           p95_ms: Math.round(percentile(sorted, 95)),
           aggregated: true,
         }
-        try { sentryLogger.info(bucket.name, summary) } catch { /* Sentry not ready */ }
-        try { logMetrics.info(`${bucket.name} agg ${bucket.count}×`, summary) } catch { /* ignore */ }
+        emit(bucket.name, summary, `${bucket.name} agg ${bucket.count}×`)
       } else {
         const summary = { ...bucket.tags, count: bucket.count, aggregated: true }
-        try { sentryLogger.info(bucket.name, summary) } catch { /* Sentry not ready */ }
-        try { logMetrics.info(`${bucket.name} agg ${bucket.count}×`, summary) } catch { /* ignore */ }
+        emit(bucket.name, summary, `${bucket.name} agg ${bucket.count}×`)
       }
     }
   } catch {
@@ -157,6 +182,12 @@ function pushToAggregate(
   }
 }
 
+// §2.82 — a consent transition drops the aggregate window without flushing it.
+// Buckets opened before the answer describe a period the user had not agreed
+// to; flushing them on opt-in would be exactly the retroactive transmission
+// the consent screen exists to prevent. Symmetric on opt-out.
+registerTelemetryCollectionResetHook(() => { aggregateBuckets.clear() })
+
 /** Stop the aggregator and clear buffers. Test-only. */
 export function resetAggregator(): void {
   if (aggregateTimer) {
@@ -184,11 +215,13 @@ export function recordEvent<N extends MetricNamesOfKind<'event'>>(
     const clean = cleanTags(tags)
     const def = definitionFor(name) as { aggregate?: boolean }
     if (def.aggregate) {
+      // Buffering is itself a consent-bearing act (see telemetryGate.ts):
+      // a bucket opened now would be flushed — and sent — later.
+      if (!isTelemetryCollectionAllowed()) return
       pushToAggregate(name, 'event', 0, clean)
       return
     }
-    try { sentryLogger.info(name, clean) } catch { /* Sentry not ready */ }
-    try { logMetrics.info(name, Object.keys(clean).length > 0 ? clean : '') } catch { /* ignore */ }
+    emit(name, clean, name)
   } catch { /* never let telemetry break the caller */ }
 }
 
@@ -207,12 +240,12 @@ export function recordHistogram<N extends MetricNamesOfKind<'histogram'>>(
     const def = definitionFor(name) as { aggregate?: boolean }
     const rounded = Math.round(valueMs)
     if (def.aggregate) {
+      // Same reasoning as recordEvent: no pre-consent buffering.
+      if (!isTelemetryCollectionAllowed()) return
       pushToAggregate(name, 'histogram', rounded, clean)
       return
     }
-    const payload = { ...clean, value_ms: rounded }
-    try { sentryLogger.info(name, payload) } catch { /* Sentry not ready */ }
-    try { logMetrics.info(`${name} ${rounded}ms`, Object.keys(clean).length > 0 ? clean : '') } catch { /* ignore */ }
+    emit(name, { ...clean, value_ms: rounded }, `${name} ${rounded}ms`)
   } catch { /* never let telemetry break the caller */ }
 }
 
@@ -228,9 +261,7 @@ export function recordGauge<N extends MetricNamesOfKind<'gauge'>>(
 ): void {
   try {
     const clean = cleanTags(tags)
-    const payload = { ...clean, value }
-    try { sentryLogger.info(name, payload) } catch { /* Sentry not ready */ }
-    try { logMetrics.info(`${name} = ${value}`, Object.keys(clean).length > 0 ? clean : '') } catch { /* ignore */ }
+    emit(name, { ...clean, value }, `${name} = ${value}`)
   } catch { /* never let telemetry break the caller */ }
 }
 
@@ -305,6 +336,20 @@ export function startMetricSpanDynamic(
 }
 
 /**
+ * A span handle that records nothing, with the same structural shape the real
+ * SDK returns. Callers (bodyIndexer / offlineReplay / searchWorkerClient) only
+ * rely on end() + setAttributes() + setAttribute() + setStatus().
+ */
+function noopSpan(): ReturnType<typeof startInactiveSpan> {
+  return {
+    end() { /* noop */ },
+    setAttributes() { /* noop */ },
+    setAttribute() { /* noop */ },
+    setStatus() { /* noop */ },
+  } as unknown as ReturnType<typeof startInactiveSpan>
+}
+
+/**
  * Shared implementation for the two public entry points. Keeps the
  * fail-safe boundary and the `parentSpan: null` sampling guard in one place.
  */
@@ -313,6 +358,10 @@ function openMetricSpan(
   op: string,
   attributes?: TagsInput,
 ): ReturnType<typeof startInactiveSpan> {
+  // §2.82 — a span is an open recording window: it is created now and
+  // submitted on end(), which may land after a consent flip. Do not open one
+  // at all while collection is off.
+  if (!isTelemetryCollectionAllowed()) return noopSpan()
   // Fail-safe boundary: @sentry/node has in the past thrown from inside
   // startInactiveSpan under niche transport/initialization states, and
   // several direct callers (bodyIndexer, searchWorkerClient, offlineReplay)
@@ -330,15 +379,8 @@ function openMetricSpan(
       parentSpan: null,
     })
   } catch {
-    // Degrade to a no-op span handle with the same structural shape the
-    // real SDK returns. Callers (see bodyIndexer / offlineReplay) only
-    // rely on end() + setAttributes() + setAttribute().
-    return {
-      end() { /* noop */ },
-      setAttributes() { /* noop */ },
-      setAttribute() { /* noop */ },
-      setStatus() { /* noop */ },
-    } as unknown as ReturnType<typeof startInactiveSpan>
+    // Degrade to a no-op span handle rather than propagating.
+    return noopSpan()
   }
 }
 

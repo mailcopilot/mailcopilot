@@ -165,10 +165,19 @@ test('uiaudit.1 portal: tooltip bounding box overlaps or is adjacent to mail-lis
     const composeBtn = page.locator('[data-testid="sidebar-compose"]')
     await expect(composeBtn).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
-    const portal = await hoverForPortal(fullCtx, composeBtn)
-
-    const portalBox = await portal.boundingBox()
-    expect(portalBox).not.toBeNull()
+    // `hoverForPortal` returns as soon as the portal is visible, but the read
+    // below is a second, separate round-trip: under full-suite load the portal
+    // can unmount in between (the pointer drifts, or the hover state lapses)
+    // and `boundingBox()` then resolves to null. Retrying only the read would
+    // spin forever on an unmounted node, so the hover is re-established inside
+    // the same block — same shape as the retry already used in
+    // `hoverForPortal` itself. Pre-existing flake, §2.85.
+    let portalBox: Awaited<ReturnType<Locator['boundingBox']>> = null
+    await expect(async () => {
+      const portal = await hoverForPortal(fullCtx, composeBtn)
+      portalBox = await portal.boundingBox()
+      expect(portalBox).not.toBeNull()
+    }).toPass({ timeout: EXPECT_TIMEOUT })
 
     // The tooltip portal renders at position:fixed with left = rect.right + 8px,
     // i.e. to the right of the sidebar icon. The mail-list section starts right

@@ -267,6 +267,30 @@ CREATE TABLE IF NOT EXISTS mail_rules(
 CREATE INDEX IF NOT EXISTS idx_mail_rules_account ON mail_rules(account_id, priority);
 `)
 
+// Static-rule evaluation watermark, one row per (account, folder).
+//
+// This is the Thunderbird `highestRecordedUID` property (nsImapMailFolder.cpp,
+// kHighestRecordedUIDPropertyName): the highest UID the RULE PIPELINE itself
+// has already looked at. It is deliberately NOT `MAX(uid) FROM messages` —
+// that value is a property of STORAGE and every writer advances it, including
+// paths that never evaluate rules (pagination, FLAGS-only sync, a sync that
+// threw after committing its batches). A message written by one of those paths
+// used to push the bar above itself and could then never be seen by a rule.
+//
+// Only the rule runner writes this table. `uid_validity` is stored alongside so
+// a UIDVALIDITY bump (server reassigned UIDs) is detected and the watermark is
+// re-baselined instead of comparing UIDs across two different numbering spaces.
+db.exec(`
+CREATE TABLE IF NOT EXISTS mail_rules_state(
+  account_id INTEGER NOT NULL,
+  folder_path TEXT NOT NULL,
+  watermark_uid INTEGER NOT NULL DEFAULT 0,
+  uid_validity INTEGER,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(account_id, folder_path)
+);
+`)
+
 // AI Rules (B2.24): AI-powered mail processing rules.
 db.exec(`
 CREATE TABLE IF NOT EXISTS ai_rules(
@@ -1195,6 +1219,36 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_pinned ON messages(account_id, 
 if (!hasColumn('messages', 'attachment_filenames')) {
   db.exec(`ALTER TABLE messages ADD COLUMN attachment_filenames TEXT`)
 }
+
+// §2.115 — partial indexes over the *pending* side of indexing.
+//
+// The body indexer asks "is there anything left to index?" every tick. Before
+// these indexes, that question cost a full pass over `messages`: none of the
+// existing indexes carries `body_text`, so `... AND body_text IS NULL LIMIT 200`
+// could only be answered by visiting every row of the folder to prove that no
+// row qualifies. The perverse consequence was that the *more* complete the
+// index was, the *more* expensive "nothing to do" became — measured on a live
+// instance as 480-800 ms of main thread every 2 s (99.77% of ticks did no work).
+//
+// A partial index only contains the rows matching its WHERE clause, so once a
+// folder is fully indexed its slice of the index is empty and the probe is a
+// single B-tree seek. The index is also the cheap source for "which folders
+// still have work" — enumerating it touches only the backlog, never the corpus.
+//
+// The column order mirrors the query shape (`account_id=? AND folder_path=?
+// ORDER BY uid DESC`) so the planner can both seek and satisfy the ORDER BY
+// from the index. `getUidsWithoutBodyText` asserts the resulting plan in
+// packages/db/index.test.ts — a partial index the planner ignores fixes nothing.
+//
+// Cost of maintenance: an entry is written when a row is inserted with a NULL
+// body (every new message) and removed when the body is filled in. Rows in
+// folders excluded from search (`index_in_search=0`) keep `body_text` NULL by
+// design (§2.15-ter), so they stay in the index permanently — they are filtered
+// out by the callers, not by the index, which cannot reference another table.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_body_pending
+  ON messages(account_id, folder_path, uid DESC) WHERE body_text IS NULL`)
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_filenames_pending
+  ON messages(account_id, folder_path) WHERE attachment_filenames IS NULL`)
 
 // Search Excellence Hardening: folder crawl state for background header coverage
 db.exec(`
@@ -3624,6 +3678,7 @@ export function deleteAccountData(accountId: number) {
     db.prepare(`DELETE FROM folder_crawl_state WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM rule_log WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM mail_rules WHERE account_id=?`).run(id)
+    db.prepare(`DELETE FROM mail_rules_state WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM ai_rule_log WHERE account_id=?`).run(id)
     db.prepare(`DELETE FROM ai_rules WHERE account_id=?`).run(id)
     // §3.3 B2 Thread AI Summary cache. `ai_summaries.account_id` is TEXT (it
@@ -3702,6 +3757,23 @@ export type SearchIndexStats = {
   filenamesIndexed: number
 }
 
+type FolderCountRow = { accountId: number; folder: string; c: number }
+
+/**
+ * Folders the user excluded from search (`folder_prefs.index_in_search=0`),
+ * as a set of `accountId:folderPath` keys.
+ *
+ * `folder_prefs` holds one row per folder the user has touched, so this is a
+ * small scan — orders of magnitude cheaper than re-deciding the same question
+ * per message row inside an aggregation.
+ */
+function listSearchExcludedFolderKeys(): Set<string> {
+  const rows = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder FROM folder_prefs WHERE index_in_search=0`,
+  ).all() as Array<{ accountId: number; folder: string }>
+  return new Set(rows.map(r => `${r.accountId}:${r.folder}`))
+}
+
 /**
  * Returns index completeness stats for given accounts (all folders).
  *
@@ -3711,21 +3783,48 @@ export type SearchIndexStats = {
  * (Junk/Spam/Trash) intentionally don't participate in body indexing or
  * FTS, so counting them would falsely inflate the denominator and never
  * reach 100% — resulting in a perpetually-visible "indexing X%" message.
+ *
+ * §2.115 — query shape. The previous single-pass form
+ * (`SUM(CASE WHEN body_text IS NOT NULL ...)` plus a correlated
+ * `NOT EXISTS` against folder_prefs per row) forced a full heap scan of
+ * `messages` *and* one subquery execution per row: ~180-270 ms on a 106k
+ * message corpus. It is now three aggregations that never touch the table
+ * heap:
+ *   - totals per folder      → covering index scan (~10 ms / 106k rows)
+ *   - body backlog per folder→ partial index `idx_messages_body_pending`
+ *   - filename backlog       → partial index `idx_messages_filenames_pending`
+ * `indexed = total - pending`, and the folder-level exclusion filter runs
+ * once per folder in JS instead of once per row in SQL.
  */
 export function getSearchIndexStats(accountIds: number[]): SearchIndexStats {
   if (accountIds.length === 0) return { totalMessages: 0, bodyIndexed: 0, filenamesIndexed: 0 }
   const ph = accountIds.map(() => '?').join(',')
-  const row = db.prepare(`SELECT
-    COUNT(*) as total,
-    SUM(CASE WHEN m.body_text IS NOT NULL THEN 1 ELSE 0 END) as body_indexed,
-    SUM(CASE WHEN m.attachment_filenames IS NOT NULL THEN 1 ELSE 0 END) as filenames_indexed
-  FROM messages m
-  WHERE m.account_id IN (${ph})
-    AND NOT EXISTS (SELECT 1 FROM folder_prefs fp WHERE fp.account_id=m.account_id AND fp.folder_path=m.folder_path AND fp.index_in_search=0)`).get(...accountIds) as { total: number; body_indexed: number; filenames_indexed: number } | undefined
+  const totals = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as c
+       FROM messages WHERE account_id IN (${ph})
+      GROUP BY account_id, folder_path`,
+  ).all(...accountIds) as FolderCountRow[]
+  const bodyPending = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as c
+       FROM messages WHERE account_id IN (${ph}) AND body_text IS NULL
+      GROUP BY account_id, folder_path`,
+  ).all(...accountIds) as FolderCountRow[]
+  const filenamesPending = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as c
+       FROM messages WHERE account_id IN (${ph}) AND attachment_filenames IS NULL
+      GROUP BY account_id, folder_path`,
+  ).all(...accountIds) as FolderCountRow[]
+
+  const excluded = listSearchExcludedFolderKeys()
+  const key = (r: FolderCountRow) => `${r.accountId}:${r.folder}`
+  const sumIncluded = (rows: FolderCountRow[]) =>
+    rows.reduce((acc, r) => (excluded.has(key(r)) ? acc : acc + r.c), 0)
+
+  const totalMessages = sumIncluded(totals)
   return {
-    totalMessages: row?.total ?? 0,
-    bodyIndexed: row?.body_indexed ?? 0,
-    filenamesIndexed: row?.filenames_indexed ?? 0,
+    totalMessages,
+    bodyIndexed: totalMessages - sumIncluded(bodyPending),
+    filenamesIndexed: totalMessages - sumIncluded(filenamesPending),
   }
 }
 
@@ -4088,12 +4187,55 @@ export function getSearchCoverageStats(accountIds: number[]): SearchCoverageStat
   }
 }
 
-/** Returns UIDs where body_text has not been indexed yet (NULL = not attempted). */
+/**
+ * Returns UIDs where body_text has not been indexed yet (NULL = not attempted).
+ *
+ * §2.115: the WHERE clause is written so the partial index
+ * `idx_messages_body_pending` (see the migration block) applies — the literal
+ * `body_text IS NULL` term is what lets SQLite prove the index covers the
+ * query. On a fully indexed folder this is a single seek that returns nothing
+ * instead of a full folder scan. Do not rewrite the predicate (e.g. to
+ * `COALESCE(body_text, ...)`) without re-checking EXPLAIN QUERY PLAN.
+ */
 export function getUidsWithoutBodyText(accountId: number, folder: string, limit = 100): number[] {
   const rows = db.prepare(
     `SELECT uid FROM messages WHERE account_id=? AND folder_path=? AND body_text IS NULL ORDER BY uid DESC LIMIT ?`
   ).all(accountId, folder, limit) as Array<{ uid: number }>
   return rows.map(r => r.uid)
+}
+
+export type PendingBodyFolder = {
+  accountId: number
+  folder: string
+  /** Number of messages in this folder still waiting for a body fetch. */
+  pending: number
+}
+
+/**
+ * Returns the folders that still have un-indexed message bodies, i.e. the
+ * indexer's actual work list, excluding folders the user removed from search
+ * (`folder_prefs.index_in_search=0`).
+ *
+ * §2.115 — this replaces `listIndexedFolders()` as the body indexer's entry
+ * point. The old shape enumerated *every* folder (a `GROUP BY` over the whole
+ * corpus) and then probed each one for work; both halves scaled with mailbox
+ * size and ran on every tick even when the answer was "nothing to do".
+ *
+ * This query only ever touches `idx_messages_body_pending`, whose size is the
+ * backlog itself, not the corpus: on a fully indexed mailbox it returns an
+ * empty list in well under a millisecond regardless of how many messages are
+ * cached. Excluded folders (Spam/Trash) keep `body_text` NULL forever by
+ * design, so they are the one part of the index that never drains — they are
+ * dropped here via `getIndexInSearchCached`, which is memoised per folder.
+ */
+export function listFoldersWithPendingBodies(): PendingBodyFolder[] {
+  const rows = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as pending
+       FROM messages
+      WHERE body_text IS NULL
+      GROUP BY account_id, folder_path`,
+  ).all() as PendingBodyFolder[]
+  return rows.filter(r => getIndexInSearchCached(r.accountId, r.folder))
 }
 
 /**
@@ -6042,6 +6184,121 @@ export function getMessagesForRuleTest(accountId?: number, limit = 500, folder =
     toAddr: (r.to_addr as string) || null,
     hasAttachments: (r.has_attachments as number) === 1,
   }))
+}
+
+// --- Static-rule evaluation watermark (mail_rules_state) ---
+
+/** Persisted rule-pipeline position for one folder. */
+export type MailRulesState = {
+  watermarkUid: number
+  uidValidity: number | null
+}
+
+/** Read the rule watermark for a folder. `undefined` = never evaluated yet. */
+export function getMailRulesState(accountId: number, folder: string): MailRulesState | undefined {
+  const row = db.prepare(
+    `SELECT watermark_uid as watermarkUid, uid_validity as uidValidity
+       FROM mail_rules_state WHERE account_id=? AND folder_path=?`
+  ).get(accountId, folder) as MailRulesState | undefined
+  return row
+}
+
+/**
+ * Advance (or re-baseline) the rule watermark for a folder.
+ * Only the rule runner may call this — see the table comment for why this must
+ * not be derived from `MAX(uid) FROM messages`.
+ */
+export function setMailRulesState(
+  accountId: number,
+  folder: string,
+  watermarkUid: number,
+  uidValidity: number | null,
+): void {
+  db.prepare(
+    `INSERT INTO mail_rules_state(account_id, folder_path, watermark_uid, uid_validity, updated_at)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(account_id, folder_path) DO UPDATE SET
+       watermark_uid=excluded.watermark_uid,
+       uid_validity=excluded.uid_validity,
+       updated_at=excluded.updated_at`
+  ).run(accountId, folder, watermarkUid, uidValidity, new Date().toISOString())
+}
+
+/**
+ * Give every folder this install already KNOWS ABOUT a starting position,
+ * without evaluating anything. Idempotent: folders that already have a row keep
+ * it untouched.
+ *
+ * This is the PRIMARY baseline path and it must run BEFORE any sync starts.
+ * The runner's own lazy baseline ("no row yet → anchor at MAX(uid)") cannot do
+ * this job on its own, because the runner is invoked AFTER a fetch has already
+ * persisted its messages: on the very first launch of the build that introduced
+ * `mail_rules_state`, `MAX(uid)` would already include mail that had just
+ * arrived, and that mail would be declared old forever — the exact defect
+ * §2.86 fixes, re-created at the moment the fix ships.
+ *
+ * "Knows about" is deliberately the UNION of every table that records an
+ * (account, folder) pair — `messages`, `folder_prefs`, `folder_crawl_state`,
+ * `sync_state` — and not just `messages` (§2.86 iter3, review finding). A
+ * folder that is known but currently EMPTY (nothing cached: never opened, or
+ * genuinely empty on the server) has no `messages` row, so a message-driven
+ * seed skipped it, and its first arriving message then hit the runner's lazy
+ * baseline AFTER the fetch had persisted it — swallowed exactly like the
+ * original bug. Such a folder is anchored at 0 (`COALESCE(MAX(uid), 0)`), so
+ * its first arrival is evaluated rather than declared pre-existing.
+ *
+ * `uid_validity` is copied from `sync_state` so the seeded watermark is tied to
+ * the UID numbering space it was measured in; a later UIDVALIDITY bump is then
+ * detected by the runner and re-baselined. NULL there means "not synced yet /
+ * unknown", which the runner treats as unknown rather than as a bump.
+ *
+ * @returns number of folders seeded (0 on a repeat call).
+ */
+export function seedMailRulesStateFromCache(): number {
+  const info = db.prepare(
+    `INSERT OR IGNORE INTO mail_rules_state(account_id, folder_path, watermark_uid, uid_validity, updated_at)
+     SELECT k.account_id,
+            k.folder_path,
+            COALESCE((SELECT MAX(m.uid) FROM messages m
+                       WHERE m.account_id = k.account_id AND m.folder_path = k.folder_path), 0),
+            (SELECT s.uid_validity FROM sync_state s
+               WHERE s.account_id = k.account_id AND s.folder = k.folder_path),
+            ?
+       FROM (
+              SELECT account_id, folder_path FROM messages
+              UNION
+              SELECT account_id, folder_path FROM folder_prefs
+              UNION
+              SELECT account_id, folder_path FROM folder_crawl_state
+              UNION
+              SELECT account_id, folder      FROM sync_state
+            ) k
+      WHERE NOT EXISTS (
+        SELECT 1 FROM mail_rules_state r
+         WHERE r.account_id = k.account_id AND r.folder_path = k.folder_path
+      )`
+  ).run(new Date().toISOString())
+  return info.changes
+}
+
+/**
+ * UIDs in a folder that the rule pipeline has not looked at yet, oldest first.
+ *
+ * Ascending order is load-bearing: the runner advances the watermark per
+ * message, so an interrupted pass must leave a contiguous unprocessed tail.
+ */
+export function getUidsForRulesSince(
+  accountId: number,
+  folder: string,
+  sinceUid: number,
+  limit: number,
+): number[] {
+  const rows = db.prepare(
+    `SELECT uid FROM messages
+      WHERE account_id=? AND folder_path=? AND uid > ?
+      ORDER BY uid ASC LIMIT ?`
+  ).all(accountId, folder, sinceUid, limit) as Array<{ uid: number }>
+  return rows.map(r => r.uid)
 }
 
 // --- AI Rules (B2.24) ---

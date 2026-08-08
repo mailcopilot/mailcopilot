@@ -1,0 +1,20 @@
+{
+  "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
+  "high": true,
+  "allowlist": [
+    {
+      "GHSA-w3rx-r6r6-pgpr": {
+        "active": true,
+        "expiry": "2026-11-01",
+        "notes": "image-size: the ICNS parser can be driven into an infinite loop. NO FIX EXISTS — this is the distinguishing fact and the reason this entry is a suppression rather than a bump. The advisory range is `<=2.0.2` and 2.0.2 IS the latest published version (checked against the registry 2026-08-08, not assumed); there is nothing to upgrade to. Contrast with the serialize-javascript entry that used to live in this file: it claimed the same 'not fixable by a bump' and that claim turned out to be false — an `overrides` pin to 7.1.0 fixed it, the documentation build was verified to still succeed, and the entry was therefore DELETED rather than renewed. Do not read this note as the same kind of claim; re-check the registry before renewing. REACHABILITY: build-time only. The single path is @docusaurus/core > @docusaurus/mdx-loader > image-size, which reads image dimensions while `npm run build` generates the static site; image-size is not in the emitted HTML/CSS/JS and never runs on the published site or in the application. To trigger the loop an attacker must get a crafted ICNS file processed by that build — i.e. commit an image into docs/ in this repository, which requires the access level our threat model puts out of scope (CLAUDE.md §7), and the consequence is a hung CI job, not a compromise. EXIT: image-size publishes a release above 2.0.2, or Docusaurus stops depending on it. The 2026-11-01 expiry forces a re-look either way. KEY FORM: bare advisory id, not the `<id>|<package>` form used in the root .audit-ci.json. Checked empirically: audit-ci matches the allowlist key against the FULL dependency chain it prints (`GHSA-...|@docusaurus/core>@docusaurus/mdx-loader>image-size>`), so a package-scoped key never matches here — it matches in the root file only because brace-expansion and ip-address sit close to the surface there. Enumerating the ~10 chains would be narrower still, but every one of them passes through the same single edge (@docusaurus/mdx-loader > image-size) and the list would break on any reshuffle inside Docusaurus without telling us anything new."
+      }
+    },
+    {
+      "GHSA-5p2g-fcmc-qvqq": {
+        "active": true,
+        "expiry": "2026-11-01",
+        "notes": "image-size: the JXL and HEIF parsers can be driven into infinite loops. Same package, same single build-time path (@docusaurus/core > @docusaurus/mdx-loader > image-size), same absence of any fixed release — `<=2.0.2` covers the latest published version — and the same reasoning as GHSA-w3rx-r6r6-pgpr above; see that entry for the full triage. Recorded as a separate id on purpose: a second advisory against a package already allowlisted under a different id does NOT inherit the first entry's suppression, which is how this file went red without a dependency change (the same shape as the brace-expansion pair in the root .audit-ci.json, §2.129). KEY FORM: bare advisory id, not the `<id>|<package>` form used in the root .audit-ci.json. Checked empirically: audit-ci matches the allowlist key against the FULL dependency chain it prints (`GHSA-...|@docusaurus/core>@docusaurus/mdx-loader>image-size>`), so a package-scoped key never matches here — it matches in the root file only because brace-expansion and ip-address sit close to the surface there. Enumerating the ~10 chains would be narrower still, but every one of them passes through the same single edge (@docusaurus/mdx-loader > image-size) and the list would break on any reshuffle inside Docusaurus without telling us anything new."
+      }
+    }
+  ]
+}

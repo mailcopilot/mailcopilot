@@ -8,11 +8,21 @@
  * e2e tests. These unit tests target the invite integration seam only.
  *
  * §3.3.C-uiaudit.22: metaTo/metaCc updated to MailAddress[] in makeProps.
+ *
+ * §2.128: attachment block behaviour (collapse ceiling, demotion of inlined
+ * parts) is covered here at the component seam; the model itself is
+ * unit-tested in `src/utils/attachmentList.test.ts`. The invariant the seam
+ * must show is that no part is ever removed — expanding reaches every one.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
-import type { CalendarInvitePublic, MailSummary, MessageDetails } from '../../packages/types'
+import type {
+  AttachmentMeta,
+  CalendarInvitePublic,
+  MailSummary,
+  MessageDetails,
+} from '../../packages/types'
 
 // ---- i18n stub (stable — prevents infinite re-renders) ----------------------
 const i18nMap: Record<string, string> = {
@@ -41,6 +51,11 @@ const i18nMap: Record<string, string> = {
   'app.empty.messageNotFound.title': 'Message not found',
   'mail.privacy.imagesBlocked': 'Images blocked',
   'mail.privacy.showImages': 'Show images',
+  'mail.attachments.download': 'Download attachment',
+  'mail.attachments.unnamed': 'Attachment',
+  'mail.attachments.showMore': 'Show more ({{hidden}})',
+  'mail.attachments.showLess': 'Show less',
+  'attachments.downloadAction': 'Download attachment: {{name}}',
 }
 
 const stableT = (key: string, opts?: Record<string, unknown>): string => {
@@ -303,5 +318,291 @@ describe('InviteCard — date formatting locale coverage', () => {
     const valueSpan = whenRow?.querySelector('.invite-meta-value')
     // Must produce some non-empty output
     expect(valueSpan?.textContent?.trim().length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §2.128 — attachment block must not take over the reading area
+// ---------------------------------------------------------------------------
+
+function makeAttachment(overrides: Partial<AttachmentMeta> = {}): AttachmentMeta {
+  return {
+    part: '2',
+    filename: 'file.bin',
+    contentType: 'application/octet-stream',
+    size: 1024,
+    ...overrides,
+  }
+}
+
+/** N genuine attachments — every one `disposition: attachment`, no `cid`. */
+function realAttachments(n: number): AttachmentMeta[] {
+  return Array.from({ length: n }, (_, i) =>
+    makeAttachment({
+      part: `2.${i + 1}`,
+      filename: `contract-${i + 1}.pdf`,
+      contentType: 'application/pdf',
+      size: 10_000 + i,
+      disposition: 'attachment',
+    }),
+  )
+}
+
+function chips(container: HTMLElement): NodeListOf<Element> {
+  return container.querySelectorAll('.attachment-chip')
+}
+
+describe('MailBodyContent — attachment list ceiling (§2.128 part 2)', () => {
+  afterEach(cleanup)
+
+  it('keeps the message body on screen when 30 genuine attachments arrive', () => {
+    // No cid anywhere and no report from the renderer: nothing to demote, so
+    // this exercises the cap alone — the reading area must survive on the
+    // ceiling's own merit.
+    const props = makeProps({
+      details: makeDetails({ attachments: realAttachments(30), text: 'Body still readable.' }),
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    expect(chips(container)).toHaveLength(4)
+    // The count on the toggle is what is not on screen (26), not the total.
+    expect(screen.getByTestId('attachments-toggle')).toHaveTextContent('Show more (26)')
+    expect(screen.getByTestId('mail-body-text')).toHaveTextContent('Body still readable.')
+  })
+
+  it('renders no toggle when the list fits', () => {
+    const props = makeProps({ details: makeDetails({ attachments: realAttachments(3) }) })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    expect(chips(container)).toHaveLength(3)
+    expect(screen.queryByTestId('attachments-toggle')).not.toBeInTheDocument()
+  })
+
+  it('renders no attachment block at all when there are no attachments', () => {
+    render(<MailBodyContent {...makeProps()} />)
+    expect(screen.queryByTestId('mail-attachments')).not.toBeInTheDocument()
+  })
+
+  it('expands to the full list on click and collapses again', () => {
+    const props = makeProps({ details: makeDetails({ attachments: realAttachments(30) }) })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    const toggle = screen.getByTestId('attachments-toggle')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(toggle)
+    expect(chips(container)).toHaveLength(30)
+    expect(screen.getByTestId('attachments-toggle')).toHaveTextContent('Show less')
+    expect(screen.getByTestId('attachments-toggle')).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    expect(chips(container)).toHaveLength(4)
+  })
+
+  it('gives the expanded list its own scroll container instead of growing the page', () => {
+    const props = makeProps({ details: makeDetails({ attachments: realAttachments(30) }) })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    // The scrolling behaviour itself is CSS (.mail-attachments--expanded);
+    // the component's contract is to flag the expanded state on the block.
+    expect(container.querySelector('.mail-attachments')).toHaveClass('mail-attachments--expanded')
+  })
+
+  it('collapses again when another message is selected', () => {
+    const props = makeProps({ details: makeDetails({ attachments: realAttachments(30) }) })
+    const { container, rerender } = render(<MailBodyContent {...props} />)
+
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    expect(chips(container)).toHaveLength(30)
+
+    // Same shape of message, different mail key — expansion must not leak over.
+    rerender(
+      <MailBodyContent
+        {...makeProps({
+          details: makeDetails({ attachments: realAttachments(30) }),
+          activeMailKey: '1:INBOX:43',
+        })}
+      />,
+    )
+    expect(chips(container)).toHaveLength(4)
+  })
+})
+
+describe('MailBodyContent — inlined parts are demoted, never removed (§2.128 part 1)', () => {
+  afterEach(cleanup)
+
+  // The component holds no opinion about which parts were inlined: it demotes
+  // the parts the body renderer reports, and nothing else. The rule that
+  // produces that report is tested in `packages/core/cidRefs.test.ts`, its
+  // wiring to the actual body in `src/hooks/useMailIframeDoc.test.ts`.
+  it('leads with the real file and keeps the reported parts one click away', () => {
+    const logo = makeAttachment({ part: '2', filename: 'logo.png', contentType: 'image/png', cid: 'logo@x' })
+    const speaker = makeAttachment({ part: '3', filename: 'speaker.jpg', contentType: 'image/jpeg', cid: 'sp@x' })
+    const programme = makeAttachment({
+      part: '4',
+      filename: 'programme.pdf',
+      contentType: 'application/pdf',
+      disposition: 'attachment',
+    })
+    const props = makeProps({
+      details: makeDetails({
+        attachments: [logo, speaker, programme],
+        html: '<p>Hi</p><img src="cid:logo@x"><img src="cid:sp@x">',
+      }),
+      hiddenAttachments: [logo, speaker],
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    expect(chips(container)).toHaveLength(1)
+    expect(container.querySelector('.attachment-name')?.textContent).toBe('programme.pdf')
+    expect(screen.getByTestId('attachments-toggle')).toHaveTextContent('Show more (2)')
+
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    expect(
+      Array.from(container.querySelectorAll('.attachment-name')).map(n => n.textContent),
+    ).toEqual(['programme.pdf', 'logo.png', 'speaker.jpg'])
+  })
+
+  // The user's screenshot: a message made entirely of layout images. Collapsed,
+  // the block is a single toggle and the message reads; expanded, every image
+  // is downloadable. A wrong "this was drawn" verdict now costs one click.
+  it('collapses a message of 30 inlined images to the toggle and reveals all of them', () => {
+    const images = Array.from({ length: 30 }, (_, i) =>
+      makeAttachment({
+        part: `3.${i + 1}`,
+        filename: `img-${i + 1}.png`,
+        contentType: 'image/png',
+        cid: `img${i + 1}@x`,
+        disposition: 'inline',
+      }),
+    )
+    const props = makeProps({
+      details: makeDetails({
+        attachments: images,
+        text: 'Body still readable.',
+      }),
+      hiddenAttachments: images,
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    expect(chips(container)).toHaveLength(0)
+    expect(screen.getByTestId('attachments-toggle')).toHaveTextContent('Show more (30)')
+    expect(screen.getByTestId('mail-body-text')).toHaveTextContent('Body still readable.')
+
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    expect(chips(container)).toHaveLength(30)
+  })
+
+  // A part the sender buried in `<div style="display:none">` satisfies every
+  // condition the inlining rule can check, so it is reported — and it must
+  // still be reachable. This is the finding that ended the "detect what the
+  // browser drew" approach.
+  it('keeps a part the body rendered inside a display:none container reachable', () => {
+    const report = makeAttachment({
+      part: '2',
+      filename: 'report.pdf',
+      contentType: 'application/pdf',
+      cid: 'report@x',
+      disposition: 'inline',
+    })
+    const props = makeProps({
+      details: makeDetails({
+        attachments: [report],
+        html: '<div style="display:none"><img src="cid:report@x"></div>',
+      }),
+      hiddenAttachments: [report],
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    expect(chips(container)).toHaveLength(0)
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    expect(container.querySelector('.attachment-name')?.textContent).toBe('report.pdf')
+  })
+
+  it('shows both real attachments immediately when 30 inlined images follow them', () => {
+    const images = Array.from({ length: 30 }, (_, i) =>
+      makeAttachment({
+        part: `3.${i + 1}`,
+        filename: `img-${i + 1}.png`,
+        contentType: 'image/png',
+        cid: `img${i + 1}@x`,
+        disposition: 'inline',
+      }),
+    )
+    const contracts = realAttachments(2)
+    const props = makeProps({
+      details: makeDetails({ attachments: [...images.slice(0, 10), ...contracts, ...images.slice(10)] }),
+      hiddenAttachments: images,
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+
+    expect(
+      Array.from(container.querySelectorAll('.attachment-name')).map(n => n.textContent),
+    ).toEqual(['contract-1.pdf', 'contract-2.pdf'])
+    expect(screen.getByTestId('attachments-toggle')).toHaveTextContent('Show more (30)')
+
+    fireEvent.click(screen.getByTestId('attachments-toggle'))
+    expect(chips(container)).toHaveLength(32)
+  })
+
+  // The dangerous direction, made structural: with no report, nothing was
+  // inlined, so every part leads the row — even one that looks inline and is
+  // referenced by the body.
+  it('shows every part when the renderer reports nothing', () => {
+    const props = makeProps({
+      details: makeDetails({
+        attachments: [makeAttachment({ part: '2', filename: 'logo.png', cid: 'logo@x', disposition: 'inline' })],
+        html: '<img src="cid:logo@x">',
+      }),
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+    expect(chips(container)).toHaveLength(1)
+  })
+
+  it('ignores the body html when deciding what to demote', () => {
+    // A body full of cid: references demotes nothing on its own — only the
+    // renderer's report does.
+    const invoice = makeAttachment({ part: '2', filename: 'invoice.pdf', cid: 'inv@x' })
+    const props = makeProps({
+      details: makeDetails({
+        attachments: [invoice],
+        html: '<img src="cid:inv@x">',
+      }),
+      hiddenAttachments: [],
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+    expect(chips(container)).toHaveLength(1)
+  })
+
+  it('keeps two distinct parts the sender declared identically', () => {
+    // Same declared name, type and size — but different MIME parts, so possibly
+    // different bytes. Merging them (as an earlier revision did) would leave the
+    // user with no way to reach one of the files, which §2.128 rules out: the
+    // cap keeps the block small, nothing else gets to remove a part.
+    const props = makeProps({
+      details: makeDetails({
+        attachments: [
+          makeAttachment({ part: '2', filename: 'logo.png', contentType: 'image/png', size: 512 }),
+          makeAttachment({ part: '3', filename: 'logo.png', contentType: 'image/png', size: 512 }),
+        ],
+        text: 'Plain body.',
+      }),
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+    expect(chips(container)).toHaveLength(2)
+  })
+
+  it('renders no preview badge on the chips (§2.125)', () => {
+    const props = makeProps({
+      details: makeDetails({
+        attachments: [
+          makeAttachment({ part: '2', filename: 'report.pdf', contentType: 'application/pdf', disposition: 'attachment' }),
+        ],
+      }),
+    })
+    const { container } = render(<MailBodyContent {...props} />)
+    expect(container.querySelector('.attachment-preview-badge')).toBeNull()
+    expect(container.textContent).not.toContain('attachments.previewAvailable')
   })
 })

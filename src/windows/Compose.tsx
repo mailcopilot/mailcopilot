@@ -1,10 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Loader2, Paperclip, X, Minus, Square, Copy, FileText, Bell, Archive, ChevronDown, Clock, Calendar } from 'lucide-react'
+import { Send, Loader2, Paperclip, X, FileText, Bell, Archive, ChevronDown, Clock, Calendar } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { AccountMeta, ComposeAttachment, ComposeInit, FolderRoles, Identity } from '../../packages/net/types'
 import { formatBytes } from '../utils/mail'
+// §2.127 — `presentedError` lives in src/utils/errorPresentation.ts. Compose
+// also relies on the renderer-side fallback: attachment reading throws locally
+// and never reaches main, so it is classified by the same closed vocabulary.
+import { presentedError } from '../utils/errorPresentation'
+// The three swallowed failures below (contact upsert, contact search, draft
+// sync) print a DIAGNOSTIC line instead of showing copy, so they never reach
+// `presentedError` — but the console is not a private sink. The renderer keeps
+// Sentry's default integrations (src/sentry.ts), and console output is one of
+// them: every argument becomes a breadcrumb that ships with the next event
+// passing `beforeSend`. The text after `[mcerr:*]` is deliberately left raw for
+// two substring consumers, so printing the error object handed a hostile
+// IMAP/SMTP server a writable field in our telemetry — the free third-party
+// text CLAUDE.md §8 forbids. `decodeErrorPresentation` collapses the value into
+// one of ERROR_PRESENTATION_KEYS, which is all a breadcrumb needs to say; the
+// raw tree stays in the main-process log via `describeErrorForLog`.
+import { decodeErrorPresentation } from '@mailcopilot/core'
 import { resolveFromEmailFromMeta } from '../utils/composeFromEmail'
-import { useMaximized } from '../hooks/useMaximized'
+import WindowTitlebar from '../components/WindowTitlebar'
 import { useIdentitySelection } from '../hooks/useIdentitySelection'
 import { useIdentityDefaultBcc } from '../hooks/useIdentityDefaultBcc'
 import IdentityPicker from '../components/IdentityPicker'
@@ -326,7 +342,6 @@ function gcDrafts() {
 
 export default function Compose() {
   const { t } = useTranslation()
-  const maximized = useMaximized()
   // Do not restart init logic on language change (t identity changes), otherwise compose:getInit may
   // be "consumed" and the Reply/Forward prefill will be overwritten by the restored last draft.
   const tRef = useRef(t)
@@ -478,7 +493,8 @@ export default function Compose() {
       }
       clearInput()
       void window.api.invoke('contacts:upsert', token.email.trim(), (token.name || '').trim() || undefined).catch((e: unknown) => {
-        console.warn('[Compose] Failed to save contact:', e)
+        // Verdict, never the value — see the note on the import above.
+        console.warn('[Compose] contact save failed:', decodeErrorPresentation(e))
       })
     }
 
@@ -539,7 +555,8 @@ export default function Compose() {
           const list = await window.api.invoke('contacts:search', query, 8) as ContactSuggestion[]
           setContactSuggestions(Array.isArray(list) ? list : [])
         } catch (e) {
-          console.warn('[Compose] Contact search error:', e)
+          // Verdict, never the value — see the note on the import above.
+          console.warn('[Compose] contact search failed:', decodeErrorPresentation(e))
           setContactSuggestions([])
         }
       })()
@@ -965,7 +982,7 @@ export default function Compose() {
           setText(prev => (prev.trim() ? prev : `\n\n--\n${accountSignature}`))
         }
       } catch (e) {
-        setError(String(e))
+        setError(presentedError(tRef.current, e))
       }
     })()
   }, [])
@@ -1067,7 +1084,11 @@ export default function Compose() {
           setStatus(prev => prev || t('compose.status.draftSynced'))
         } catch (e) {
           // Do not break compose with frequent sync errors (server/folder may not be supported).
-          console.warn('draft sync failed:', e)
+          // Verdict, never the value — see the note on the import above. This
+          // is the site with the widest exposure of the three: an unsupported
+          // Drafts folder makes the server answer with its own prose every
+          // 1.5 s of typing.
+          console.warn('[Compose] draft sync failed:', decodeErrorPresentation(e))
         }
       })()
     }, 1500)
@@ -1196,7 +1217,7 @@ export default function Compose() {
       await maybeCreateFollowUp()
       await finalizeAfterDispatch(t('compose.status.sent'))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1228,7 +1249,7 @@ export default function Compose() {
       await maybeCreateFollowUp()
       await finalizeAfterDispatch(t('compose.status.sentAndArchived'))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1253,7 +1274,7 @@ export default function Compose() {
       await maybeCreateFollowUp(Date.now() + delayMs)
       await finalizeAfterDispatch(t('compose.status.scheduled', { seconds: Math.max(1, Math.round(delayMs / 1000)) }))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1283,7 +1304,7 @@ export default function Compose() {
       await maybeCreateFollowUp(sendAt.getTime())
       await finalizeAfterDispatch(t('compose.status.scheduledAt', { at: at.toLocaleString() }))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1415,7 +1436,9 @@ export default function Compose() {
       const atts = await filesToAttachments(files)
       setAttachments(prev => [...prev, ...atts])
     } catch (e) {
-      setError(String(e))
+      // Renderer-side failure (FileReader / oversized selection): never tagged,
+      // and its text is a DOMException the user cannot act on either.
+      setError(presentedError(t, e))
     } finally {
       // Reset value so re-selecting the same files also triggers the handler
       if (fileRef.current) fileRef.current.value = ''
@@ -1445,20 +1468,7 @@ export default function Compose() {
   return (
     <div className="compose-window" onDragOver={onDragOver} onDrop={onDrop}>
       {/* Custom titlebar for frameless window */}
-      <div className="child-titlebar">
-        <span className="child-titlebar-title">{t('compose.title')}</span>
-        <div className="titlebar-controls">
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:minimize')}>
-            <Minus size={14} />
-          </button>
-          <button className="titlebar-btn" onClick={() => void window.api.invoke('win:maximize')}>
-            {maximized ? <Copy size={12} /> : <Square size={12} />}
-          </button>
-          <button className="titlebar-btn titlebar-btn-close" onClick={() => window.close()}>
-            <X size={14} />
-          </button>
-        </div>
-      </div>
+      <WindowTitlebar title={t('compose.title')} />
       <div className="compose-form">
         {accounts.length > 1 && (
           <Select

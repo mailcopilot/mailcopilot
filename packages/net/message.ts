@@ -400,51 +400,14 @@ export async function downloadRawMessage(accountId: number, cfg: ImapConfig, mai
 
 /**
  * §2.22 Wave A — extract a raw `text/calendar` part from a full RFC822 buffer.
- * Used by the local-EML cache path: `electron/main.ts` already loads the raw
- * message bytes from disk (`readEml`) and parses them via `parseEmlBuffer`,
- * which intentionally skips attachment content for speed. This helper does
- * a one-shot full parse so we can recover the ics payload without re-fetching
- * from IMAP. Layering note: this stays in `packages/net` because it is pure
- * MIME walking; ical.js parsing is one layer up in `inviteBridge.ts`.
  *
- * §2.22 fix iter4 — codex-security-review MEDIUM: cap returned ics at
- * `MAX_ICS_BYTES` to mirror the IMAP path (`fetchMessageDetails` line 324).
- * Without this guard, a maliciously oversized ics inside an offline-cached
- * EML would force unbounded `simpleParser` + `toString('utf8')` + downstream
- * `ICAL.parse` work, giving an attacker a cheap CPU/memory amplifier.
+ * §2.124 — the implementation moved to `./eml`, next to the other full-buffer
+ * MIME parse, so both can share the off-main-thread dispatch (a full parse of
+ * a large message costs one event-loop turn per line, which is ruinous on the
+ * Electron main loop). Re-exported here because `electron/main.ts` imports it
+ * from this module.
  */
-const MAX_ICS_BYTES = 1 * 1024 * 1024
-
-export async function extractIcsFromRawEml(raw: Buffer): Promise<string | undefined> {
-  try {
-    const parsed = await simpleParser(raw)
-    const atts = parsed.attachments ?? []
-    for (const att of atts) {
-      const contentType = (att.contentType || '').toLowerCase()
-      const filename = att.filename || ''
-      const isIcs =
-        contentType === 'text/calendar' ||
-        contentType === 'application/ics' ||
-        (contentType === 'application/octet-stream' && /\.ics$/i.test(filename))
-      if (!isIcs) continue
-      const content = att.content
-      if (Buffer.isBuffer(content)) {
-        if (content.length > MAX_ICS_BYTES) return undefined
-        return content.toString('utf8')
-      }
-      if (typeof content === 'string') {
-        // Byte-length guard via Buffer.byteLength (string `.length` counts
-        // UTF-16 code units, not bytes; an ics with multibyte UTF-8 chars
-        // could otherwise slip the cap on the byte side).
-        if (Buffer.byteLength(content, 'utf8') > MAX_ICS_BYTES) return undefined
-        return content
-      }
-    }
-    return undefined
-  } catch {
-    return undefined
-  }
-}
+export { extractIcsFromRawEml, extractIcsFromRawEmlInline } from './eml'
 
 /** Downloads the full original message via per-account IMAP pool (for parallel sync) */
 export async function downloadRawMessagePerAccount(accountId: number, cfg: ImapConfig, mailbox: string, uid: number): Promise<Buffer | null> {

@@ -6,7 +6,8 @@
  *   1. State machine: idle → checking → up-to-date | available | downloading | downloaded | error
  *   2. Background event wiring (update:available, update:downloadProgress,
  *      update:downloaded, update:checkResult, update:downloadFailed)
- *   3. Disabled checkbox + tooltip when canSelfUpdate=false
+ *   3. §2.58 — self-update warning (never a disabled checkbox) when
+ *      canSelfUpdate=false, keyed on the enum reason from main
  *   4. Unsupported (dev) state — button hidden, hint visible
  *   5. System info fields rendered correctly (versions, install path, channel badge)
  *   6. Read-only install path badge
@@ -40,7 +41,9 @@ const i18nMap: Record<string, string> = {
   'settings.about.update.title': 'Updates',
   'settings.about.update.autoDownload': 'Automatically download updates',
   'settings.about.update.autoDownloadHint': 'Updates are downloaded in the background.',
-  'settings.about.update.cannotSelfUpdateHint': 'Cannot self-update — admin install.',
+  'settings.about.update.cannotSelfUpdateHint': 'Cannot self-update — folder not writable.',
+  'settings.about.update.cannotSelfUpdateNoTarget': 'Cannot self-update — not an AppImage or system package.',
+  'settings.about.update.cannotSelfUpdateUnknown': 'This installation cannot update itself automatically.',
   'settings.about.update.unsupportedDev': 'Auto-update not available in dev builds.',
   'settings.about.update.checkNow': 'Check now',
   'settings.about.update.checking': 'Checking…',
@@ -108,6 +111,7 @@ type SystemInfoPayload = {
   installPath: string
   installPathWritable: boolean
   canSelfUpdate: boolean
+  selfUpdateBlockedReason?: 'not-packaged' | 'no-in-place-target' | 'target-dir-readonly' | null
   isPackaged: boolean
 }
 
@@ -123,6 +127,7 @@ function makeInfo(overrides: Partial<SystemInfoPayload> = {}): SystemInfoPayload
     installPath: '/opt/mailcopilot/bin/mailcopilot',
     installPathWritable: true,
     canSelfUpdate: true,
+    selfUpdateBlockedReason: null,
     isPackaged: true,
     ...overrides,
   }
@@ -268,20 +273,38 @@ describe('SystemInfo — auto-update checkbox', () => {
     expect(checkbox.disabled).toBe(false)
   })
 
-  it('checkbox is disabled when canSelfUpdate=false', async () => {
-    setupDefaultInvoke({ canSelfUpdate: false, installPathWritable: false })
+  // §2.58 — the checkbox is never disabled any more: a build that cannot
+  // update itself in place still lets the user own the preference (the
+  // warning below explains why nothing will download).
+  it('checkbox stays enabled when canSelfUpdate=false (warning, not lockout)', async () => {
+    setupDefaultInvoke({
+      canSelfUpdate: false,
+      installPathWritable: false,
+      selfUpdateBlockedReason: 'target-dir-readonly',
+    })
     renderComponent({ autoUpdateEnabled: false })
     await act(async () => {})
     const checkbox = screen.getByTestId('settings-about-auto-update') as HTMLInputElement
-    expect(checkbox.disabled).toBe(true)
+    expect(checkbox.disabled).toBe(false)
+  })
+
+  it('user can still toggle the preference when canSelfUpdate=false', async () => {
+    setupDefaultInvoke({ canSelfUpdate: false, selfUpdateBlockedReason: 'target-dir-readonly' })
+    const handler = vi.fn()
+    renderComponent({ autoUpdateEnabled: false, onAutoUpdateEnabledChange: handler })
+    await act(async () => {})
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('settings-about-auto-update'))
+    })
+    expect(handler).toHaveBeenCalledWith(true)
   })
 
   it('checkbox label carries tooltip text when canSelfUpdate=false', async () => {
-    setupDefaultInvoke({ canSelfUpdate: false })
+    setupDefaultInvoke({ canSelfUpdate: false, selfUpdateBlockedReason: 'target-dir-readonly' })
     renderComponent({ autoUpdateEnabled: false })
     await act(async () => {})
     const label = screen.getByTestId('settings-about-auto-update').closest('label')
-    expect(label?.title).toBe('Cannot self-update — admin install.')
+    expect(label?.title).toBe('Cannot self-update — folder not writable.')
   })
 
   it('checkbox label has no tooltip when canSelfUpdate=true', async () => {
@@ -303,18 +326,76 @@ describe('SystemInfo — auto-update checkbox', () => {
     expect(handler).toHaveBeenCalledWith(true)
   })
 
-  it('shows cannotSelfUpdateHint paragraph when canSelfUpdate=false', async () => {
-    setupDefaultInvoke({ canSelfUpdate: false })
+  it('shows the read-only warning when blocked reason is target-dir-readonly', async () => {
+    setupDefaultInvoke({ canSelfUpdate: false, selfUpdateBlockedReason: 'target-dir-readonly' })
     renderComponent()
     await act(async () => {})
-    expect(screen.getByText('Cannot self-update — admin install.')).toBeInTheDocument()
+    expect(screen.getByTestId('settings-about-self-update-warning')).toHaveTextContent(
+      'Cannot self-update — folder not writable.',
+    )
   })
 
-  it('shows autoDownloadHint paragraph when canSelfUpdate=true', async () => {
+  it('shows the no-target warning when the build is not an AppImage / system package', async () => {
+    setupDefaultInvoke({ canSelfUpdate: false, selfUpdateBlockedReason: 'no-in-place-target' })
+    renderComponent()
+    await act(async () => {})
+    expect(screen.getByTestId('settings-about-self-update-warning')).toHaveTextContent(
+      'Cannot self-update — not an AppImage or system package.',
+    )
+  })
+
+  // A missing reason must NOT be rendered as "folder not writable": that is a
+  // diagnosis we do not have. Neutral wording only.
+  it('shows the neutral warning when the payload carries no reason', async () => {
+    setupDefaultInvoke({ canSelfUpdate: false, selfUpdateBlockedReason: undefined })
+    renderComponent()
+    await act(async () => {})
+    const warning = screen.getByTestId('settings-about-self-update-warning')
+    expect(warning).toHaveTextContent('This installation cannot update itself automatically.')
+    expect(warning).not.toHaveTextContent('folder not writable')
+  })
+
+  it('shows the neutral warning when the reason is not one we know', async () => {
+    // Defensive: the enum crosses IPC, so an unrecognised string must degrade
+    // to the neutral text rather than falling through to a guessed cause.
+    setupDefaultInvoke({
+      canSelfUpdate: false,
+      selfUpdateBlockedReason: 'some-future-reason' as unknown as 'target-dir-readonly',
+    })
+    renderComponent()
+    await act(async () => {})
+    const warning = screen.getByTestId('settings-about-self-update-warning')
+    expect(warning).toHaveTextContent('This installation cannot update itself automatically.')
+  })
+
+  it('shows no self-update warning in dev builds (unsupported state covers it)', async () => {
+    setupDefaultInvoke({ isPackaged: false, canSelfUpdate: false, selfUpdateBlockedReason: 'not-packaged' })
+    renderComponent()
+    await act(async () => {})
+    expect(screen.queryByTestId('settings-about-self-update-warning')).not.toBeInTheDocument()
+    expect(screen.getByTestId('settings-about-update-unsupported')).toBeInTheDocument()
+  })
+
+  it('shows autoDownloadHint paragraph and no warning when canSelfUpdate=true', async () => {
     setupDefaultInvoke({ canSelfUpdate: true })
     renderComponent()
     await act(async () => {})
     expect(screen.getByText('Updates are downloaded in the background.')).toBeInTheDocument()
+    expect(screen.queryByTestId('settings-about-self-update-warning')).not.toBeInTheDocument()
+  })
+
+  it('.deb install with an admin-owned directory is not treated as read-only', async () => {
+    // §2.58 — main reports installPathWritable=true for distro packages
+    // (the updater elevates), so the "read-only" marker must not appear.
+    setupDefaultInvoke({
+      canSelfUpdate: true,
+      installPathWritable: true,
+      installPath: '/opt/MailCopilot/mailcopilot',
+    })
+    renderComponent()
+    await act(async () => {})
+    expect(screen.queryByTestId('settings-about-install-readonly')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('settings-about-self-update-warning')).not.toBeInTheDocument()
   })
 })
 
@@ -700,5 +781,52 @@ describe('SystemInfo — background event subscriptions (IPC wiring)', () => {
       const remaining = registeredListeners.get(channel) ?? []
       expect(remaining).toHaveLength(0)
     }
+  })
+})
+
+/**
+ * §2.58 iter2 — main refuses `update:systemInfo` for any sender that is not
+ * the settings window (the payload carries `process.execPath`). This panel
+ * only ever renders inside that window, so `null` is a wiring-regression
+ * signal rather than a user-facing state — but it must degrade, not crash:
+ * the same fallback as an outright IPC failure.
+ */
+describe('SystemInfo — §2.58 iter2: refused (null) systemInfo payload', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    registeredListeners.clear()
+  })
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('keeps the panel alive and shows no install path when main returns null', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'update:systemInfo') return Promise.resolve(null)
+      return Promise.resolve({ ok: true })
+    })
+    renderComponent()
+    await act(async () => {})
+
+    // Panel still renders (static app version), no crash from the null read.
+    expect(screen.getByTestId('settings-about-system')).toBeInTheDocument()
+    expect(screen.getByTestId('settings-about-app-version')).toBeInTheDocument()
+    // Nothing derived from the refused payload is shown — most importantly
+    // the install path, which is the value the sender gate protects.
+    expect(screen.queryByTestId('settings-about-install-path')).toBeNull()
+    expect(screen.queryByTestId('settings-about-channel')).toBeNull()
+  })
+
+  it('does not fall into the dev "unsupported" state on a refusal', async () => {
+    // `isPackaged` is unknown when the payload is refused; claiming
+    // "auto-update unsupported" would be an invented diagnosis.
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'update:systemInfo') return Promise.resolve(null)
+      return Promise.resolve({ ok: true })
+    })
+    renderComponent()
+    await act(async () => {})
+
+    expect(screen.queryByTestId('settings-about-update-unsupported')).toBeNull()
   })
 })

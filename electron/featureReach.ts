@@ -8,7 +8,17 @@
  *
  * Lives in its own module because both main.ts and metrics.ts need to write
  * to it, and keeping it isolated prevents an import cycle.
+ *
+ * §2.82 — consent-gated. This bitmap is the longest-lived accumulator in the
+ * process: it is written from the first user action and read only at quit. If
+ * it kept filling while consent was absent, a user who declined, worked all
+ * day, then opted in from Settings → About would have that whole day's feature
+ * usage shipped in the session summary. So bits are only ever set while
+ * `isTelemetryCollectionAllowed()` is true, and any consent transition clears
+ * the bitmap (see telemetryGate.ts).
  */
+
+import { isTelemetryCollectionAllowed, registerTelemetryCollectionResetHook } from './telemetryGate'
 
 export const featureReach = {
   search: false,
@@ -30,6 +40,7 @@ export const featureReach = {
  * rules) are flagged via markFeatureUsed() directly from their IPC handlers.
  */
 export function markFeatureReachFromEvent(name: string): void {
+  if (!isTelemetryCollectionAllowed()) return
   if (name.startsWith('search.')) featureReach.search = true
   else if (name === 'compose.opened' || name.startsWith('send_queue.') || name.startsWith('misdirection.')) featureReach.compose = true
   else if (name === 'template.applied') featureReach.templates = true
@@ -42,12 +53,16 @@ export function markFeatureReachFromEvent(name: string): void {
  * invocation is observable via an IPC handler or a background task.
  */
 export function markFeatureUsed(key: keyof typeof featureReach): void {
+  if (!isTelemetryCollectionAllowed()) return
   featureReach[key] = true
 }
 
-/** Test-only. Reset the bitmap to all false. */
+/** Reset the bitmap to all false. */
 export function resetFeatureReach(): void {
   for (const k of Object.keys(featureReach) as Array<keyof typeof featureReach>) {
     featureReach[k] = false
   }
 }
+
+// A consent transition drops everything collected under the previous answer.
+registerTelemetryCollectionResetHook(resetFeatureReach)

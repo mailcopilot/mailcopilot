@@ -102,13 +102,25 @@ Lorsque le message actif contient des pièces jointes, celles-ci apparaissent au
 - Une **icone de type de fichier**, choisie a partir du type MIME, avec un repli sur l'extension du nom de fichier lorsque le type MIME est manquant, generique (`application/octet-stream`) ou non reconnu : PDF, image, archive, document, tableur, presentation, texte brut, message `.eml` integre, ou une icone de fichier generique lorsqu'aucune correspondance plus precise ne s'applique.
 - Le **nom du fichier**.
 - La **taille du fichier**.
-- Un **badge « Aperçu disponible »** sur les pieces jointes que MailCopilot reconnait comme previsualisables. L'ensemble actuel couvre les images PNG, JPEG, GIF, WebP et les documents PDF -- le badge n'apparait que pour ces types et signale qu'une prise en charge de previsualisation est prevue ; l'action principale dans la ligne reste aujourd'hui le bouton de telechargement.
+
+Les images de mise en page que le corps du message affiche deja en ligne -- par exemple un logo dans une signature HTML -- ne sont jamais retirees de la liste. MailCopilot ne peut pas etablir de maniere fiable, depuis l'exterieur du navigateur, si une partie donnee a reellement fini par etre visible a l'ecran -- c'est la mise en page, le CSS et le choix au sein d'une image adaptative qui en decident --, donc plutot que de deviner, il garde chaque partie accessible : les pieces jointes reelles (les fichiers reellement joints par l'expediteur) sont listees en premier, et les images en ligne que le corps a affichees sont releguees a la fin de la liste, derriere le meme interrupteur d'expansion decrit plus bas.
+
+Un interrupteur d'expansion apparait des qu'il y a plus a montrer que ce qui tient replie -- plus de quatre pieces jointes reelles, ou toute image en ligne releguee, meme s'il y a quatre pieces jointes reelles ou moins. Cliquez sur **Afficher plus (N)**, ou N ne compte que les elements actuellement non visibles, pour tout reveler, et sur **Reduire** pour reduire a nouveau la liste.
 
 Cliquez sur le bouton de telechargement de la ligne d'une piece jointe pour la sauvegarder sur votre ordinateur. Le bouton de telechargement porte un libelle accessible explicite, de sorte que les lecteurs d'ecran annoncent l'action en meme temps que le nom du fichier.
 
 ## Liens dans les e-mails
 
 MailCopilot verifie les liens pour votre securite : liens ne correspondant pas au texte affiche, liens HTTP non chiffres et domaines IDN/Punycode. Un dialogue de confirmation apparait pour les liens suspects.
+
+### Clic droit sur un lien
+
+Faites un clic droit sur un lien dans le corps d'un message pour ouvrir un petit menu contextuel avec :
+
+- **Ouvrir le lien dans le navigateur** -- ouvre le lien de la meme maniere qu'un clic, avec les memes verifications de securite que ci-dessus (avertissements de domaine incoherent et de HTTP, signalement IDN/punycode). Cet element n'apparait que dans la fenetre principale et dans la fenetre de message autonome (voir [Ouvrir dans une fenêtre](#ouvrir-dans-une-fenêtre)) -- il n'est pas propose dans les fenetres Parametres, Nouveau message ou Compte, qui n'affichent aucun lien d'e-mail.
+- **Copier l’adresse du lien** -- copie la destination reelle du lien dans le presse-papiers, et non son texte visible, et jamais la forme de routage interne que MailCopilot utilise pour afficher le lien. Pour une adresse web (`http:`/`https:`) avec un nom de domaine internationalise, l'adresse est copiee sous sa forme punycode (ASCII) -- la forme que votre navigateur utilisera reellement -- plutot que sous sa forme Unicode, afin qu'une adresse copiee ne puisse pas dissimuler un domaine ressemblant derriere des caracteres lisibles. Pour une adresse `mailto:`, un domaine internationalise est encode en pourcentage a la place, car les clients de messagerie ne le resolvent pas comme un hote punycode. Les identifiants integres dans un lien (`https://user:pass@host/…`) sont copies tels quels, sans etre retires -- si vous collez un tel lien ailleurs, les identifiants l'accompagnent.
+
+Aucun de ces elements n'apparait pour les liens qui ne commencent pas par `http:`, `https:` ou `mailto:` (par exemple un lien `javascript:` ou `data:` integre dans un message), ni pour une adresse de lien de plus de 8192 caracteres.
 
 ## Actions sur les messages
 
