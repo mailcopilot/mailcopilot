@@ -3,6 +3,69 @@
   "high": true,
   "allowlist": [
     {
+      "GHSA-9f4c-93c8-jc8g|electron": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "READ THIS FIRST — it is the shared context for the nine 1.25.1 hotfix entries in this file, kept on this entry because a documentation-only pseudo-entry is not a valid allowlist key (scripts/check-audit-expiry.test.mjs enforces GHSA ids, and rightly so). They exist for one release only — the 1.25.1 hotfix — and they suppress advisories that are ALREADY PRESENT IN THE SHIPPED 1.25.0. Nothing here is a judgement that the advisories are acceptable. WHY THE HOTFIX EXISTS: v1.25.0 shipped with a Google client ID baked in and no client secret, so Gmail sign-in failed for every Linux user with Google's own `client_secret is missing`. Cause was a GitLab CI variable marked Protected while the tag ref was not, so `MAILCOPILOT_GOOGLE_CLIENT_SECRET` was empty at build time and vite's define block substituted an empty string; verified by extracting the published .deb — the client ID is present, `GOCSPX-` appears zero times in the bundle. The variable has since been fixed. WHY THESE ENTRIES: 1.25.1 changes ZERO dependencies — the lockfile and every declared range are byte-identical to 1.25.0. The pipeline's `security` stage runs before `build`, so without these the release never reaches the builder and users keep BOTH the advisories and the broken sign-in. Suppressing here is therefore not a trade of security for speed: the shipped risk is unchanged and one user-facing defect is removed. WHY NOT FIX THEM HERE: every one is already fixed on develop by dependency updates that ship in 1.26 — mailparser, undici and the transitive chain clear on a lockfile refresh, electron needs 41.10.3+ and develop is on 43. Bumping the Electron major inside a hotfix is exactly the risk a hotfix exists to avoid. EXIT: these entries die when develop merges into main for 1.26 — that merge brings develop's own allowlist, which has four entries and none of these. The 2026-09-30 expiry is the backstop if 1.26 slips; it is not a renewal date. --- THIS ENTRY: Electron: ProtocolResponse.url reuses the default session cache instead of the session the request belongs to. Vulnerable 40.0.0-alpha.2 through 41.10.2; main declares ^40.4.0, so the whole line is affected and the minimum fix is 41.10.3 — a runtime MAJOR bump. This is the one entry here that covers shipped runtime code rather than tooling, and it is stated plainly rather than softened. It is ALREADY in the hands of every 1.25.0 user; 1.25.1 does not add it and does not make it easier to reach. develop runs Electron ^43.4.1, which is out of the vulnerable range, and that is what 1.26 ships. The reasoning for not taking the bump is in the shared context at the head of this same note."
+      }
+    },
+    {
+      "GHSA-4cwx-7wf7-3272|undici": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. undici: downstream response desynchronization via retry. Vulnerable <=6.27.0 and 7.0.0-7.28.0; main declares ^7.24.5 and resolves inside the range. Clears with a lockfile refresh alone — the declared range already admits the fixed 7.28.1 — but 1.25.1 refreshes nothing on purpose. develop is on ^7.29.0. Shipped in 1.25.0 already; 1.26 carries the fix."
+      }
+    },
+    {
+      "GHSA-ggr8-5vv4-36mx|mailparser>html-to-text>deepmerge-ts": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. deepmerge-ts: stack exhaustion on recursive object graphs, reached through mailparser > html-to-text. This chain DOES touch untrusted input — it is the mail body path — and that is named here rather than glossed. Unchanged from 1.25.0, which users are running today. Clears on a lockfile refresh within existing ranges; 1.26 ships it. Chain-scoped on purpose so a different route to deepmerge-ts still fails the build."
+      }
+    },
+    {
+      "GHSA-5p4m-2wfm-xmqj|js-yaml": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. js-yaml: quadratic CPU consumption resolving !!omap. Transitive, not a declared dependency of ours. Clears on a lockfile refresh; 1.26 ships it. Present in 1.25.0 as delivered."
+      }
+    },
+    {
+      "GHSA-7p8r-x3mc-p8w7|fast-uri": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. fast-uri: host confusion via a backslash in the authority. Transitive, not declared by us. Clears on a lockfile refresh; 1.26 ships it. Present in 1.25.0 as delivered."
+      }
+    },
+    {
+      "GHSA-2v37-7h3g-55p8|nanoid": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. nanoid: a custom generator can loop indefinitely when size is zero. Transitive, not declared by us; we never call it with a zero size. Clears on a lockfile refresh; 1.26 ships it. Present in 1.25.0 as delivered."
+      }
+    },
+    {
+      "GHSA-rgw5-rvv9-x895|brace-expansion": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. brace-expansion DoS, second advisory of the pair. develop carries this same entry with a full reachability write-up: every path is lint/build/CI tooling plus the copy vendored inside the npm CLI, and exploitation needs an attacker-controlled glob pattern, which on these paths always comes from our own repo config. Ported here verbatim in substance rather than re-triaged, because the tree is byte-identical to the one develop analysed. Present in 1.25.0 as delivered."
+      }
+    },
+    {
+      "GHSA-mwp4-54f8-5fhr|ip-address": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. ip-address: Address4 decodes leading-zero octets as decimal. develop carries this entry already; same node, same reasoning, tooling-only reachability. Ported rather than re-triaged for the same reason as brace-expansion. Present in 1.25.0 as delivered."
+      }
+    },
+    {
+      "GHSA-r292-9mhp-454m|npm>tar": {
+        "active": true,
+        "expiry": "2026-09-30",
+        "notes": "ONE OF THE NINE 1.25.1 HOTFIX ENTRIES — the shared context (why they exist, why no dependency is touched, and when they die) is written out in full on the `GHSA-9f4c-93c8-jc8g|electron` entry of this file. tar: uncontrolled recursion in mapHas/filesFilter. ONE node, `node_modules/npm/node_modules/tar`, dev and inBundle — the copy vendored inside the npm CLI that @semantic-release/npm carries; `tar` is in npm's own bundleDependencies so an override cannot reach it. Reaching it needs the vendored npm to extract an attacker-supplied tarball with member selection during a release run on our own runner. Keyed `npm>tar` and not the bare package name: a path audit-ci prints differently still fails. Note the limit precisely — audit-ci matches the printed path, not provenance, so ancestry above `npm` is not enforced. develop carries the same entry with the longer history."
+      }
+    },
+    {
       "GHSA-mh99-v99m-4gvg": {
         "active": true,
         "expiry": "2026-10-01",
