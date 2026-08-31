@@ -62,7 +62,7 @@ async function openAiSettingsTab(page: Page, browser: Browser): Promise<Page> {
   return settings
 }
 
-test('B7: proofread button absent on a fresh profile (toggle OFF by default)', async () => {
+test('B7: proofread button is visible but LOCKED on a fresh profile (toggle OFF by default)', async () => {
   const ctx: Partial<AppContext> = {}
   try {
     Object.assign(ctx, await launchApp('mailcopilot-e2e-proofread-off-'))
@@ -71,10 +71,21 @@ test('B7: proofread button absent on a fresh profile (toggle OFF by default)', a
 
     const compose = await openComposeWindow(page, browser)
 
-    // ComposeQuickActions renders the button only when `proofreadEnabled` is
-    // true. On a fresh profile aiProofreadEnabled defaults to {} (all OFF).
-    // Removing the `proofreadEnabled` prop check → this assertion goes red.
-    await expect(compose.getByTestId('compose-proofread-run')).toHaveCount(0)
+    // §1.26.1 AC-2: on a fresh profile aiProofreadEnabled defaults to {} (all
+    // OFF), and the button is RENDERED in that state — locked, focusable, with
+    // a hint saying where to switch it on. It used to be absent, which made a
+    // switched-off setting indistinguishable from a missing feature.
+    const btn = compose.getByTestId('compose-proofread-run')
+    await expect(btn).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(btn).toHaveAttribute('aria-disabled', 'true')
+    // `aria-disabled`, not the `disabled` attribute — checked by attribute
+    // presence, not Playwright's `toBeEnabled()`: that assertion folds
+    // `aria-disabled="true"` into its own "disabled" verdict (it walks the
+    // ARIA chain, same as real assistive tech), so it would fail here on code
+    // that is doing exactly what §1.26.1(2) asks for. The HTML `disabled`
+    // attribute — not ARIA — is what removes an element from the tab order,
+    // which is the actual guarantee this test exists to pin.
+    await expect(btn).not.toHaveAttribute('disabled')
   } finally {
     await cleanupApp(ctx)
   }
@@ -90,7 +101,7 @@ test('B7: enabling the toggle in Settings makes the proofread button appear in C
     // 1. Open Settings → AI tab, turn on the toggle and save.
     const settings = await openAiSettingsTab(page, browser)
 
-    const toggle = settings.getByTestId('settings-ai-proofread-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-proofread-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     // Default: unchecked. Removing the default({}) in settingsSchema → value is
     // undefined, Compose reads it as true (wrong), and the initial state flips.
@@ -102,10 +113,13 @@ test('B7: enabling the toggle in Settings makes the proofread button appear in C
     await expect.poll(() => settings.isClosed(), { timeout: CLOSE_TIMEOUT }).toBe(true)
     await page.bringToFront()
 
-    // 2. Open Compose — button must now be present.
-    // Removing the `proofreadEnabled` prop wiring in Compose.tsx → count stays 0.
+    // 2. Open Compose — the button must now be unlocked.
+    // Removing the `proofreadEnabled` prop wiring in Compose.tsx → it stays
+    // aria-disabled.
     const compose = await openComposeWindow(page, browser)
-    await expect(compose.getByTestId('compose-proofread-run')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    const btn = compose.getByTestId('compose-proofread-run')
+    await expect(btn).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(btn).not.toHaveAttribute('aria-disabled', 'true')
   } finally {
     await cleanupApp(ctx)
   }
@@ -120,7 +134,7 @@ test('B7: Settings toggle persists across close/reopen (settings.json round-trip
 
     // Turn ON, save.
     const settings = await openAiSettingsTab(page, browser)
-    const toggle = settings.getByTestId('settings-ai-proofread-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-proofread-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await toggle.check()
     await settings.getByTestId('settings-save').click()
@@ -130,7 +144,7 @@ test('B7: Settings toggle persists across close/reopen (settings.json round-trip
     // Reopen Settings → AI tab. Toggle must still be ON.
     // Removing the save payload key `aiProofreadEnabled` → reopen shows it OFF.
     const settings2 = await openAiSettingsTab(page, browser)
-    const toggle2 = settings2.getByTestId('settings-ai-proofread-toggle')
+    const toggle2 = settings2.getByTestId('settings-ai-consent-proofread-1')
     await expect(toggle2).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle2).toBeChecked()
 
@@ -152,7 +166,7 @@ test('B7: clicking the check button with no AI provider surfaces a refusal, not 
 
     // Enable the toggle.
     const settings = await openAiSettingsTab(page, browser)
-    await settings.getByTestId('settings-ai-proofread-toggle').check()
+    await settings.getByTestId('settings-ai-consent-proofread-1').check()
     await settings.getByTestId('settings-save').click()
     await expect.poll(() => settings.isClosed(), { timeout: CLOSE_TIMEOUT }).toBe(true)
     await page.bringToFront()

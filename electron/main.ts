@@ -151,6 +151,7 @@ process.on('unhandledRejection', (reason) => {
 import { app, BrowserWindow, shell, Menu, dialog, screen } from 'electron'
 import { buildChildWindowOptions, centerOverRect, isStandaloneWindowKind, type ChildWindowKind } from './childWindowOptions'
 import { computeIsE2E } from './e2eFlag'
+import { buildFolderCountsResponse } from './folderCountsResponse'
 // §2.145 — whether a stored details row may be served; see that module for why
 // the threshold is the SERVER-DIRECT writer's bound and not the EML soft cap.
 import { isServableCachedDetail, isServableCachedDetailJson } from './cachedDetailGuard'
@@ -368,7 +369,11 @@ import { senderPartsFromHeader } from './e2eSenderParts'
 // schema (defaults and all), so keeping it off the public index makes it hard
 // to reach for by accident. Its only two callers are the §2.82 consent
 // migration and the `settings:save` clamp-preservation below.
-import { setSecretBackend, getRawPersistedSettings } from '../packages/net/config'
+import { setSecretBackend, getRawPersistedSettings, ACCOUNT_KEYED_CONSENT_FIELDS } from '../packages/net/config'
+// §1.26.f2 — `settings:save` may not persist an AI consent for a mailbox that
+// no longer exists. Pure functions; the handler keeps the registry read and the
+// ordering. See the module header for what the rule does and does not cover.
+import { pruneUnknownAccountConsents, keepStoredConsents } from './accountKeyedConsents'
 import type { AccountConfig, AccountMeta, AttachmentMeta, CalendarInvite, ComposeInit, FolderRoles, FolderPreference, ImapConfig, Mailbox, MessageDetails, UnsubscribeAttemptResult } from '../packages/net/types'
 import { queueItemToComposeInit } from './queueComposeBridge'
 import { quickActionRewriteSchema, instantReplyGenerateSchema, proofreadCheckSchema, translateDraftSchema } from './ipcSchemas'
@@ -440,6 +445,7 @@ import {
   removeTlsPin,
   listFolderPrefs,
   listFolderStats,
+  listFolderCrawlStates,
   getFolderPref,
   upsertFolderPref,
   removeFolderPref,
@@ -4649,15 +4655,23 @@ handleIpc('folder:prefs:remove', (_e, accountId: unknown, folderPath: unknown) =
   return { ok: true as const, removed: dropFolderPref(id, pathValue) }
 })
 
-/** Unread counts from SQLite cache (without IMAP requests). */
+/**
+ * Unread counts from SQLite cache (without IMAP requests).
+ *
+ * The reply names the folders it speaks for: `listFolderStats` alone omits
+ * every folder with no rows, and the renderer cannot tell "cache says zero"
+ * from "cache knows nothing" (an `on_open` folder never opened has no rows
+ * either, and its badge legitimately carries the server LIST-STATUS number).
+ * `buildFolderCountsResponse` resolves that ambiguity here, where the crawl
+ * state is visible — see `electron/folderCountsResponse.ts` for the rule.
+ */
 handleIpc('folder:refreshCounts', (_e, accountId: unknown) => {
   const id = accountIdSchema.parse(accountId)
-  const stats = listFolderStats(id)
-  const result: Record<string, { unread: number; total: number }> = {}
-  for (const s of stats) {
-    result[s.folderPath] = { unread: s.unreadCount, total: s.messageCount }
-  }
-  return result
+  return buildFolderCountsResponse({
+    accountId: id,
+    stats: listFolderStats(id),
+    crawlStates: listFolderCrawlStates([id]),
+  })
 })
 
 // --- IPC: network operations ---
@@ -9017,7 +9031,54 @@ handleIpc('settings:save', async (event, s: unknown) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (merged as any)[field] = (current as any)[field]
   }
-  const parsed = settingsSchema.parse(merged)
+  // §1.26.f2 — an AI consent may only name a mailbox that exists.
+  //
+  // The four per-account opt-ins are keyed by stringified account id, and the
+  // settings window loads them ONCE (a `[]`-dependency effect) and sends all
+  // four back whole on every save. Deleting an account purges its entries from
+  // the store (`forgetAccountAiConsents`), but a window that was open across
+  // that deletion still holds them, so its next ordinary save merges the purged
+  // `true` back in — and ids are reused (`max + 1`), so a later mailbox can
+  // inherit a grant its owner never gave.
+  //
+  // The registry is read HERE, after the post-dialog re-read of `current`, so
+  // the list and the settings snapshot are of the same moment: a deletion that
+  // landed while a native prompt was open is already visible in both.
+  //
+  // Runs over `merged`, not over the payload, so the same pass also clears
+  // entries an older build persisted. What it cannot reach is the READ side —
+  // the AI services read `getSettings()` directly, so such an entry survives
+  // until the next save of any kind. See electron/accountKeyedConsents.ts.
+  //
+  // The roster consulted is the one `accounts:list` serves, which under
+  // `MAILCOPILOT_E2E=1` in an unpackaged build is the in-memory `E2E_ACCOUNTS`
+  // fixture — the same branch as `mail:openInWindow` and
+  // `pendingMoveAccountExists`. Reading the config store here instead would
+  // make this the one account lookup in main that disagrees with the rest of
+  // the app: in e2e it reports NO accounts, so every consent the renderer can
+  // legitimately hold would be pruned as belonging to nobody. Not a weaker
+  // check — the accepted ids are exactly the ones the renderer was given.
+  const knownAccountIds = (() => {
+    try {
+      const roster = IS_E2E ? E2E_ACCOUNTS : listAccounts()
+      return new Set(roster.map(a => a.id))
+    } catch { return null }
+  })()
+  const consentScope = knownAccountIds
+    ? pruneUnknownAccountConsents(merged, ACCOUNT_KEYED_CONSENT_FIELDS, knownAccountIds)
+    : keepStoredConsents(merged, current, ACCOUNT_KEYED_CONSENT_FIELDS)
+  if (consentScope.changedFields.length > 0) {
+    // Closed vocabulary only: the field names are our own constants and the
+    // rest are counts. The account ids that were dropped are not named
+    // (CLAUDE.md §8) — the count answers "did this happen", which is what a log
+    // line is for here.
+    logMain.warn('settings:save: account-keyed consent scoped to existing mailboxes', {
+      fields: consentScope.changedFields.join(','),
+      droppedEntries: consentScope.droppedEntries,
+      mode: knownAccountIds ? 'pruned' : 'kept_stored',
+    })
+  }
+  const parsed = settingsSchema.parse(consentScope.settings)
   // §2.82: the About switch is the GDPR art. 7(3) withdrawal path, so a flip
   // here moves the stored consent record too, and `sentryEnabled` is clamped to
   // that record (a switch cannot be "on" without consent — see applyAboutToggle).

@@ -459,13 +459,37 @@ export type TranslateMessageRequest = {
  *                               translation.
  *   - `budget`                — daily/monthly AI budget cap exceeded.
  *   - `no_provider`           — no AI provider configured.
- *   - `provider_error`        — the provider call failed, returned nothing
- *                               usable, or was cut off by the output cap.
+ *   - `answer_too_long`       — the provider ANSWERED but ran out of output
+ *                               room, so the translation came back cut off or
+ *                               empty. Split out of `provider_error` on
+ *                               2026-08-31, and the split is the whole point:
+ *                               the two demand OPPOSITE advice. A provider
+ *                               hiccup is worth another attempt; running out of
+ *                               room is a property of this message and this
+ *                               ceiling, so a retry very likely buys the
+ *                               identical nothing — at the price of a fresh
+ *                               billed call. "Very likely", not "certainly":
+ *                               providers are not promised to be deterministic
+ *                               and these calls carry a non-zero temperature, so
+ *                               the evidence is about the answer already given.
+ *                               Telling a reader to "try again" there is the
+ *                               product recommending a repeat it expects to
+ *                               fail, and charging for the demonstration.
+ *
+ *                               Emitted ONLY on direct evidence from the
+ *                               provider: a `length` stop verdict, or reported
+ *                               output tokens sitting on the ceiling. An
+ *                               unreadable or absent verdict stays
+ *                               `provider_error` — an unexplained failure must
+ *                               not be dressed up as an explained one.
+ *   - `provider_error`        — the provider call failed or returned nothing
+ *                               usable, with no evidence of why.
  */
 export type TranslateRefusalReason =
   | 'budget'
   | 'no_provider'
   | 'provider_error'
+  | 'answer_too_long'
   | 'empty_input'
   | 'too_long'
   | 'opt_out'

@@ -138,7 +138,7 @@ test('thread-summary: per-account Settings toggle persists across close/reopen',
     await settings.waitForLoadState('domcontentloaded')
     await settings.getByTestId('settings-tab-ai').click()
 
-    const toggle = settings.getByTestId('settings-ai-thread-summary-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-threadSummary-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle).not.toBeChecked()
 
@@ -160,7 +160,7 @@ test('thread-summary: per-account Settings toggle persists across close/reopen',
     await settings2.waitForLoadState('domcontentloaded')
     await settings2.getByTestId('settings-tab-ai').click()
 
-    const toggle2 = settings2.getByTestId('settings-ai-thread-summary-toggle')
+    const toggle2 = settings2.getByTestId('settings-ai-consent-threadSummary-1')
     await expect(toggle2).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle2).toBeChecked()
 

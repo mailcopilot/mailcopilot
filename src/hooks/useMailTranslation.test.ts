@@ -287,6 +287,7 @@ describe('useMailTranslation — refusals are values, never crashes', () => {
     'budget',
     'no_provider',
     'provider_error',
+    'answer_too_long',
     'empty_input',
     'too_long',
     'opt_out',
@@ -337,6 +338,137 @@ describe('useMailTranslation — refusals are values, never crashes', () => {
     await waitFor(() => expect(view.result.current.status).toBe('ready'))
 
     expect(view.result.current.refusal).toBeNull()
+  })
+})
+
+/**
+ * 2026-08-31 incident — the retry that looked dead.
+ *
+ * The button was never broken: every press issued a real request — billed, as
+ * the audit log later showed — and the answer refused for the same reason each
+ * time, so the screen repainted byte-identically. Two facts have to leave this
+ * hook for that to be tellable apart from a control that does nothing — how many
+ * requests have been SENT, and whether another one is worth offering at all.
+ *
+ * "Sent", not "billed": the renderer never learns whether a request reached a
+ * provider, and the tests below hold it to that. See `attempts` in the hook.
+ */
+describe('useMailTranslation — a repeat is visible, and a pointless one is not offered', () => {
+  it('counts an attempt the moment the request goes out, not when it answers', async () => {
+    let release: (r: TranslateMessageResult) => void = () => {}
+    const translate = vi.fn<TranslateFn>(() => new Promise(resolve => { release = resolve }))
+    const view = setup(translate)
+
+    act(() => view.result.current.request())
+    // Still in flight: the count is what tells the reader the press landed, so
+    // it cannot wait for the provider.
+    expect(view.result.current.attempts).toBe(1)
+
+    await act(async () => { release({ ok: false, reason: 'provider_error' }) })
+    expect(view.result.current.attempts).toBe(1)
+  })
+
+  it('advances on every repeat, so an identical refusal is still a changed screen', async () => {
+    const translate = vi.fn<TranslateFn>(async () => ({ ok: false, reason: 'provider_error' }))
+    const view = setup(translate)
+
+    for (const expected of [1, 2, 3]) {
+      act(() => view.result.current.request())
+      await waitFor(() => expect(view.result.current.status).toBe('refused'))
+      expect(view.result.current.attempts).toBe(expected)
+      // The reason really is identical every time — that is the whole point.
+      expect(view.result.current.refusal).toBe('provider_error')
+    }
+    expect(translate).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not count a press the local gate refuses — nothing was sent', () => {
+    const translate = vi.fn<TranslateFn>(async () => ({ ok: true, translation: makeTranslation() }))
+    const view = setup(translate, { enabled: false })
+
+    act(() => view.result.current.request())
+
+    expect(translate).not.toHaveBeenCalled()
+    expect(view.result.current.attempts).toBe(0)
+  })
+
+  it('counts a request main refuses before contacting anyone — it was still sent', async () => {
+    // Independent review, 2026-08-31, Medium: the count must not be described as
+    // spend, because main can refuse without any provider being reached — no
+    // provider configured, consent off, budget exhausted, input cap, cache hit —
+    // and the wire contract carries a refusal reason, not a billing verdict. The
+    // behaviour is right (a press that left the renderer is what the reader is
+    // asking about); this pins it so the honest reading cannot drift back into
+    // "requests you have paid for".
+    const translate = vi.fn<TranslateFn>(async () => ({ ok: false, reason: 'no_provider' }))
+    const view = setup(translate)
+
+    act(() => view.result.current.request())
+    await waitFor(() => expect(view.result.current.status).toBe('refused'))
+
+    expect(view.result.current.attempts).toBe(1)
+  })
+
+  it('starts the count over for a new target language — a new question', async () => {
+    const translate = vi.fn<TranslateFn>(async () => ({ ok: false, reason: 'provider_error' }))
+    const view = setup(translate)
+
+    act(() => view.result.current.request())
+    await waitFor(() => expect(view.result.current.attempts).toBe(1))
+
+    act(() => view.result.current.setTargetLang('ja'))
+    expect(view.result.current.attempts).toBe(0)
+  })
+
+  it('starts the count over for a new message', async () => {
+    const translate = vi.fn<TranslateFn>(async () => ({ ok: false, reason: 'provider_error' }))
+    const view = setup(translate)
+
+    act(() => view.result.current.request())
+    await waitFor(() => expect(view.result.current.attempts).toBe(1))
+
+    view.rerender({
+      message: { accountId: 1, folder: 'INBOX', uid: 43 },
+      enabled: true,
+      uiLocale: 'en',
+      translate,
+    })
+    expect(view.result.current.attempts).toBe(0)
+  })
+
+  it('withholds the retry for refusals that cannot answer differently', async () => {
+    // Each of these is fixed by something that is not another request: the
+    // message and the ceiling for `answer_too_long`, the input cap for
+    // `too_long`, and a setting whose change resets this hook for `opt_out`.
+    for (const reason of ['answer_too_long', 'too_long', 'opt_out'] as const) {
+      const translate = vi.fn<TranslateFn>(async () => ({ ok: false, reason }))
+      const view = setup(translate)
+      act(() => view.result.current.request())
+      await waitFor(() => expect(view.result.current.status).toBe('refused'))
+      expect(view.result.current.canRetry).toBe(false)
+    }
+  })
+
+  it('offers the retry for refusals that something outside this request could fix', async () => {
+    // `provider_error` is, since the split, precisely the failure we have no
+    // explanation for — and an unexplained failure may well be transient.
+    for (const reason of ['provider_error', 'budget', 'no_provider', 'empty_input'] as const) {
+      const translate = vi.fn<TranslateFn>(async () => ({ ok: false, reason }))
+      const view = setup(translate)
+      act(() => view.result.current.request())
+      await waitFor(() => expect(view.result.current.status).toBe('refused'))
+      expect(view.result.current.canRetry).toBe(true)
+    }
+  })
+
+  it('makes no retry claim while nothing is refusing', async () => {
+    const translate = vi.fn<TranslateFn>(async () => ({ ok: true, translation: makeTranslation() }))
+    const view = setup(translate)
+    expect(view.result.current.canRetry).toBe(false)
+
+    act(() => view.result.current.request())
+    await waitFor(() => expect(view.result.current.status).toBe('ready'))
+    expect(view.result.current.canRetry).toBe(false)
   })
 })
 

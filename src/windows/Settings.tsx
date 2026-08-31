@@ -30,6 +30,7 @@ import AiPrivacyPanel from '../components/Settings/AiPrivacyPanel'
 import AiDestinationRejectionNotice from '../components/Settings/AiDestinationRejectionNotice'
 import SettingsSaveRefusalNotice from '../components/Settings/SettingsSaveRefusalNotice'
 import TraySection from '../components/Settings/TraySection'
+import AiConsentMatrix from '../components/Settings/AiConsentMatrix'
 import { useAiDestinationRejection } from '../hooks/useAiDestinationRejection'
 import {
   buildExportWhitelistPayload,
@@ -1209,6 +1210,29 @@ export default function Settings() {
     await window.api.invoke('accounts:remove', id)
     const next = accounts.filter(a => a.id !== id)
     setAccounts(next)
+    // §1.26.f2 — drop the removed mailbox from the four consent maps this
+    // window holds. Main purged them in `accounts:remove`, but this window
+    // loads them ONCE (the `[]`-dependency effect above) and sends all four
+    // back whole on every save, so without this the next unrelated save would
+    // merge the purged entry straight back in.
+    //
+    // This is the DISPLAY half only: it keeps the grid agreeing with the store
+    // in the window that performed the deletion. It is not the enforcement
+    // point and must not be mistaken for one — a second settings window, a save
+    // already in flight, and a compromised renderer all bypass it. Main refuses
+    // an entry for a mailbox that does not exist on its own (`settings:save`,
+    // electron/accountKeyedConsents.ts).
+    const withoutRemoved = (prev: Record<string, boolean>): Record<string, boolean> => {
+      const key = String(id)
+      if (!Object.prototype.hasOwnProperty.call(prev, key)) return prev
+      const copy = { ...prev }
+      delete copy[key]
+      return copy
+    }
+    setAiThreadSummaryEnabled(withoutRemoved)
+    setAiInstantReplyEnabled(withoutRemoved)
+    setAiProofreadEnabled(withoutRemoved)
+    setAiTranslateEnabled(withoutRemoved)
     if (accountId === id) {
       const nextId = next[0]?.id ?? null
       setAccountId(nextId)
@@ -3042,112 +3066,57 @@ export default function Settings() {
             )}
           </section>
 
-          {/* §3.3 B2 Thread AI Summary — per-account opt-in. Default OFF. The
-              toggle reads/writes the entry for the currently selected account
-              in the aiThreadSummaryEnabled Record; the shared account selector
-              scopes it when more than one account exists. */}
-          <section className="form-section" data-testid="settings-ai-thread-summary">
-            <h3>{t('ai.settings.threadSummary.title')}</h3>
-            <p className="section-hint">{t('ai.settings.threadSummary.help')}</p>
-            {accountSelector}
-            <div className="setting-row setting-row-checkbox">
-              <label>
-                <input
-                  type="checkbox"
-                  data-testid="settings-ai-thread-summary-toggle"
-                  disabled={typeof accountId !== 'number'}
-                  checked={typeof accountId === 'number' && aiThreadSummaryEnabled[String(accountId)] === true}
-                  onChange={e => {
-                    if (typeof accountId !== 'number') return
-                    const key = String(accountId)
-                    const next = e.target.checked
-                    setAiThreadSummaryEnabled(prev => ({ ...prev, [key]: next }))
-                  }}
-                />{' '}
-                {t('ai.settings.threadSummary.label')}
-              </label>
-            </div>
-          </section>
-
-          {/* §3.3 B4 Instant Reply — per-account opt-in. Default OFF. Same
-              account-scoped Record pattern as Thread Summary above. */}
-          <section className="form-section" data-testid="settings-ai-instant-reply">
-            <h3>{t('ai.settings.instantReply.title')}</h3>
-            <p className="section-hint">{t('ai.settings.instantReply.help')}</p>
-            {accountSelector}
-            <div className="setting-row setting-row-checkbox">
-              <label>
-                <input
-                  type="checkbox"
-                  data-testid="settings-ai-instant-reply-toggle"
-                  disabled={typeof accountId !== 'number'}
-                  checked={typeof accountId === 'number' && aiInstantReplyEnabled[String(accountId)] === true}
-                  onChange={e => {
-                    if (typeof accountId !== 'number') return
-                    const key = String(accountId)
-                    const next = e.target.checked
-                    setAiInstantReplyEnabled(prev => ({ ...prev, [key]: next }))
-                  }}
-                />{' '}
-                {t('ai.settings.instantReply.label')}
-              </label>
-            </div>
-          </section>
-
-          {/* §3.3 B7 AI Proofread — per-account opt-in. Default OFF. Same
-              account-scoped Record pattern as the two toggles above. The help
-              text is deliberately honest about scope: the check looks at the
-              text the user wrote, and the own/quote boundary behind that is an
-              estimate over flat text (§2.173), not a guarantee. */}
-          <section className="form-section" data-testid="settings-ai-proofread">
-            <h3>{t('ai.settings.proofread.title')}</h3>
-            <p className="section-hint">{t('ai.settings.proofread.help')}</p>
-            {accountSelector}
-            <div className="setting-row setting-row-checkbox">
-              <label>
-                <input
-                  type="checkbox"
-                  data-testid="settings-ai-proofread-toggle"
-                  disabled={typeof accountId !== 'number'}
-                  checked={typeof accountId === 'number' && aiProofreadEnabled[String(accountId)] === true}
-                  onChange={e => {
-                    if (typeof accountId !== 'number') return
-                    const key = String(accountId)
-                    const next = e.target.checked
-                    setAiProofreadEnabled(prev => ({ ...prev, [key]: next }))
-                  }}
-                />{' '}
-                {t('ai.settings.proofread.label')}
-              </label>
-            </div>
-          </section>
-
-          {/* §3.3 B6 AI Translate — per-account opt-in. Default OFF. Same
-              account-scoped Record pattern as the toggles above. The help text
-              names the two things a reader has to know before turning it on:
-              it costs a provider call, and it only ever runs when they ask. */}
-          <section className="form-section" data-testid="settings-ai-translate">
-            <h3>{t('ai.settings.translate.title')}</h3>
-            <p className="section-hint">{t('ai.settings.translate.help')}</p>
-            {accountSelector}
-            <div className="setting-row setting-row-checkbox">
-              <label>
-                <input
-                  type="checkbox"
-                  data-testid="settings-ai-translate-toggle"
-                  disabled={typeof accountId !== 'number'}
-                  checked={typeof accountId === 'number' && aiTranslateEnabled[String(accountId)] === true}
-                  onChange={e => {
-                    if (typeof accountId !== 'number') return
-                    const key = String(accountId)
-                    const next = e.target.checked
-                    setAiTranslateEnabled(prev => ({ ...prev, [key]: next }))
-                  }}
-                />{' '}
-                {t('ai.settings.translate.label')}
-              </label>
-            </div>
-          </section>
+          {/* §1.26.1(3): the four per-account AI opt-ins used to be four sections,
+              each repeating the SAME account picker (same `data-testid`, same
+              `accountId` state) — four copies of one control in one tab. They are
+              one grid now: a row per mailbox, a column per feature. All logic is
+              in `useAiConsentMatrix`; this file only hands over state and the
+              four setters (CLAUDE.md §5 hotspot policy). */}
+          <AiConsentMatrix
+            accounts={accounts.map(a => {
+              const name = (a.name || '').trim()
+              const email = a.email || a.imap.user || ''
+              return { id: a.id, label: name ? `${name} (${email})` : email || `#${a.id}` }
+            })}
+            value={{
+              threadSummary: aiThreadSummaryEnabled,
+              instantReply: aiInstantReplyEnabled,
+              proofread: aiProofreadEnabled,
+              translate: aiTranslateEnabled,
+            }}
+            onChangeFeature={(feature, update) => {
+              // An exhaustive switch rather than a map of setters: with the
+              // `never` guard in `default`, adding a fifth opt-in to
+              // `AI_CONSENT_FEATURES` is a compile error HERE until it is given
+              // somewhere to be stored.
+              //
+              // The guard is what makes that true, and it was missing: without
+              // it a switch is legal with any subset of the union, so the only
+              // error a fifth feature raised was on `value` below (which is
+              // `Record<AiConsentFeature, AiConsentMap>` and so must be
+              // complete). Satisfying that one and forgetting a branch here
+              // produced a checkbox that silently stored nothing — the safe
+              // direction (a dead control, never an unasked grant), but a
+              // comment claiming a compile error that did not exist.
+              //
+              // `update` is a function of the previous map and is handed to the
+              // setter as-is — never a map computed here from render-time state.
+              // Two writes coalesced into one React batch would otherwise be
+              // "last one wins over a stale snapshot", and the write that can be
+              // lost that way is a WITHDRAWAL of consent, the unsafe direction.
+              switch (feature) {
+                case 'threadSummary': setAiThreadSummaryEnabled(update); break
+                case 'instantReply': setAiInstantReplyEnabled(update); break
+                case 'proofread': setAiProofreadEnabled(update); break
+                case 'translate': setAiTranslateEnabled(update); break
+                default: {
+                  const exhaustive: never = feature
+                  void exhaustive
+                  break
+                }
+              }
+            }}
+          />
 
           <section className="form-section">
             <h3>{t('ai.settings.memory.title')}</h3>

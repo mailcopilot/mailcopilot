@@ -67,9 +67,19 @@ Si el asistente no puede iniciar una solicitud, el panel de IA o el boton **Veri
   - **Este límite nunca se activa en endpoints compatibles con OpenAI que no informan en absoluto el consumo de tokens.** El límite funciona rastreando el costo real acumulado a partir de los conteos de tokens que informa el proveedor; si el endpoint nunca informa el consumo (algunos frontales autoalojados o proxies lo omiten por completo), el costo rastreado permanece en $0 en cada paso, así que el límite por solicitud simplemente no tiene nada sobre lo que activarse — la solicitud continúa hasta topar con el límite de Máx. de pasos por solicitud. Esto es una limitación deliberada, no un defecto: inventar una estimación de costo en ausencia de cifras reales arriesgaría cortar solicitudes legítimas en proveedores que sencillamente no informan su consumo. El gasto no queda por ello sin control — el Presupuesto diario / mensual de arriba se aplica de forma independiente a que el endpoint informe o no su consumo por paso, y se aplica plenamente también aquí. Esto afecta sobre todo a builds locales y autoalojados (Ollama y similares), donde el informe del consumo de tokens suele faltar. Es un caso distinto al del modelo no reconocido mencionado arriba: allí el modelo sí *informa* tokens pero no está en la tabla de tarifas, lo que hace que el límite se active demasiado pronto; aquí el modelo no informa ningún token, lo que hace que el límite nunca se active.
 - **Proxy HTTP** -- si su red requiere un proxy HTTP para acceder a Internet, ingrese la URL del proxy aquí (por ejemplo, `http://proxy.company.local:3128`). El proxy se usa para todas las solicitudes de IA. Déjelo vacío si no se necesita proxy. Establecer o cambiar un proxy se confirma con un cuadro de diálogo del sistema -- consulta [Confirmar un nuevo destino de IA](#confirmar-un-nuevo-destino-de-ia) más abajo.
 - **Tecla de envio** -- enviar con **Enter** o **Ctrl+Enter**.
-- **Resumen IA del hilo** -- active "Resumir hilos largos con IA" para mostrar un resumen generado por IA sobre hilos de tres o mas mensajes. Deshabilitado de forma predeterminada; se activa por separado para cada cuenta. Consulte [Resumen IA del hilo](#resumen-ia-del-hilo) mas abajo para mas detalles.
-- **Respuesta instantanea** -- active "Sugerir borradores de respuesta con IA" para mostrar un boton de Respuesta instantanea en el mensaje abierto. Deshabilitado de forma predeterminada; se activa por separado para cada cuenta. Consulte [Respuesta instantanea](#respuesta-instantanea) mas abajo para mas detalles.
-- **AI Proofread** -- active "Revisar borradores en busca de errores con IA" para agregar un boton **Check writing** en la ventana de redaccion. El boton muestra una lista de correcciones sugeridas; usted acepta cada una individualmente. Deshabilitado de forma predeterminada; se activa por separado para cada cuenta. Consulte [AI Proofread](#ai-proofread) mas abajo para mas detalles.
+- **Resumen IA del hilo**, **Respuesta instantánea**, **AI Proofread**, **AI Translate** -- cuatro autorizaciones independientes, cada una desactivada de forma predeterminada y activada por separado por buzón en la tabla **Funciones de IA por buzón** -- consulte [Funciones de IA por buzón](#funciones-de-ia-por-buzón) más abajo. Activarlas muestra un resumen generado por IA sobre los hilos largos, añade un botón de Respuesta instantánea, añade un botón **Check writing** en la ventana de redacción, o añade un control **Translate**, respectivamente -- consulte [Resumen IA del hilo](#resumen-ia-del-hilo), [Respuesta instantánea](#respuesta-instantanea), [AI Proofread](#ai-proofread) y [Traducción del mensaje](#traducción-del-mensaje) más abajo para más detalles.
+
+### Funciones de IA por buzón
+
+El resumen IA del hilo, la respuesta instantánea, AI Proofread y AI Translate son cuatro autorizaciones independientes, y MailCopilot pregunta por cada una de ellas por separado, por buzón -- activar una no activa las demás, y activarla para un buzón no la activa para el resto de buzones.
+
+**Ajustes > IA** muestra todo esto como una única tabla, **Funciones de IA por buzón**: una fila por buzón, una columna por función, una casilla en el cruce. Marcar una casilla solo permite que esa función se *ofrezca* en ese buzón -- no se resume, redacta, revisa ni traduce nada hasta que usted lo pida por separado en ese buzón.
+
+Encima de cada columna, una casilla en el encabezado concede o retira esa **única** función en todos los buzones a la vez -- muestra un estado mixto (indeterminado) cuando la función solo está activada en algunos de sus buzones. No existe un único control que active todo para todos los buzones a la vez: cada función se sigue pidiendo por separado.
+
+Debajo de la tabla, una breve leyenda explica qué hace realmente cada función y qué cuesta, ya que un encabezado de dos o tres palabras no puede transmitir eso por sí solo.
+
+Si aún no ha añadido ningún buzón, la tabla muestra en su lugar una invitación a añadir uno.
 
 ### Confirmar un nuevo destino de IA
 
@@ -112,7 +122,7 @@ El Resumen IA del hilo muestra automaticamente un resumen de IA de una linea jus
 **Como habilitarlo:**
 
 1. Abra **Configuracion** y vaya a la pestana **IA**.
-2. Busque **Resumen IA del hilo** y marque "Resumir hilos largos con IA".
+2. En la tabla **Funciones de IA por buzón** (consulte [Funciones de IA por buzón](#funciones-de-ia-por-buzón) arriba), marque la casilla bajo **Resumen IA del hilo** para el buzón que desee -- o marque la casilla del encabezado de columna para activarlo en todos los buzones.
 
 La opcion esta **deshabilitada de forma predeterminada** y se aplica **por cuenta** -- habilitela por separado para cada cuenta en la que la quiera usar.
 
@@ -129,27 +139,27 @@ La opcion esta **deshabilitada de forma predeterminada** y se aplica **por cuent
 
 ### Acciones rapidas al redactar
 
-La ventana de redacción muestra una pequeña barra de herramientas sobre el cuerpo del mensaje con cuatro botones de reescritura IA: **Mejorar**, **Acortar**, **Formal** y **Corregir gramática**. Haga clic en uno para que la IA reescriba, con ese objetivo, el texto que usted mismo ha escrito.
+La ventana de redacción muestra una pequeña barra de herramientas sobre el cuerpo del mensaje con tres botones de reescritura IA: **Mejorar**, **Acortar** y **Formal**. Haga clic en uno para que la IA reescriba, con ese objetivo, el texto que usted mismo ha escrito -- cada botón reescribe su texto como un todo, y usted acepta o descarta el resultado en bloque. **Corregir errores tiene su propia herramienta, más específica: [AI Proofread](#ai-proofread) más abajo enumera correcciones individuales que usted acepta una a una, en lugar de reescribir todo el texto.**
 
 **Solo se reescribe su propio texto.** Un borrador rara vez es solo sus propias palabras -- al responder se añade debajo el mensaje original citado, al reenviar se añade un encabezado de reenvío, y tras cualquiera de los dos puede haber una firma. MailCopilot separa su propio texto de ese contenido circundante -- cualquier línea que empiece con `>` (el mensaje citado, incluida una cita anidada `>>` o una con sangría de espacios antes del `>`), la línea de atribución justo encima (por ejemplo, "El lunes, Alicia escribió:"), un encabezado de reenvío y una firma tras un separador `--` o `-- ` -- y solo envía su propio texto a la IA. Esta separación es fiable para respuestas, reenvíos y firmas que ha producido el propio MailCopilot, así como para las convenciones extendidas de otros clientes. **Un borrador redactado en otro programa de correo puede citar con un estilo que MailCopilot no reconoce**: un prefijo `|`, solo sangría sin `>`, un bloque de encabezados `From:` / `Sent:` / `To:` / `Subject:` sin marco, texto plano convertido desde una cita HTML, un separador de guiones bajos al estilo Outlook, o "Begin forwarded message:" sin banner de guiones. En un borrador así no se encuentra ninguna frontera, todo el cuerpo cuenta como su propio texto y la cita se envía junto con él. **Reemplazar** vuelve a insertar la reescritura en su lugar; el mensaje citado, el encabezado de reenvío y la firma se conservan exactamente igual.
 
 **Cómo usarlo:**
 
 1. Escriba algo de texto en el cuerpo del mensaje, encima de cualquier cita.
-2. Haga clic en **Mejorar**, **Acortar**, **Formal** o **Corregir gramática** en la barra de herramientas sobre el cuerpo del mensaje.
+2. Haga clic en **Mejorar**, **Acortar** o **Formal** en la barra de herramientas sobre el cuerpo del mensaje.
 3. MailCopilot muestra un panel "Revisar la reescritura de IA": su propio texto y la reescritura aparecen juntos como un único pasaje desplazable, con los cambios marcados directamente en el texto -- las palabras eliminadas tachadas, las añadidas resaltadas, cada una también marcada con un signo **−** o **+** al inicio, de modo que el cambio nunca dependa solo del color. Los tramos largos sin cambios se pliegan tras un interruptor **N líneas sin cambios**, y debajo del pasaje aparece una lista numerada de los cambios individuales; el mensaje citado, el encabezado de reenvío y la firma no forman parte de esta comparación, ya que no forman parte de la reescritura. Las copias en texto plano **Antes** / **Después** siguen disponibles al expandir **Texto plano**. Pulsar **Esc** o hacer clic fuera del panel lo cierra, igual que **Cancelar**.
 4. Elija una de tres acciones:
    - **Reemplazar** -- sustituye su propio texto por el texto reescrito; el resto del borrador no cambia.
-   - **Insertar en el cursor** -- inserta el texto reescrito en la posición actual del cursor en lugar de reemplazar su texto.
+   - **Añadir debajo de mi texto** -- inserta el texto reescrito al final de su propio texto, encima de cualquier mensaje citado, encabezado de reenvío o firma, en lugar de reemplazar su texto.
    - **Cancelar** -- descarta la reescritura y deja su borrador exactamente como estaba.
 
-Su borrador **nunca se modifica automáticamente** -- la reescritura solo aparece como una comparación antes/después, y el cuerpo solo se modifica después de que haga clic explícitamente en **Reemplazar** o **Insertar en el cursor**.
+Su borrador **nunca se modifica automáticamente** -- la reescritura solo aparece como una comparación antes/después, y el cuerpo solo se modifica después de que haga clic explícitamente en **Reemplazar** o **Añadir debajo de mi texto**.
 
 **Si no hay nada suyo que reescribir** -- por ejemplo, una respuesta aún vacía que solo contiene el mensaje original citado, o un borrador que consiste únicamente en su firma -- MailCopilot rechaza la acción con **"Las acciones rápidas solo reescriben su propio texto: el mensaje citado y su firma quedan intactos. Escriba algo encima de la cita primero."** Una respuesta escrita *debajo* del mensaje citado se trata igual en esta versión: la plantilla de respuesta propia de MailCopilot coloca el cursor encima de la cita, así que esto solo afecta a una respuesta que haya escrito deliberadamente debajo.
 
 **Los borradores demasiado largos se rechazan en lugar de recortarse en silencio.** Si su propio texto supera los 8000 caracteres -- y, cuando no se encuentra el límite de la cita, todo el borrador cuenta como su propio texto --, MailCopilot muestra **"Este borrador es demasiado largo para reescribirlo de una vez y no hay forma de reescribir solo una selección: MailCopilot siempre toma todo su propio texto. Acorte el borrador, o corte una parte, reescriba lo que quede y vuelva a pegar la parte cortada. Si su propio texto parece corto, es posible que MailCopilot no haya detectado dónde empieza un mensaje citado y lo haya contado junto con el suyo."** en lugar de reescribir solo una parte y perder el resto.
 
-**Si sigue escribiendo mientras se genera una reescritura:** si el borrador cambió para cuando llega la reescritura, el botón **Reemplazar** se deshabilita con la advertencia **"Editó el borrador mientras la IA trabajaba, así que reemplazarlo descartaría esos cambios. Inserte en el cursor o vuelva a ejecutar la acción."** **Insertar en el cursor** sigue disponible, ya que esta acción añade la reescritura en la posición actual del cursor sin sobrescribir nada de lo que haya escrito.
+**Si sigue escribiendo mientras se genera una reescritura:** si el borrador cambió para cuando llega la reescritura, el botón **Reemplazar** se deshabilita con la advertencia **"Editó el borrador mientras la IA trabajaba, así que reemplazarlo descartaría esos cambios. Añada el resultado debajo de su texto o vuelva a ejecutar la acción."** **Añadir debajo de mi texto** sigue disponible, ya que esta acción añade la reescritura al final de su propio texto sin sobrescribir nada de lo que haya escrito.
 
 **Disponibilidad:** las Acciones rápidas al redactar no tienen un ajuste de activación/desactivación propio -- están disponibles siempre que haya un proveedor de IA configurado, usando el mismo **proveedor configurado por clave de API** que el Resumen IA del hilo (Anthropic, compatible con OpenAI o Google Gemini). Los botones solo se deshabilitan mientras el cuerpo del mensaje está completamente vacío; en un borrador que no contiene más que una cita o una firma siguen siendo pulsables, y el rechazo descrito arriba aparece después de pulsar, no antes. Si se ha alcanzado el presupuesto diario de IA, la barra de herramientas muestra un mensaje de presupuesto en lugar de reescribir.
 
@@ -162,7 +172,7 @@ La Respuesta instantanea agrega un boton en el mensaje que tiene abierto que red
 **Como habilitarla:**
 
 1. Abra **Configuracion** y vaya a la pestana **IA**.
-2. Busque **Respuesta instantanea** y marque "Sugerir borradores de respuesta con IA".
+2. En la tabla **Funciones de IA por buzón** (consulte [Funciones de IA por buzón](#funciones-de-ia-por-buzón) arriba), marque la casilla bajo **Respuesta instantánea** para el buzón que desee -- o marque la casilla del encabezado de columna para activarlo en todos los buzones.
 
 La opcion esta **deshabilitada de forma predeterminada** y se aplica **por cuenta** -- habilitela por separado para cada cuenta en la que la quiera usar. Cuando esta desactivada, el boton de Respuesta instantanea no aparece y no se envia nada al proveedor de IA.
 
@@ -184,9 +194,11 @@ AI Proofread revisa su borrador en busca de errores y sugiere correcciones de un
 **Como habilitarlo:**
 
 1. Abra **Configuracion** y vaya a la pestana **IA**.
-2. Busque **AI Proofread** y marque "Revisar borradores en busca de errores con IA".
+2. En la tabla **Funciones de IA por buzón** (consulte [Funciones de IA por buzón](#funciones-de-ia-por-buzón) arriba), marque la casilla bajo **AI Proofread** para el buzón que desee -- o marque la casilla del encabezado de columna para activarlo en todos los buzones.
 
 La opcion esta **deshabilitada de forma predeterminada** y se aplica **por cuenta** -- habilitela por separado para cada cuenta en la que la quiera usar.
+
+**El botón siempre está presente, incluso cuando el ajuste está desactivado.** A diferencia de la Respuesta instantánea de arriba, el botón **Check writing** de la barra de herramientas de redacción nunca se oculta: para un buzón donde AI Proofread está desactivado, se muestra en un estado visiblemente bloqueado, y al pasar el cursor por encima o al enfocarlo muestra dónde activarlo: "La revisión de borradores con IA está desactivada para este buzón. Actívela en Ajustes → IA." Hacer clic mientras está bloqueado no hace nada -- no llega ninguna solicitud al proveedor de IA. Esto es deliberado: un botón que desaparece cuando un ajuste está desactivado es indistinguible de una función que no existe en absoluto en esta versión de MailCopilot.
 
 **Como usarlo:**
 
@@ -202,7 +214,7 @@ Su borrador **nunca se modifica automaticamente** -- las correcciones solo se ap
 
 **El envio nunca se bloquea** por esta funcion -- puede enviar su borrador en cualquier momento independientemente de si se ha ejecutado la revision.
 
-**Si la funcion no esta activada** para la cuenta actual, al hacer clic en **Check writing** se muestra el mensaje: "Turn on AI proofreading for this account in Settings to check your writing."
+**Si la funcion no esta activada** para la cuenta actual, **Check writing** permanece bloqueado y hacer clic no hace nada -- consulte "El botón siempre está presente, incluso cuando el ajuste está desactivado" arriba. La propia comprobación de MailCopilot también se aplica de forma independiente en la conexión con el proveedor de IA, así que incluso una solicitud que de algún modo llegara hasta ahí sería rechazada igualmente con "Activa la revisión con IA para esta cuenta en Ajustes para revisar tu texto."
 
 **Si sigue escribiendo mientras se ejecuta la revision:** si modifica el borrador antes de que lleguen los resultados, las sugerencias se muestran con una advertencia de que el borrador ha cambiado y las correcciones pueden no coincidir. Ejecute la revision de nuevo para obtener sugerencias actualizadas.
 
@@ -233,7 +245,9 @@ Nada se traduce automáticamente -- solo se llama a un proveedor cuando hace cli
 
 **Caché.** Una traducción se almacena en caché localmente, vinculada al propio contenido del mensaje, al idioma de destino y a la versión del contrato de traducción (proveedor, modelo y forma del prompt) con la que se generó, así que volver a abrir el mensaje y elegir de nuevo el mismo idioma reutiliza el resultado en caché en lugar de llamar de nuevo al proveedor, y un cambio posterior en cómo MailCopilot genera las traducciones queda registrado bajo una clave nueva en lugar de servir el resultado de un contrato antiguo como si fuera el actual. Las traducciones en caché no tienen caducidad independiente, están limitadas a 500 por cuenta (se eliminan primero las más antiguas al alcanzar ese límite) y se eliminan al quitar la cuenta.
 
-**Si se rechaza la traducción,** MailCopilot indica el motivo concreto en lugar de un error genérico: la opción está desactivada para esta cuenta, no hay ningún proveedor de IA configurado, el proveedor no ha devuelto ningún resultado, el texto del mensaje aún no se ha descargado, el mensaje es demasiado largo para traducirlo de una sola vez (no hay forma de traducir solo una parte: para el límite cuenta el mensaje entero, incluida la correspondencia anterior que pueda estar citada dentro), o el presupuesto de IA del periodo actual se ha agotado.
+**Si se rechaza la traducción,** MailCopilot indica el motivo concreto en lugar de un error genérico: la opción está desactivada para esta cuenta, no hay ningún proveedor de IA configurado, el proveedor no ha devuelto ninguna traducción ni ha indicado el motivo, la traducción no cabía en el límite de respuesta del proveedor y ha llegado cortada, el texto del mensaje aún no se ha descargado, el mensaje es demasiado largo para traducirlo de una sola vez (no hay forma de traducir solo una parte: para el límite cuenta el mensaje entero, incluida la correspondencia anterior que pueda estar citada dentro), o el presupuesto de IA del periodo actual se ha agotado.
+
+**Solo aparece el botón Reintentar donde volver a intentarlo puede cambiar el resultado.** Cada clic es una solicitud aparte, facturada por su proveedor de IA, así que MailCopilot no ofrece este botón para un rechazo que se repetiría exactamente igual: la traducción que ha chocado con el límite de respuesta del proveedor, un mensaje demasiado largo para traducir en absoluto, o la traducción desactivada para esta cuenta. Para los demás motivos -- el proveedor ha fallado sin dar explicación, el mensaje todavía se está descargando, no hay proveedor configurado, o el presupuesto está agotado -- se muestra **Reintentar**, ya que corregir la causa, o simplemente esperar, puede hacer que el siguiente intento tenga éxito. A partir del segundo intento, el rechazo lleva la indicación **"Intento 2"** (y así sucesivamente), para que un reintento que no cambia nada en pantalla no se confunda con un clic que no ha funcionado.
 
 **Proveedor y privacidad:** la Traducción del mensaje utiliza su **proveedor configurado por clave de API** (Anthropic, compatible con OpenAI o Google Gemini). El texto del mensaje se lee de la caché local de MailCopilot y se envuelve con marcadores de límite `wrapUntrusted()` antes de llegar al proveedor de IA. Cada llamada al proveedor (pero no los resultados en caché) se registra en el [registro de auditoría de IA](./privacy/ai-data). Consulte [Datos de IA y registro de auditoría](./privacy/ai-data#traducción-del-mensaje) para conocer la postura de privacidad completa.
 
@@ -241,19 +255,25 @@ Nada se traduce automáticamente -- solo se llama a un proveedor cuando hace cli
 
 La traducción del borrador añade una lista **Traducir el borrador al** y un botón **Traducir** junto a las [Acciones rápidas al redactar](#acciones-rapidas-al-redactar), para que pueda escribir una respuesta en un idioma distinto del que usó al escribirla.
 
-**Cómo habilitarla.** No hay un ajuste independiente: la traducción del borrador usa el mismo interruptor **Traducción con IA** que la [Traducción del mensaje](#traducción-del-mensaje) anterior -- **Configuración > IA > Traducción con IA > Permitir traducir los mensajes recibidos y tus propios borradores con IA**, deshabilitado de forma predeterminada y activado por cuenta.
+**Cómo habilitarla.** No hay un ajuste independiente: la traducción del borrador usa la misma autorización **AI Translate** que la [Traducción del mensaje](#traducción-del-mensaje) anterior -- actívela por buzón en la tabla **Funciones de IA por buzón** (consulte [Funciones de IA por buzón](#funciones-de-ia-por-buzón) arriba), deshabilitado de forma predeterminada.
+
+**La lista y el botón siempre están presentes, incluso cuando el ajuste está desactivado.** Para un buzón donde AI Translate está desactivado, el selector de idioma está inactivo y el botón **Traducir** se muestra en un estado visiblemente bloqueado, con una pista al pasar el cursor por encima o al enfocarlo que indica dónde activarlo -- el mismo tratamiento "siempre visible, bloqueado en lugar de oculto" que usa [AI Proofread](#ai-proofread), y por la misma razón: un control que desaparece cuando un ajuste está desactivado parece una función que no existe.
 
 **Cómo usarla:**
 
 1. Elija un idioma de destino en la lista **Traducir el borrador al**, o acepte la sugerencia descrita más abajo.
 2. Haga clic en **Traducir**.
-3. MailCopilot muestra la traducción en el mismo panel "Revisar la reescritura de IA" que usan las cuatro reescrituras predefinidas, con los botones **Reemplazar**, **Insertar en el cursor** y **Cancelar** -- consulte [Acciones rápidas al redactar](#acciones-rapidas-al-redactar) para saber cómo funciona ese panel. Nada se sustituye en su borrador por sí solo; el cuerpo solo cambia después de que haga clic explícitamente en **Reemplazar** o **Insertar en el cursor**.
+3. MailCopilot muestra la traducción en el mismo panel "Revisar la reescritura de IA" que usan las tres reescrituras predefinidas, con los botones **Reemplazar**, **Añadir debajo de mi texto** y **Cancelar** -- consulte [Acciones rápidas al redactar](#acciones-rapidas-al-redactar) para saber cómo funciona ese panel. Nada se sustituye en su borrador por sí solo; el cuerpo solo cambia después de que haga clic explícitamente en **Reemplazar** o **Añadir debajo de mi texto**.
 
 **Solo se traduce su propio texto -- cuando se encuentra una frontera.** Aquí se aplica la misma frontera que en las acciones rápidas al redactar: el mensaje citado, el encabezado de reenvío y la firma permanecen intactos, byte a byte, y solo su propio texto se envía al proveedor de IA y se reemplaza, para respuestas, reenvíos y firmas que ha producido el propio MailCopilot, así como para las convenciones extendidas de otros clientes. **Un borrador redactado en otro programa de correo puede citar con un estilo que MailCopilot no reconoce** -- consulte la lista exacta en [Acciones rápidas al redactar](#acciones-rapidas-al-redactar). En un borrador así no se encuentra ninguna frontera, todo el cuerpo cuenta como su propio texto, y la cita se envía al proveedor de IA y se traduce junto con él.
 
 **Usted elige el idioma.** Cuando responde a un mensaje, MailCopilot puede rellenar de antemano la lista con una sugerencia: el idioma del mensaje al que está respondiendo, detectado en su dispositivo. Es solo una sugerencia -- se muestra en la lista, puede cambiarla, y no se traduce nada hasta que pulse **Traducir**. Reenviar un mensaje o empezar uno nuevo no ofrece ninguna sugerencia, ya que no hay ningún mensaje del que deducir un idioma. Si el idioma no se puede identificar con suficiente confianza, la lista queda vacía en lugar de adivinar.
 
 Nada aquí es automático: no existe traducción automática en ningún camino, ni antes ni después de hacer clic.
+
+**Si se rechaza la traducción,** MailCopilot indica el motivo concreto en lugar de un error genérico: la traducción está desactivada para esta cuenta, no hay ningún proveedor de IA configurado, el proveedor no ha devuelto ninguna traducción ni ha indicado el motivo, la traducción no cabía en el límite de respuesta del proveedor y ha llegado cortada, todavía no hay nada que traducir, el borrador es demasiado largo para traducirlo de una sola vez (consulte el límite de longitud de las [Acciones rápidas al redactar](#acciones-rapidas-al-redactar) más arriba), su borrador solo contiene una cita y una firma, o el presupuesto de IA del periodo actual se ha agotado.
+
+**Cuando reintentar no cambiaría nada, el botón Traducir simplemente permanece deshabilitado, en lugar de ofrecer un botón de reintento aparte.** Cada clic es una solicitud aparte, facturada por su proveedor de IA, así que el botón permanece deshabilitado ante un rechazo que se repetiría exactamente igual mientras usted no modifique el borrador: la traducción que ha chocado con el límite de respuesta del proveedor, un borrador demasiado largo, todavía sin texto propio escrito, o solo una cita y una firma presentes. Para los demás motivos -- el proveedor ha fallado sin dar explicación, no hay proveedor configurado, o el presupuesto está agotado -- el botón vuelve a ser clicable, ya que corregir la causa, o simplemente esperar, puede hacer que el siguiente intento tenga éxito.
 
 **Proveedor y privacidad:** la traducción del borrador utiliza su **proveedor configurado por clave de API** (Anthropic, compatible con OpenAI o Google Gemini). Su propio texto se envuelve con marcadores de límite `wrapUntrusted()` antes de enviarse al proveedor de IA. Cada llamada al proveedor se registra en el [registro de auditoría de IA](./privacy/ai-data). Consulte [Datos de IA y registro de auditoría](./privacy/ai-data#traducción-del-borrador) para conocer la postura de privacidad completa.
 

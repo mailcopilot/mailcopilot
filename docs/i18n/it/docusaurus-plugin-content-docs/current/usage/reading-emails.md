@@ -131,10 +131,13 @@ MailCopilot indica il motivo specifico per cui la traduzione non è riuscita, in
 
 - La traduzione è disattivata per questo account.
 - Non è ancora configurato alcun provider IA.
-- Il provider IA non ha restituito una traduzione.
+- Il provider IA non ha restituito una traduzione e non ne ha indicato il motivo.
+- La traduzione non rientra nel limite di risposta del provider IA, quindi è arrivata troncata e non viene mostrata.
 - Il testo del messaggio non è ancora stato scaricato.
 - Il messaggio è troppo lungo per essere tradotto in una sola volta, e non è possibile tradurne solo una parte: per il limite conta l'intero messaggio, compresa la corrispondenza precedente che potrebbe esservi citata.
 - Il budget IA di questo periodo è esaurito.
+
+**Il pulsante Riprova compare solo dove riprovare può davvero cambiare il risultato.** Ogni clic è una richiesta a sé, fatturata dal tuo provider IA, quindi MailCopilot non mostra questo pulsante per un rifiuto che si ripeterebbe identico: la traduzione che urta contro il limite di risposta del provider, un messaggio troppo lungo per essere tradotto del tutto, o la traduzione disattivata per questo account. Per gli altri motivi -- il provider ha fallito senza spiegazioni, il messaggio è ancora in fase di download, non è configurato alcun provider, oppure il budget è esaurito -- **Riprova** viene mostrato, perché correggere la causa, o semplicemente aspettare, può far riuscire il tentativo successivo. Dal secondo tentativo in poi, il rifiuto porta l'indicazione **"Tentativo 2"** (e così via), così un nuovo tentativo che non cambia nulla sullo schermo non viene scambiato per un clic che non ha funzionato.
 
 ## Allegati
 

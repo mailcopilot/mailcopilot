@@ -131,10 +131,13 @@ MailCopilot indica el motivo concreto por el que no se pudo producir la traducci
 
 - La traducción está desactivada para esta cuenta.
 - Todavía no hay ningún proveedor de IA configurado.
-- El proveedor de IA no ha devuelto ninguna traducción.
+- El proveedor de IA no ha devuelto ninguna traducción ni ha indicado el motivo.
+- La traducción no cabe en el límite de respuesta del proveedor de IA, así que ha llegado cortada y por eso no se muestra.
 - El texto del mensaje aún no se ha descargado.
 - El mensaje es demasiado largo para traducirlo de una sola vez, y no hay forma de traducir solo una parte: para el límite cuenta el mensaje entero, incluida la correspondencia anterior que pueda estar citada dentro.
 - El presupuesto de IA de este periodo se ha agotado.
+
+**Solo aparece el botón Reintentar donde volver a intentarlo puede cambiar el resultado.** Cada clic es una solicitud aparte, facturada por su proveedor de IA, así que MailCopilot no ofrece este botón para un rechazo que se repetiría exactamente igual: la traducción que ha chocado con el límite de respuesta del proveedor, un mensaje demasiado largo para traducir en absoluto, o la traducción desactivada para esta cuenta. Para los demás motivos -- el proveedor ha fallado sin dar explicación, el mensaje todavía se está descargando, no hay proveedor configurado, o el presupuesto está agotado -- se muestra **Reintentar**, ya que corregir la causa, o simplemente esperar, puede hacer que el siguiente intento tenga éxito. A partir del segundo intento, el rechazo lleva la indicación **«Intento 2»** (y así sucesivamente), para que un reintento que no cambia nada en pantalla no se confunda con un clic que no ha funcionado.
 
 ## Adjuntos
 

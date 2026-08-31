@@ -376,6 +376,7 @@
     "translate": {
       "action": "Traducir",
       "retry": "Reintentar",
+      "attempt": "Intento {{n}}.",
       "loading": "Traduciendo…",
       "showOriginal": "Ver el original",
       "showTranslation": "Ver la traducción",
@@ -392,7 +393,8 @@
       "refusal": {
         "budget": "El presupuesto de IA de este periodo se ha agotado. Auméntalo en Ajustes → IA o espera al siguiente periodo.",
         "no_provider": "Todavía no hay ningún proveedor de IA configurado. Añade uno en Ajustes → IA.",
-        "provider_error": "El proveedor de IA no ha devuelto ninguna traducción. Inténtalo de nuevo.",
+        "provider_error": "El proveedor de IA no ha devuelto ninguna traducción ni ha indicado el motivo. Otro intento volverá a enviar el mensaje al proveedor.",
+      "answer_too_long": "La traducción no cabe en el límite de respuesta del proveedor de IA: ha llegado cortada y por eso no se muestra. Otro intento terminaría igual: ni este mensaje ni el límite han cambiado.",
         "empty_input": "El texto de este mensaje aún no se ha descargado. Vuelve a intentarlo cuando el mensaje se haya cargado.",
         "too_long": "Este mensaje es demasiado largo para traducirlo de una sola vez y no hay forma de traducir solo una parte: para el límite cuenta el mensaje entero, incluida la correspondencia anterior que pueda estar citada dentro.",
         "opt_out": "La traducción está desactivada para esta cuenta. Actívala en Ajustes → IA → Traducir mensajes."
@@ -1441,6 +1443,17 @@
         "placeholder": "Ejemplo:\n- Trabajo en Acme Corp como gerente de proyecto\n- Mi zona horaria es UTC+3\n- Prefiero correos concisos",
         "clear": "Limpiar"
       },
+      "consentMatrix": {
+        "title": "Funciones de IA por buzón",
+        "help": "Cada función de IA se pide por separado y está desactivada hasta que usted la active. Una casilla marcada solo permite ofrecer la función en ese buzón: nada se resume, redacta, revisa ni traduce hasta que lo pida.",
+        "accountColumn": "Buzón",
+        "noAccounts": "Añada un buzón para elegir qué funciones de IA puede usar.",
+        "cellLabel": "«{{feature}}» en {{account}}",
+        "allowAll_one": "Permitir «{{feature}}» en su único buzón",
+        "allowAll_other": "Permitir «{{feature}}» en los {{count}} buzones",
+        "clearAll_one": "Desactivar «{{feature}}» en su único buzón",
+        "clearAll_other": "Desactivar «{{feature}}» en los {{count}} buzones"
+      },
       "threadSummary": {
         "title": "Resumen de conversación con IA",
         "label": "Resumir conversaciones largas con IA",
@@ -1481,6 +1494,7 @@
         "formal": "Formal",
         "grammar": "Corregir gramática"
       },
+      "presetTitle": "{{label}} — reescribe su texto entero; el resultado se acepta o se descarta de una vez.",
       "diff": {
         "title": "Revisar la reescritura de IA",
         "before": "Antes",
@@ -1493,9 +1507,9 @@
         "unchangedLines_other": "{{count}} líneas sin cambios",
         "plainText": "Texto sin formato",
         "replace": "Reemplazar",
-        "insert": "Insertar en el cursor",
+        "insert": "Añadir debajo de mi texto",
         "cancel": "Cancelar",
-        "staleWarning": "Editó el borrador mientras la IA trabajaba, así que reemplazarlo descartaría esos cambios. Inserte en el cursor o vuelva a ejecutar la acción.",
+        "staleWarning": "Editó el borrador mientras la IA trabajaba, así que reemplazarlo descartaría esos cambios. Añada el resultado debajo de su texto o vuelva a ejecutar la acción.",
         "staleReplaceHint": "Reemplazar no está disponible porque el borrador cambió después de solicitar esta reescritura."
       },
       "refusal": {
@@ -1508,6 +1522,8 @@
       },
       "proofread": {
         "button": "Revisar el texto",
+        "buttonTitle": "Revisar el texto — las correcciones se enumeran una a una y usted acepta cada una por separado.",
+        "disabledHint": "La revisión de borradores con IA está desactivada para este buzón. Actívela en Ajustes → IA.",
         "checking": "Revisando…",
         "title": "Correcciones sugeridas",
         "editCount_one": "{{count}} sugerencia",
@@ -1541,6 +1557,7 @@
       },
       "translate": {
         "button": "Traducir",
+        "disabledHint": "La traducción de borradores con IA está desactivada para este buzón. Actívela en Ajustes → IA.",
         "loading": "Traduciendo…",
         "targetLabel": "Traducir el borrador a",
         "targetPlaceholder": "Elija un idioma",
@@ -1549,6 +1566,7 @@
           "budget": "El presupuesto de IA de este periodo se ha agotado. Auméntelo en Ajustes → IA o espere al siguiente periodo.",
           "noProvider": "Todavía no hay ningún proveedor de IA configurado. Añada uno en Ajustes → IA.",
           "providerError": "El proveedor de IA no devolvió ninguna traducción. Inténtelo de nuevo.",
+          "answerTooLong": "La traducción no cabe en el límite de respuesta del proveedor de IA: ha llegado cortada y por eso no se muestra. Otro intento terminaría igual: ni este borrador ni el límite han cambiado. Acorte su propio texto, o corte una parte, traduzca lo que quede y vuelva a pegar la parte cortada.",
           "emptyInput": "Todavía no hay nada que traducir: escriba algo primero.",
           "tooLong": "Este borrador es demasiado largo para traducirlo de una vez y no hay forma de traducir solo una selección: MailCopilot siempre toma todo su propio texto. Acorte el borrador, o corte una parte, traduzca lo que quede y vuelva a pegar la parte cortada. Si su propio texto parece corto, es posible que MailCopilot no haya detectado dónde empieza un mensaje citado y lo haya contado junto con el suyo.",
           "optOut": "La traducción está desactivada para esta cuenta. Actívela en Ajustes → IA → Traducir mensajes.",

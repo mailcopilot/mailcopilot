@@ -1243,6 +1243,21 @@
   cursor: default;
 }
 
+/* §1.26.1(2) / invariant B1 — a control switched off by a per-account consent
+   stays on screen, greyed, focusable and explained by its `title`. It reads the
+   same as a transiently disabled button on purpose: the difference the user has
+   to act on is in the tooltip ("turn it on in Settings"), not in a second
+   visual language. `aria-disabled` (not the `disabled` attribute) keeps it in
+   the tab order, so `:hover` still has to be suppressed by hand. */
+.compose-quick-action-btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.compose-quick-action-btn[aria-disabled='true']:hover {
+  background: var(--btn-bg);
+}
+
 .compose-quick-actions-refusal {
   color: var(--muted);
   font-size: 12px;
@@ -2742,6 +2757,72 @@
   margin: 0 0 10px;
   font-size: 14px;
   font-weight: 700;
+}
+
+/* --- §1.26.1(3) per-account AI consent grid ---
+   Row per mailbox, column per feature. Sizes are given in whole pixels, not in
+   `em`, per §2.79: the document's base is 13px and a fraction of it lands on
+   fractional pixels. */
+.ai-consent-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0 12px;
+  font-size: 13px;
+}
+
+.ai-consent-matrix th,
+.ai-consent-matrix td {
+  border-bottom: 1px solid var(--mailcopilot-border);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.ai-consent-matrix tr:last-child th,
+.ai-consent-matrix tr:last-child td {
+  border-bottom: none;
+}
+
+.ai-consent-account-head,
+.ai-consent-feature-head {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ai-consent-feature-head {
+  text-align: center;
+}
+
+.ai-consent-feature-name {
+  font-weight: 600;
+}
+
+/* The account label is the only free-form string in the grid and the only one
+   that can be long; it wraps instead of stretching the feature columns. */
+.ai-consent-account-cell {
+  font-weight: 400;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.ai-consent-cell {
+  text-align: center;
+}
+
+.ai-consent-legend {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-consent-legend-item dt {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.ai-consent-legend-item dd {
+  margin: 2px 0 0;
 }
 
 /* Provider picker (account wizard step 1) */

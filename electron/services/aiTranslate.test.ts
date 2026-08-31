@@ -366,6 +366,147 @@ describe('generateTranslation — the untrusted boundary', () => {
   })
 })
 
+/**
+ * 2026-08-31 incident — the refusal that repeats has to say why it will repeat.
+ *
+ * A reader pressed "translate", waited, was told the provider returned nothing,
+ * and then pressed "try again" seven times in three seconds. Every click really
+ * did reach the provider and really was billed; the answer was identical each
+ * time because the endpoint had run out of output room on that message, which
+ * is a property of the message and the cap and so very likely of the next retry
+ * too — likely, not guaranteed, since nothing promises the provider is
+ * deterministic; what it is guaranteed to be is billed again. The log
+ * said only "provider returned no usable text", so nothing in the product could
+ * distinguish that from a hiccup worth retrying.
+ *
+ * The two facts that settle it are provider-owned and now survive
+ * `aiChatSimpleOutcome` (see its `billedUnusableResult` docblock). They belong
+ * in the line, and nothing else does: the verdict is one of four literals this
+ * repository defines and the count is a number, so the PII rule above is intact.
+ */
+describe('generateTranslation — a textless answer is logged with the provider\'s own verdict', () => {
+  it('names the stop reason and the reported output tokens', async () => {
+    const warn = vi.fn()
+    const { deps } = makeDeps({
+      log: { warn, error: vi.fn() },
+      chat: async () => billed('', 2000, 'length'),
+    })
+
+    // `answer_too_long` since the refusal split: a `length` verdict IS the
+    // explanation, and the log line and the reason now carry the same fact.
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'answer_too_long' })
+
+    const line = warn.mock.calls.map(args => String(args[0])).find(l => l.includes('no usable text'))
+    expect(line).toContain('stop_reason=length')
+    expect(line).toContain('output_tokens=2000')
+  })
+
+  it('says the count was unreported rather than inventing a zero', async () => {
+    // An endpoint that reports no usage reports no evidence. Printing `0` there
+    // would read as "the model generated nothing", which is a different claim
+    // from "we were not told".
+    const warn = vi.fn()
+    const { deps } = makeDeps({
+      log: { warn, error: vi.fn() },
+      chat: async () => billedWithoutUsage('   ', 'stop'),
+    })
+
+    await generateTranslation(deps, REQ)
+
+    const line = warn.mock.calls.map(args => String(args[0])).find(l => l.includes('no usable text'))
+    expect(line).toContain('output_tokens=unreported')
+  })
+
+  it('still keeps the message out of that line', async () => {
+    const warn = vi.fn()
+    const { deps } = makeDeps({
+      log: { warn, error: vi.fn() },
+      chat: async () => billed('', 2000, 'length'),
+    })
+
+    await generateTranslation(deps, REQ)
+
+    const emitted = warn.mock.calls.flat().join(' ')
+    expect(emitted).not.toContain('Rechnung')
+    expect(emitted).not.toContain('INBOX')
+  })
+})
+
+/**
+ * 2026-08-31 incident — the refusal has to answer "will another attempt help?"
+ *
+ * `provider_error` used to cover two failures with opposite answers: a provider
+ * that hiccuped (try again) and a provider that ran out of output room (do not
+ * bother — the message and the ceiling are unchanged, and the attempt is a fresh
+ * billed call). The reader pressed "try again" seven times against the second
+ * one. `answer_too_long` is that split, and its boundary is the whole design:
+ * it is claimed only on DIRECT evidence about the ceiling, never inferred.
+ */
+describe('generateTranslation — running out of output room is said out loud', () => {
+  it('refuses an empty answer as answer_too_long when the provider says `length`', async () => {
+    const { deps } = makeDeps({ chat: async () => billed('', 2000, 'length') })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({
+      ok: false, reason: 'answer_too_long',
+    })
+  })
+
+  it('refuses a TRUNCATED answer as answer_too_long rather than showing half a letter', async () => {
+    const { deps } = makeDeps({ chat: async () => billed('Guten Tag, die Rechn', 2000, 'length') })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({
+      ok: false, reason: 'answer_too_long',
+    })
+  })
+
+  it('reads the token count as evidence when the verdict itself is unreadable', async () => {
+    // An OpenAI-compatible endpoint may spell its finish reason in a word we map
+    // to `unknown` while still reporting the count. The count alone is then the
+    // entire case, and it is a fact rather than a guess.
+    const { deps } = makeDeps({ chat: async () => billed('', 2000, 'unknown') })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({
+      ok: false, reason: 'answer_too_long',
+    })
+  })
+
+  it('does NOT claim "too long" for a stop that says nothing about the ceiling', async () => {
+    // A content filter, a safety stop, a tool call: all are reasons to refuse and
+    // none is evidence about length. Dressing one up as "your message is too
+    // long" is the same defect this split exists to end, one level down.
+    const { deps } = makeDeps({ chat: async () => billed('', 10, 'interrupted') })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({
+      ok: false, reason: 'provider_error',
+    })
+  })
+
+  it('does NOT claim "too long" when there is no verdict and no count', async () => {
+    // The honest answer to "why did this fail" is sometimes "we do not know",
+    // and that is what `provider_error` now means.
+    const { deps } = makeDeps({ chat: async () => billedWithoutUsage('', 'unknown') })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({
+      ok: false, reason: 'provider_error',
+    })
+  })
+
+  it('keeps saying provider_error for failures that never reached a completion', async () => {
+    const { deps } = makeDeps({
+      chat: async () => ({ kind: 'unbilled', reason: 'no_key', dispatched: false }) as TranslateChatOutcome,
+    })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({
+      ok: false, reason: 'provider_error',
+    })
+  })
+
+  it('still settles the paid call it is refusing', async () => {
+    // The split changes what the reader is told, not what was charged: those
+    // tokens were billed either way (§2.51).
+    const { deps, settleBudget, releaseBudget } = makeDeps({
+      chat: async () => billed('', 2000, 'length'),
+    })
+    await generateTranslation(deps, REQ)
+    expect(settleBudget).toHaveBeenCalledTimes(1)
+    expect(releaseBudget).not.toHaveBeenCalled()
+  })
+})
+
 describe('generateTranslation — money (§2.51)', () => {
   it('settles a billed completion exactly once and never releases it', async () => {
     const { deps, settleBudget, releaseBudget } = makeDeps()
@@ -519,7 +660,12 @@ describe('generateTranslation — output handling', () => {
     const { deps, recordSpan } = makeDeps({
       chat: async () => billedWithoutUsage('Good afternoon, the invoice', 'length'),
     })
-    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'provider_error' })
+    // The REASON says which failure it was (2026-08-31): `length` is direct
+    // evidence about the ceiling, so the reader is told that instead of being
+    // invited to retry. The span keeps `parse_error` — telemetry still asks the
+    // coarser question "was the answer unusable", and the metrics schema is not
+    // being widened for a copy fix.
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'answer_too_long' })
     expect(recordSpan.mock.calls[0][0]).toMatchObject({ errorClass: 'parse_error' })
   })
 
@@ -545,7 +691,9 @@ describe('generateTranslation — output handling', () => {
     const { deps, recordSpan } = makeDeps({
       chat: async () => billed('Good afternoon, the invoice', 2000, 'unknown'),
     })
-    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'provider_error' })
+    // No readable verdict, but the count reached the cap — still direct evidence
+    // about the ceiling, so still `answer_too_long`.
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'answer_too_long' })
     expect(recordSpan.mock.calls[0][0]).toMatchObject({ errorClass: 'parse_error' })
   })
 
@@ -553,7 +701,9 @@ describe('generateTranslation — output handling', () => {
     // A self-contradicting provider takes the refusing side: one avoidable
     // refusal is cheaper than a half letter shown as whole.
     const { deps } = makeDeps({ chat: async () => billed('Good afternoon', 2000, 'stop') })
-    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'provider_error' })
+    // And it names the ceiling: the contradiction is between the verdict and the
+    // count, and the count is the half that says something actionable.
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'answer_too_long' })
   })
 
   it('accepts a clean answer that reported no usage at all', async () => {

@@ -6090,14 +6090,17 @@ export type AiReservationAdmission =
  *
  * HOW BIG IS THE OVERSHOOT, CONCRETELY (§2.51 fix-3, MEDIUM — measured, not
  * hand-waved). The floor is `nullUsageReservationUsd(model)` =
- * `max(0.05, 2k-in + 2k-out priced for the model)`, which works out to $0.05 for
- * every model in the current rate table except gpt-4 ($0.08). So with the default
- * $5 daily cap, admission alone permits N ≈ 5 / 0.05 = 100 simultaneously
- * in-flight reservations before the ledger shows the cap as reached.
+ * `max(0.05, AI_RULE_MAX_OUTPUT_TOKENS in + the same out, priced for the model)`,
+ * which works out to $0.05 for every model in the current rate table except
+ * gpt-4 ($0.10 at today's 2500-token yardstick; it read $0.08 while the yardstick
+ * was 2000). So with the default $5 daily cap, admission alone permits N ≈ 5 /
+ * 0.05 = 100 simultaneously in-flight reservations before the ledger shows the
+ * cap as reached.
  *
  * The floor is NOT an upper bound on the settled actual, in two distinct ways:
  *   - ONE-SHOT surfaces (quick action, instant reply, thread summary) cap output
- *     at `max_tokens = 2000`, but the INPUT is unbounded — a long thread is easily
+ *     at `AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS` (2500 today), but the INPUT is
+ *     unbounded — a long thread is easily
  *     20k+ prompt tokens. On gpt-4o that is ~$0.13 actual against a $0.05 floor
  *     (~2.6x).
  *   - The AGENTIC chat path runs up to `aiMaxTurns` (default 30) tool cycles with

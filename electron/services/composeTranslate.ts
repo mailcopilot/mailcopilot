@@ -105,6 +105,7 @@ import {
   buildTranslateSystemPrompt,
   isIncompleteCompletion,
   normalizeTranslationOutput,
+  ranOutOfOutputRoom,
   resolveTrigramScorer,
   type TranslateAdmission,
   type TranslateChatOutcome,
@@ -537,7 +538,11 @@ export function prepareDraftTranslate(
  *      self-hosted.
  *   5. Trim the answer, refuse an empty one or one the provider says it cut off
  *      (`isIncompleteCompletion`, part 1's rule, imported not copied), then
- *      rebuild the payload's layout around it with `joinComposeBody`.
+ *      rebuild the payload's layout around it with `joinComposeBody`. That
+ *      refusal names the CEILING (`answer_too_long`) when — and only when — the
+ *      provider handed us direct evidence of one (`ranOutOfOutputRoom`, also
+ *      imported); otherwise it stays `provider_error`, which since 2026-08-31
+ *      means exactly "we do not know why".
  *
  * NOTHING here is automatic. There is no path into this function that does not
  * begin with the user pressing the translate button: the suggestion above does
@@ -639,10 +644,18 @@ async function runDraftTranslate(
   // admission and the provider call cannot leave a hold lingering (§2.51).
   let reservationToRelease: TranslateReservation | null = null
 
+  // The refusal REASON and the telemetry ERROR CLASS are separate arguments on
+  // purpose (2026-08-31). They answer different questions and are allowed to
+  // disagree: the class is the coarse "was the answer unusable" this span has
+  // always carried, while the reason is what the user is told — and only the
+  // reason distinguishes "the answer did not fit" from "we do not know why".
+  // Defaulted to `provider_error` so a path that has no evidence about the
+  // ceiling cannot acquire one by omission.
   const fail = (
     errorClass: 'provider_error' | 'parse_error' | 'internal_error',
     result: TranslateChatResult | null,
     sent: boolean,
+    reason: TranslateDraftRefusalReason = 'provider_error',
   ): TranslateDraftResult => {
     recordDraftFailure(deps, {
       provider: spanProvider,
@@ -653,7 +666,7 @@ async function runDraftTranslate(
       targetLang: req.targetLang,
       leftTheMachine: sent,
     })
-    return { ok: false, reason: 'provider_error' }
+    return { ok: false, reason }
   }
 
   try {
@@ -727,10 +740,36 @@ async function runDraftTranslate(
     settleDraftReservation(deps, reservationToRelease, result, allowFabrication)
     reservationToRelease = null
 
+    // WHY the draft side asks this question too (2026-08-31). Both failures
+    // below produce no translation, and both used to say `provider_error` — a
+    // reason whose copy invites another attempt. When the cause is the output
+    // ceiling, that attempt is a fresh BILLED call which cannot end
+    // differently: the draft and the ceiling are the same two things they were
+    // a second ago. The reading path was corrected first; leaving this one
+    // behind would have meant the product telling the truth about the same
+    // defect in one window and not in the other.
+    //
+    // `ranOutOfOutputRoom` is IMPORTED from part 1, not restated here, for the
+    // reason `isIncompleteCompletion` is imported one line below it: the two
+    // paths enforce one rule over one provider vocabulary, and a second copy
+    // would be free to drift on the next edit — and drift here means claiming a
+    // cause we do not have. It is deliberately NARROWER than the completeness
+    // check: a content filter, a safety stop and a tool call are all reasons to
+    // refuse and none of them is evidence about length.
+    const outOfRoom = ranOutOfOutputRoom(result, deps.outputTokenCap)
+    const noAnswerReason: TranslateDraftRefusalReason = outOfRoom ? 'answer_too_long' : 'provider_error'
+
     const translated = normalizeTranslationOutput(result.text)
     if (translated.length === 0) {
-      deps.log.warn('compose translate: provider returned no usable text')
-      return fail('parse_error', result, true)
+      // The two provider-owned numbers make a REPEAT of this refusal
+      // diagnosable at all, and neither is PII: the verdict is one of four
+      // literals THIS repository defines, and the count is a number. Same line
+      // the reading path logs, for the same reason.
+      deps.log.warn(
+        'compose translate: provider returned no usable text '
+        + `(stop_reason=${result.stopReason}, output_tokens=${result.usage?.outputTokens ?? 'unreported'})`,
+      )
+      return fail('parse_error', result, true, noAnswerReason)
     }
     if (isIncompleteCompletion(result, deps.outputTokenCap)) {
       // The answer never reached its end, so the tail of the draft is missing
@@ -741,7 +780,7 @@ async function runDraftTranslate(
         `compose translate: incomplete completion (stop_reason=${result.stopReason}) — `
         + 'refusing a partial translation',
       )
-      return fail('parse_error', result, true)
+      return fail('parse_error', result, true, noAnswerReason)
     }
 
     appendDraftAudit(deps, { provider, result, untrustedWrapped: 1, outcome: 'ok' })

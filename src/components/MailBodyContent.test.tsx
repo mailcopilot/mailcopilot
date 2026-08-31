@@ -834,6 +834,8 @@ describe('MailBodyContent — §3.3 B6 translation swap', () => {
         sourceIsTextProjection: true,
       },
       refusal: null,
+      attempts: 0,
+      canRetry: false,
       targetLang: 'en',
       sourceLang: null,
       needsLanguageChoice: false,

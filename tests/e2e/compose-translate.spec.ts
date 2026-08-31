@@ -140,17 +140,27 @@ async function openBlankCompose(ctx: AppContext, body: string): Promise<Page> {
   return compose
 }
 
-test('compose translate: the picker and button are absent when the per-account opt-in is off', async () => {
+test('compose translate: the picker and button are locked, not absent, when the per-account opt-in is off', async () => {
   const ctx: Partial<AppContext> = {}
   try {
     Object.assign(ctx, await launchApp('mailcopilot-e2e-composetr-off-'))
     const compose = await openBlankCompose(ctx as AppContext, 'Hello there.')
-    // Sibling controls (Improve/Shorter/Formal/Grammar) DO render — only the
-    // opt-in-gated translate control must be missing. Confirms the toolbar
-    // itself mounted, so an empty result below is the gate, not a dead window.
+    // Sibling controls (Improve/Shorter/Formal) render as always; §1.26.1 AC-2
+    // says the opt-in-gated translate control renders too, LOCKED. Its absence
+    // is what convinced the author of the feature that it had not shipped.
     await expect(compose.getByTestId('compose-quick-action-improve')).toBeVisible({ timeout: EXPECT_TIMEOUT })
-    await expect(compose.getByTestId('compose-translate-target')).toHaveCount(0)
-    await expect(compose.getByTestId('compose-translate-run')).toHaveCount(0)
+    await expect(compose.getByTestId('compose-translate-target')).toBeDisabled()
+    const runBtn = compose.getByTestId('compose-translate-run')
+    await expect(runBtn).toBeVisible()
+    await expect(runBtn).toHaveAttribute('aria-disabled', 'true')
+    // Focusable on purpose (W3C ARIA APG) — the hint has to be reachable.
+    // Checked by `disabled` attribute presence, not Playwright's
+    // `toBeEnabled()`: that assertion folds `aria-disabled="true"` into its
+    // own "disabled" verdict (it walks the ARIA chain, same as real assistive
+    // tech), so it fails here on code doing exactly what §1.26.1(2) asks for.
+    // The HTML `disabled` attribute — not ARIA — is what removes an element
+    // from the tab order, which is the guarantee this test exists to pin.
+    await expect(runBtn).not.toHaveAttribute('disabled')
   } finally {
     await cleanupApp(ctx)
   }

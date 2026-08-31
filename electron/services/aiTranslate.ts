@@ -754,11 +754,33 @@ async function runTranslate(
     settleTranslateReservation(deps, reservationToRelease, result, allowFabrication)
     reservationToRelease = null
 
+    // WHY this refusal is answered, not just reported (2026-08-31 incident).
+    // Both failures below produce no translation, and both used to say
+    // `provider_error` — a reason whose copy invites another attempt. When the
+    // cause is the output ceiling, that attempt is a fresh billed call which
+    // cannot end differently: the message and the ceiling are the same two
+    // things they were a second ago. So the reason carries the distinction the
+    // provider itself just handed us, and the interface stops offering a retry
+    // it knows will fail. `ranOutOfOutputRoom` is deliberately narrower than the
+    // completeness check — see its docblock for why a content filter must NOT
+    // be reported as "too long".
+    const outOfRoom = ranOutOfOutputRoom(result, deps.outputTokenCap)
+    const noAnswerReason: TranslateRefusalReason = outOfRoom ? 'answer_too_long' : 'provider_error'
+
     const translatedText = normalizeTranslationOutput(result.text)
     if (translatedText.length === 0) {
-      deps.log.warn('translate: provider returned no usable text')
+      // The two numbers beside the message are what makes a REPEAT of this
+      // refusal diagnosable at all: a `length` verdict, or a reported output
+      // count sitting on the cap, says the answer ran out of room. Both are
+      // provider-owned facts that `aiChatSimpleOutcome` used to delete on
+      // exactly this path. Neither is PII: the verdict is one of four literals
+      // THIS repository defines, and the count is a number.
+      deps.log.warn(
+        'translate: provider returned no usable text '
+        + `(stop_reason=${result.stopReason}, output_tokens=${result.usage?.outputTokens ?? 'unreported'})`,
+      )
       recordTranslateFailure(deps, provider, wasLocal, started, 'parse_error', result, sourceLabeled, req.targetLang, true)
-      return { ok: false, reason: 'provider_error' }
+      return { ok: false, reason: noAnswerReason }
     }
     if (isIncompleteCompletion(result, deps.outputTokenCap)) {
       // The answer never reached its end, so the tail of the message is missing
@@ -770,7 +792,7 @@ async function runTranslate(
         `translate: incomplete completion (stop_reason=${result.stopReason}) — refusing a partial translation`,
       )
       recordTranslateFailure(deps, provider, wasLocal, started, 'parse_error', result, sourceLabeled, req.targetLang, true)
-      return { ok: false, reason: 'provider_error' }
+      return { ok: false, reason: noAnswerReason }
     }
 
     // Cache write is best-effort: a translation the user can read now must not
@@ -929,6 +951,7 @@ export function normalizeTranslationOutput(text: string): string {
 export function isIncompleteCompletion(result: TranslateChatResult, cap: number): boolean {
   switch (result.stopReason) {
     case 'length':
+      return true
     case 'interrupted':
       return true
     case 'stop':
@@ -946,6 +969,35 @@ export function isIncompleteCompletion(result: TranslateChatResult, cap: number)
       return true
     }
   }
+}
+
+/**
+ * Whether the answer ran out of OUTPUT ROOM specifically — the narrower question
+ * behind the `answer_too_long` refusal (2026-08-31).
+ *
+ * {@link isIncompleteCompletion} answers "is this a whole answer", and it is
+ * deliberately wider: it also refuses a content filter, a safety stop, a tool
+ * call and a `never`-guard fallthrough. Every one of those is a reason to refuse
+ * and NONE of them is evidence about the ceiling. Telling a reader "this message
+ * is too long for the answer limit" because the provider tripped a content
+ * filter would be inventing certainty — the exact failure mode this whole
+ * refusal split exists to end, reintroduced one level down.
+ *
+ * So this asks only for DIRECT evidence of the ceiling, and there are exactly
+ * two admissible kinds:
+ *
+ *   - the provider said `length` — it names the cap outright;
+ *   - the provider's own output count reached the cap the call ran under.
+ *
+ * The second is not redundant: an OpenAI-compatible endpoint may report the
+ * count while spelling its verdict in a word we map to `unknown`, and the count
+ * alone is then the whole case. Absent both, the caller must keep saying
+ * `provider_error`: "we do not know why" is a worse answer than a wrong reason
+ * only if you believe a confident wrong reason is free, and this batch is here
+ * because it is not.
+ */
+export function ranOutOfOutputRoom(result: TranslateChatResult, cap: number): boolean {
+  return result.stopReason === 'length' || exceedsOutputCap(result.usage, cap)
 }
 
 /** Whether the reported output length reached the cap this call ran under. A

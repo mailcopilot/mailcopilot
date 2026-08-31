@@ -376,6 +376,7 @@
     "translate": {
       "action": "Übersetzen",
       "retry": "Erneut versuchen",
+      "attempt": "Versuch {{n}}.",
       "loading": "Wird übersetzt…",
       "showOriginal": "Original anzeigen",
       "showTranslation": "Übersetzung anzeigen",
@@ -392,7 +393,8 @@
       "refusal": {
         "budget": "Das KI-Budget dieses Zeitraums ist aufgebraucht. Erhöhen Sie es unter Einstellungen → KI oder warten Sie auf den nächsten Zeitraum.",
         "no_provider": "Es ist noch kein KI-Anbieter eingerichtet. Fügen Sie einen unter Einstellungen → KI hinzu.",
-        "provider_error": "Der KI-Anbieter hat keine Übersetzung geliefert. Bitte versuchen Sie es erneut.",
+        "provider_error": "Der KI-Anbieter hat keine Übersetzung geliefert und keinen Grund genannt. Ein weiterer Versuch sendet die Nachricht erneut an den Anbieter.",
+      "answer_too_long": "Die Übersetzung passt nicht in das Antwortlimit des KI-Anbieters: Sie kam abgeschnitten zurück und wird deshalb nicht angezeigt. Ein weiterer Versuch würde genauso enden — weder an dieser Nachricht noch am Limit hat sich etwas geändert.",
         "empty_input": "Der Text dieser Nachricht ist noch nicht geladen. Versuchen Sie es erneut, sobald die Nachricht geladen ist.",
         "too_long": "Diese Nachricht ist zu lang, um sie in einem Durchgang zu übersetzen, und es gibt keine Möglichkeit, nur einen Teil davon zu übersetzen: Für die Grenze zählt die gesamte Nachricht, einschließlich früherer Korrespondenz, die darin zitiert sein könnte.",
         "opt_out": "Für dieses Konto ist die Übersetzung ausgeschaltet. Schalten Sie sie unter Einstellungen → KI → Nachrichten übersetzen ein."
@@ -1441,6 +1443,17 @@
         "placeholder": "Beispiel:\n- Ich arbeite bei Acme Corp als Projektmanager\n- Meine Zeitzone ist UTC+3\n- Ich bevorzuge kurze E-Mails",
         "clear": "Löschen"
       },
+      "consentMatrix": {
+        "title": "KI-Funktionen je Postfach",
+        "help": "Jede KI-Funktion wird einzeln erfragt und bleibt aus, bis Sie sie einschalten. Ein Häkchen erlaubt die Funktion nur in diesem Postfach — nichts wird zusammengefasst, entworfen, geprüft oder übersetzt, bevor Sie darum bitten.",
+        "accountColumn": "Postfach",
+        "noAccounts": "Fügen Sie ein Postfach hinzu, um zu wählen, welche KI-Funktionen es nutzen darf.",
+        "cellLabel": "„{{feature}}“ in {{account}}",
+        "allowAll_one": "„{{feature}}“ in Ihrem einzigen Postfach erlauben",
+        "allowAll_other": "„{{feature}}“ in allen {{count}} Postfächern erlauben",
+        "clearAll_one": "„{{feature}}“ in Ihrem einzigen Postfach ausschalten",
+        "clearAll_other": "„{{feature}}“ in allen {{count}} Postfächern ausschalten"
+      },
       "threadSummary": {
         "title": "KI-Thread-Zusammenfassung",
         "label": "Lange Threads mit KI zusammenfassen",
@@ -1481,6 +1494,7 @@
         "formal": "Förmlich",
         "grammar": "Grammatik korrigieren"
       },
+      "presetTitle": "{{label}} — schreibt Ihren Text als Ganzes um; das Ergebnis wird als Ganzes übernommen oder verworfen.",
       "diff": {
         "title": "KI-Umformulierung prüfen",
         "before": "Vorher",
@@ -1493,9 +1507,9 @@
         "unchangedLines_other": "{{count}} unveränderte Zeilen",
         "plainText": "Nur Text",
         "replace": "Ersetzen",
-        "insert": "An Cursor einfügen",
+        "insert": "Unter meinem Text einfügen",
         "cancel": "Abbrechen",
-        "staleWarning": "Sie haben den Entwurf geändert, während die KI gearbeitet hat; ein Ersetzen würde diese Änderungen verwerfen. Fügen Sie stattdessen an der Cursorposition ein oder starten Sie die Aktion erneut.",
+        "staleWarning": "Sie haben den Entwurf geändert, während die KI gearbeitet hat; ein Ersetzen würde diese Änderungen verwerfen. Fügen Sie das Ergebnis stattdessen unter Ihrem Text ein oder starten Sie die Aktion erneut.",
         "staleReplaceHint": "Ersetzen ist nicht verfügbar, weil sich der Entwurf nach dieser Anfrage geändert hat."
       },
       "refusal": {
@@ -1508,6 +1522,8 @@
       },
       "proofread": {
         "button": "Text prüfen",
+        "buttonTitle": "Text prüfen — die Vorschläge werden einzeln aufgelistet und jeder wird separat übernommen.",
+        "disabledHint": "Das Prüfen von Entwürfen durch die KI ist für dieses Postfach ausgeschaltet. Schalten Sie es unter Einstellungen → KI ein.",
         "checking": "Wird geprüft…",
         "title": "Korrekturvorschläge",
         "editCount_one": "{{count}} Vorschlag",
@@ -1541,6 +1557,7 @@
       },
       "translate": {
         "button": "Übersetzen",
+        "disabledHint": "Das Übersetzen von Entwürfen durch die KI ist für dieses Postfach ausgeschaltet. Schalten Sie es unter Einstellungen → KI ein.",
         "loading": "Wird übersetzt…",
         "targetLabel": "Entwurf übersetzen in",
         "targetPlaceholder": "Sprache auswählen",
@@ -1549,6 +1566,7 @@
           "budget": "Das KI-Budget für diesen Zeitraum ist aufgebraucht. Erhöhen Sie es unter Einstellungen → KI oder warten Sie auf den nächsten Zeitraum.",
           "noProvider": "Es ist noch kein KI-Anbieter eingerichtet. Fügen Sie unter Einstellungen → KI einen hinzu.",
           "providerError": "Der KI-Anbieter hat keine Übersetzung geliefert. Bitte versuchen Sie es erneut.",
+          "answerTooLong": "Die Übersetzung passt nicht in das Antwortlimit des KI-Anbieters: Sie kam abgeschnitten zurück und wird deshalb nicht angezeigt. Ein weiterer Versuch würde genauso enden — weder an diesem Entwurf noch am Limit hat sich etwas geändert. Kürzen Sie Ihren eigenen Text, oder schneiden Sie einen Teil aus, übersetzen Sie den Rest und fügen Sie den ausgeschnittenen Teil wieder ein.",
           "emptyInput": "Es gibt noch nichts zu übersetzen — schreiben Sie zuerst einen Text.",
           "tooLong": "Dieser Entwurf ist zu lang, um ihn auf einmal zu übersetzen, und es gibt keine Möglichkeit, nur eine Auswahl zu übersetzen — MailCopilot nimmt immer Ihren gesamten eigenen Text. Kürzen Sie den Entwurf, oder schneiden Sie einen Teil aus, übersetzen Sie den Rest und fügen Sie den ausgeschnittenen Teil wieder ein. Wenn Ihr eigener Text kurz wirkt, hat MailCopilot möglicherweise nicht erkannt, wo eine zitierte Nachricht beginnt, und sie zusammen mit Ihrem Text gezählt.",
           "optOut": "Die Übersetzung ist für dieses Konto deaktiviert. Aktivieren Sie sie unter Einstellungen → KI → Nachrichten übersetzen.",

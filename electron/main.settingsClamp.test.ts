@@ -398,3 +398,79 @@ describe('main.ts update:systemInfo sender gate', () => {
     expect(logLine).not.toContain('${')
   })
 })
+
+// §1.26.f2 — an AI consent may only name a mailbox that exists.
+//
+// `forgetAccountAiConsents` purges the deleted id from the stored maps, but the
+// settings window is a SECOND writer: it loads all four maps once (a
+// `[]`-dependency effect) and re-submits them whole on every save, so a window
+// that was open across the deletion merges the purged `true` straight back in.
+// Ids are reused (`max + 1`), so the entry can then be read as consent from a
+// mailbox whose owner was never asked.
+//
+// The decision is unit-tested in accountKeyedConsents.test.ts. What cannot be
+// imported is the handler, so what is pinned here is that main applies the rule
+// at all, applies it to the object it is about to persist, and reads the
+// account registry at a point where a deletion that raced the save is visible.
+describe('main.ts settings:save account-keyed consent scope', () => {
+  const codeStart = MAIN_TS_CODE.indexOf("handleIpc('settings:save'")
+  const handlerCode = MAIN_TS_CODE.slice(codeStart, MAIN_TS_CODE.indexOf('\n})', codeStart))
+
+  it('scopes the consent maps to existing mailboxes before persisting them', () => {
+    expect(codeStart).toBeGreaterThan(-1)
+    const prune = handlerCode.indexOf('pruneUnknownAccountConsents(')
+    const parse = handlerCode.indexOf('settingsSchema.parse(')
+    const save = handlerCode.indexOf('saveSettings(next)')
+    expect(prune).toBeGreaterThan(-1)
+    expect(prune).toBeLessThan(parse)
+    expect(prune).toBeLessThan(save)
+    // The canonical field list, not a second copy spelled out at the call site.
+    expect(handlerCode).toContain('ACCOUNT_KEYED_CONSENT_FIELDS')
+  })
+
+  it('prunes the merged object, so a stale entry already in the store is cleared too', () => {
+    // Pruning the PAYLOAD would leave an entry an older build persisted
+    // untouched: the window that would re-submit it is exactly the window that
+    // may not be the one saving.
+    expect(handlerCode).toMatch(/pruneUnknownAccountConsents\(\s*merged\s*,/)
+    // …and what is persisted is the pruned object, not the unpruned `merged`.
+    expect(handlerCode).toContain('settingsSchema.parse(consentScope.settings)')
+    expect(handlerCode).not.toContain('settingsSchema.parse(merged)')
+  })
+
+  it('reads the account registry after the post-dialog settings re-read', () => {
+    // The §2.119 / §2.103 gates can block on a native dialog for a minute, and
+    // an account can be deleted meanwhile. A registry snapshot taken before the
+    // wait would still list the deleted mailbox and let the entry through.
+    const reread = handlerCode.lastIndexOf('current = getSettings()')
+    const registry = handlerCode.indexOf('listAccounts()')
+    expect(reread).toBeGreaterThan(-1)
+    expect(registry).toBeGreaterThan(reread)
+  })
+
+  it('consults the roster accounts:list serves, not the config store directly', () => {
+    // Under `MAILCOPILOT_E2E=1` in an unpackaged build that roster is the
+    // in-memory `E2E_ACCOUNTS` fixture (same branch as `mail:openInWindow` and
+    // `pendingMoveAccountExists`). Reading `listAccounts()` unconditionally
+    // reports NO accounts there, so every consent the renderer can legitimately
+    // hold would be pruned as belonging to nobody.
+    expect(handlerCode).toMatch(/const roster = IS_E2E \? E2E_ACCOUNTS : listAccounts\(\)/)
+  })
+
+  it('keeps the stored maps when the account roster cannot be read', () => {
+    // Not "prune against an empty set" (a silent mass withdrawal on a transient
+    // failure) and not "let it through" (the hole itself).
+    expect(handlerCode).toContain('keepStoredConsents(merged, current, ACCOUNT_KEYED_CONSENT_FIELDS)')
+    expect(handlerCode).toMatch(/catch\s*\{\s*return null\s*\}/)
+  })
+
+  it('logs the scoping without naming an account id', () => {
+    const logIdx = handlerCode.indexOf("logMain.warn('settings:save: account-keyed consent scoped")
+    expect(logIdx).toBeGreaterThan(-1)
+    const line = handlerCode.slice(logIdx, handlerCode.indexOf('})', logIdx))
+    // CLAUDE.md §8: closed vocabulary (our own field names) plus counts.
+    expect(line).toContain('consentScope.changedFields.join')
+    expect(line).toContain('consentScope.droppedEntries')
+    expect(line).not.toContain('${')
+  })
+})

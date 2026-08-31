@@ -261,7 +261,7 @@ async function openAiSettingsTab(page: import('@playwright/test').Page, browser:
 
 async function enableTranslateToggle(page: import('@playwright/test').Page, browser: import('@playwright/test').Browser) {
   const settings = await openAiSettingsTab(page, browser)
-  const toggle = settings.getByTestId('settings-ai-translate-toggle')
+  const toggle = settings.getByTestId('settings-ai-consent-translate-1')
   await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
   await toggle.check()
   await settings.getByTestId('settings-save').click()
@@ -303,7 +303,7 @@ test('B6: enabling the toggle in Settings makes the translate bar appear in the 
     const browser = ctx.browser!
 
     const settings = await openAiSettingsTab(page, browser)
-    const toggle = settings.getByTestId('settings-ai-translate-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-translate-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     // Default: unchecked. Removing the default `{}` normalization in App.tsx's
     // settings apply() → this could read as checked instead.
@@ -338,7 +338,7 @@ test('B6: Settings toggle persists across close/reopen (settings.json round-trip
     await enableTranslateToggle(page, browser)
 
     const settings2 = await openAiSettingsTab(page, browser)
-    const toggle2 = settings2.getByTestId('settings-ai-translate-toggle')
+    const toggle2 = settings2.getByTestId('settings-ai-consent-translate-1')
     await expect(toggle2).toBeVisible({ timeout: EXPECT_TIMEOUT })
     // Removing `aiTranslateEnabled` from the settings:save payload → reopen
     // shows this unchecked again.
@@ -695,7 +695,7 @@ test('B6: turning the per-account toggle off in Settings while a translation is 
     await expect(translated).toHaveText(REPLY)
 
     const settings = await openAiSettingsTab(page, browser)
-    const toggle = settings.getByTestId('settings-ai-translate-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-translate-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle).toBeChecked()
     await toggle.uncheck()

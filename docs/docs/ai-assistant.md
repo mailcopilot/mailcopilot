@@ -68,9 +68,19 @@ If the assistant cannot start a request, the AI panel or the **Check connection*
   - **This ceiling does not fire at all on OpenAI-compatible endpoints that never report token usage.** The ceiling works by tracking the actual cost accrued so far from the token counts the provider reports; if the endpoint never reports usage (some self-hosted or proxy front-ends omit it entirely), tracked cost stays at $0 for every step, so the per-request ceiling never has anything to trigger on -- the request simply runs until it hits Max steps per request instead. This is a deliberate limitation, not a bug: guessing at a cost in the absence of real numbers would risk cutting off legitimate requests on providers that are simply silent about usage. Spend is still bounded on such an endpoint -- the Daily / Monthly budget above is enforced independently of per-step usage reporting and fully applies here. This mainly affects local and self-hosted builds (Ollama and similar), where usage reporting is often missing. It is a different failure mode from the unrecognized-model case above: that one is about a model that *does* report tokens but isn't in the pricing table, and it makes the ceiling trigger too early; this one is about a model that reports no tokens at all, and it makes the ceiling never trigger.
 - **HTTP Proxy** -- if your network requires an HTTP proxy to access the internet, enter the proxy URL here (e.g. `http://proxy.company.local:3128`). The proxy is used for all AI requests. Leave empty if no proxy is needed. Setting or changing a proxy is confirmed with a system dialog -- see [Confirming a New AI Destination](#confirming-a-new-ai-destination) below.
 - **Send key** -- choose whether messages are sent with **Enter** or **Ctrl+Enter**.
-- **Thread AI Summary** -- enable "Summarize long threads with AI" to show an AI-generated summary above threads of three or more messages. Off by default; enabled separately for each account. See [Thread AI Summary](#thread-ai-summary) below for details.
-- **Instant Reply** -- enable "Suggest quick reply drafts with AI" to add an Instant Reply button on the open message. Off by default; enabled separately for each account. See [Instant Reply](#instant-reply) below for details.
-- **AI Proofread** -- enable "Check drafts for mistakes with AI" to add a **Check writing** button in the compose window. The button shows a list of suggested corrections; you accept each one individually. Off by default; enabled separately for each account. See [AI Proofread](#ai-proofread) below for details.
+- **Thread AI Summary**, **Instant Reply**, **AI Proofread**, **AI Translate** -- four separate opt-ins, each off by default and each enabled per mailbox in the **AI features per mailbox** table -- see [AI Features per Mailbox](#ai-features-per-mailbox) below. Turning one on shows an AI-generated summary above long threads, adds an Instant Reply button, adds a **Check writing** button in the compose window, or adds a **Translate** control, respectively -- see [Thread AI Summary](#thread-ai-summary), [Instant Reply](#instant-reply), [AI Proofread](#ai-proofread) and [Message Translation](#message-translation) below for details.
+
+### AI Features per Mailbox
+
+Thread AI Summary, Instant Reply, AI Proofread and AI Translate are four separate opt-ins, and MailCopilot asks for each of them separately, per mailbox -- turning one on does not turn on the others, and turning one on for one mailbox does not turn it on for any other mailbox.
+
+**Settings > AI** shows all of this as a single table, **AI features per mailbox**: one row per mailbox, one column per feature, and a checkbox at the crossing. Checking a box only allows that feature to be *offered* in that mailbox -- nothing is summarized, drafted, checked, or translated until you separately ask for it in that mailbox.
+
+Above each column, a checkbox in the column header grants or withdraws that **one** feature across every mailbox at once -- it shows as a mixed (indeterminate) state when only some of your mailboxes have the feature on. There is no single control that turns everything on for every mailbox: each feature is still asked for on its own.
+
+Below the table, a short legend explains what each feature actually does and what it costs, since a two- or three-word column header cannot carry that on its own.
+
+If you have not added a mailbox yet, the table shows a prompt to add one instead.
 
 ### Confirming a New AI Destination
 
@@ -113,7 +123,7 @@ Thread AI Summary shows an automatic one-line AI summary directly above the mess
 **Enabling it:**
 
 1. Open **Settings** and go to the **AI** tab.
-2. Find **Thread AI Summary** and check **Summarize long threads with AI**.
+2. In the **AI features per mailbox** table (see [AI Features per Mailbox](#ai-features-per-mailbox) above), check the box under **Thread AI Summary** for the mailbox you want it on for -- or check the box in the column header to turn it on for every mailbox.
 
 The setting is **off by default** and applies **per account** -- enable it separately for each account you want it on for.
 
@@ -130,27 +140,27 @@ The setting is **off by default** and applies **per account** -- enable it separ
 
 ### Compose Quick Actions
 
-The compose window shows a small toolbar above the message body with four AI rewrite buttons: **Improve**, **Shorter**, **Formal**, and **Fix grammar**. Click one to have the AI rewrite the text you wrote yourself for that goal.
+The compose window shows a small toolbar above the message body with three AI rewrite buttons: **Improve**, **Shorter**, and **Formal**. Click one to have the AI rewrite the text you wrote yourself for that goal -- each button rewrites your text as a whole, and you accept or discard the result in one piece. **Fixing mistakes is a separate, more targeted tool: [AI Proofread](#ai-proofread) below lists individual corrections you accept one by one, instead of rewriting the whole text.**
 
 **Only your own text is rewritten.** A draft is rarely just your own words -- replying carries the quoted original message below your text, forwarding carries a forwarded-message header, and a signature may be appended after either. MailCopilot separates your own text from that surrounding material -- any line starting with `>` (the quoted message, including a nested `>>` quote or one indented with leading spaces before the `>`), the attribution line directly above it (for example "On Monday, Alice wrote:"), a forwarded-message header, and a signature after a `--` or `-- ` separator -- and sends only your own text to the AI. This separation is dependable for replies, forwards and signatures that MailCopilot itself produced, and for the widespread conventions other clients follow. **A draft composed in a different mail client may quote in a style MailCopilot does not recognize** -- a `|` prefix, indentation alone with no `>`, a bare `From:` / `Sent:` / `To:` / `Subject:` header block, plain text converted from an HTML quote, an Outlook-style underscore separator, or "Begin forwarded message:" without a dashed banner. On such a draft no boundary is found, the whole body counts as your own text, and the quoted part is sent along with it. **Replace** writes the rewrite back in place; the quoted message, forwarded header, and signature are carried through byte-for-byte unchanged.
 
 **Using it:**
 
 1. Write some text in the compose body, above any quoted message.
-2. Click **Improve**, **Shorter**, **Formal**, or **Fix grammar** in the toolbar above the body.
+2. Click **Improve**, **Shorter**, or **Formal** in the toolbar above the body.
 3. MailCopilot shows a **Review AI rewrite** panel: your own text and the rewrite appear together as one merged, scrollable passage with the edits marked in place -- removed words struck through, added words highlighted, each also marked with a leading **−** or **+** sign so the change never depends on color alone. Long unchanged stretches collapse behind an **N unchanged lines** toggle, and a numbered list of the individual edits sits below the passage; the quoted message, forwarded header, and signature are not part of this comparison, since they are not part of the rewrite. Plain **Before** / **After** copies of the full text stay available by expanding **Plain text**. Pressing **Escape** or clicking outside the panel dismisses it, the same as **Cancel**.
 4. Choose one of three actions:
    - **Replace** -- swap your own text with the rewritten text; the rest of the draft is unchanged.
-   - **Insert at cursor** -- insert the rewritten text at the current cursor position instead of replacing your own text.
+   - **Add below my text** -- insert the rewritten text at the end of your own text, above any quoted message, forwarded header, or signature, instead of replacing your own text.
    - **Cancel** -- discard the rewrite and keep your draft exactly as it was.
 
-Your draft is **never changed automatically** -- the rewrite only appears as a before/after comparison, and the body is only modified after you explicitly click **Replace** or **Insert at cursor**.
+Your draft is **never changed automatically** -- the rewrite only appears as a before/after comparison, and the body is only modified after you explicitly click **Replace** or **Add below my text**.
 
 **If there is nothing of your own to rewrite** -- for example an empty reply that is still just the quoted original, or a draft that consists only of your signature -- MailCopilot refuses with **"Quick actions only rewrite your own text — the quoted message and your signature stay untouched. Write something above the quote first."** A reply typed *below* the quoted message is treated the same way in this version: MailCopilot's own reply template places your cursor above the quote, so this only affects a reply you deliberately typed underneath it.
 
 **Long drafts are refused rather than silently trimmed.** If your own text is longer than 8,000 characters -- and, when no quote boundary is found, everything in the draft counts as your own text -- MailCopilot shows **"This draft is too long to rewrite in one pass, and there is no way to rewrite only a selection — MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, rewrite what is left and paste the cut part back. If your own text looks short, MailCopilot may have failed to spot where a quoted message begins, and measured it together with your text."** instead of rewriting part of it and discarding the rest.
 
-**If you keep typing while a rewrite is being generated:** should you change the draft before the rewrite comes back, **Replace** is disabled with the warning **"You edited the draft while the AI was working, so replacing it would discard those edits. Insert at cursor instead, or run the action again."** **Insert at cursor** stays available, since it adds the rewrite at your current cursor position without overwriting anything you typed.
+**If you keep typing while a rewrite is being generated:** should you change the draft before the rewrite comes back, **Replace** is disabled with the warning **"You edited the draft while the AI was working, so replacing it would discard those edits. Add the result below your text instead, or run the action again."** **Add below my text** stays available, since it adds the rewrite at the end of your own text without overwriting anything you typed.
 
 **Availability:** Compose Quick Actions has no separate on/off setting -- it is available whenever an AI provider is configured, using the same **API-key provider** as Thread AI Summary (Anthropic, OpenAI-compatible, or Google Gemini). The buttons are greyed out only while the body is completely empty; on a draft that holds nothing but a quoted message or a signature they stay clickable, and the refusal described above appears after you click, not before. If the daily AI budget has been reached, the toolbar shows a budget message instead of rewriting.
 
@@ -163,7 +173,7 @@ Instant Reply adds a button on the message you have open that drafts two or thre
 **Enabling it:**
 
 1. Open **Settings** and go to the **AI** tab.
-2. Find **Instant Reply** and check **Suggest quick reply drafts with AI**.
+2. In the **AI features per mailbox** table (see [AI Features per Mailbox](#ai-features-per-mailbox) above), check the box under **Instant Reply** for the mailbox you want it on for -- or check the box in the column header to turn it on for every mailbox.
 
 The setting is **off by default** and applies **per account** -- enable it separately for each account you want it on for. When it is off, the Instant Reply button does not appear and nothing is sent to the AI provider.
 
@@ -185,9 +195,11 @@ AI Proofread checks your draft for mistakes and suggests corrections one by one 
 **Enabling it:**
 
 1. Open **Settings** and go to the **AI** tab.
-2. Find **AI Proofread** and check **Check drafts for mistakes with AI**.
+2. In the **AI features per mailbox** table (see [AI Features per Mailbox](#ai-features-per-mailbox) above), check the box under **AI Proofread** for the mailbox you want it on for -- or check the box in the column header to turn it on for every mailbox.
 
 The setting is **off by default** and applies **per account** -- enable it separately for each account you want it on for.
+
+**The button is always there, even when the setting is off.** Unlike Instant Reply above, the **Check writing** button in the compose toolbar is never hidden: for a mailbox where AI Proofread is off, it is shown in a visibly locked state, and hovering or focusing it shows where to turn it on: *"Checking drafts with AI is off for this mailbox. Turn it on in Settings → AI."* Clicking it while locked does nothing -- no request reaches the AI provider. This is deliberate: a button that disappears when a setting is off is indistinguishable from a feature that does not exist in this version of MailCopilot at all.
 
 **Using it:**
 
@@ -203,7 +215,7 @@ Your draft is **never changed automatically** -- corrections only take effect af
 
 **Sending is never blocked** by this feature -- you can send your draft at any time regardless of whether the check has run or not.
 
-**If the check is not enabled** for the current account, clicking **Check writing** shows the message: "Turn on AI proofreading for this account in Settings to check your writing."
+**If the check is not enabled** for the current account, **Check writing** stays locked and clicking it does nothing -- see "The button is always there, even when the setting is off" above. MailCopilot's own check for this is also enforced independently on the connection to the AI provider, so even a request that somehow reached that point would still be refused with "Turn on AI proofreading for this account in Settings to check your writing."
 
 **If you keep typing while a check is running:** should you change the draft before the results come back, the suggestions are shown with a warning that the draft has changed and the corrections may no longer match. Run the check again to get fresh suggestions.
 
@@ -234,7 +246,9 @@ Nothing is translated automatically -- a provider is only called when you click 
 
 **Caching.** A translation is cached locally, keyed to the message's own content, the target language, and the version of the translation contract (provider, model, and prompt shape) that produced it -- so reopening the message and choosing the same language again reuses the cached result instead of calling the provider a second time, and a later change to how MailCopilot produces translations is addressed under a new key rather than an older contract's output being served as if it were current. Cached translations have no separate expiry, are capped at 500 per account (oldest dropped first once the cap is reached), and are deleted when you remove the account.
 
-**If translation is refused,** MailCopilot names the specific reason instead of a generic error: the setting is off for this account, no AI provider is configured, the provider did not return a result, the message text has not downloaded yet, the message is too long to translate in one go (there is no way to translate only part of it -- the whole message counts toward the limit, including any earlier correspondence quoted inside it), or the AI budget for the current period is used up.
+**If translation is refused,** MailCopilot names the specific reason instead of a generic error: the setting is off for this account, no AI provider is configured, the provider did not return a translation and did not say why, the translation did not fit within the provider's answer limit and came back cut off, the message text has not downloaded yet, the message is too long to translate in one go (there is no way to translate only part of it -- the whole message counts toward the limit, including any earlier correspondence quoted inside it), or the AI budget for the current period is used up.
+
+**A Try again button appears only where trying again could change the outcome.** Each click is a separate request billed to your AI provider, so MailCopilot does not offer one for a refusal that would only reproduce itself: the translation hitting the provider's answer limit, the message being too long to translate at all, or translation being turned off for the account. For the remaining reasons -- the provider failing without explanation, the message still downloading, no provider configured, or the budget being used up -- **Try again** is shown, since fixing the underlying cause, or simply waiting, can make the next attempt succeed. From the second attempt on, the refusal is labeled **Attempt 2** (and so on), so a retry that changes nothing on screen is not mistaken for a click that failed to register.
 
 **Provider and privacy:** Message Translation uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini). The message text is read from MailCopilot's local cache and wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider. Every provider call (not cache hits) is recorded in the [AI audit log](./privacy/ai-data). See [AI Data & Audit Log](./privacy/ai-data#message-translation) for the full privacy posture.
 
@@ -242,19 +256,25 @@ Nothing is translated automatically -- a provider is only called when you click 
 
 Draft Translation adds a **Translate the draft into** language picker and a **Translate** button next to [Compose Quick Actions](#compose-quick-actions), so you can write a reply in a language other than the one you typed it in.
 
-**Enabling it.** There is no separate setting: Draft Translation shares the same **AI Translate** toggle as [Message Translation](#message-translation) above -- **Settings > AI > AI Translate > Allow translating received messages and your own drafts with AI**, off by default and enabled per account.
+**Enabling it.** There is no separate setting: Draft Translation shares the same **AI Translate** toggle as [Message Translation](#message-translation) above -- turn it on per mailbox in the **AI features per mailbox** table (see [AI Features per Mailbox](#ai-features-per-mailbox) above), off by default.
+
+**The picker and button are always there, even when the setting is off.** For a mailbox where AI Translate is off, the language picker is inert and the **Translate** button is shown in a visibly locked state, with a hint on hover or focus pointing to where to turn it on -- the same "always visible, locked rather than hidden" treatment [AI Proofread](#ai-proofread) uses, for the same reason: a control that disappears when a setting is off looks like a feature that does not exist.
 
 **Using it:**
 
 1. Pick a target language from the **Translate the draft into** list, or accept the suggestion described below.
 2. Click **Translate**.
-3. MailCopilot shows the translation in the same **Review AI rewrite** panel used by the four rewrite presets, with **Replace**, **Insert at cursor**, and **Cancel** buttons -- see [Compose Quick Actions](#compose-quick-actions) for how that panel works. Nothing is substituted into your draft on its own; the body only changes after you explicitly click **Replace** or **Insert at cursor**.
+3. MailCopilot shows the translation in the same **Review AI rewrite** panel used by the three rewrite presets, with **Replace**, **Add below my text**, and **Cancel** buttons -- see [Compose Quick Actions](#compose-quick-actions) for how that panel works. Nothing is substituted into your draft on its own; the body only changes after you explicitly click **Replace** or **Add below my text**.
 
 **Only your own text is translated -- when a boundary is found.** The same boundary Compose Quick Actions uses applies here: the quoted message, forwarded-message header, and signature are left untouched, byte-for-byte, and only your own text is sent to the AI provider and replaced, for replies, forwards, and signatures that MailCopilot itself produced, and for the widespread quoting conventions other clients follow. **A draft composed in a different mail client may quote in a style MailCopilot does not recognize** -- see [Compose Quick Actions](#compose-quick-actions) for the exact list. On such a draft no boundary is found, the whole body counts as your own text, and the quoted part is sent to the AI provider and translated right along with it.
 
 **You choose the language.** When you are replying to a message, MailCopilot may pre-fill the picker with a suggestion: the language of the message you are replying to, detected on your device. It is only a suggestion -- it is shown in the picker, you can change it, and nothing is translated until you press **Translate**. Forwarding a message or starting a new one offers no suggestion, since there is no message to read a language from. When the language cannot be identified with enough confidence, the picker is left empty rather than guessing.
 
 Nothing here is automatic: there is no auto-translation on any path, before or after you click.
+
+**If translation is refused,** MailCopilot names the specific reason instead of a generic error: translation is turned off for this account, no AI provider is configured, the provider did not return a translation and did not say why, the translation did not fit within the provider's answer limit and came back cut off, there is nothing of your own to translate yet, the draft is too long to translate in one go (see the length limit under [Compose Quick Actions](#compose-quick-actions) above), your draft contains only quoted text and a signature, or the AI budget for the current period is used up.
+
+**The Translate button goes back to disabled, rather than offering a separate retry, when trying again could not change the outcome.** Each click is a separate request billed to your AI provider, so the button stays disabled for a refusal that would only reproduce itself unless you first change the draft: the translation hitting the provider's answer limit, the draft being too long, nothing of your own written yet, or only quoted text and a signature present. For the remaining reasons -- the provider failing without explanation, no provider configured, or the budget being used up -- the button is clickable again, since fixing the underlying cause, or simply waiting, can make the next attempt succeed.
 
 **Provider and privacy:** Draft Translation uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini). Your own text is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider. Every provider call is recorded in the [AI audit log](./privacy/ai-data). See [AI Data & Audit Log](./privacy/ai-data#draft-translation) for the full privacy posture.
 

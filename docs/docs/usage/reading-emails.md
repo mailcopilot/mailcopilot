@@ -141,10 +141,13 @@ MailCopilot names the specific reason translation could not be produced, rather 
 
 - Translation is turned off for this account.
 - No AI provider is set up yet.
-- The AI provider did not return a translation.
+- The AI provider did not return a translation, and did not say why.
+- The translation did not fit within the AI provider's answer limit, so it came back cut off and is not shown.
 - There is no downloaded text for the message yet.
 - The message is too long to translate in one go, and there is no way to translate only part of it -- the whole message counts toward the limit, including any earlier correspondence quoted inside it.
 - The AI budget for this period is used up.
+
+**A Try again button appears only where trying again could change the outcome.** Each click is a separate request billed to your AI provider, so MailCopilot does not offer the button for a refusal that would only reproduce itself: the answer hitting the provider's limit, the message being too long to translate at all, or translation being turned off for the account. For the remaining reasons -- the provider failing without explanation, the message still downloading, no provider configured, or the budget being used up -- **Try again** is shown, since fixing the underlying cause, or simply waiting, can make the next attempt succeed. From the second attempt on, the refusal is labeled **Attempt 2** (and so on), so a retry that changes nothing on screen is not mistaken for a click that failed to register.
 
 ## Working with Attachments
 

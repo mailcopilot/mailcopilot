@@ -15,7 +15,9 @@
  * the guarantee as "the recognized tail stays out", not as "no quoted text ever
  * leaves". The user chooses one of three explicit actions:
  *   - Replace — swap the user's own part with the rewritten text, tail intact.
- *   - Insert  — splice the rewritten text at the current caret position.
+ *   - Insert  — add the rewritten text below the user's own part (§1.26.1
+ *               AC-9), above the quote / forward banner / signature. It is NOT
+ *               a caret insertion; the label says "Add below my text".
  *   - Cancel  — discard the preview, leaving the draft untouched.
  *
  * When `stale` is set (the draft changed while the rewrite was in flight) the
@@ -95,7 +97,7 @@ export type QuickActionDiffProps = {
   stale?: boolean
   /** Replace the user's own part with the rewritten text (tail preserved). */
   onReplace: () => void
-  /** Insert the rewritten text at the current caret position. */
+  /** Add the rewritten text below the user's own part (§1.26.1 AC-9). */
   onInsert: () => void
   /** Dismiss without changing the draft. */
   onCancel: () => void
@@ -420,8 +422,8 @@ export type ProofreadPanelProps = {
   /**
    * The draft body changed after the check was requested, so every offset now
    * points into a string that no longer exists. Disables Apply (§2.78 AC-h);
-   * unlike the rewrite panel there is no caret-insert fallback, because a
-   * suggestion is only meaningful at its own span.
+   * unlike the rewrite panel there is no "add it below instead" fallback,
+   * because a suggestion is only meaningful at its own span.
    */
   stale?: boolean
   onToggleEdit: (id: string) => void

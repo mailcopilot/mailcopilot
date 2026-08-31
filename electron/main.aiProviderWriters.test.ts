@@ -210,7 +210,11 @@ describe('§2.218.f2 main.ts — settings:save refuses unhandled schema failures
       'const accepted = dropErasingUndefined',
       'let current = getSettings()',
       'const merged = applyAiDestinationDecision',
-      'settingsSchema.parse(merged)',
+      // The persisted parse. §1.26.f2 renamed its ARGUMENT (the merged object
+      // now passes through the account-keyed consent scoping first); the marker
+      // follows the call, because what this asserts is the order of the parse,
+      // not the name of the value handed to it.
+      'settingsSchema.parse(consentScope.settings)',
     ]) {
       const idx = saveBody.indexOf(later)
       expect(idx, `expected "${later}" to come AFTER the refusal`).toBeGreaterThan(throwIdx)

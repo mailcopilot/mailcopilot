@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   QUICK_ACTION_PRESETS,
   quickActionLabelKey,
-  insertAtCaret,
+  insertAtOwnTextEnd,
   hasRewritableText,
   isPreviewStale,
   isBlockedByOtherAction,
@@ -11,8 +11,19 @@ import {
 
 describe('quickActions pure helpers', () => {
   describe('QUICK_ACTION_PRESETS', () => {
-    it('exposes exactly the four B4 presets in toolbar order', () => {
-      expect([...QUICK_ACTION_PRESETS]).toEqual(['improve', 'shorter', 'formal', 'grammar'])
+    it('exposes exactly the three tone presets in toolbar order', () => {
+      expect([...QUICK_ACTION_PRESETS]).toEqual(['improve', 'shorter', 'formal'])
+    })
+
+    it('does NOT offer `grammar` — the B7 check owns mistakes (§1.26.1 AC-1)', () => {
+      expect(QUICK_ACTION_PRESETS).not.toContain('grammar')
+    })
+
+    it('keeps `grammar` a live contract value with a label of its own', () => {
+      // The preset type and the main-side prompt catalogue are unchanged; only
+      // the toolbar stopped offering it. A label key that stopped resolving
+      // would turn a contract value into a rendering bug.
+      expect(quickActionLabelKey('grammar')).toBe('ai.quickAction.preset.grammar')
     })
   })
 
@@ -34,35 +45,62 @@ describe('quickActions pure helpers', () => {
     })
   })
 
-  describe('insertAtCaret', () => {
-    it('splices insert at the caret and returns the post-insert caret', () => {
-      const r = insertAtCaret('Hello world', 'brave ', 6)
-      expect(r.text).toBe('Hello brave world')
-      expect(r.caret).toBe(12)
+  // §1.26.1 AC-9 / §2.252 — the insert action lands at the END OF THE USER'S OWN
+  // TEXT, never at a caret index. The old `insertAtCaret` read
+  // `textarea.selectionStart` while an OVERLAY had focus; on a pre-filled draft
+  // the textarea had never been focused, so that index was 0 and the generated
+  // text was spliced above everything, quote included.
+  describe('insertAtOwnTextEnd', () => {
+    it('lands above a recognized quote, not at the top of the body', () => {
+      const body = 'My answer.\n\n> quoted line one\n> quoted line two'
+      const r = insertAtOwnTextEnd(body, 'Added paragraph.')
+      expect(r.text).toBe('My answer.\nAdded paragraph.\n\n> quoted line one\n> quoted line two')
+      expect(r.text.startsWith('Added paragraph.')).toBe(false)
+      // Caret sits immediately after the inserted text.
+      expect(r.text.slice(0, r.caret).endsWith('Added paragraph.')).toBe(true)
     })
 
-    it('inserts at the start when caret is 0', () => {
-      const r = insertAtCaret('world', 'hello ', 0)
-      expect(r.text).toBe('hello world')
-      expect(r.caret).toBe(6)
+    it('lands above a recognized signature', () => {
+      const r = insertAtOwnTextEnd('Hello.\n\n--\nSergey', 'Regards.')
+      expect(r.text).toBe('Hello.\nRegards.\n\n--\nSergey')
     })
 
-    it('appends at the end when caret is at length', () => {
-      const r = insertAtCaret('hello', '!', 5)
-      expect(r.text).toBe('hello!')
-      expect(r.caret).toBe(6)
+    it('lands above a forwarded-message banner', () => {
+      const body = 'FYI.\n\n---------- Forwarded message ----------\nFrom: a@b.test'
+      const r = insertAtOwnTextEnd(body, 'See below.')
+      expect(r.text).toBe('FYI.\nSee below.\n\n---------- Forwarded message ----------\nFrom: a@b.test')
     })
 
-    it('clamps a caret past the end (stale selection) without throwing', () => {
-      const r = insertAtCaret('abc', 'X', 999)
-      expect(r.text).toBe('abcX')
-      expect(r.caret).toBe(4)
+    it('appends at the very end when no tail is recognized (own text IS the body)', () => {
+      const r = insertAtOwnTextEnd('Just a plain draft.', 'One more line.')
+      expect(r.text).toBe('Just a plain draft.\nOne more line.')
+      expect(r.caret).toBe(r.text.length)
     })
 
-    it('clamps a negative caret to 0', () => {
-      const r = insertAtCaret('abc', 'X', -5)
-      expect(r.text).toBe('Xabc')
-      expect(r.caret).toBe(1)
+    it('adds exactly one newline, and none when the own part already ends with one', () => {
+      expect(insertAtOwnTextEnd('Hello.', 'X').text).toBe('Hello.\nX')
+      expect(insertAtOwnTextEnd('Hello.\n', 'X').text).toBe('Hello.\nX')
+    })
+
+    it('does not fuse onto a tail that starts on the same line', () => {
+      // Unreachable from the toolbar (an empty own part is refused as
+      // `no_own_text` before anything is generated), but the helper must not
+      // produce `My reply.> only a quote` if a future caller reaches it.
+      const r = insertAtOwnTextEnd('> only a quote', 'My reply.')
+      expect(r.text).toBe('My reply.\n> only a quote')
+      expect(r.caret).toBe('My reply.'.length)
+    })
+
+    it('carries the recognized tail through byte-identically', () => {
+      const tail = '\n\n> quoted\n\n--\nSergey'
+      const r = insertAtOwnTextEnd(`Body.${tail}`, 'Added.')
+      expect(r.text.endsWith(tail)).toBe(true)
+    })
+
+    it('preserves leading blank lines above the own text', () => {
+      const r = insertAtOwnTextEnd('\n\nHello.\n\n> quoted', 'Added.')
+      expect(r.text.startsWith('\n\n')).toBe(true)
+      expect(r.text).toBe('\n\nHello.\nAdded.\n\n> quoted')
     })
   })
 

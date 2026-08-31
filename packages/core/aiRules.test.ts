@@ -23,6 +23,7 @@ import {
   estimateAiRuleCostUsd,
   nullUsageReservationUsd,
   AI_RULE_NULL_USAGE_COST_FLOOR,
+  AI_RULE_MAX_OUTPUT_TOKENS,
   type AiRulePendingItem,
   type AiRuleSpec,
   type AiRuleDecision,
@@ -865,10 +866,29 @@ describe('nullUsageReservationUsd — model-aware fail-closed reservation', () =
   })
 
   it('reserves MORE than the flat floor for a pricier model (gpt-4)', () => {
-    // gpt-4 worst-case: 2000/1000 * 0.01 + 2000/1000 * 0.03 = 0.08 > 0.05.
+    // gpt-4 worst-case, derived from the yardstick rather than a literal so the
+    // two cannot drift: N/1000 * 0.01 + N/1000 * 0.03, N =
+    // AI_RULE_MAX_OUTPUT_TOKENS. At today's 2500 that is $0.10 (it was $0.08
+    // while the yardstick still said 2000, one release behind the one-shot
+    // request cap it is supposed to cover — see the constant's docblock).
     const reserved = nullUsageReservationUsd('gpt-4')
     expect(reserved).toBeGreaterThan(AI_RULE_NULL_USAGE_COST_FLOOR)
-    expect(reserved).toBeCloseTo(0.08, 6)
+    expect(reserved).toBeCloseTo((AI_RULE_MAX_OUTPUT_TOKENS / 1000) * 0.04, 6)
+  })
+
+  it('keeps the SHARED yardstick raise confined to the one tier it actually moves', () => {
+    // The evidence behind the decision recorded at AI_RULE_MAX_OUTPUT_TOKENS
+    // ("Why the raise is SHARED and not per-contour"): raising the yardstick
+    // lifts the reservation floor for EVERY contour, including the streaming one
+    // whose own limits did not move, so the cost of sharing it must be measured
+    // rather than asserted. At the current yardstick every tier except gpt-4
+    // prices its worst case at or under the flat floor, so only gpt-4 moved
+    // ($0.08 → $0.10). Note gpt-4o sits EXACTLY on the flat floor here — it is
+    // the next tier to move, and this test is where that will show up.
+    for (const m of ['gpt-4o', 'gpt-4o-mini', 'claude-haiku-4-5', 'gemini-1.5-flash', 'weird-model']) {
+      expect(nullUsageReservationUsd(m)).toBe(AI_RULE_NULL_USAGE_COST_FLOOR)
+    }
+    expect(nullUsageReservationUsd('gpt-4')).toBeGreaterThan(AI_RULE_NULL_USAGE_COST_FLOOR)
   })
 
   it('is always finite and positive', () => {

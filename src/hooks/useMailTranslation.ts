@@ -24,7 +24,7 @@ import { captureException } from '../sentry'
  * this hook's output and hold no translate state of their own (CLAUDE.md §5
  * hotspot policy — App.tsx is wiring only).
  *
- * ## Four properties this hook exists to guarantee
+ * ## Five properties this hook exists to guarantee
  *
  * 1. **Never automatic.** There is no effect that calls the provider. The only
  *    path to `ai:translate:message` is {@link UseMailTranslationResult.request},
@@ -48,6 +48,16 @@ import { captureException } from '../sentry'
  *    handed to the renderer as a React text child. There is no HTML half in the
  *    contract and nothing here builds one: model output derived from untrusted
  *    mail must never reach `dangerouslySetInnerHTML` or an iframe `srcDoc`.
+ *
+ * 5. **A second press is visible, and a useless one is never offered**
+ *    (2026-08-31). Requests can cost the reader money and the provider may
+ *    refuse for the same reason every time, so a repeat can repaint a
+ *    byte-identical screen — which is exactly what a dead button looks like. Two
+ *    values leave the hook to close that: `attempts`, which moves on every press
+ *    this hook SENDS, and `canRetry`, which is false for the refusals that have
+ *    no realistic chance of answering differently until something outside this
+ *    request changes. The bar draws no button in that case rather than a live
+ *    one whose outcome we already expect.
  *
  * ## What the renderer is NOT allowed to do, and does not
  *
@@ -130,6 +140,47 @@ export type UseMailTranslationResult = {
   translation: TranslatedMessage | null
   /** Structured refusal while `status === 'refused'`, else null. */
   refusal: TranslateRefusalReason | null
+  /**
+   * How many requests this hook has SENT for the message and target currently
+   * in view. Counted at FIRE TIME, not on the answer.
+   *
+   * ## What this number is, and what it is deliberately not
+   *
+   * It is a count of PRESSES THAT LEFT THE RENDERER. It is NOT a count of calls
+   * the provider was paid for, and nothing here may describe it as one: main is
+   * free to refuse the request before any provider is contacted — no provider
+   * configured, per-account consent off, budget exhausted, the input cap, or a
+   * cache hit that answers without spending anything. The renderer never learns
+   * which of those happened; the wire contract carries a refusal reason, not a
+   * billing verdict. Claiming spend from here would be inventing knowledge we
+   * do not have (CLAUDE.md §5 "кто владеет правдой") — the same defect class as
+   * pricing someone else's ledger from our own guess.
+   *
+   * Making it a true spend count would mean main reporting, per response,
+   * whether the call reached a provider — a wire-contract change, not a
+   * renderer change. Until then the honest reading is "how many times you asked".
+   *
+   * It exists because a repeat that refuses for the same reason repaints a
+   * byte-identical screen, and the reader cannot tell that from a button that
+   * did nothing (2026-08-31 incident: seven clicks in three seconds, seven
+   * requests that did reach the provider and were billed, no visible change). A
+   * number that moves on every press is the smallest honest answer to "did my
+   * click do anything".
+   *
+   * Resets exactly where results reset: a new message or a new target language
+   * is a new question, so its attempts start at zero.
+   */
+  attempts: number
+  /**
+   * Whether offering another attempt is honest for the CURRENT refusal.
+   *
+   * False for refusals that have no realistic chance of answering differently
+   * until something outside this request changes, so the bar renders no button
+   * at all rather than a live control whose outcome we already expect. A
+   * dead-looking button and a button that is genuinely dead are the same defect
+   * wearing different clothes; the answer to both is to not draw it.
+   */
+  canRetry: boolean
   /** Currently selected target language. */
   targetLang: TranslateLanguageCode
   /** User-stated source language. Corrects the caption; never gates a request. */
@@ -222,6 +273,70 @@ function targetKey(message: MailTranslationTarget | null): string | null {
   return `${message.accountId}\u0000${message.folder}\u0000${message.uid}`
 }
 
+/**
+ * Whether another attempt at THIS refusal could answer differently.
+ *
+ * The rule is one question asked per reason: is a second press, made right now
+ * with nothing else changed, REASONABLY LIKELY to produce a different result?
+ * Where the answer is no, the bar draws no button — because a control whose
+ * outcome we can already predict is a poor choice to offer, and here it is not a
+ * free one either: a press that main does not refuse before dispatch is a fresh
+ * billed request against the reader's own provider key.
+ *
+ * The bar for suppression is PROBABLE, not PROVEN, and the difference is worth
+ * writing down because the strong claim would be false. Nothing here can know
+ * that a provider is deterministic — several of these calls go out with a
+ * non-zero temperature, so a repeat CAN come back different. What the refusal
+ * proves is that the LAST answer hit the ceiling, not that every future one
+ * must. We suppress because a repeat is very likely to reproduce the same
+ * refusal AND COSTS MONEY TO FIND OUT, not because a different outcome is
+ * impossible.
+ *
+ * Exhaustive over `TranslateRefusalReason` with a `never` guard, so a reason
+ * added to the wire contract cannot quietly inherit someone else's verdict.
+ *
+ *   answer_too_long — NO. The message and the output ceiling are exactly what
+ *     they were a moment ago, so a repeat is asking the same model for the same
+ *     thing under the same limit — very likely the same refusal, at full price.
+ *     This is the case the 2026-08-31 incident was made of.
+ *   too_long — NO. The input cap is measured before any call; the same text
+ *     measures the same.
+ *   opt_out — NO. Turning the setting on flips `enabled`, which resets this hook
+ *     to idle and removes the refusal along with the button; so a press while
+ *     the refusal is still on screen is a press against an unchanged setting.
+ *   budget — YES. The cap belongs to a period that rolls, and it can also be
+ *     raised in Settings without anything here resetting.
+ *   no_provider — YES. Configuring a provider changes nothing in this hook's
+ *     state, so the refusal stays on screen and the retry is exactly the way
+ *     back.
+ *   empty_input — YES. The body is still downloading; its own copy tells the
+ *     reader to try once it has arrived.
+ *   provider_error — YES. By construction this is now the reason we have NO
+ *     explanation for, and an unexplained failure may well be transient. That is
+ *     the whole value of having split `answer_too_long` out of it.
+ */
+function refusalAllowsRetry(reason: TranslateRefusalReason): boolean {
+  switch (reason) {
+    case 'answer_too_long':
+    case 'too_long':
+    case 'opt_out':
+      return false
+    case 'budget':
+    case 'no_provider':
+    case 'empty_input':
+    case 'provider_error':
+      return true
+    default: {
+      const exhaustive: never = reason
+      void exhaustive
+      // An unknown reason from a newer main is not evidence that retrying is
+      // pointless, and refusing to draw the button would strand the reader with
+      // no way forward at all. Offer it.
+      return true
+    }
+  }
+}
+
 /** Default IPC runner — invokes the whitelisted `ai:translate:message` channel. */
 async function defaultTranslate(req: TranslateMessageRequest): Promise<TranslateMessageResult> {
   return (await window.api.invoke('ai:translate:message', req)) as TranslateMessageResult
@@ -247,6 +362,11 @@ export function useMailTranslation({
   // the result rather than a thing the reader opened.
   const [sourceChoiceOpen, setSourceChoiceOpen] = useState(false)
   const [view, setView] = useState<MailTranslationView>('original')
+  // Requests SENT for the question currently in view — presses that left the
+  // renderer, not calls we know were billed (see `attempts` on the result type).
+  // State rather than a derived value because it is the only thing on screen
+  // that is guaranteed to change when a repeat produces the identical refusal.
+  const [attempts, setAttempts] = useState(0)
 
   const translateRef = useRef(translate)
   translateRef.current = translate
@@ -295,6 +415,7 @@ export function useMailTranslation({
     setSourceLangState(null)
     setSourceChoiceOpen(false)
     setView('original')
+    setAttempts(0)
   }, [key, enabled])
 
   // Follow the interface language until the user overrides the target for this
@@ -326,6 +447,10 @@ export function useMailTranslation({
     setTranslation(null)
     setRefusal(null)
     setStatus('idle')
+    // A different target is a different question, so its attempt count starts
+    // over. Carrying the old one would report attempts at something the reader
+    // never asked for.
+    setAttempts(0)
     // The disclosure belonged to the caption of the result just dropped. Left
     // standing it would hang under a target selection with nothing to correct.
     setSourceChoiceOpen(false)
@@ -360,6 +485,14 @@ export function useMailTranslation({
     const requestId = ++requestIdRef.current
     setStatus('loading')
     setRefusal(null)
+    // Counted HERE, past the early return and before the await: the fact the
+    // reader needs is that this press was SENT, which is true the moment the
+    // request is issued and stays true whether the answer arrives, refuses, or
+    // is dropped as stale. Counting on the answer instead would leave the number
+    // still during the one situation it exists for. It is deliberately NOT
+    // moved to the answer in order to count billed calls either — the answer
+    // does not say whether one happened (see `attempts` on the result type).
+    setAttempts(n => n + 1)
 
     const req: TranslateMessageRequest = {
       accountId: target.accountId,
@@ -420,6 +553,11 @@ export function useMailTranslation({
     status,
     translation,
     refusal,
+    attempts,
+    // Only ever true while something is actually refusing: `canRetry` answers
+    // "should the button be drawn for THIS refusal", so with no refusal on
+    // screen there is nothing for it to be about.
+    canRetry: status === 'refused' && refusal !== null && refusalAllowsRetry(refusal),
     targetLang,
     sourceLang,
     needsLanguageChoice,

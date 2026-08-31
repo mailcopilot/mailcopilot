@@ -5,7 +5,7 @@
  * state, performs no IPC and makes no decision about when to call a provider.
  * Everything it shows is a projection of the hook (CLAUDE.md §5 hotspot policy).
  *
- * Four things this component is responsible for getting right:
+ * Five things this component is responsible for getting right:
  *
  *   1. **Nothing happens without a click.** The only provider-reaching control
  *      is the translate button. There is no auto-banner and no effect here.
@@ -20,7 +20,14 @@
  *      offers over a translation already on screen; neither blocks anything and
  *      neither costs a provider call.
  *
- *   4. **It says what was actually translated.** For an HTML mail, main
+ *   4. **A refusal is honest about what a retry would do.** The button is drawn
+ *      only when the hook says another attempt could end differently; when it
+ *      could not, there is no button, because a control with a known outcome is
+ *      not a choice and every press of this one is a paid request. From the
+ *      second attempt on, the refusal carries the count, so a repeat that
+ *      refuses identically is still visibly a repeat (2026-08-31 incident).
+ *
+ *   5. **It says what was actually translated.** For an HTML mail, main
  *      translates the cached plain-text projection of the body, not the rendered
  *      markup — so the reader is looking at a translation of something slightly
  *      different from what the pane normally shows them. `sourceIsTextProjection`
@@ -57,6 +64,12 @@ export default function MailTranslateBar({ state, originalIsHtml }: MailTranslat
   const { status, translation, refusal } = state
   const loading = status === 'loading'
   const ready = status === 'ready' && translation !== null
+  // A refusal that cannot answer differently gets NO button (2026-08-31). The
+  // hook owns that verdict per reason; re-deriving it here would put two answers
+  // to one question in two files. Idle and loading are not refusals, so they
+  // keep the control unconditionally — `canRetry` is only ever about a refusal
+  // that is on screen right now.
+  const showAction = status !== 'refused' || state.canRetry
 
   return (
     <>
@@ -83,7 +96,7 @@ export default function MailTranslateBar({ state, originalIsHtml }: MailTranslat
               ? t('mail.translate.showOriginal')
               : t('mail.translate.showTranslation')}
           </button>
-        ) : (
+        ) : showAction ? (
           <button
             type="button"
             className="mail-translate-action"
@@ -106,7 +119,7 @@ export default function MailTranslateBar({ state, originalIsHtml }: MailTranslat
               t('mail.translate.action')
             )}
           </button>
-        )}
+        ) : null}
       </div>
 
       {ready && state.showingTranslation && (
@@ -151,7 +164,35 @@ export default function MailTranslateBar({ state, originalIsHtml }: MailTranslat
 
       {status === 'refused' && refusal !== null && (
         <div className="meta-row mail-translate-refusal" data-testid="mail-translate-refusal">
-          <span>{t(`mail.translate.refusal.${refusal}`)}</span>
+          <span>
+            {t(`mail.translate.refusal.${refusal}`)}
+            {/* The attempt count, and ONLY from the second attempt on. A repeat
+                that refuses for the same reason repaints an identical screen,
+                which is indistinguishable from a button that did nothing — the
+                defect the reader reported. A number that moves on every press
+                answers that without pretending the outcome changed. It counts
+                REQUESTS SENT, not calls the provider was paid for: main can
+                refuse before contacting anyone (consent, budget, no provider,
+                input cap, cache hit) and never tells the renderer which
+                happened. The copy says "Attempt N" for that reason and must not
+                be reworded into a claim about money. Showing "1" on a first
+                refusal would be noise about a thing nobody is asking yet.
+
+                The interpolation is `n`, deliberately NOT `count`: i18next
+                treats `count` as a plural selector and resolves it through
+                suffixed keys. That is not a hypothetical here — ru.json already
+                carries `_few` / `_many` forms for the keys that do use `count`
+                — so naming this one `count` would send the lookup after six
+                plural forms per locale to render one ordinary number. */}
+            {state.attempts > 1 && (
+              <>
+                {' '}
+                <span data-testid="mail-translate-attempts">
+                  {t('mail.translate.attempt', { n: state.attempts })}
+                </span>
+              </>
+            )}
+          </span>
         </div>
       )}
 

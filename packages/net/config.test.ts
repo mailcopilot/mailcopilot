@@ -71,6 +71,8 @@ import {
   __resetMcpEnvSanitizationAuditFlagForTest,
   setSecretBackend,
   setAiApiKeySavedFlag,
+  forgetAccountAiConsents,
+  ACCOUNT_KEYED_CONSENT_FIELDS,
   type KeytarGetter,
 } from './config'
 import type { Settings, SecretBackend, SecretSurface } from './config'
@@ -1699,6 +1701,110 @@ describe('packages/net/config', () => {
       })
       const settings = getSettings()
       expect(settings.currentAccountId).toBe(1)
+    })
+
+    // --- consents do not outlive the account (account ids are reused) ---
+
+    describe('deleteAccount — per-account AI consents', () => {
+      const CONSENTS = {
+        aiThreadSummaryEnabled: { '1': true, '2': true },
+        aiInstantReplyEnabled: { '2': true },
+        aiProofreadEnabled: { '2': false },
+        aiTranslateEnabled: { '1': false, '2': true },
+      } as const
+
+      async function twoAccounts() {
+        await saveAccount({
+          imap: { host: 'imap1', port: 993, secure: true, user: 'a@test', pass: 'p' },
+          smtp: { host: 'smtp1', port: 587, secure: false, user: 'a@test', pass: 'p' },
+        })
+        await saveAccount({
+          imap: { host: 'imap2', port: 993, secure: true, user: 'b@test', pass: 'p' },
+          smtp: { host: 'smtp2', port: 587, secure: false, user: 'b@test', pass: 'p' },
+        })
+        saveSettings({ ...getSettings(), ...CONSENTS })
+      }
+
+      it('the list matches the account-keyed consent fields the schema carries', () => {
+        // The purge is driven by this array, so an opt-in added to the schema
+        // and forgotten here would silently outlive its account. Both sides are
+        // read from the parsed defaults rather than restated in prose.
+        const parsed = settingsSchema.parse({ theme: 'light' })
+        for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) {
+          expect(parsed[field]).toEqual({})
+        }
+        expect([...ACCOUNT_KEYED_CONSENT_FIELDS]).toEqual([
+          'aiThreadSummaryEnabled',
+          'aiInstantReplyEnabled',
+          'aiProofreadEnabled',
+          'aiTranslateEnabled',
+        ])
+      })
+
+      it('a consent granted to a mailbox does not survive deleting it', async () => {
+        await twoAccounts()
+        await deleteAccount(2)
+        const after = getSettings()
+        for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) {
+          expect(after[field], field).not.toHaveProperty('2')
+        }
+      })
+
+      it('leaves every other mailbox answer exactly as it was', async () => {
+        await twoAccounts()
+        await deleteAccount(2)
+        const after = getSettings()
+        expect(after.aiThreadSummaryEnabled).toEqual({ '1': true })
+        expect(after.aiInstantReplyEnabled).toEqual({})
+        expect(after.aiProofreadEnabled).toEqual({})
+        expect(after.aiTranslateEnabled).toEqual({ '1': false })
+      })
+
+      it('a NEW mailbox reusing the freed id comes up denied', async () => {
+        // The defect this pins: ids are handed out as max(existing) + 1, so the
+        // next account created after deleting #2 IS #2. With the leftover map
+        // entry, main's gate would read a genuine `true` for a mailbox whose
+        // owner never ticked anything.
+        await twoAccounts()
+        await deleteAccount(2)
+        const { id } = await saveAccount({
+          imap: { host: 'imap3', port: 993, secure: true, user: 'c@test', pass: 'p' },
+          smtp: { host: 'smtp3', port: 587, secure: false, user: 'c@test', pass: 'p' },
+        })
+        expect(id).toBe(2)
+        const after = getSettings()
+        for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) {
+          expect(after[field]?.['2'], field).toBeUndefined()
+        }
+      })
+
+      it('records the withdrawal as absence, not as a stored false', async () => {
+        // `false` means "asked and refused"; there is nobody left to have
+        // refused, and a stored `false` would also keep the map growing by one
+        // dead key per deleted mailbox.
+        await twoAccounts()
+        await deleteAccount(2)
+        expect(Object.keys(getSettings().aiThreadSummaryEnabled ?? {})).toEqual(['1'])
+      })
+
+      it('touches nothing else in settings', async () => {
+        await twoAccounts()
+        saveSettings({ ...getSettings(), theme: 'dark', cacheDays: 7 })
+        await deleteAccount(2)
+        const after = getSettings()
+        expect(after.theme).toBe('dark')
+        expect(after.cacheDays).toBe(7)
+      })
+
+      it('forgetAccountAiConsents writes nothing when the id has no record', () => {
+        // An account deleted before it was ever asked must not cause a settings
+        // write — `getSettings()` is a parse, and re-persisting it on every
+        // deletion would rewrite fields nobody touched.
+        saveSettings({ ...getSettings(), aiTranslateEnabled: { '1': true } })
+        const before = storeData.get('settings')
+        forgetAccountAiConsents(7)
+        expect(storeData.get('settings')).toBe(before)
+      })
     })
 
     it('deleteAccount updates currentAccountId', async () => {

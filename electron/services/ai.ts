@@ -6215,36 +6215,104 @@ function geminiStopReason(raw: unknown): AiChatStopReason {
 }
 
 /**
- * Coerce a provider's raw token counts into clean, finite, non-negative usage,
- * or `null` when the provider reported no usable usage. Defensive at the SOURCE
- * so a malformed provider response (NaN / Infinity / non-number / missing) never
- * flows into the cost estimator as a poison value — the AI Rules pipeline then
- * fails closed to its budget reservation rather than computing a NaN cost that
- * would silently disable the daily budget. Mirrors the same `Number.isFinite`
- * guard inside `estimateAiRuleCostUsd` (defense in depth on both ends).
+ * Is this ONE provider-reported count usable as a token count at all? Returns
+ * the number unchanged, or `null` when the provider reported something a token
+ * count cannot be.
  *
- * The contract is "non-number → null". We therefore require the raw value to be
- * a real `number` BEFORE any finite check — we do NOT `Number(raw)`-coerce.
- * Coercion would let a boolean (`true`→1, `false`→0), a numeric string
- * (`'5'`→5), or a single-element array (`[5]`→5) masquerade as a valid token
- * count and produce a MICROSCOPIC measured cost instead of the fail-closed
- * reservation — a subtle budget-bypass where a provider returning garbage usage
- * gets charged near-zero instead of the conservative reservation. Rejecting any
- * non-`number` outright forces the pipeline onto the reservation path, which is
- * the fail-closed default.
+ * USABLE MEANS: a genuine `number`, and a non-negative integer within the safe
+ * integer range. Everything else is REJECTED, never repaired — that is the whole
+ * point of the helper, so state what each rejection is protecting:
+ *
+ *  - NOT A `number` — checked before anything else, and we do NOT `Number(raw)`-
+ *    coerce. Coercion would let a boolean (`true`→1, `false`→0), a numeric string
+ *    (`'5'`→5) or a single-element array (`[5]`→5) masquerade as a valid count
+ *    and produce a MICROSCOPIC measured cost instead of the fail-closed
+ *    reservation — a budget bypass where garbage usage is charged near zero.
+ *    A MISSING field (`undefined`) lands here too, which is what makes the
+ *    "missing → null" contract real.
+ *  - NaN / ±Infinity — a non-finite cost typeof-checks as `number` and, once
+ *    accumulated, makes every `>= maxBudget` comparison false, silently
+ *    disabling the daily budget. Mirrors the `Number.isFinite` guard inside
+ *    `estimateAiRuleCostUsd` (defense in depth at both ends).
+ *  - NEGATIVE — rejected, NOT clamped to zero. `-5` output tokens is not the
+ *    provider telling us the output was free; it is the provider telling us its
+ *    meter is broken. Clamping substitutes OUR number (0) for its broken one and
+ *    charges the call as if the output were free, which is the same defect class
+ *    as the `?? 0` this function exists to prevent (CLAUDE.md §5 "кто владеет
+ *    правдой"). The fail-closed reservation is the correct answer instead.
+ *  - FRACTIONAL — rejected, NOT floored, for the same reason: tokens are counted
+ *    in whole units, so `12.7` is not a count we may round, it is a response we
+ *    may not price. Flooring would publish `12` as though the provider had said
+ *    it.
+ *  - ABOVE `Number.MAX_SAFE_INTEGER` — the value lost precision before it
+ *    reached us, so it is no longer the number the provider sent, and pricing it
+ *    would book a fabricated charge (real counts are seven orders of magnitude
+ *    below this).
+ *
+ * The streaming contour normalizes per-step increments differently on purpose
+ * (`usableStepTokens` / `normalizeStepTokens` in `aiRequestBudget.ts`): one
+ * malformed STEP must not discard the tokens every other step of the same
+ * request legitimately reported. The reasoning for that trade lives there.
  */
-function normalizeChatUsage(
-  rawInput: unknown,
-  rawOutput: unknown,
+function usableReportedTokens(raw: unknown): number | null {
+  if (typeof raw !== 'number') return null
+  // `Number.isSafeInteger` is false for NaN, ±Infinity and any fractional value,
+  // so this single predicate carries three of the five rejections above.
+  if (!Number.isSafeInteger(raw)) return null
+  if (raw < 0) return null
+  return raw
+}
+
+/**
+ * Coerce a provider's REPORTED token counts into usage we may price, or `null`
+ * when the provider reported no usable usage. Defensive at the SOURCE so a
+ * malformed provider response never flows into the cost estimator as a poison
+ * value — the AI Rules pipeline then fails closed to its budget reservation
+ * rather than computing a NaN cost that would silently disable the daily budget.
+ *
+ * The contract is "anything a token count cannot be → `null`", for BOTH halves;
+ * {@link usableReportedTokens} owns that predicate and documents each rejection.
+ * Nothing here repairs a number: the only outputs are the provider's own two
+ * counts, or `null`.
+ *
+ * ## Why it reads the provider's object itself instead of taking two numbers
+ *
+ * It used to take the two counts as arguments, and all three adapters spelled
+ * the call `normalizeChatUsage(json.usage.prompt_tokens ?? 0, ...)` — so a
+ * MISSING half arrived here already wearing a zero, and the "missing → null"
+ * contract above could never fire for it. A 2xx carrying
+ * `{"prompt_tokens": 100}` and nothing else then priced as 100 input and 0
+ * output tokens: one half positive, so `estimateAiRuleCostUsd` returns a real
+ * number, the null-usage floor never applies, and the paid output is billed at
+ * zero. Reachable from any OpenAI-compatible endpoint that reports partial
+ * usage, without touching a line of this repository.
+ *
+ * A zero the provider SENT and a zero we substituted on its behalf are
+ * different facts, and telling them apart cannot be left to caller discipline
+ * (CLAUDE.md §5 "кто владеет правдой"). So the shape of the argument enforces
+ * it: the adapter hands over the provider's own usage object and the NAMES of
+ * the two fields, and there is no expression in between where a default can be
+ * substituted. Absent object, absent field and garbage field all land on the
+ * same `null`, which is the fail-closed reservation.
+ *
+ * The key parameters are constrained to `keyof T`, so a mistyped field name is
+ * a compile error rather than a silent permanent `null` (which would read as
+ * "this provider never reports usage" and quietly charge the floor forever).
+ */
+function normalizeChatUsage<T extends object, KIn extends keyof T, KOut extends keyof T>(
+  reported: T | null | undefined,
+  inputKey: KIn,
+  outputKey: KOut,
 ): { inputTokens: number; outputTokens: number } | null {
-  // Strict type gate first: only a genuine number may price the call. A boolean,
-  // numeric string, array, or object is treated as "no usable usage" → null.
-  if (typeof rawInput !== 'number' || typeof rawOutput !== 'number') return null
-  if (!Number.isFinite(rawInput) || !Number.isFinite(rawOutput)) return null
-  return {
-    inputTokens: Math.max(0, Math.floor(rawInput)),
-    outputTokens: Math.max(0, Math.floor(rawOutput)),
-  }
+  // No usage object at all ⇒ the provider told us nothing about the cost.
+  if (!reported) return null
+  const inputTokens = usableReportedTokens(reported[inputKey])
+  const outputTokens = usableReportedTokens(reported[outputKey])
+  // An unusable HALF is enough: a call we can only half-price is one we cannot
+  // price. Both halves stated and one of them genuinely `0` is NOT this case —
+  // that is a measurement, and it prices as one.
+  if (inputTokens === null || outputTokens === null) return null
+  return { inputTokens, outputTokens }
 }
 
 /**
@@ -6291,17 +6359,45 @@ function normalizeChatUsage(
  * settling, so the refusal the user sees is unchanged; only the accounting is.
  */
 /**
- * The result for a call the provider ACCEPTED (2xx) but whose body yielded no
- * usable text — unparseable JSON, an empty completion, a refusal object. Those
- * tokens were billed, so this must be a NON-NULL result: it routes the caller
- * into settle-then-report-error instead of release-as-if-free (§2.51 fix-3).
- * `usage: null` makes the settle fall back to the conservative model-aware floor,
- * which is the right charge for a call we cannot price.
+ * The result for a call the provider ACCEPTED (2xx) whose body we could not read
+ * at all — unparseable JSON. Those tokens were billed, so this must be a
+ * NON-NULL result: it routes the caller into settle-then-report-error instead of
+ * release-as-if-free (§2.51 fix-3). `usage: null` makes the settle fall back to
+ * the conservative model-aware floor, which is the right charge for a call we
+ * genuinely cannot price.
+ *
+ * ## What this is NOT for any more (2026-08-31 incident)
+ *
+ * It used to stand in for a SECOND case: a body that parsed fine and reported
+ * both `usage` and a finish reason, but carried no text. Substituting this
+ * result there DELETED two facts the provider had just told us, and both were
+ * load-bearing:
+ *
+ *   - `usage` is the only authority on what the call cost. Dropping it charged
+ *     the invented floor instead of the reported number — the "fabricating
+ *     money" failure §2.51 was retired for (CLAUDE.md §5 "кто владеет правдой")
+ *     — and wrote NULL token counts into the append-only audit log for calls
+ *     that were billed, so the one record a user reads to see what a request
+ *     cost said "unknown" precisely when it was not.
+ *   - `finish_reason` is the only authority on whether the answer ran out of
+ *     room. Forcing `unknown` erased `length`, which is the difference between
+ *     "the provider hiccuped, try again" and "this message did not fit under the
+ *     current output cap, so a retry is very likely to buy the same nothing".
+ *     LIKELY, not certain: a provider is not promised to be deterministic and
+ *     these calls carry a non-zero temperature. What `length` proves is what the
+ *     LAST answer did — enough to stop recommending a repeat that costs money,
+ *     not enough to claim the next one is impossible.
+ *
+ * The user-visible defect that exposed it: nineteen consecutive billed
+ * `translate_message` calls against an OpenAI-compatible endpoint, each a
+ * deliberate click on "try again", every one of them logged as "provider
+ * returned no usable text" with NULL tokens and no verdict — leaving no way to
+ * tell why, from inside the product, that retry could never succeed.
  */
 function billedUnusableResult(model: string): AiChatSimpleResult {
-  // `unknown`, never `stop`: there is no usable body, so there is no verdict to
-  // report, and a caller that treats `stop` as "complete" must not be handed one
-  // we invented.
+  // `unknown`, never `stop`: there is no readable body, so there is no verdict
+  // to report, and a caller that treats `stop` as "complete" must not be handed
+  // one we invented.
   return { text: '', model, usage: null, stopReason: 'unknown' }
 }
 
@@ -6313,10 +6409,20 @@ function billedUnusableResult(model: string): AiChatSimpleResult {
 export interface AiChatSimpleOptions {
   /**
    * Provider-side output cap for this call (`max_tokens` / `maxOutputTokens`).
-   * Defaults to {@link AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS}. Lowering it bounds the
+   * Defaults to {@link AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS}, and can only NARROW:
+   * a larger value is clamped back down to that default. Lowering it bounds the
    * ACTUAL cost of the call; it does NOT lower the conservative budget
    * reservation the caller holds (that floor is model-aware and priced for the
    * default cap — safe-side, never an under-reservation).
+   *
+   * The clamp is what keeps that last sentence true. The reservation is priced
+   * from `AI_RULE_MAX_OUTPUT_TOKENS`, which the default cap is pinned at or
+   * below (`ai.test.ts`); a caller free to ask for MORE than the default would
+   * reopen exactly that gap — request 8000 output tokens, get reserved for 2500
+   * whenever the provider reports no usable usage — and no test pinning the two
+   * CONSTANTS would notice, because neither constant moved. Today's only caller
+   * passes 20, so the clamp changes no current behaviour; it removes the way a
+   * future caller could widen the request past what the reservation prices.
    */
   maxOutputTokens?: number
   /**
@@ -6336,8 +6442,50 @@ export interface AiChatSimpleOptions {
   settings?: Settings
 }
 
-/** Default provider-side output cap for a one-shot completion. */
-export const AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS = 2000
+/**
+ * Default provider-side output cap for a one-shot completion.
+ *
+ * ## 2000 → 2500 (2026-08-31)
+ *
+ * This number is OUR ESTIMATE OF SOMEONE ELSE'S MODEL, not a fact we own, and
+ * it is written down as an estimate on purpose. What we actually measured is
+ * one data point: the last translation that succeeded before the incident spent
+ * 1001 output tokens, i.e. the old ceiling stood one comparable message away
+ * from the first failure. What we then reasoned, and cannot verify from here, is
+ * that a model which thinks before it answers spends part of THIS budget on the
+ * thinking — so the room a translation needs is not the length of the
+ * translation. 2500 buys headroom for that; it does not prove any particular
+ * message fits.
+ *
+ * The honest fix is not a better guess. It is to stop guessing: the person who
+ * chose the model knows its answer limits and we do not, so the ceiling belongs
+ * in advanced settings (backlog, 1.27). Until then, a message whose translation
+ * does not fit is REFUSED and SAID SO — `answer_too_long` — rather than shown
+ * cut off or offered a retry that is very unlikely to succeed.
+ *
+ * RAISING THIS HAS A COMPANION EDIT. The conservative §2.51 reservation for a
+ * call whose provider reported no usable usage is priced from
+ * `AI_RULE_MAX_OUTPUT_TOKENS` in packages/core/aiRules.ts, which does not read
+ * this constant (layering: core must not import from electron/) — so for one
+ * release the two drifted, this cap said 2500 while the "worst case" was still
+ * priced at 2000, and the documented worst case was no longer the worst case.
+ * The invariant is now an inequality, `AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS <=
+ * AI_RULE_MAX_OUTPUT_TOKENS`, asserted in `ai.test.ts`: raise this above the
+ * yardstick and a test fails. The inequality, not equality, is deliberate — the
+ * same yardstick floors reservations for the streaming contour, so LOWERING
+ * this one-shot cap must not lower a floor other callers rely on. Whether that
+ * yardstick should have stayed SHARED when it was raised is answered at the
+ * constant itself ("Why the raise is SHARED and not per-contour"). §2.51
+ * admission is otherwise unchanged, and `AI_RULE_NULL_USAGE_COST_FLOOR` ($0.05)
+ * remains the hard minimum.
+ *
+ * The inequality is between CONSTANTS, so it only covers actual requests
+ * because `AiChatSimpleOptions.maxOutputTokens` may narrow and never widen: a
+ * per-call value above this one is clamped back to it. Without that clamp a
+ * caller could ask for more output than the reservation prices while both
+ * constants, and the test on them, stayed put.
+ */
+export const AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS = 2500
 
 /**
  * The un-collapsed billing verdict for a one-shot completion (§2.51.f2
@@ -6543,11 +6691,16 @@ export async function aiChatSimpleOutcome(
       dispatched = true
       return inFlight
     }
-    const maxOutputTokens = typeof opts?.maxOutputTokens === 'number'
+    // The option may only NARROW the request (see AiChatSimpleOptions): an
+    // invalid value falls back to the default cap, and a larger one is clamped
+    // to it, so the request never asks for more output than the conservative
+    // reservation is priced for.
+    const requestedMaxOutputTokens = typeof opts?.maxOutputTokens === 'number'
       && Number.isFinite(opts.maxOutputTokens)
       && opts.maxOutputTokens > 0
       ? Math.floor(opts.maxOutputTokens)
       : AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS
+    const maxOutputTokens = Math.min(requestedMaxOutputTokens, AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS)
 
     if (provider === 'openai-api') {
       const key = await getApiKey('openai-api')
@@ -6581,16 +6734,17 @@ export async function aiChatSimpleOutcome(
           choices?: Array<{ message?: { content?: string }; finish_reason?: unknown }>
           usage?: { prompt_tokens?: number; completion_tokens?: number }
         }
+        // A body that PARSED reports what it reports whether or not it carried
+        // text. `text: ''` is still the caller's error signal; the usage and the
+        // verdict beside it are the provider's own facts and are not ours to
+        // discard — see {@link billedUnusableResult}.
         const text = json.choices?.[0]?.message?.content?.trim()
-        if (!text) return { kind: 'billed', result: billedUnusableResult(model) }
         return {
           kind: 'billed',
           result: {
-            text,
+            text: text ?? '',
             model,
-            usage: json.usage
-              ? normalizeChatUsage(json.usage.prompt_tokens ?? 0, json.usage.completion_tokens ?? 0)
-              : null,
+            usage: normalizeChatUsage(json.usage, 'prompt_tokens', 'completion_tokens'),
             stopReason: openAiStopReason(json.choices?.[0]?.finish_reason),
           },
         }
@@ -6629,19 +6783,19 @@ export async function aiChatSimpleOutcome(
           candidates?: Array<{ finishReason?: unknown }>
           usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number }
         }
+        // Parsed body ⇒ keep its usage and verdict even with no text; see the
+        // openai branch and {@link billedUnusableResult}.
         const text = parseGeminiText(json)?.trim()
-        if (!text) return { kind: 'billed', result: billedUnusableResult(model) }
         return {
           kind: 'billed',
           result: {
-            text,
+            text: text ?? '',
             model,
-            usage: json.usageMetadata
-              ? normalizeChatUsage(
-                  json.usageMetadata.promptTokenCount ?? 0,
-                  json.usageMetadata.candidatesTokenCount ?? 0,
-                )
-              : null,
+            usage: normalizeChatUsage(
+              json.usageMetadata,
+              'promptTokenCount',
+              'candidatesTokenCount',
+            ),
             stopReason: geminiStopReason(json.candidates?.[0]?.finishReason),
           },
         }
@@ -6682,16 +6836,15 @@ export async function aiChatSimpleOutcome(
           stop_reason?: unknown
           usage?: { input_tokens?: number; output_tokens?: number }
         }
+        // Parsed body ⇒ keep its usage and verdict even with no text; see the
+        // openai branch and {@link billedUnusableResult}.
         const text = json.content?.[0]?.text?.trim()
-        if (!text) return { kind: 'billed', result: billedUnusableResult(model) }
         return {
           kind: 'billed',
           result: {
-            text,
+            text: text ?? '',
             model,
-            usage: json.usage
-              ? normalizeChatUsage(json.usage.input_tokens ?? 0, json.usage.output_tokens ?? 0)
-              : null,
+            usage: normalizeChatUsage(json.usage, 'input_tokens', 'output_tokens'),
             stopReason: anthropicStopReason(json.stop_reason),
           },
         }

@@ -2564,8 +2564,89 @@ export async function saveAccount(input: unknown): Promise<{ id: number }> {
   return { id }
 }
 
+/**
+ * Settings fields that are maps keyed by stringified account id AND hold a
+ * consent — a recorded answer to "may this mailbox use this feature".
+ *
+ * Kept as an array rather than spelled out at the call site so that adding a
+ * fifth per-account opt-in has ONE place to be registered, and so a test can
+ * assert the list matches the schema instead of trusting prose.
+ */
+export const ACCOUNT_KEYED_CONSENT_FIELDS = [
+  'aiThreadSummaryEnabled',
+  'aiInstantReplyEnabled',
+  'aiProofreadEnabled',
+  'aiTranslateEnabled',
+] as const
+
+export type AccountKeyedConsentField = typeof ACCOUNT_KEYED_CONSENT_FIELDS[number]
+
+/**
+ * Drop every recorded consent belonging to one account id.
+ *
+ * Why this exists: account ids are handed out as `max(existing) + 1`, so a
+ * freed number can come back — deleting the highest-numbered mailbox hands its
+ * id to the next one created. Delete a mailbox that had been allowed to use,
+ * say, AI Translate, add another, and the main-side gate reads a map that still
+ * says `{"2": true}` and honours it. The new mailbox comes up with a consent
+ * its owner never gave, and from main's point of view that `true` is a
+ * perfectly honest record. The §1.26 consent grid widened the exposure: one
+ * click on a column header now writes `true` for every mailbox at once,
+ * including the id that is about to be freed.
+ *
+ * The entry is DELETED, not set to `false`: `false` means "asked and refused",
+ * and there is no longer anyone to have refused. See `forgetAccountAiConsents`
+ * usage in `deleteAccount` for why it runs before the record is removed.
+ *
+ * The durable, id-keyed state that lives elsewhere is already handled: DB rows
+ * by `deleteAccountData` (packages/db), secrets by `deleteAccount` itself, and
+ * main's in-memory registries by `completeAccountRemoval` — including the
+ * account GENERATION, which is the same defence applied to sign-in verdicts in
+ * §2.165.
+ */
+export function forgetAccountAiConsents(id: number): void {
+  const key = String(id)
+  const settings = getSettings()
+  const patch: { [K in AccountKeyedConsentField]?: Record<string, boolean> } = {}
+  let changed = false
+  for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) {
+    const map = settings[field]
+    if (!map || !Object.prototype.hasOwnProperty.call(map, key)) continue
+    const nextMap = { ...map }
+    delete nextMap[key]
+    patch[field] = nextMap
+    changed = true
+  }
+  if (!changed) return
+  saveSettings({ ...settings, ...patch })
+}
+
 export async function deleteAccount(id: number): Promise<void> {
   ensureMigratedSingleAccountToAccounts()
+  // The consents go FIRST — before the record, the secrets and the rows.
+  //
+  // Everything below this line can fail (the OAuth cleanup awaits are not
+  // wrapped), and an id can come back: `saveAccount` assigns `max(existing) + 1`,
+  // so deleting the highest-numbered mailbox frees its number for the next one.
+  //
+  // What the ordering buys is one guarantee and nothing wider: no path through
+  // this function ends with the account record gone and its consents still
+  // recorded. That is the direction §2.82 calls safe — a withdrawal may happen
+  // too eagerly, a grant may not outlive the owner it belonged to. Running the
+  // purge last would invert exactly that: a rejection in the secret cleanup
+  // would leave the record removed and the `true` behind, and
+  // `completeAccountRemoval` in main (the teardown owner for that case) has no
+  // access to the settings store.
+  //
+  // Other residue a partial failure can leave is NOT ruled out, in either
+  // direction: a throw before `store.set('accounts', …)` leaves the mailbox
+  // listed with its consents already withdrawn, and a throw after it leaves the
+  // record gone with secrets, EMLs or rows partly behind.
+  //
+  // The purge is also not the last word on the maps — the settings window is a
+  // second writer and can merge a stale entry back. That is refused in main
+  // (`settings:save`, electron/accountKeyedConsents.ts).
+  forgetAccountAiConsents(id)
   // FINDING 3: snapshot the backend once for this operation's direct secret
   // deletes. The OAuth cleanup below routes through the internal
   // `*With(backend, ...)` helpers so the nested secret work shares this single

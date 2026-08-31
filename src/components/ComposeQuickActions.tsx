@@ -1,16 +1,26 @@
 /**
  * ComposeQuickActions — B4 Compose Quick Actions toolbar.
  *
- * A thin toolbar rendered above the compose body: four preset buttons
- * (Improve / Shorter / Formal / Grammar), an inline loading/refusal status, and
- * the before/after diff preview. All logic lives in `useQuickActions`; this
+ * A thin toolbar rendered above the compose body: three preset buttons
+ * (Improve / Shorter / Formal), an inline loading/refusal status, and the
+ * before/after diff preview. All logic lives in `useQuickActions`; this
  * component wires the current draft text + caret in, and applies the user's
  * Replace/Insert choice out via callbacks the parent owns. No hardcoded copy.
  *
+ * §1.26.1(1): the presets are three TONES, and the fourth one ("fix grammar")
+ * was retired from the panel because it read as the same promise as the B7
+ * check while implementing a different acceptance model — see
+ * `QUICK_ACTION_PRESETS` in `../utils/quickActions`. The two remaining kinds of
+ * button therefore SAY which model they use: a preset rewrites the draft as a
+ * whole, the check lists remarks accepted one by one.
+ *
  * The parent (Compose) keeps ownership of the textarea state and passes:
  *   - `text` — current draft body (captured at click time to send to backend);
- *   - `getCaret` — current caret index (read lazily on Insert);
- *   - `onReplace(next)` / `onInsert(rewritten, caret)` — mutation callbacks.
+ *   - `onReplace(next)` / `onInsert(body, caret)` — mutation callbacks. The
+ *     second one does NOT insert at the caret: §1.26.1 AC-9 puts the generated
+ *     text at the END of the user's own part (`insertAtOwnTextEnd`), above the
+ *     quote, the forwarded banner and the signature, and `caret` is where the
+ *     selection should land afterwards, not where the text came from.
  * This keeps the "no auto-substitution" invariant: the body only changes when
  * the parent's callback runs after an explicit Replace/Insert.
  *
@@ -20,8 +30,8 @@
  *     the bare model output over the whole body.
  *   - Replace is refused — button disabled plus a handler guard — when the body
  *     changed after the rewrite was requested, so text typed during generation
- *     cannot disappear. Insert at cursor stays available because it splices
- *     into the CURRENT body and can therefore lose nothing.
+ *     cannot disappear. Insert stays available because it splices into the
+ *     CURRENT body and can therefore lose nothing.
  *
  * The three actions on this bar (rewrite presets, proofread, translate) own
  * independent state machines that cannot see each other, so this component is
@@ -46,7 +56,7 @@ import {
   QUICK_ACTION_PRESETS,
   quickActionLabelKey,
   hasRewritableText,
-  insertAtCaret,
+  insertAtOwnTextEnd,
   isBlockedByOtherAction,
   isPreviewStale,
   type ComposeAiActivity,
@@ -68,15 +78,20 @@ export type ComposeQuickActionsProps = {
   /**
    * §3.3 B7: whether the per-account AI Proofread opt-in
    * (`settings.aiProofreadEnabled["<accountId>"]`) is on for this account.
-   * Default OFF — the Check button is not rendered at all when it is off, so
-   * the feature is invisible until it is asked for. Main gates independently
-   * and refuses with `not_enabled`; this is UX, not the security boundary.
+   * Default OFF. §1.26.1(2): when it is off the button is still RENDERED, in a
+   * visibly locked state with a hint naming where to switch it on — a control
+   * that vanishes makes "you turned this off" indistinguishable from "this
+   * build has no such feature", which is exactly how the author of the feature
+   * came to believe translation had not shipped. Main gates independently and
+   * refuses with `not_enabled`; this is UX and defence in depth, never the
+   * security boundary.
    */
   proofreadEnabled?: boolean
   /**
    * §3.3 B6 (draft side): whether the per-account AI Translate opt-in
-   * (`settings.aiTranslateEnabled["<accountId>"]`) is on for this account. The
-   * control is not rendered at all when it is off. Main gates the channel
+   * (`settings.aiTranslateEnabled["<accountId>"]`) is on for this account.
+   * §1.26.1(2): when it is off the control is still rendered, visibly locked,
+   * for the same reason as `proofreadEnabled` above. Main gates the channel
    * independently and refuses with `opt_out` — defence in depth, not a
    * duplicate: the setting can change between paint and click.
    */
@@ -106,11 +121,13 @@ export type ComposeQuickActionsProps = {
    * hung-toolbar defect the reset was introduced to fix.
    */
   composeGeneration: number
-  /** Lazily read the current caret index in the body textarea. */
-  getCaret: () => number
   /** Replace the whole draft body with `next`. */
   onReplace: (next: string) => void
-  /** Insert `text` at `caret`, returning the new body + caret to the parent. */
+  /**
+   * Splice the generated text in at the end of the user's own text (§1.26.1
+   * AC-9) and hand the parent the new body plus the caret index right after it.
+   * The parent restores the selection; this component does not touch the DOM.
+   */
   onInsert: (next: string, caret: number) => void
 }
 
@@ -175,12 +192,18 @@ function proofreadRefusalMessageKey(reason: ProofreadDisplayRefusal): string {
 /**
  * Map a draft-translation refusal to its localized inline message key.
  *
- * Exhaustive over `TranslateDraftRefusalReason` — seven reasons, seven arms,
+ * Exhaustive over `TranslateDraftRefusalReason` — eight reasons, eight arms,
  * deliberately NOT collapsed into a shared "the provider failed" line
  * (§3.3.B4.f3(a)): each one has a different actionable answer (raise the
  * budget, add a provider, turn the setting on, write something above the
  * quote, shorten the draft, try again). The `default:` arm exists only for an
  * unknown value from a rogue/older main.
+ *
+ * `answer_too_long` is the newest of them (2026-08-31) and the reason the count
+ * moved from seven: it used to arrive as `provider_error`, whose copy invites
+ * another attempt — advice the product knew would fail, at the price of a fresh
+ * billed call. Its own line says the opposite, and the button beside it goes
+ * dead (`canRetryFor`), so the copy and the control agree.
  */
 function translateRefusalMessageKey(reason: TranslateDraftRefusalReason): string {
   switch (reason) {
@@ -190,6 +213,8 @@ function translateRefusalMessageKey(reason: TranslateDraftRefusalReason): string
       return 'ai.quickAction.translate.refusal.noProvider'
     case 'provider_error':
       return 'ai.quickAction.translate.refusal.providerError'
+    case 'answer_too_long':
+      return 'ai.quickAction.translate.refusal.answerTooLong'
     case 'empty_input':
       return 'ai.quickAction.translate.refusal.emptyInput'
     case 'too_long':
@@ -211,7 +236,6 @@ export function ComposeQuickActions({
   translateEnabled = false,
   suggestedTargetLang = null,
   composeGeneration,
-  getCaret,
   onReplace,
   onInsert,
 }: ComposeQuickActionsProps) {
@@ -231,6 +255,22 @@ export function ComposeQuickActions({
   })
 
   const canRun = accountId != null && !disabled && hasRewritableText(text)
+  // §1.26.1(2) / invariant B1: a per-account opt-in that is OFF makes the control
+  // LOCKED, not absent. `locked` is about consent only — the ordinary transient
+  // reasons (mid-send, empty draft, another action occupying the draft) keep
+  // using the real `disabled` attribute, because those are momentary states the
+  // user does not have to go anywhere to resolve.
+  const proofreadLocked = !proofreadEnabled
+  const translateLocked = !tr.active
+  // 2026-08-31: a refusal that cannot answer differently over THIS body must not
+  // leave a live button behind it. The verdict is the hook's — one exhaustive
+  // switch with a `never` guard, next to the state it reads — and it is asked
+  // with the CURRENT text, so the moment the writer edits the draft (which is
+  // exactly what several of those refusals ask them to do) the control comes
+  // back on its own. `disabled` rather than `aria-disabled`: unlike the consent
+  // lock, this resolves right here in the compose window, and the refusal line
+  // underneath is what explains it.
+  const translateRetryFutile = !tr.canRetryFor(text)
   // The check is stale as soon as the body differs from the snapshot it was
   // computed over: every offset indexes into that exact string (§2.78 AC-h).
   const proofreadStale = pr.review != null && isPreviewStale(pr.review, text)
@@ -266,7 +306,10 @@ export function ComposeQuickActions({
               disabled={!canRun || qa.status === 'loading' || isBlockedByOtherAction(activity, 'rewrite')}
               aria-busy={isRunning}
               onClick={() => qa.run(preset, text)}
-              title={t(quickActionLabelKey(preset))}
+              // §1.26.1(1): the title states the ACCEPTANCE MODEL, which is the
+              // thing that distinguished this row from the check button and was
+              // nowhere in the UI.
+              title={t('ai.quickAction.presetTitle', { label: t(quickActionLabelKey(preset)) })}
             >
               {isRunning ? (
                 <Loader2 size={13} className="spin" aria-hidden="true" />
@@ -275,19 +318,43 @@ export function ComposeQuickActions({
             </button>
           )
         })}
-        {/* §3.3 B7: rendered only for an account that opted in. Sits with the
-            rewrite presets because it acts on the same draft, but it is not a
-            fifth preset — it returns a list of individually acceptable edits,
-            not one rewritten string. */}
-        {proofreadEnabled && (
+        {/* §3.3 B7: sits with the rewrite presets because it acts on the same
+            draft, but it is not a fourth preset — it returns a list of
+            individually acceptable edits, not one rewritten string, and its
+            label and title say so (§1.26.1(1)).
+
+            §1.26.1(2): rendered for ANY account, opted in or not. When the
+            opt-in is off it is locked, with a hint naming where to switch it
+            on — see the `proofreadEnabled` prop doc for why absence was the
+            defect. */}
+        {accountId != null && (
           <button
             type="button"
-            className="compose-quick-action-btn compose-proofread-btn"
+            className={
+              'compose-quick-action-btn compose-proofread-btn'
+              + (proofreadLocked ? ' is-consent-locked' : '')
+            }
             data-testid="compose-proofread-run"
-            disabled={!canRun || pr.status === 'loading' || isBlockedByOtherAction(activity, 'proofread')}
+            // `aria-disabled`, NOT the `disabled` attribute (W3C ARIA APG):
+            // `disabled` takes the element out of the tab order, so a keyboard
+            // or screen-reader user could not reach the very control whose hint
+            // tells them where to turn the feature on.
+            aria-disabled={proofreadLocked || undefined}
+            disabled={
+              !proofreadLocked
+              && (!canRun || pr.status === 'loading' || isBlockedByOtherAction(activity, 'proofread'))
+            }
             aria-busy={pr.status === 'loading'}
-            onClick={() => pr.run(text)}
-            title={t('ai.quickAction.proofread.button')}
+            onClick={() => {
+              // The renderer half of the gate. Main refuses `not_enabled` on
+              // its own and remains the boundary; this only makes sure a
+              // locked, still-clickable button never spends a provider call.
+              if (proofreadLocked) return
+              pr.run(text)
+            }}
+            title={proofreadLocked
+              ? t('ai.quickAction.proofread.disabledHint')
+              : t('ai.quickAction.proofread.buttonTitle')}
           >
             {pr.status === 'loading'
               ? <Loader2 size={13} className="spin" aria-hidden="true" />
@@ -297,12 +364,17 @@ export function ComposeQuickActions({
               : t('ai.quickAction.proofread.button')}
           </button>
         )}
-        {/* §3.3 B6 draft side: rendered only for an account that opted in. A
-            picker plus one button, and NOTHING here is an effect — no
-            translation is ever requested on window open, when the suggested
-            language appears, when the user changes it, or a second time after
-            one was produced. The button is inert until a target exists. */}
-        {tr.active && (
+        {/* §3.3 B6 draft side: a picker plus one button, and NOTHING here is an
+            effect — no translation is ever requested on window open, when the
+            suggested language appears, when the user changes it, or a second
+            time after one was produced. The button is inert until a target
+            exists.
+
+            §1.26.1(2): rendered for ANY account. With the opt-in off the picker
+            is inert and the button is locked with a hint, rather than the whole
+            control disappearing — the disappearance is what made a switched-off
+            setting look like a missing feature. */}
+        {accountId != null && (
           <>
             <Languages size={14} className="compose-quick-actions-icon" aria-hidden="true" />
             {/* The picker is NOT gated on the toolbar's occupancy: choosing a
@@ -315,19 +387,35 @@ export function ComposeQuickActions({
               ariaLabel={t('ai.quickAction.translate.targetLabel')}
               testId="compose-translate-target"
               placeholder={t('ai.quickAction.translate.targetPlaceholder')}
-              disabled={disabled}
+              // The picker keeps the real `disabled` attribute while locked: it
+              // is not the element that carries the "where to switch this on"
+              // hint, the button next to it is, and that one stays focusable.
+              disabled={disabled || translateLocked}
             />
             <button
               type="button"
-              className="compose-quick-action-btn compose-translate-btn"
+              className={
+                'compose-quick-action-btn compose-translate-btn'
+                + (translateLocked ? ' is-consent-locked' : '')
+              }
               data-testid="compose-translate-run"
+              // Same rule as the check button: consent-off is `aria-disabled`
+              // (focusable, findable), everything transient stays `disabled`.
+              aria-disabled={translateLocked || undefined}
               disabled={
-                !canRun || !tr.canRun || tr.busy
-                || isBlockedByOtherAction(activity, 'translate')
+                !translateLocked
+                && (!canRun || !tr.canRun || tr.busy || translateRetryFutile
+                  || isBlockedByOtherAction(activity, 'translate'))
               }
               aria-busy={tr.busy}
-              onClick={() => tr.run(text)}
-              title={t('ai.quickAction.translate.button')}
+              onClick={() => {
+                // Renderer-side half of the gate; main still refuses `opt_out`.
+                if (translateLocked) return
+                tr.run(text)
+              }}
+              title={translateLocked
+                ? t('ai.quickAction.translate.disabledHint')
+                : t('ai.quickAction.translate.button')}
             >
               {/* Keyed on `busy` rather than on the status so the button that
                   is disabled because a call is still out also SAYS so — after
@@ -400,7 +488,7 @@ export function ComposeQuickActions({
             qa.dismiss()
           }}
           onInsert={() => {
-            const { text: next, caret } = insertAtCaret(text, qa.preview!.rewritten, getCaret())
+            const { text: next, caret } = insertAtOwnTextEnd(text, qa.preview!.rewritten)
             onInsert(next, caret)
             qa.dismiss()
           }}
@@ -408,10 +496,10 @@ export function ComposeQuickActions({
         />
       )}
 
-      {/* The SAME review panel as the four rewrites: Replace / Insert at cursor
-          / Cancel, no auto-substitution, and the staleness rule applies here
-          too — a translation computed over a snapshot must not be written over
-          a draft edited while it was in flight (§2.78 AC-h). */}
+      {/* The SAME review panel as the tone presets: Replace / add below my own
+          text / Cancel, no auto-substitution, and the staleness rule applies
+          here too — a translation computed over a snapshot must not be written
+          over a draft edited while it was in flight (§2.78 AC-h). */}
       {tr.status === 'ready' && tr.preview && (
         <QuickActionDiff
           preview={{
@@ -428,7 +516,7 @@ export function ComposeQuickActions({
             tr.dismiss()
           }}
           onInsert={() => {
-            const { text: next, caret } = insertAtCaret(text, tr.preview!.rewritten, getCaret())
+            const { text: next, caret } = insertAtOwnTextEnd(text, tr.preview!.rewritten)
             onInsert(next, caret)
             tr.dismiss()
           }}

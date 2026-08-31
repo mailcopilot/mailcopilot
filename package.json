@@ -2,7 +2,7 @@
   "name": "mailcopilot",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "1.26.0",
+  "version": "1.26.1",
   "description": "MailCopilot — современный кроссплатформенный почтовый клиент на Electron + React + TypeScript.",
   "author": {
     "name": "MailCopilot Team",

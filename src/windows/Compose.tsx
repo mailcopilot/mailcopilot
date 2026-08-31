@@ -1708,7 +1708,11 @@ export default function Compose() {
           value={subject}
           onChange={e => setSubject(e.target.value)}
         />
-        {/* B4: AI quick-action toolbar (Improve / Shorter / Formal / Grammar).
+        {/* B4: AI quick-action toolbar (Improve / Shorter / Formal), plus the
+            B7 proofread check and the B6 draft translation. "Fix grammar" is
+            NOT one of the presets — §1.26.1(1) retired it because it made the
+            same promise as the proofread check under a different acceptance
+            model (whole-draft rewrite vs. remarks accepted one by one).
             All rewrite logic lives in useQuickActions; the diff preview only
             mutates the body via the explicit Replace/Insert callbacks below —
             never auto-substitutes (no-auto-send / no-auto-edit invariant).
@@ -1726,7 +1730,6 @@ export default function Compose() {
           translateEnabled={isAiFeatureEnabledForAccount(aiTranslateEnabled, accountId)}
           suggestedTargetLang={suggestedTargetLang}
           composeGeneration={composeGeneration}
-          getCaret={() => bodyRef.current?.selectionStart ?? text.length}
           onReplace={next => setText(next)}
           onInsert={(next, caret) => {
             setText(next)

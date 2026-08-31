@@ -131,10 +131,13 @@ MailCopilot nennt den genauen Grund, warum eine Übersetzung nicht erstellt werd
 
 - Die Übersetzung ist für dieses Konto ausgeschaltet.
 - Es ist noch kein KI-Anbieter eingerichtet.
-- Der KI-Anbieter hat keine Übersetzung geliefert.
+- Der KI-Anbieter hat keine Übersetzung geliefert und keinen Grund genannt.
+- Die Übersetzung passt nicht in das Antwortlimit des KI-Anbieters, kam deshalb abgeschnitten zurück und wird nicht angezeigt.
 - Der Text der Nachricht ist noch nicht heruntergeladen.
 - Die Nachricht ist zu lang, um sie in einem Durchgang zu übersetzen, und es gibt keine Möglichkeit, nur einen Teil davon zu übersetzen -- die gesamte Nachricht zählt für die Grenze, einschließlich einer eventuell darin zitierten früheren Korrespondenz.
 - Das KI-Budget für diesen Zeitraum ist aufgebraucht.
+
+**Eine Schaltfläche „Erneut versuchen" erscheint nur dort, wo ein erneuter Versuch das Ergebnis tatsächlich ändern könnte.** Jeder Klick ist eine eigene, beim KI-Anbieter kostenpflichtige Anfrage, deshalb bietet MailCopilot diese Schaltfläche nicht bei einer Ablehnung an, die sich unverändert wiederholen würde: die Übersetzung, die am Antwortlimit des Anbieters scheitert, eine Nachricht, die grundsätzlich zu lang zum Übersetzen ist, oder eine für das Konto ausgeschaltete Übersetzung. Für die übrigen Gründe -- der Anbieter ist ohne Erklärung gescheitert, die Nachricht lädt noch, es ist kein Anbieter eingerichtet, oder das Budget ist aufgebraucht -- wird **Erneut versuchen** angezeigt, da das Beheben der Ursache, oder einfaches Abwarten, den nächsten Versuch erfolgreich machen kann. Ab dem zweiten Versuch trägt die Ablehnung den Vermerk **„Versuch 2"** (und so weiter), damit ein Wiederholungsversuch, der auf dem Bildschirm nichts ändert, nicht mit einem Klick verwechselt wird, der nicht reagiert hat.
 
 ## Anhaenge
 

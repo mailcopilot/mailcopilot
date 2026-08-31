@@ -93,7 +93,7 @@ export const AI_RULE_ENABLED_LIMIT_ERROR = 'AI_RULE_ENABLED_LIMIT';
  *
  * This is a RESERVATION, not an upper bound: for an arbitrary
  * OpenAI-compatible model there is no universal upper bound on a single call's
- * cost (e.g. a GPT-4-class model emitting the full 2000-token `max_tokens`
+ * cost (e.g. a GPT-4-class model emitting the full `AI_RULE_MAX_OUTPUT_TOKENS`
  * output can exceed this). For KNOWN models we can do better —
  * `nullUsageReservationUsd(model)` prices the max-output worst case from the
  * per-model rate table, so a pricier model reserves more. This flat default is
@@ -583,12 +583,57 @@ function modelRates(model: string): ModelRate {
 }
 
 /**
- * The `max_tokens` cap the AI Rules pipeline requests per call (mirrors the
- * `aiChatSimple` provider bodies in electron/services/ai.ts). Used to price the
- * worst-case output when a provider reports no usable usage, so the null-usage
+ * The output-token yardstick the null-usage RESERVATION is priced from: it is
+ * kept at or above the largest `max_tokens` any one-shot call actually requests
+ * (`AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS` in electron/services/ai.ts). Used to price
+ * the worst-case output when a provider reports no usable usage, so the
  * reservation is model-aware rather than a single flat guess.
+ *
+ * WHY A SEPARATE CONSTANT INSTEAD OF IMPORTING THE CAP. Layering forbids the
+ * obvious direction (`packages/core` must not import from `electron/`), and the
+ * reverse coupling — deriving the request cap from this number — would be worse
+ * than the drift it fixes: this yardstick also prices reservations for the
+ * STREAMING contour, whose steps have no relation to the one-shot cap, so
+ * LOWERING the one-shot cap would silently lower a floor that guards other
+ * callers. The relation we actually want is an inequality in the fail-closed
+ * direction, and it is enforced mechanically rather than by comment:
+ * `ai.test.ts` asserts `AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS <=
+ * AI_RULE_MAX_OUTPUT_TOKENS`, so raising the request cap without raising this
+ * fails a test. Lowering the request cap is free and leaves the floor alone.
+ *
+ * The 2000 → 2500 move on 2026-08-31 was exactly that drift being repaid: the
+ * one-shot cap had been raised for translation while this stayed at 2000, so
+ * for one release the "worst case" priced below what a single call could
+ * legitimately spend. Still a RESERVATION and not an upper bound — a streaming
+ * request runs many steps and can exceed it by design (see
+ * `AI_RULE_NULL_USAGE_COST_FLOOR`).
+ *
+ * ## Why the raise is SHARED and not per-contour (decided 2026-08-31)
+ *
+ * Raising this lifted the reservation floor for every contour, including the
+ * streaming one, whose own limits did not move — so the question was asked
+ * explicitly rather than left to look like an accident: should each contour get
+ * its own yardstick?
+ *
+ * It should not. The number answers ONE question — "what is the largest single
+ * unpriceable completion this app can have paid for?" — and that question has
+ * one answer per model, not one per call site. The largest single completion we
+ * request is the one-shot cap (2500; `aiChatSimple` clamps its per-call option
+ * down to it, so no caller can exceed it). The streaming contour has no fixed
+ * per-step cap at all, so a contour-specific number for it would be an
+ * invention rather than a measurement, and inventing one BELOW the largest
+ * completion we can make is the wrong direction for a fail-closed floor.
+ *
+ * The cost of sharing it is measured, not hand-waved: against the rate table
+ * above, the 2000 → 2500 raise moves exactly ONE tier — gpt-4, $0.08 → $0.10.
+ * Every other tier (gpt-4o, gpt-4o-mini, haiku, gemini-flash, unknown) prices a
+ * worst case at or under the flat $0.05 floor at BOTH values, so its reservation
+ * is unchanged; `aiRules.test.ts` pins that. And the raised amount is held only
+ * between reserve and reconcile — reconcile rewrites the ledger toward the
+ * actual cost — so the exposure is one extra $0.02 held, per in-flight gpt-4
+ * call, against a caller already at the very edge of its cap.
  */
-const AI_RULE_MAX_OUTPUT_TOKENS = 2000;
+export const AI_RULE_MAX_OUTPUT_TOKENS = 2500;
 
 /**
  * Model-aware budget RESERVATION for a successful call with no usable usage.
@@ -601,7 +646,8 @@ const AI_RULE_MAX_OUTPUT_TOKENS = 2000;
  */
 export function nullUsageReservationUsd(model: string): number {
   const { inputCostPer1k, outputCostPer1k } = modelRates(model);
-  // Worst realistic single call: ~2k prompt tokens + the full max_tokens output.
+  // Worst realistic single ONE-SHOT call: a prompt of the same order as the
+  // output cap, plus the full output cap. Not a bound on a streaming request.
   const worstCase =
     (AI_RULE_MAX_OUTPUT_TOKENS / 1000) * inputCostPer1k +
     (AI_RULE_MAX_OUTPUT_TOKENS / 1000) * outputCostPer1k;

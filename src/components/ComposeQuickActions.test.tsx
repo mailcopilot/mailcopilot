@@ -12,6 +12,11 @@ const i18nMap: Record<string, string> = {
   'ai.quickAction.preset.shorter': 'Shorter',
   'ai.quickAction.preset.formal': 'Formal',
   'ai.quickAction.preset.grammar': 'Fix grammar',
+  'ai.quickAction.presetTitle': '{{label}} — rewrites the whole text; accepted as a whole.',
+  'ai.quickAction.proofread.button': 'Check writing',
+  'ai.quickAction.proofread.buttonTitle': 'Check writing — remarks accepted one by one.',
+  'ai.quickAction.proofread.disabledHint': 'Checking drafts with AI is off for this mailbox.',
+  'ai.quickAction.translate.disabledHint': 'Translating drafts with AI is off for this mailbox.',
   'ai.quickAction.diff.title': 'Review AI rewrite',
   'ai.quickAction.diff.before': 'Before',
   'ai.quickAction.diff.after': 'After',
@@ -34,6 +39,8 @@ const i18nMap: Record<string, string> = {
   'ai.quickAction.translate.refusal.budget': 'The AI budget for this period is used up.',
   'ai.quickAction.translate.refusal.noProvider': 'No AI provider is set up yet.',
   'ai.quickAction.translate.refusal.providerError': 'The AI provider did not return a translation.',
+  'ai.quickAction.translate.refusal.answerTooLong':
+    'The translation does not fit within the answer limit. Another attempt would end the same way.',
   'ai.quickAction.translate.refusal.emptyInput': 'There is nothing to translate yet.',
   'ai.quickAction.translate.refusal.tooLong': 'This draft is too long to translate in one go.',
   'ai.quickAction.translate.refusal.optOut': 'Translation is turned off for this account.',
@@ -41,7 +48,13 @@ const i18nMap: Record<string, string> = {
   'mail.translate.languages.de': 'German',
   'mail.translate.languages.fr': 'French',
 }
-const stableT = (key: string): string => i18nMap[key] ?? key
+// Interpolating stub: several labels now carry `{{...}}` placeholders, and a
+// mock that ignored them would let a test pass on the raw template string.
+const stableT = (key: string, opts?: Record<string, unknown>): string => {
+  const raw = i18nMap[key] ?? key
+  if (!opts) return raw
+  return raw.replace(/\{\{(\w+)\}\}/g, (_m: string, name: string) => String(opts[name] ?? ''))
+}
 const stableUseTranslation = { t: stableT }
 vi.mock('react-i18next', () => ({
   useTranslation: () => stableUseTranslation,
@@ -64,7 +77,6 @@ function renderToolbar(overrides: Partial<React.ComponentProps<typeof ComposeQui
     accountId: 1,
     text: 'raw draft body',
     composeGeneration: 0,
-    getCaret: () => 0,
     onReplace: vi.fn(),
     onInsert: vi.fn(),
     ...overrides,
@@ -82,12 +94,22 @@ afterEach(() => {
 })
 
 describe('ComposeQuickActions', () => {
-  it('renders all four preset buttons', () => {
+  it('renders the three tone preset buttons', () => {
     renderToolbar()
     expect(screen.getByTestId('compose-quick-action-improve')).toBeInTheDocument()
     expect(screen.getByTestId('compose-quick-action-shorter')).toBeInTheDocument()
     expect(screen.getByTestId('compose-quick-action-formal')).toBeInTheDocument()
-    expect(screen.getByTestId('compose-quick-action-grammar')).toBeInTheDocument()
+  })
+
+  it('no longer offers the grammar preset — mistakes belong to the check (§1.26.1 AC-1)', () => {
+    renderToolbar()
+    expect(screen.queryByTestId('compose-quick-action-grammar')).not.toBeInTheDocument()
+  })
+
+  it('states the acceptance model in each preset title', () => {
+    renderToolbar()
+    expect(screen.getByTestId('compose-quick-action-improve'))
+      .toHaveAttribute('title', 'Improve — rewrites the whole text; accepted as a whole.')
   })
 
   it('disables all preset buttons when the draft has no rewritable text', () => {
@@ -173,14 +195,30 @@ describe('ComposeQuickActions', () => {
     expect(screen.queryByTestId('quick-action-diff')).not.toBeInTheDocument()
   })
 
-  it('calls onInsert with the spliced text + post-insert caret on Insert click', async () => {
-    mockInvoke.mockResolvedValue({ ok: true, rewritten: ' inserted', provider: 'anthropic-api' })
+  it('calls onInsert with the text added below the own part + post-insert caret', async () => {
+    mockInvoke.mockResolvedValue({ ok: true, rewritten: 'inserted', provider: 'anthropic-api' })
     const onInsert = vi.fn()
-    renderToolbar({ text: 'my draft', getCaret: () => 2, onInsert })
+    renderToolbar({ text: 'my draft', onInsert })
     fireEvent.click(screen.getByTestId('compose-quick-action-improve'))
     await waitFor(() => expect(screen.getByTestId('quick-action-diff')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('quick-action-diff-insert'))
-    expect(onInsert).toHaveBeenCalledWith('my inserted draft', 11)
+    expect(onInsert).toHaveBeenCalledWith('my draft\ninserted', 'my draft\ninserted'.length)
+  })
+
+  // §1.26.1 AC-9 / §2.252 — the whole point of the rename: on a reply the user
+  // has not clicked into, the caret index was 0 and the generated text landed
+  // above the quote AND above their own first line.
+  it('adds the result below the own text, above a quote, never at the top of the body', async () => {
+    mockInvoke.mockResolvedValue({ ok: true, rewritten: 'Sounds good.', provider: 'p' })
+    const onInsert = vi.fn()
+    renderToolbar({ text: 'sounds good\n\n> Can you ship it?', onInsert })
+    fireEvent.click(screen.getByTestId('compose-quick-action-improve'))
+    await waitFor(() => expect(screen.getByTestId('quick-action-diff')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('quick-action-diff-insert'))
+    expect(onInsert).toHaveBeenCalledWith(
+      'sounds good\nSounds good.\n\n> Can you ship it?',
+      'sounds good\nSounds good.'.length,
+    )
   })
 
   // -------------------------------------------------------------------------
@@ -258,7 +296,6 @@ describe('ComposeQuickActions', () => {
       accountId: 1,
       text: 'my draft',
       composeGeneration: 0,
-      getCaret: () => 0,
       onReplace,
       onInsert: vi.fn(),
     }
@@ -292,7 +329,6 @@ describe('ComposeQuickActions', () => {
       accountId: 1,
       text: 'my draft',
       composeGeneration: 0,
-      getCaret: () => 0,
       onReplace,
       onInsert,
     }
@@ -317,14 +353,16 @@ describe('ComposeQuickActions', () => {
     expect(screen.getByTestId('quick-action-diff')).toBeInTheDocument()
   })
 
-  it('keeps Insert at cursor available on a stale preview and splices into the CURRENT body', async () => {
+  it('keeps the insert action available on a stale preview and appends to the CURRENT body', async () => {
+    // §2.78 AC-h + §1.26.1 AC-9: Replace is the dangerous one on a stale
+    // preview, and the insert button is the ONLY way left to use the result —
+    // it must stay enabled, and it must operate on the body as it is now.
     mockInvoke.mockResolvedValue({ ok: true, rewritten: 'X', provider: 'p' })
     const onInsert = vi.fn()
     const props: React.ComponentProps<typeof ComposeQuickActions> = {
       accountId: 1,
       text: 'ab',
       composeGeneration: 0,
-      getCaret: () => 2,
       onReplace: vi.fn(),
       onInsert,
     }
@@ -333,9 +371,11 @@ describe('ComposeQuickActions', () => {
     await waitFor(() => expect(screen.getByTestId('quick-action-diff')).toBeInTheDocument())
 
     rerender(React.createElement(ComposeQuickActions, { ...props, text: 'abcd' }))
+    expect(screen.getByTestId('quick-action-diff-stale')).toBeInTheDocument()
+    expect(screen.getByTestId('quick-action-diff-insert')).toBeEnabled()
     fireEvent.click(screen.getByTestId('quick-action-diff-insert'))
-    // Spliced into 'abcd' (the current body), so nothing typed meanwhile is lost.
-    expect(onInsert).toHaveBeenCalledWith('abXcd', 3)
+    // Appended to 'abcd' (the current body), so nothing typed meanwhile is lost.
+    expect(onInsert).toHaveBeenCalledWith('abcd\nX', 6)
   })
 
   it('leaves Replace enabled while the draft is unchanged', async () => {
@@ -366,10 +406,44 @@ describe('ComposeQuickActions', () => {
 // §3.3 B6 draft side — the translate control.
 // ---------------------------------------------------------------------------
 describe('ComposeQuickActions — draft translation', () => {
-  it('renders nothing at all while the per-account opt-in is off (acceptance f-UI)', () => {
+  // §1.26.1(2): the control used to disappear while the opt-in was off, which
+  // made "you switched this off" indistinguishable from "this build has no such
+  // feature". It is now rendered, visibly locked, and inert.
+  it('still renders while the per-account opt-in is off, locked rather than absent', () => {
     renderToolbar({ translateEnabled: false })
-    expect(screen.queryByTestId('compose-translate-run')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('compose-translate-target')).not.toBeInTheDocument()
+    const btn = screen.getByTestId('compose-translate-run')
+    expect(btn).toBeInTheDocument()
+    expect(screen.getByTestId('compose-translate-target')).toBeInTheDocument()
+    expect(btn).toHaveAttribute('aria-disabled', 'true')
+    // `aria-disabled`, NOT the attribute: the control has to stay reachable by
+    // keyboard and screen reader, or its hint is unreachable too (W3C ARIA APG).
+    expect(btn).toBeEnabled()
+    expect(btn).toHaveAttribute('title', 'Translating drafts with AI is off for this mailbox.')
+  })
+
+  it('makes a locked translate button inert — clicking it invokes no IPC at all', () => {
+    renderToolbar({ translateEnabled: false, suggestedTargetLang: 'de' })
+    fireEvent.click(screen.getByTestId('compose-translate-run'))
+    fireEvent.click(screen.getByTestId('compose-translate-run'))
+    expect(mockInvoke).not.toHaveBeenCalled()
+  })
+
+  // §1.26.1(2) — the ONE behavioural difference `aria-disabled` is supposed to
+  // buy over the `disabled` attribute: a real `disabled` button cannot receive
+  // focus at all (browsers and jsdom agree on this), which would make the hint
+  // on this button unreachable by keyboard. Reintroducing `disabled={translateLocked}`
+  // here keeps every other assertion in this file green while breaking exactly
+  // this one.
+  it('stays reachable by keyboard focus while locked', () => {
+    renderToolbar({ translateEnabled: false })
+    const btn = screen.getByTestId('compose-translate-run')
+    btn.focus()
+    expect(document.activeElement).toBe(btn)
+  })
+
+  it('drops aria-disabled once the opt-in is on', () => {
+    renderToolbar({ translateEnabled: true })
+    expect(screen.getByTestId('compose-translate-run')).not.toHaveAttribute('aria-disabled')
   })
 
   it('renders the picker and the button for an account that opted in', () => {
@@ -456,6 +530,7 @@ describe('ComposeQuickActions — draft translation', () => {
     ['budget', 'The AI budget for this period is used up.'],
     ['no_provider', 'No AI provider is set up yet.'],
     ['provider_error', 'The AI provider did not return a translation.'],
+    ['answer_too_long', 'The translation does not fit within the answer limit. Another attempt would end the same way.'],
     ['too_long', 'This draft is too long to translate in one go.'],
     ['opt_out', 'Translation is turned off for this account.'],
   ] as const)('renders the %s refusal with its own copy (acceptance e)', async (reason, copy) => {
@@ -488,6 +563,62 @@ describe('ComposeQuickActions — draft translation', () => {
     expect(mockInvoke).not.toHaveBeenCalled()
   })
 
+  /**
+   * 2026-08-31 — the copy and the control have to agree.
+   *
+   * The refusal line says another attempt cannot help; a live button next to it
+   * says the opposite, and the button is the one the reader believes. On this
+   * bar a press is also money: the incident that produced the split was nineteen
+   * billed calls in four minutes against a refusal that could not change.
+   */
+  it('withholds the button while a refusal that cannot help is on screen', async () => {
+    mockInvoke.mockResolvedValue({ ok: false, reason: 'answer_too_long' })
+    renderToolbar({ translateEnabled: true, suggestedTargetLang: 'de', text: 'My reply.' })
+
+    fireEvent.click(screen.getByTestId('compose-translate-run'))
+    await waitFor(() =>
+      expect(screen.getByTestId('compose-translate-refusal')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('compose-translate-run')).toBeDisabled()
+    // And a programmatic press cannot get past it either — one call, the one
+    // that produced the refusal.
+    fireEvent.click(screen.getByTestId('compose-translate-run'))
+    expect(mockInvoke).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the button live for a refusal that another attempt could fix', async () => {
+    // `provider_error` now means exactly "we do not know why", and an
+    // unexplained failure may well be transient.
+    mockInvoke.mockResolvedValue({ ok: false, reason: 'provider_error' })
+    renderToolbar({ translateEnabled: true, suggestedTargetLang: 'de', text: 'My reply.' })
+
+    fireEvent.click(screen.getByTestId('compose-translate-run'))
+    await waitFor(() =>
+      expect(screen.getByTestId('compose-translate-refusal')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('compose-translate-run')).toBeEnabled()
+  })
+
+  it('gives the button back the moment the draft is edited', async () => {
+    // The refusal tells the writer to shorten their text. The toolbar must not
+    // then refuse to let them act on it.
+    mockInvoke.mockResolvedValue({ ok: false, reason: 'answer_too_long' })
+    const { rerender, props } = renderToolbar({
+      translateEnabled: true,
+      suggestedTargetLang: 'de',
+      text: 'My long reply.',
+    })
+
+    fireEvent.click(screen.getByTestId('compose-translate-run'))
+    await waitFor(() =>
+      expect(screen.getByTestId('compose-translate-refusal')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('compose-translate-run')).toBeDisabled()
+
+    rerender(React.createElement(ComposeQuickActions, { ...props, text: 'My reply.' }))
+    expect(screen.getByTestId('compose-translate-run')).toBeEnabled()
+  })
+
   it('never collapses two different refusals into one line', () => {
     const seen = new Set([
       'ai.quickAction.translate.refusal.budget',
@@ -497,9 +628,12 @@ describe('ComposeQuickActions — draft translation', () => {
       'ai.quickAction.translate.refusal.tooLong',
       'ai.quickAction.translate.refusal.optOut',
       'ai.quickAction.translate.refusal.noOwnText',
+      // 2026-08-31: the eighth. It exists precisely because it was collapsed
+      // into `providerError`, whose copy invites a retry that cannot help.
+      'ai.quickAction.translate.refusal.answerTooLong',
     ])
-    expect(seen.size).toBe(7)
-    expect(new Set([...seen].map(k => i18nMap[k])).size).toBe(7)
+    expect(seen.size).toBe(8)
+    expect(new Set([...seen].map(k => i18nMap[k])).size).toBe(8)
   })
 })
 
@@ -725,7 +859,6 @@ describe('ComposeQuickActions — the reset key cannot be forgotten by a caller'
     const incomplete = {
       accountId: 1,
       text: 'my draft',
-      getCaret: () => 0,
       onReplace: vi.fn(),
       onInsert: vi.fn(),
     }

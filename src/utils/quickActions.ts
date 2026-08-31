@@ -24,6 +24,7 @@
  * unit-testable functions.
  */
 
+import { joinComposeBody, splitComposeBody } from '@mailcopilot/core'
 import type {
   QuickActionPreset,
   ProofreadEditCategory,
@@ -46,12 +47,32 @@ export type {
   ProofreadResult,
 } from '@mailcopilot/types'
 
-/** Ordered list of presets as rendered in the compose toolbar. */
+/**
+ * Ordered list of presets as rendered in the compose toolbar.
+ *
+ * §1.26.1(1): `grammar` is deliberately NOT here, while it stays a live member
+ * of `QuickActionPreset` and keeps its system prompt in `electron/services/ai.ts`.
+ * The panel offered two buttons that read as the same promise — "fix my
+ * mistakes" — but implemented two different acceptance models: a preset returns
+ * one rewritten string the user takes or leaves as a whole, while the B7
+ * proofreader returns a LIST of individually acceptable edits. Two controls over
+ * the same subject with different accept semantics is the defect; the narrower,
+ * per-edit one is the better answer for mistakes, so the preset loses the slot.
+ *
+ * That leaves exactly three presets, and they are exactly three TONES. Apple's
+ * Writing Tools makes the same split — proofreading is its own reviewed-one-by-one
+ * flow, and the rewrite row is Friendly / Professional / Concise with no
+ * "fix grammar" among the tones:
+ * https://support.apple.com/guide/mac-help/find-the-right-words-with-writing-tools-mchldcd6c260/mac
+ *
+ * The preset value is kept alive rather than deleted because main owns the
+ * prompt catalogue and a renderer list is not the place to retire a contract
+ * member; `quickActionLabelKey('grammar')` therefore still resolves.
+ */
 export const QUICK_ACTION_PRESETS: readonly QuickActionPreset[] = [
   'improve',
   'shorter',
   'formal',
-  'grammar',
 ] as const
 
 /**
@@ -113,28 +134,57 @@ export function proofreadCategoryKey(category: ProofreadEditCategory): string {
 }
 
 /**
- * Result of inserting `insert` into `original` at caret position `caret`.
- *
- * Pure so it can be unit-tested outside jsdom. `caret` is clamped into
- * `[0, original.length]` so an out-of-range/stale selection index can never
- * throw or corrupt the body. Returns both the new text and the caret position
- * AFTER the inserted text, so the caller can restore the selection.
+ * Result of splicing generated text into a draft: the new body and where the
+ * caret belongs afterwards.
  */
-export type InsertAtCaretResult = {
+export type InsertIntoDraftResult = {
   text: string
   /** Caret index positioned immediately after the inserted text. */
   caret: number
 }
 
 /**
- * Insert `insert` into `original` at `caret` (clamped). Used by the diff-preview
- * "Insert" action to splice the rewritten text at the user's cursor instead of
- * replacing the whole body.
+ * Append `insert` to the END OF THE USER'S OWN TEXT, above a recognized quoted
+ * original / forwarded message / signature (§2.252, §1.26.1 AC-9).
+ *
+ * This replaced an `insertAtCaret(original, insert, caret)` helper, and the
+ * caret is gone from the contract on purpose. The review panel is an OVERLAY:
+ * while it is open the body textarea does not have focus, and on a pre-filled
+ * draft (a reply, a forward, a template) it may never have had focus at all —
+ * `selectionStart` is then 0 and "insert at the cursor" put the generated text
+ * at the very top of the message, above the user's own first line and, in a
+ * reply, above the quote. The button's promise and its behaviour disagreed.
+ *
+ * The fix is to make the promise the narrow one and always keep it: one button,
+ * one behaviour. Honouring a deliberately-placed caret "when there is one" was
+ * considered and rejected — a label that describes the behaviour only sometimes
+ * is the same defect in a smaller box.
+ *
+ * The boundary is NOT re-derived here: it is `splitComposeBody()` from
+ * `@mailcopilot/core`, the same splitter the rewrite, the proofreader and the
+ * translation already use, so the four paths cannot disagree about where the
+ * user's own text ends. Where that splitter recognizes no tail, `own` is the
+ * whole body and the text lands at the end of the draft — which is correct,
+ * because there the whole body IS the user's own text.
+ *
+ * One formatting rule, and only one: the inserted block is separated from a
+ * neighbour by a single newline when that neighbour exists and there is not one
+ * already. Without it, appending a generated paragraph after `Hello,` produces
+ * `Hello,Thanks for...`, and on a draft whose whole body is a quote the
+ * insertion would fuse onto the quote's first line. Nothing else about the
+ * draft's layout is touched: `lead` and `tail` are carried through
+ * byte-identically, and the returned caret sits right after the inserted text,
+ * before any trailing separator.
  */
-export function insertAtCaret(original: string, insert: string, caret: number): InsertAtCaretResult {
-  const clamped = Math.max(0, Math.min(caret, original.length))
-  const next = original.slice(0, clamped) + insert + original.slice(clamped)
-  return { text: next, caret: clamped + insert.length }
+export function insertAtOwnTextEnd(original: string, insert: string): InsertIntoDraftResult {
+  const split = splitComposeBody(original)
+  const before = split.own.length > 0 && !split.own.endsWith('\n') ? '\n' : ''
+  const after = split.tail.length > 0 && !split.tail.startsWith('\n') ? '\n' : ''
+  const caret = split.lead.length + split.own.length + before.length + insert.length
+  return {
+    text: joinComposeBody(split, split.own + before + insert + after),
+    caret,
+  }
 }
 
 /**

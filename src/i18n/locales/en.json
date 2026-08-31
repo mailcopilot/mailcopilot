@@ -376,6 +376,7 @@
     "translate": {
       "action": "Translate",
       "retry": "Try again",
+      "attempt": "Attempt {{n}}.",
       "loading": "Translating…",
       "showOriginal": "Show original",
       "showTranslation": "Show translation",
@@ -392,7 +393,8 @@
       "refusal": {
         "budget": "The AI budget for this period is used up. Raise it in Settings → AI, or wait for the next period.",
         "no_provider": "No AI provider is set up yet. Add one in Settings → AI.",
-        "provider_error": "The AI provider did not return a translation. Please try again.",
+        "provider_error": "The AI provider did not return a translation, and did not say why. Another attempt sends the message to the provider again.",
+      "answer_too_long": "The translation does not fit within the AI provider's answer limit, so it came back cut off and is not shown. Another attempt would end the same way: neither this message nor the limit has changed.",
         "empty_input": "There is no downloaded text for this message yet. Try again once the message has loaded.",
         "too_long": "This message is too long to translate in one go, and there is no way to translate only part of it — the whole message counts towards the limit, including any earlier correspondence quoted inside it.",
         "opt_out": "Translation is turned off for this account. Turn it on in Settings → AI → Translate messages."
@@ -1441,6 +1443,17 @@
         "placeholder": "Example:\n- I work at Acme Corp as a Project Manager\n- My timezone is UTC+3\n- I prefer concise emails\n- Key contacts: alice@corp.com (CEO), bob@corp.com (CTO)",
         "clear": "Clear"
       },
+      "consentMatrix": {
+        "title": "AI features per mailbox",
+        "help": "Each AI feature is asked for separately and is off until you turn it on. A tick only allows the feature to be offered in that mailbox — nothing is summarised, drafted, checked or translated until you ask for it.",
+        "accountColumn": "Mailbox",
+        "noAccounts": "Add a mailbox to choose which AI features it may use.",
+        "cellLabel": "{{feature}} in {{account}}",
+        "allowAll_one": "Allow “{{feature}}” in your only mailbox",
+        "allowAll_other": "Allow “{{feature}}” in all {{count}} mailboxes",
+        "clearAll_one": "Turn “{{feature}}” off in your only mailbox",
+        "clearAll_other": "Turn “{{feature}}” off in all {{count}} mailboxes"
+      },
       "threadSummary": {
         "title": "Thread AI Summary",
         "label": "Summarize long threads with AI",
@@ -1481,6 +1494,7 @@
         "formal": "Formal",
         "grammar": "Fix grammar"
       },
+      "presetTitle": "{{label}} — rewrites the text you wrote as a whole; you accept or discard the result in one piece.",
       "diff": {
         "title": "Review AI rewrite",
         "before": "Before",
@@ -1493,9 +1507,9 @@
         "unchangedLines_other": "{{count}} unchanged lines",
         "plainText": "Plain text",
         "replace": "Replace",
-        "insert": "Insert at cursor",
+        "insert": "Add below my text",
         "cancel": "Cancel",
-        "staleWarning": "You edited the draft while the AI was working, so replacing it would discard those edits. Insert at cursor instead, or run the action again.",
+        "staleWarning": "You edited the draft while the AI was working, so replacing it would discard those edits. Add the result below your text instead, or run the action again.",
         "staleReplaceHint": "Replace is unavailable because the draft changed after this rewrite was requested."
       },
       "refusal": {
@@ -1508,6 +1522,8 @@
       },
       "proofread": {
         "button": "Check writing",
+        "buttonTitle": "Check writing — lists suggested corrections one by one, and you accept each one separately.",
+        "disabledHint": "Checking drafts with AI is off for this mailbox. Turn it on in Settings → AI.",
         "checking": "Checking…",
         "title": "Suggested corrections",
         "editCount_one": "{{count}} suggestion",
@@ -1541,6 +1557,7 @@
       },
       "translate": {
         "button": "Translate",
+        "disabledHint": "Translating drafts with AI is off for this mailbox. Turn it on in Settings → AI.",
         "loading": "Translating…",
         "targetLabel": "Translate the draft into",
         "targetPlaceholder": "Choose a language",
@@ -1549,6 +1566,7 @@
           "budget": "The AI budget for this period is used up. Raise it in Settings → AI, or wait for the next period.",
           "noProvider": "No AI provider is set up yet. Add one in Settings → AI.",
           "providerError": "The AI provider did not return a translation. Please try again.",
+          "answerTooLong": "The translation does not fit within the AI provider's answer limit, so it came back cut off and is not shown. Another attempt would end the same way: neither this draft nor the limit has changed. Shorten your own text, or cut part of it out, translate what is left and paste the cut part back.",
           "emptyInput": "There is nothing to translate yet — write something first.",
           "tooLong": "This draft is too long to translate in one go, and there is no way to translate only a selection — MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, translate what is left and paste the cut part back. If your own text looks short, MailCopilot may have failed to spot where a quoted message begins, and measured it together with your text.",
           "optOut": "Translation is turned off for this account. Turn it on in Settings → AI → Translate messages.",

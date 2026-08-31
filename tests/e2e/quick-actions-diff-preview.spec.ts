@@ -613,10 +613,11 @@ test('quick action diff: Replace swaps only the own text — the quoted original
 })
 
 // ---------------------------------------------------------------------------
-// 11. Insert splices the rewrite at the caret, everything else byte-exact
+// 11. Insert lands at the end of the user's own text, NOT at the caret
+//     (§1.26.1 AC-9 / §2.252) — everything else byte-exact
 // ---------------------------------------------------------------------------
 
-test('quick action diff: Insert splices the rewrite at the caret and leaves the rest of the draft byte-exact', async () => {
+test('quick action diff: Insert adds the rewrite below the own text and ignores the caret entirely', async () => {
   const stub = await startAiStub()
   const ctx: Partial<AppContext> = {}
   try {
@@ -632,13 +633,18 @@ test('quick action diff: Insert splices the rewrite at the caret and leaves the 
     await compose.getByTestId('compose-quick-action-improve').click()
     await expect(compose.getByTestId('quick-action-diff')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
-    // Caret right after "Alpha.\n" (index 7) — before "Beta.\nGamma.".
-    const caret = 'Alpha.\n'.length
-    await setComposeCaret(compose, caret)
+    // Put the caret in the MIDDLE of the draft, right after "Alpha.\n". The
+    // insert must ignore it: the button now promises "below my text", one
+    // behaviour on every draft. Before the fix this decided the landing spot,
+    // and on a draft the user had never clicked into it was index 0 — above
+    // their own first line, and in a reply above the quote too.
+    await setComposeCaret(compose, 'Alpha.\n'.length)
     await compose.getByTestId('quick-action-diff-insert').click()
 
     await expect(compose.getByTestId('quick-action-diff')).toHaveCount(0)
-    await expect(compose.getByTestId('compose-text')).toHaveValue('Alpha.\n' + rewritten + 'Beta.\nGamma.')
+    // No tail is recognizable here, so the own text is the whole body and the
+    // result lands at its end, separated by a single newline.
+    await expect(compose.getByTestId('compose-text')).toHaveValue(original + '\n' + rewritten)
   } finally {
     await teardown(ctx, stub)
   }
@@ -701,10 +707,13 @@ test('quick action diff: editing the draft mid-flight marks the preview stale �
     // Replace refused — the panel is still open.
     await expect(compose.getByTestId('quick-action-diff')).toBeVisible()
 
-    await setComposeCaret(compose, 0)
+    // The insert action is the only way left to use this result, so it stays
+    // enabled on a stale preview (§2.78 AC-h) — and it appends to the CURRENT
+    // body, so the text typed during generation survives.
+    await expect(compose.getByTestId('quick-action-diff-insert')).toBeEnabled()
     await compose.getByTestId('quick-action-diff-insert').click()
     await expect(compose.getByTestId('quick-action-diff')).toHaveCount(0)
-    await expect(compose.getByTestId('compose-text')).toHaveValue(rewritten + editedBody)
+    await expect(compose.getByTestId('compose-text')).toHaveValue(editedBody + '\n' + rewritten)
   } finally {
     await teardown(ctx, stub)
   }
@@ -900,7 +909,6 @@ test('quick action diff: fold and plain-text state reset on a fresh preview inst
 
     // Dismiss via Insert (not Replace — avoids any quote/signature bookkeeping)
     // so the panel unmounts and a second, independent preview can be requested.
-    await setComposeCaret(compose, 0)
     await compose.getByTestId('quick-action-diff-insert').click()
     await expect(compose.getByTestId('quick-action-diff')).toHaveCount(0)
 
@@ -911,8 +919,8 @@ test('quick action diff: fold and plain-text state reset on a fresh preview inst
     const rewritten2 = ['Second opening line has changed.', secondFiller, 'Second closing line has changed.'].join('\n')
     stub.queueResponse(rewritten2)
     await compose.getByTestId('compose-text').fill(original2)
-    await expect(compose.getByTestId('compose-quick-action-grammar')).toBeEnabled({ timeout: EXPECT_TIMEOUT })
-    await compose.getByTestId('compose-quick-action-grammar').click()
+    await expect(compose.getByTestId('compose-quick-action-formal')).toBeEnabled({ timeout: EXPECT_TIMEOUT })
+    await compose.getByTestId('compose-quick-action-formal').click()
     await expect(compose.getByTestId('quick-action-diff')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     // The fresh panel must NOT inherit the first preview's expanded state.

@@ -133,10 +133,13 @@ MailCopilot indique la raison precise pour laquelle la traduction n'a pas pu etr
 
 - La traduction est desactivee pour ce compte.
 - Aucun fournisseur IA n'est encore configure.
-- Le fournisseur IA n'a pas renvoye de traduction.
+- Le fournisseur IA n'a pas renvoye de traduction et n'en a pas indique la raison.
+- La traduction ne tient pas dans la limite de reponse du fournisseur IA : elle est revenue tronquee et n'est pas affichee.
 - Le texte du message n'est pas encore telecharge.
 - Le message est trop long pour etre traduit en une seule fois, et il n'y a aucun moyen d'en traduire seulement une partie -- le message entier compte dans la limite, y compris les echanges anterieurs qui y seraient cites.
 - Le budget IA de cette periode est epuise.
+
+**Un bouton Reessayer n'apparait que la ou reessayer peut changer le resultat.** Chaque clic est une nouvelle requete facturee a votre fournisseur IA, donc MailCopilot ne propose pas ce bouton pour un refus qui se reproduirait a l'identique : la traduction butant sur la limite de reponse du fournisseur, le message trop long pour etre traduit du tout, ou la traduction desactivee pour ce compte. Pour les autres raisons -- le fournisseur ayant echoue sans explication, le message encore en telechargement, aucun fournisseur configure, ou le budget epuise -- **Reessayer** est affiche, car corriger la cause, ou simplement attendre, peut faire reussir la tentative suivante. A partir de la deuxieme tentative, le refus porte la mention **Tentative 2** (et ainsi de suite), pour qu'une nouvelle tentative qui ne change rien a l'ecran ne soit pas confondue avec un clic qui n'a pas fonctionne.
 
 ## Pieces jointes
 

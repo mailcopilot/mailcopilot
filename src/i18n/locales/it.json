@@ -376,6 +376,7 @@
     "translate": {
       "action": "Traduci",
       "retry": "Riprova",
+      "attempt": "Tentativo {{n}}.",
       "loading": "Traduzione in corso…",
       "showOriginal": "Mostra l'originale",
       "showTranslation": "Mostra la traduzione",
@@ -392,7 +393,8 @@
       "refusal": {
         "budget": "Il budget IA di questo periodo è esaurito. Aumentalo in Impostazioni → IA oppure attendi il periodo successivo.",
         "no_provider": "Non è ancora configurato alcun fornitore IA. Aggiungine uno in Impostazioni → IA.",
-        "provider_error": "Il fornitore IA non ha restituito una traduzione. Riprova.",
+        "provider_error": "Il fornitore IA non ha restituito una traduzione e non ne ha indicato il motivo. Un altro tentativo invierà di nuovo il messaggio al fornitore.",
+      "answer_too_long": "La traduzione non rientra nel limite di risposta del fornitore IA: è arrivata troncata e perciò non viene mostrata. Un altro tentativo finirebbe allo stesso modo: né questo messaggio né il limite sono cambiati.",
         "empty_input": "Il testo di questo messaggio non è ancora stato scaricato. Riprova quando il messaggio sarà caricato.",
         "too_long": "Questo messaggio è troppo lungo per essere tradotto in una sola volta e non è possibile tradurne solo una parte: per il limite conta l'intero messaggio, compresa la corrispondenza precedente che potrebbe esservi citata.",
         "opt_out": "La traduzione è disattivata per questo account. Attivala in Impostazioni → IA → Traduci i messaggi."
@@ -1441,6 +1443,17 @@
         "placeholder": "Esempio:\n- Lavoro presso Acme Corp come project manager\n- Il mio fuso orario è UTC+3\n- Preferisco email concise",
         "clear": "Cancella"
       },
+      "consentMatrix": {
+        "title": "Funzioni IA per casella",
+        "help": "Ogni funzione IA viene chiesta separatamente ed è disattivata finché non la attivi. Una spunta consente solo di offrire la funzione in quella casella: nulla viene riassunto, redatto, controllato o tradotto finché non lo chiedi.",
+        "accountColumn": "Casella",
+        "noAccounts": "Aggiungi una casella per scegliere quali funzioni IA può usare.",
+        "cellLabel": "«{{feature}}» in {{account}}",
+        "allowAll_one": "Consenti «{{feature}}» nella tua unica casella",
+        "allowAll_other": "Consenti «{{feature}}» in tutte le {{count}} caselle",
+        "clearAll_one": "Disattiva «{{feature}}» nella tua unica casella",
+        "clearAll_other": "Disattiva «{{feature}}» in tutte le {{count}} caselle"
+      },
       "threadSummary": {
         "title": "Riepilogo IA della conversazione",
         "label": "Riepiloga le conversazioni lunghe con l'IA",
@@ -1481,6 +1494,7 @@
         "formal": "Formale",
         "grammar": "Correggi grammatica"
       },
+      "presetTitle": "{{label}} — riscrive il tuo testo per intero; il risultato si accetta o si scarta in blocco.",
       "diff": {
         "title": "Rivedi la riscrittura IA",
         "before": "Prima",
@@ -1493,9 +1507,9 @@
         "unchangedLines_other": "{{count}} righe invariate",
         "plainText": "Testo semplice",
         "replace": "Sostituisci",
-        "insert": "Inserisci al cursore",
+        "insert": "Aggiungi sotto il mio testo",
         "cancel": "Annulla",
-        "staleWarning": "Hai modificato la bozza mentre l'IA lavorava, quindi la sostituzione annullerebbe quelle modifiche. Inserisci al cursore oppure esegui di nuovo l'azione.",
+        "staleWarning": "Hai modificato la bozza mentre l’IA lavorava, quindi la sostituzione annullerebbe quelle modifiche. Aggiungi invece il risultato sotto il tuo testo oppure esegui di nuovo l’azione.",
         "staleReplaceHint": "La sostituzione non è disponibile perché la bozza è cambiata dopo la richiesta di questa riscrittura."
       },
       "refusal": {
@@ -1508,6 +1522,8 @@
       },
       "proofread": {
         "button": "Controlla il testo",
+        "buttonTitle": "Controlla il testo — le correzioni sono elencate una per una e ognuna si accetta separatamente.",
+        "disabledHint": "Il controllo delle bozze con l’IA è disattivato per questa casella. Attivalo in Impostazioni → IA.",
         "checking": "Controllo in corso…",
         "title": "Correzioni suggerite",
         "editCount_one": "{{count}} suggerimento",
@@ -1541,6 +1557,7 @@
       },
       "translate": {
         "button": "Traduci",
+        "disabledHint": "La traduzione delle bozze con l’IA è disattivata per questa casella. Attivala in Impostazioni → IA.",
         "loading": "Traduzione…",
         "targetLabel": "Traduci la bozza in",
         "targetPlaceholder": "Scegli una lingua",
@@ -1549,6 +1566,7 @@
           "budget": "Il budget IA per questo periodo è esaurito. Aumentalo in Impostazioni → IA oppure attendi il periodo successivo.",
           "noProvider": "Nessun fornitore di IA è ancora configurato. Aggiungine uno in Impostazioni → IA.",
           "providerError": "Il fornitore di IA non ha restituito una traduzione. Riprova.",
+          "answerTooLong": "La traduzione non rientra nel limite di risposta del fornitore IA: è arrivata troncata e perciò non viene mostrata. Un altro tentativo finirebbe allo stesso modo: né questa bozza né il limite sono cambiati. Accorcia il tuo testo, oppure taglia via una parte, traduci quello che resta e reincolla la parte tagliata.",
           "emptyInput": "Non c'è ancora nulla da tradurre: scrivi prima un testo.",
           "tooLong": "Questa bozza è troppo lunga per essere tradotta in una volta sola e non è possibile tradurre solo una selezione: MailCopilot prende sempre tutto il tuo testo. Accorcia la bozza, oppure taglia via una parte, traduci quello che resta e reincolla la parte tagliata. Se il tuo testo sembra breve, MailCopilot potrebbe non aver riconosciuto dove inizia un messaggio citato e averlo conteggiato insieme al tuo.",
           "optOut": "La traduzione è disattivata per questo account. Attivala in Impostazioni → IA → Traduci i messaggi.",

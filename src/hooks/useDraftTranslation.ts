@@ -17,7 +17,7 @@ import { hasRewritableText } from '../utils/quickActions'
  * before/after pair the review panel renders. `ComposeQuickActions` draws this
  * hook's output and holds no translate state of its own (CLAUDE.md §5).
  *
- * ## Three properties this hook exists to guarantee
+ * ## Four properties this hook exists to guarantee
  *
  * 1. **Never automatic.** There is no effect that calls a provider. The only
  *    path to `ai:translate:draft` is {@link UseDraftTranslationResult.run},
@@ -55,6 +55,16 @@ import { hasRewritableText } from '../utils/quickActions'
  *        (a separate effect below), but they must not erase the pick —
  *        otherwise "the pick beats the suggestion irreversibly within this
  *        draft" is not a property the user can rely on.
+ *
+ * 4. **A useless repeat is never offered** (2026-08-31). Some refusals cannot
+ *    answer differently until something outside the request changes, and the
+ *    expensive one — the provider ran out of output room — repeats a BILLED
+ *    call to produce the identical nothing. {@link
+ *    UseDraftTranslationResult.canRetryFor} is what the toolbar asks before
+ *    leaving the button live. It takes the draft body as an argument because on
+ *    this side the input is editable: the escape from those refusals is an
+ *    edit, so a verdict that ignored the text would turn "shorten it and try
+ *    again" into advice the interface refuses to let the writer follow.
  *
  * ## What crosses the wire
  *
@@ -177,12 +187,119 @@ export type UseDraftTranslationResult = {
    * for is still running.
    */
   busy: boolean
+  /**
+   * Whether pressing Translate again over `body` could answer differently
+   * (2026-08-31).
+   *
+   * `true` whenever nothing is refusing, so the ordinary states are untouched.
+   * `false` only for a refusal with no realistic chance of answering differently
+   * until something outside this request changes — and then only while the text
+   * that would be SENT is still the text that was refused, byte for byte. The
+   * toolbar disables the button in that state rather than leaving a live control
+   * whose outcome we already expect: a dead-looking button and a button that is
+   * genuinely dead are the same defect wearing different clothes, and here a
+   * press is not even free — the case this exists for (`answer_too_long`) is
+   * very likely to spend a fresh billed call on the identical nothing.
+   *
+   * A FUNCTION OF THE BODY, not a boolean, on purpose. The reading pane's
+   * `canRetry` can be a plain flag because a message does not change under the
+   * reader; a draft changes every keystroke, and the escape from every one of
+   * these refusals is an edit. Taking the body as an argument means the caller
+   * cannot ask the question without saying which draft it is about, so a stale
+   * verdict cannot outlive the text it was about. It takes the WHOLE body and
+   * splits it here, rather than asking the caller for the own-text half: the
+   * toolbar holds the draft, and a caller that had to pre-split could pre-split
+   * differently from `run` — which is the disagreement this comparison exists to
+   * prevent.
+   */
+  canRetryFor: (body: string) => boolean
   /** Record the user's pick for this draft. Never reaches a provider by itself. */
   setTargetLang: (code: TranslateLanguageCode) => void
   /** Explicit user action — the ONLY path that can reach a provider. */
   run: (body: string) => void
   /** Dismiss the preview / refusal and return to idle. */
   dismiss: () => void
+}
+
+/**
+ * Whether another press at THIS refusal could answer differently, ASSUMING the
+ * draft is unchanged (2026-08-31).
+ *
+ * The same rule the reading pane applies in `refusalAllowsRetry`
+ * (`useMailTranslation.ts`), asked with the same question: is a second press,
+ * made right now with nothing else changed, REASONABLY LIKELY to produce a
+ * different result? Where the answer is no, the toolbar draws no live control —
+ * a control whose outcome we can already predict is a poor thing to offer, and
+ * on this bar it is not a free one either: a repeat that main does not refuse
+ * before dispatch is a fresh billed request against the writer's own key.
+ *
+ * PROBABLE, NOT PROVEN — see the same paragraph in `refusalAllowsRetry`. A
+ * provider is not guaranteed to be deterministic, and these calls go out with a
+ * non-zero temperature, so a repeat CAN answer differently. The refusal proves
+ * the LAST answer hit the ceiling, not that every future one must. We suppress
+ * because the repeat is very likely to reproduce it and costs money to find out.
+ *
+ * ONE DIFFERENCE FROM THE READING SIDE, and it is the whole reason this function
+ * exists separately instead of being imported: the input is EDITABLE. A message
+ * cannot change under the reader, so there the verdict is a property of the
+ * reason alone; a draft changes every keystroke, and "the same request" is
+ * therefore a pair — the reason AND the string that was actually sent for it,
+ * which is the own-text half of the draft and not the whole body. That is why
+ * nothing here is exported as a bare boolean: the hook publishes
+ * {@link UseDraftTranslationResult.canRetryFor}, which cannot be consulted
+ * without saying which body is being asked about.
+ *
+ * Exhaustive over `TranslateDraftRefusalReason` with a `never` guard, so a
+ * reason added to the wire contract cannot quietly inherit someone else's
+ * verdict.
+ *
+ *   answer_too_long — NO. The own text and the output ceiling are exactly what
+ *     they were a moment ago, so a repeat asks the same model for the same thing
+ *     under the same limit — very likely the same refusal. This is the case the
+ *     2026-08-31 incident was made of, and the expensive one: a repeat that
+ *     reaches the provider is billed whatever it answers.
+ *   too_long — NO. The input cap is measured on the received string before any
+ *     call; the same string measures the same.
+ *   opt_out — NO. Turning the setting on flips `enabled`, which resets this hook
+ *     and takes the refusal with it; so a press while the refusal is still on
+ *     screen is a press against an unchanged setting.
+ *   empty_input — NO for this request. On the DRAFT side this means "there is
+ *     nothing of yours to translate", not the reading side's "the body is still
+ *     downloading": nothing arrives on its own, and the fix is to write
+ *     something — which changes the own text and revives the control by itself.
+ *   no_own_text — NO for this request, for the same reason: the answer is to
+ *     write above the quote, and that is an edit to the own text. Editing INSIDE
+ *     the quote correctly leaves the control dead — it changes nothing the
+ *     provider would see.
+ *   budget — YES. The cap belongs to a period that rolls, and it can also be
+ *     raised in Settings without anything here resetting.
+ *   no_provider — YES. Configuring a provider changes nothing in this hook's
+ *     state, so the refusal stays on screen and the retry is the way back.
+ *   provider_error — YES. By construction this is now the reason we have NO
+ *     explanation for, and an unexplained failure may well be transient. That is
+ *     the whole value of having split `answer_too_long` out of it.
+ */
+function draftRefusalAllowsRetry(reason: TranslateDraftRefusalReason): boolean {
+  switch (reason) {
+    case 'answer_too_long':
+    case 'too_long':
+    case 'opt_out':
+    case 'empty_input':
+    case 'no_own_text':
+      return false
+    case 'budget':
+    case 'no_provider':
+    case 'provider_error':
+      return true
+    default: {
+      const exhaustive: never = reason
+      void exhaustive
+      // An unknown reason from a newer main is not evidence that retrying is
+      // pointless, and refusing to draw the control would strand the writer
+      // with no way forward at all. Offer it.
+      return true
+    }
+  }
 }
 
 /** Default IPC runner — invokes the whitelisted `ai:translate:draft` channel. */
@@ -199,7 +316,21 @@ export function useDraftTranslation({
 }: UseDraftTranslationParams): UseDraftTranslationResult {
   const [status, setStatus] = useState<DraftTranslationStatus>('idle')
   const [preview, setPreview] = useState<DraftTranslationPreview | null>(null)
-  const [refusal, setRefusal] = useState<TranslateDraftRefusalReason | null>(null)
+  // ONE piece of state for two facts that must never disagree: what was refused
+  // and WHICH REQUEST it was refused for. Kept together rather than as two
+  // `useState`s because every clear site would otherwise have to remember both,
+  // and a leftover from a forgotten clear would keep the translate button dead
+  // for a draft nothing is refusing (see `canRetryFor`).
+  //
+  // `sentText` is the OWN-TEXT half of the draft — `splitComposeBody(body).own`,
+  // which is exactly and only what `run` puts on the wire — never the whole
+  // body. Keying on the whole body re-armed the button when the writer touched
+  // the signature, the separator or the quoted tail, none of which change the
+  // request by a single byte: the next press would send the identical string
+  // and pay for the identical refusal. Compare what is actually sent.
+  const [refusalState, setRefusalState] =
+    useState<{ reason: TranslateDraftRefusalReason; sentText: string } | null>(null)
+  const refusal = refusalState?.reason ?? null
   // The user's pick, and ONLY the user's pick. The suggestion is never written
   // into it, so "was there a pick in this draft?" stays answerable and the
   // priority rule below cannot be defeated by a later re-render.
@@ -236,7 +367,7 @@ export function useDraftTranslation({
     setChosen(null)
     setStatus('idle')
     setPreview(null)
-    setRefusal(null)
+    setRefusalState(null)
   }, [composeGeneration])
 
   // A different sender account, or the per-account opt-in flipping, is a
@@ -255,7 +386,7 @@ export function useDraftTranslation({
     setBusy(false)
     setStatus('idle')
     setPreview(null)
-    setRefusal(null)
+    setRefusalState(null)
   }, [accountId, enabled])
 
   const setTargetLang = useCallback((code: TranslateLanguageCode) => {
@@ -269,7 +400,7 @@ export function useDraftTranslation({
     // occupied until the request the user is paying for actually settles.
     requestIdRef.current++
     setPreview(null)
-    setRefusal(null)
+    setRefusalState(null)
     setStatus('idle')
   }, [])
 
@@ -282,9 +413,20 @@ export function useDraftTranslation({
     // that must hold at the entry point too, not only in the rendering.
     if (inFlightRef.current.size > 0) return
 
+    // §2.78: only the user's own text is ever sent or replaced. Split BEFORE
+    // the first refusal so every refusal — including the two raised locally
+    // below — is recorded against the string that would have gone on the wire,
+    // not against the draft that contains it.
+    const split = splitComposeBody(body)
+
     const refuse = (reason: TranslateDraftRefusalReason) => {
       setPreview(null)
-      setRefusal(reason)
+      // The SENT text is recorded WITH the reason: on a draft "the same
+      // request" is a pair, because the text is editable and an edit is exactly
+      // what makes some of these refusals answerable (see
+      // `draftRefusalAllowsRetry`). The pair's second half is `split.own` and
+      // not `body`, because `split.own` is what the provider sees.
+      setRefusalState({ reason, sentText: split.own })
       setStatus('refused')
     }
 
@@ -294,8 +436,6 @@ export function useDraftTranslation({
       refuse('empty_input')
       return
     }
-    // §2.78: only the user's own text is ever sent or replaced.
-    const split = splitComposeBody(body)
     if (!hasRewritableText(split.own)) {
       refuse('no_own_text')
       return
@@ -305,7 +445,7 @@ export function useDraftTranslation({
     inFlightRef.current.add(requestId)
     setBusy(true)
     setPreview(null)
-    setRefusal(null)
+    setRefusalState(null)
     setStatus('loading')
 
     void (async () => {
@@ -319,7 +459,7 @@ export function useDraftTranslation({
             sourceBody: body,
             replacement: joinComposeBody(split, result.translation.translatedText),
           })
-          setRefusal(null)
+          setRefusalState(null)
           setStatus('ready')
           return
         }
@@ -340,6 +480,23 @@ export function useDraftTranslation({
     })()
   }, [])
 
+  const canRetryFor = useCallback((body: string): boolean => {
+    // Nothing refusing ⇒ nothing to suppress. Idle, loading and ready all take
+    // this branch, so the button's ordinary enablement is decided entirely by
+    // the rules that already own it. It also keeps the split off the hot path:
+    // a draft with no refusal on screen never pays for one, and only a refused
+    // draft re-splits per render.
+    if (!refusalState) return true
+    // A different REQUEST is a different question, whatever the previous one was
+    // refused for. The comparison is on the own-text half — the exact string
+    // `run` would send — so "shorten it and try again" is advice the interface
+    // lets the writer follow, while editing the quote or the signature (which
+    // the provider never sees) does not re-arm a button whose next press would
+    // buy a byte-identical refusal.
+    if (refusalState.sentText !== splitComposeBody(body).own) return true
+    return draftRefusalAllowsRetry(refusalState.reason)
+  }, [refusalState])
+
   const dismiss = useCallback(() => {
     // Invalidate any in-flight request so a late response cannot re-open a
     // panel the user has just closed. `busy` is deliberately left alone for
@@ -347,7 +504,7 @@ export function useDraftTranslation({
     // request finishing.
     requestIdRef.current++
     setPreview(null)
-    setRefusal(null)
+    setRefusalState(null)
     setStatus('idle')
   }, [])
 
@@ -359,6 +516,7 @@ export function useDraftTranslation({
     refusal,
     canRun: targetLang !== null,
     busy,
+    canRetryFor,
     setTargetLang,
     run,
     dismiss,

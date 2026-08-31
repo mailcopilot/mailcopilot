@@ -27,6 +27,7 @@ import type { UseMailTranslationResult } from '../hooks/useMailTranslation'
 const i18nMap: Record<string, string> = {
   'mail.translate.action': 'Translate',
   'mail.translate.retry': 'Try again',
+  'mail.translate.attempt': "Attempt {{n}}.",
   'mail.translate.loading': 'Translating…',
   'mail.translate.showOriginal': 'Show original',
   'mail.translate.showTranslation': 'Show translation',
@@ -43,7 +44,10 @@ const i18nMap: Record<string, string> = {
   'mail.translate.textProjection': 'Translated from the plain-text version of the message, so its formatting and images are not part of the translation.',
   'mail.translate.refusal.budget': 'The AI budget for this period is used up. Raise it in Settings → AI, or wait for the next period.',
   'mail.translate.refusal.no_provider': 'No AI provider is set up yet. Add one in Settings → AI.',
-  'mail.translate.refusal.provider_error': 'The AI provider did not return a translation. Please try again.',
+  'mail.translate.refusal.provider_error':
+    "The AI provider did not return a translation, and did not say why. Another attempt sends the message to the provider again.",
+  'mail.translate.refusal.answer_too_long':
+    "The translation does not fit within the AI provider's answer limit, so it came back cut off and is not shown. Another attempt would end the same way: neither this message nor the limit has changed.",
   'mail.translate.refusal.empty_input': 'There is no downloaded text for this message yet. Try again once the message has loaded.',
   'mail.translate.refusal.too_long':
     'This message is too long to translate in one go, and there is no way to translate only part of it — the whole message counts towards the limit, including any earlier correspondence quoted inside it.',
@@ -92,6 +96,8 @@ function makeState(overrides: Partial<UseMailTranslationResult> = {}): UseMailTr
     status: 'idle',
     translation: null,
     refusal: null,
+    attempts: 0,
+    canRetry: false,
     targetLang: 'en',
     sourceLang: null,
     needsLanguageChoice: false,
@@ -267,6 +273,7 @@ describe('MailTranslateBar — refusals render human, localized text', () => {
     'budget',
     'no_provider',
     'provider_error',
+    'answer_too_long',
     'empty_input',
     'too_long',
     'opt_out',
@@ -287,15 +294,93 @@ describe('MailTranslateBar — refusals render human, localized text', () => {
     expect(screen.queryByTestId('mail-translate-refusal')).not.toBeInTheDocument()
   })
 
-  it('offers a SECOND attempt after a refusal, worded as one', () => {
+  it('offers a SECOND attempt after a refusal the hook says could go differently', () => {
     const { state } = renderBar({
-      state: makeState({ status: 'refused', refusal: 'provider_error' }),
+      state: makeState({ status: 'refused', refusal: 'provider_error', canRetry: true }),
     })
     const action = screen.getByTestId('mail-translate-action')
     expect(action).toHaveTextContent('Try again')
     expect(action).not.toBeDisabled()
     fireEvent.click(action)
     expect(state.request).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * 2026-08-31 incident, the interface half.
+ *
+ * A reader hit a refusal, pressed "try again" seven times in three seconds, and
+ * saw nothing move. Every one of those presses really did reach the provider and
+ * really was billed — the screen simply repainted the same sentence. Two things
+ * are wrong in that story and both are fixed here: an attempt that cannot end
+ * differently should not be offered at all, and an attempt that IS offered has
+ * to visibly register when it is spent.
+ */
+describe('MailTranslateBar — a retry is offered only when it could change something', () => {
+  it('draws NO button for a refusal the hook rules out, rather than a dead one', () => {
+    renderBar({
+      state: makeState({ status: 'refused', refusal: 'answer_too_long', canRetry: false }),
+    })
+    // The refusal itself is still on screen and still explains itself.
+    expect(screen.getByTestId('mail-translate-refusal')).toHaveTextContent(
+      i18nMap['mail.translate.refusal.answer_too_long'],
+    )
+    // A control whose outcome is already known is not a choice, and each press
+    // of it would be a fresh billed request.
+    expect(screen.queryByTestId('mail-translate-action')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('mail-translate-toggle')).not.toBeInTheDocument()
+  })
+
+  it('never withholds the button outside a refusal — idle and loading always keep it', () => {
+    // `canRetry` is a statement about a refusal on screen. Reading it as a
+    // general "may this button exist" would hide the ordinary Translate action.
+    renderBar({ state: makeState({ status: 'idle', canRetry: false }) })
+    expect(screen.getByTestId('mail-translate-action')).toHaveTextContent('Translate')
+    cleanup()
+    renderBar({ state: makeState({ status: 'loading', canRetry: false }) })
+    expect(screen.getByTestId('mail-translate-action')).toBeDisabled()
+  })
+
+  it('leaves the reader a way forward when the button is gone — the target select stays', () => {
+    // Changing the target resets the hook to idle, which is how the Translate
+    // action comes back. Without this the bar would be a cul-de-sac.
+    renderBar({
+      state: makeState({ status: 'refused', refusal: 'too_long', canRetry: false }),
+    })
+    expect(screen.getByTestId('mail-translate-target')).toBeInTheDocument()
+  })
+})
+
+describe('MailTranslateBar — a repeat that refuses identically still shows it happened', () => {
+  it('says nothing about attempts on the first refusal', () => {
+    renderBar({
+      state: makeState({ status: 'refused', refusal: 'provider_error', canRetry: true, attempts: 1 }),
+    })
+    expect(screen.queryByTestId('mail-translate-attempts')).not.toBeInTheDocument()
+  })
+
+  it('counts from the second attempt on, so an identical refusal is not an identical screen', () => {
+    renderBar({
+      state: makeState({ status: 'refused', refusal: 'provider_error', canRetry: true, attempts: 2 }),
+    })
+    expect(screen.getByTestId('mail-translate-attempts')).toHaveTextContent('Attempt 2.')
+    cleanup()
+    renderBar({
+      state: makeState({ status: 'refused', refusal: 'provider_error', canRetry: true, attempts: 7 }),
+    })
+    expect(screen.getByTestId('mail-translate-attempts')).toHaveTextContent('Attempt 7.')
+  })
+
+  it('keeps the count with the refusal it belongs to, not on a ready translation', () => {
+    renderBar({
+      state: makeState({
+        status: 'ready',
+        translation: makeTranslation(),
+        showingTranslation: true,
+        attempts: 3,
+      }),
+    })
+    expect(screen.queryByTestId('mail-translate-attempts')).not.toBeInTheDocument()
   })
 })
 

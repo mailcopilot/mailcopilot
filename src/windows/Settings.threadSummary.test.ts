@@ -1,19 +1,28 @@
 /**
  * §3.3 B2 Thread AI Summary — per-account opt-in toggle logic (pure unit test).
  *
- * The AI-tab toggle in Settings.tsx reads/writes a single entry in the
- * `aiThreadSummaryEnabled` Record keyed by stringified accountId, and the load
- * path normalizes any persisted shape so only strictly-true entries count as
- * opted in. Both are small pure transforms; we pin them here rather than
- * mounting Settings.tsx, whose 3000+ line surface and many top-level imports
- * make full-component mounting impractical in jsdom (same rationale as
+ * The AI-tab control reads/writes a single entry in the `aiThreadSummaryEnabled`
+ * Record keyed by stringified accountId, and the Settings.tsx load path
+ * normalizes any persisted shape so only strictly-true entries count as opted
+ * in. Both are small pure transforms; we pin them here rather than mounting
+ * Settings.tsx, whose 3000+ line surface and many top-level imports make
+ * full-component mounting impractical in jsdom (same rationale as
  * Settings.bodyRetention.test.ts). Keep these mirrors in sync with the source.
+ *
+ * §1.26.1(3): the toggle itself moved out of Settings.tsx into the per-account
+ * consent grid — the read/write pair below is now `isConsentGranted` /
+ * `withConsent` in `src/hooks/useAiConsentMatrix.ts`, tested directly in
+ * `useAiConsentMatrix.test.ts`. These mirrors are kept because they also pin the
+ * SEMANTICS the main-side gate depends on (missing key and explicit false both
+ * mean "not opted in"), and because the `normalize` case below still mirrors
+ * live Settings.tsx code.
  */
 import { describe, expect, it } from 'vitest'
 
 /**
- * Pure mirror of the checkbox `checked` predicate in the AI-tab toggle:
- *   checked={typeof accountId === 'number' && aiThreadSummaryEnabled[String(accountId)] === true}
+ * Pure mirror of the grid cell's `checked` predicate (`isConsentGranted`):
+ *   checked={map[String(accountId)] === true}
+ * with the `accountId == null` guard the surrounding Settings state still has.
  */
 function isChecked(
   record: Record<string, boolean>,
@@ -23,8 +32,8 @@ function isChecked(
 }
 
 /**
- * Pure mirror of the checkbox `onChange` writer:
- *   setAiThreadSummaryEnabled(prev => ({ ...prev, [String(accountId)]: next }))
+ * Pure mirror of the grid cell's writer (`withConsent`):
+ *   { ...map, [String(accountId)]: next }
  */
 function writeToggle(
   record: Record<string, boolean>,

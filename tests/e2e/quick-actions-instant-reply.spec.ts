@@ -109,12 +109,14 @@ test('quick actions: toolbar renders in Compose and a preset click reaches a gra
     await compose.waitForLoadState('domcontentloaded')
     compose.on('dialog', d => d.accept())
 
-    // The toolbar renders above the body with all four preset buttons.
+    // The toolbar renders above the body with the three tone presets. §1.26.1
+    // AC-1 retired the fourth ("fix grammar"): it promised the same thing as
+    // the B7 check while accepting the result under a different rule.
     await expect(compose.getByTestId('compose-quick-actions')).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(compose.getByTestId('compose-quick-action-improve')).toBeVisible()
     await expect(compose.getByTestId('compose-quick-action-shorter')).toBeVisible()
     await expect(compose.getByTestId('compose-quick-action-formal')).toBeVisible()
-    await expect(compose.getByTestId('compose-quick-action-grammar')).toBeVisible()
+    await expect(compose.getByTestId('compose-quick-action-grammar')).toHaveCount(0)
 
     // A fresh reply draft is nothing but the attribution + quoted original, so
     // the §2.78 boundary detector reports "no own text" and never fires IPC.
@@ -250,7 +252,7 @@ test('instant reply: strip renders when toggled ON, and the trigger reaches a gr
     await settings.waitForLoadState('domcontentloaded')
     await settings.getByTestId('settings-tab-ai').click()
 
-    const toggle = settings.getByTestId('settings-ai-instant-reply-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-instantReply-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle).not.toBeChecked()
     await toggle.check()
@@ -307,7 +309,7 @@ test('instant reply: strip renders on a SINGLE (non-thread) message when toggled
     await settings.waitForLoadState('domcontentloaded')
     await settings.getByTestId('settings-tab-ai').click()
 
-    const toggle = settings.getByTestId('settings-ai-instant-reply-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-instantReply-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle).not.toBeChecked()
     await toggle.check()
@@ -360,7 +362,7 @@ test('instant reply: per-account Settings toggle persists across close/reopen', 
     await settings.waitForLoadState('domcontentloaded')
     await settings.getByTestId('settings-tab-ai').click()
 
-    const toggle = settings.getByTestId('settings-ai-instant-reply-toggle')
+    const toggle = settings.getByTestId('settings-ai-consent-instantReply-1')
     await expect(toggle).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle).not.toBeChecked()
 
@@ -377,7 +379,7 @@ test('instant reply: per-account Settings toggle persists across close/reopen', 
     await settings2.waitForLoadState('domcontentloaded')
     await settings2.getByTestId('settings-tab-ai').click()
 
-    const toggle2 = settings2.getByTestId('settings-ai-instant-reply-toggle')
+    const toggle2 = settings2.getByTestId('settings-ai-consent-instantReply-1')
     await expect(toggle2).toBeVisible({ timeout: EXPECT_TIMEOUT })
     await expect(toggle2).toBeChecked()
 

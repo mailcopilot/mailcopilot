@@ -362,17 +362,133 @@ describe('the result', () => {
     expect(f.recordSpan.mock.calls[0][0].errorClass).toBe('parse_error')
   })
 
+  // The REASON differs across these three while the refusal does not, and that
+  // is the 2026-08-31 split: `length` and a count sitting on the cap are direct
+  // evidence about the ceiling, `interrupted` says nothing about length at all.
+  // The telemetry class stays `parse_error` on all three — the span asks the
+  // coarser question "was the answer usable", and the metrics schema is not
+  // being widened for a copy fix.
   it.each([
-    ['the provider says it stopped at the cap', () => billed(TRANSLATED, 100, 'length')],
-    ['the provider says it was interrupted', () => billed(TRANSLATED, 100, 'interrupted')],
-    ['a clean finish contradicts its own token count', () => billed(TRANSLATED, 2000, 'stop')],
-  ])('refuses a half-translated draft when %s', async (_label, make) => {
+    ['the provider says it stopped at the cap', () => billed(TRANSLATED, 100, 'length'), 'answer_too_long'],
+    ['the provider says it was interrupted', () => billed(TRANSLATED, 100, 'interrupted'), 'provider_error'],
+    ['a clean finish contradicts its own token count', () => billed(TRANSLATED, 2000, 'stop'), 'answer_too_long'],
+  ] as const)('refuses a half-translated draft when %s', async (_label, make, reason) => {
     const f = makeDeps({ chat: vi.fn(async () => make()) as never })
     // Never show half a letter: the user would send a complete-looking message
     // that stops meaning what they wrote.
-    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({ ok: false, reason: 'provider_error' })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({ ok: false, reason })
     expect(f.recordSpan.mock.calls[0][0].errorClass).toBe('parse_error')
     expect(f.appendAudit.mock.calls[0][0].outcome).toBe('error')
+  })
+})
+
+/**
+ * 2026-08-31 — the draft side says out loud when the answer ran out of room.
+ *
+ * The reading path was corrected first: `provider_error` used to cover two
+ * failures with OPPOSITE advice — a provider that hiccuped (try again) and a
+ * provider that ran out of output room (do not bother; the text and the ceiling
+ * are unchanged, and the attempt is a fresh BILLED call). The draft path
+ * repeated the same ladder and kept the old answer, so the product told the
+ * truth about the same defect in the reading window and not in the compose one.
+ *
+ * The boundary is the whole design, and it is the same boundary part 1 draws
+ * because it is the same function (`ranOutOfOutputRoom`, imported): the reason
+ * is claimed only on DIRECT evidence about the ceiling, never inferred.
+ */
+describe('generateDraftTranslation — running out of output room is said out loud', () => {
+  it('refuses an EMPTY answer as answer_too_long when the provider says `length`', async () => {
+    const f = makeDeps({ chat: vi.fn(async () => billed('', 2000, 'length')) as never })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({
+      ok: false, reason: 'answer_too_long',
+    })
+  })
+
+  it('refuses a TRUNCATED answer as answer_too_long rather than offering half a letter to send', async () => {
+    const f = makeDeps({ chat: vi.fn(async () => billed('Hello Anna, thank you for the', 2000, 'length')) as never })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({
+      ok: false, reason: 'answer_too_long',
+    })
+  })
+
+  it('reads the token count as evidence when the verdict itself is unreadable', async () => {
+    // An OpenAI-compatible endpoint may spell its finish reason in a word we map
+    // to `unknown` while still reporting the count. The count alone is then the
+    // entire case, and it is a fact rather than a guess.
+    const f = makeDeps({ chat: vi.fn(async () => billed('', 2000, 'unknown')) as never })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({
+      ok: false, reason: 'answer_too_long',
+    })
+  })
+
+  it('does NOT claim "too long" for a stop that says nothing about the ceiling', async () => {
+    // A content filter, a safety stop, a tool call: all are reasons to refuse and
+    // none is evidence about length. Dressing one up as "your draft is too long"
+    // is the same defect this split exists to end, one level down.
+    const f = makeDeps({ chat: vi.fn(async () => billed('', 10, 'interrupted')) as never })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({
+      ok: false, reason: 'provider_error',
+    })
+  })
+
+  it('does NOT claim "too long" when there is no verdict and no count', async () => {
+    // The honest answer to "why did this fail" is sometimes "we do not know",
+    // and that is what `provider_error` now means.
+    const f = makeDeps({
+      chat: vi.fn(async (): Promise<TranslateChatOutcome> => ({
+        kind: 'billed',
+        result: { text: '', model: 'gpt-test', usage: null, stopReason: 'unknown' },
+      })) as never,
+    })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({
+      ok: false, reason: 'provider_error',
+    })
+  })
+
+  it('keeps saying provider_error for failures that never reached a completion', async () => {
+    // No completion, no evidence about its length — whatever the output cap is.
+    const f = makeDeps({
+      chat: vi.fn(async (): Promise<TranslateChatOutcome> => (
+        { kind: 'unbilled', reason: 'no_key', dispatched: false }
+      )) as never,
+    })
+    expect(await generateDraftTranslation(f.deps, REQ)).toEqual({
+      ok: false, reason: 'provider_error',
+    })
+  })
+
+  it('names the stop reason and the reported output tokens in the log line', async () => {
+    // Both are provider-owned facts and neither is PII: the verdict is one of
+    // four literals THIS repository defines, and the count is a number. They are
+    // what makes a REPEAT of this refusal diagnosable at all.
+    const warn = vi.fn()
+    const f = makeDeps({
+      log: { warn, error: vi.fn() },
+      chat: vi.fn(async () => billed('', 2000, 'length')) as never,
+    })
+
+    await generateDraftTranslation(f.deps, REQ)
+
+    const line = warn.mock.calls.map(args => String(args[0])).find(l => l.includes('no usable text'))
+    expect(line).toContain('stop_reason=length')
+    expect(line).toContain('output_tokens=2000')
+    // …and still not one byte of the draft.
+    expect(warn.mock.calls.map(args => String(args[0])).join('\n')).not.toContain('Hallo Anna')
+  })
+
+  it('leaves the money and the records exactly where they were', async () => {
+    // The split changes the WORD the user is told and nothing else: a billed
+    // completion still settles once, still writes one audit row and still books
+    // one span in the same coarse class the schema already publishes.
+    const f = makeDeps({ chat: vi.fn(async () => billed('', 2000, 'length')) as never })
+    await generateDraftTranslation(f.deps, REQ)
+
+    expect(f.settleBudget).toHaveBeenCalledTimes(1)
+    expect(f.releaseBudget).not.toHaveBeenCalled()
+    expect(f.appendAudit).toHaveBeenCalledTimes(1)
+    expect(f.appendAudit.mock.calls[0][0].outcome).toBe('error')
+    expect(f.recordSpan).toHaveBeenCalledTimes(1)
+    expect(f.recordSpan.mock.calls[0][0].errorClass).toBe('parse_error')
   })
 })
 

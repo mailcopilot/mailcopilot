@@ -177,7 +177,6 @@ describe('ComposeQuickActions — proofread action', () => {
       text: BODY,
       proofreadEnabled: true,
       composeGeneration: 0,
-      getCaret: () => 0,
       onReplace: vi.fn(),
       onInsert: vi.fn(),
       ...over,
@@ -185,9 +184,37 @@ describe('ComposeQuickActions — proofread action', () => {
     return { ...render(<ComposeQuickActions {...props} />), props }
   }
 
-  it('does not render the check button for an account that has not opted in', () => {
+  // §1.26.1(2): a switched-off opt-in locks the button, it does not delete it —
+  // an absent control reads as a missing feature.
+  it('still renders the check button for an account that has not opted in, locked', () => {
     renderToolbar({ proofreadEnabled: false })
-    expect(screen.queryByTestId('compose-proofread-run')).not.toBeInTheDocument()
+    const btn = screen.getByTestId('compose-proofread-run')
+    expect(btn).toBeInTheDocument()
+    expect(btn).toHaveAttribute('aria-disabled', 'true')
+    // Focusable on purpose (W3C ARIA APG): `disabled` would take the button
+    // out of the tab order along with the hint that says where to switch it on.
+    expect(btn).toBeEnabled()
+  })
+
+  it('makes the locked check button inert — no IPC on click (AC-2b)', () => {
+    renderToolbar({ proofreadEnabled: false })
+    fireEvent.click(screen.getByTestId('compose-proofread-run'))
+    fireEvent.click(screen.getByTestId('compose-proofread-run'))
+    expect(mockInvoke).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('proofread-panel')).not.toBeInTheDocument()
+  })
+
+  // §1.26.1(2) — the one behavioural difference `aria-disabled` buys over the
+  // `disabled` attribute: a real `disabled` button cannot receive focus at all
+  // (jsdom and every browser agree), which would make the "turn it on in
+  // Settings" hint unreachable by keyboard. Reintroducing
+  // `disabled={proofreadLocked}` here keeps every other assertion in this file
+  // green while breaking exactly this one.
+  it('stays reachable by keyboard focus while locked', () => {
+    renderToolbar({ proofreadEnabled: false })
+    const btn = screen.getByTestId('compose-proofread-run')
+    btn.focus()
+    expect(document.activeElement).toBe(btn)
   })
 
   it('renders the check button for an opted-in account', () => {

@@ -290,6 +290,148 @@ describe('useDraftTranslation — refusals (acceptance e)', () => {
   })
 })
 
+/**
+ * 2026-08-31 — a repeat that cannot answer differently is not offered.
+ *
+ * The reading pane learned this first (`useMailTranslation.canRetry`): a refusal
+ * whose cause is unchanged repaints a byte-identical screen, and a reader cannot
+ * tell that from a button that did nothing. On the draft side the same press is
+ * also a fresh BILLED call for `answer_too_long`.
+ *
+ * The draft difference the tests below pin down: the input is EDITABLE, so the
+ * verdict is about the pair (reason, body). "Shorten it" must not be advice the
+ * interface then refuses to let the writer act on.
+ */
+describe('useDraftTranslation — a useless repeat is never offered', () => {
+  it.each(['answer_too_long', 'too_long', 'opt_out'] as const)(
+    'withholds the retry for %s while the draft is unchanged',
+    async reason => {
+      const translate = vi.fn(async () => ({ ok: false as const, reason }))
+      const { result } = setup(translate, { suggestedTargetLang: 'de' })
+      act(() => result.current.run('my own text'))
+      await waitFor(() => expect(result.current.status).toBe('refused'))
+      expect(result.current.canRetryFor('my own text')).toBe(false)
+    },
+  )
+
+  it.each(['budget', 'no_provider', 'provider_error'] as const)(
+    'offers the retry for %s, which something outside this request could fix',
+    async reason => {
+      const translate = vi.fn(async () => ({ ok: false as const, reason }))
+      const { result } = setup(translate, { suggestedTargetLang: 'de' })
+      act(() => result.current.run('my own text'))
+      await waitFor(() => expect(result.current.status).toBe('refused'))
+      expect(result.current.canRetryFor('my own text')).toBe(true)
+    },
+  )
+
+  it('offers the retry again as soon as the draft is edited', async () => {
+    // The escape from every withheld refusal is an edit, and the interface must
+    // not stand in front of it: `answer_too_long` literally tells the writer to
+    // shorten the text.
+    const translate = vi.fn(async () => ({ ok: false as const, reason: 'answer_too_long' as const }))
+    const { result } = setup(translate, { suggestedTargetLang: 'de' })
+    act(() => result.current.run('my own long text'))
+    await waitFor(() => expect(result.current.status).toBe('refused'))
+
+    expect(result.current.canRetryFor('my own long text')).toBe(false)
+    expect(result.current.canRetryFor('my own text')).toBe(true)
+  })
+
+  it('withholds it again if the writer edits back to exactly the refused draft', () => {
+    // Not a technicality: the same string genuinely produces the same answer, so
+    // the button being live again would be the original defect returning.
+    const translate = vi.fn()
+    const { result } = setup(translate, { suggestedTargetLang: 'de' })
+    act(() => result.current.run('> only a quote\n> and nothing else\n'))
+    expect(result.current.refusal).toBe('no_own_text')
+    expect(result.current.canRetryFor('> only a quote\n> and nothing else\n')).toBe(false)
+    expect(result.current.canRetryFor('mine\n> only a quote\n')).toBe(true)
+  })
+
+  it('keeps withholding when the writer edits only what is never sent', async () => {
+    // Independent review, 2026-08-31, Medium: the verdict was keyed on the WHOLE
+    // body while only `splitComposeBody(body).own` ever reaches the provider. So
+    // touching the signature, the separator or the quoted tail re-armed the
+    // button for a request that would go out byte-identical — and be billed
+    // again for the identical refusal. Compare what is actually sent.
+    const translate = vi.fn(async () => ({ ok: false as const, reason: 'answer_too_long' as const }))
+    const { result } = setup(translate, { suggestedTargetLang: 'de' })
+    act(() => result.current.run('my own long text\n\n-- \nSergey\n'))
+    await waitFor(() => expect(result.current.status).toBe('refused'))
+    expect(translate).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'my own long text' }),
+    )
+
+    // Signature edited — the provider would see the same string.
+    expect(result.current.canRetryFor('my own long text\n\n-- \nSergey Popov\n')).toBe(false)
+    // Quoted tail replaced — likewise.
+    expect(result.current.canRetryFor('my own long text\n\n> quoted line\n')).toBe(false)
+    // Signature removed entirely — the own text is STILL the same string.
+    expect(result.current.canRetryFor('my own long text')).toBe(false)
+    // The own text itself edited — a genuinely different request, so the escape
+    // the refusal advises stays open.
+    expect(result.current.canRetryFor('my own text\n\n-- \nSergey\n')).toBe(true)
+  })
+
+  it('withholds a no_own_text refusal however the quote is edited', () => {
+    // The local refusals are recorded against the sent text too, so editing
+    // inside the quote — which changes nothing the provider would see — does not
+    // offer a press that can only refuse again. Writing above it does.
+    const translate = vi.fn()
+    const { result } = setup(translate, { suggestedTargetLang: 'de' })
+    act(() => result.current.run('> only a quote\n> and nothing else\n'))
+    expect(result.current.refusal).toBe('no_own_text')
+    expect(result.current.canRetryFor('> only a quote\n> edited to say something else\n')).toBe(false)
+    expect(result.current.canRetryFor('mine\n> only a quote\n')).toBe(true)
+  })
+
+  it('makes no claim at all while nothing is refusing', async () => {
+    const translate = vi.fn(async () => ok('Hallo Anna'))
+    const { result } = setup(translate, { suggestedTargetLang: 'de' })
+    // Idle.
+    expect(result.current.canRetryFor('my own text')).toBe(true)
+
+    act(() => result.current.run('my own text'))
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    // Ready: the ordinary enablement rules own the button here, not this one.
+    expect(result.current.canRetryFor('my own text')).toBe(true)
+  })
+
+  it('stops withholding once a reset clears the refusal', async () => {
+    // A new `compose:init` is another message; whatever the previous draft was
+    // refused for must not follow it.
+    const translate = vi.fn(async () => ({ ok: false as const, reason: 'answer_too_long' as const }))
+    const { result, rerender } = setup(translate, { suggestedTargetLang: 'de' })
+    act(() => result.current.run('my own text'))
+    await waitFor(() => expect(result.current.status).toBe('refused'))
+    expect(result.current.canRetryFor('my own text')).toBe(false)
+
+    rerender({
+      accountId: 1,
+      enabled: true,
+      suggestedTargetLang: 'de' as TranslateLanguageCode,
+      composeGeneration: 1,
+      translate,
+    })
+    expect(result.current.canRetryFor('my own text')).toBe(true)
+  })
+
+  it('stops withholding when the target language changes', async () => {
+    // A different target is a different question — and for the ceiling case a
+    // genuinely different one, since the answer is priced in the target's own
+    // tokens. The existing `setTargetLang` reset is what carries this; the test
+    // pins it so a future edit cannot quietly leave the button dead.
+    const translate = vi.fn(async () => ({ ok: false as const, reason: 'answer_too_long' as const }))
+    const { result } = setup(translate, { suggestedTargetLang: 'de' })
+    act(() => result.current.run('my own text'))
+    await waitFor(() => expect(result.current.status).toBe('refused'))
+
+    act(() => result.current.setTargetLang('fr'))
+    expect(result.current.canRetryFor('my own text')).toBe(true)
+  })
+})
+
 describe('useDraftTranslation — a late answer never lands under a new question', () => {
   it('drops a response superseded by a target change', async () => {
     let release: ((r: TranslateDraftResult) => void) | null = null

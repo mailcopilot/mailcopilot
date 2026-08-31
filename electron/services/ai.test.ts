@@ -356,6 +356,7 @@ import {
   type EmailContext,
   type AiStreamEvent,
   type AiSource,
+  type AiChatSimpleResult,
 } from './ai'
 import { DOMAINS } from '../metricsSchema'
 import type { MessageParseCap } from '../../packages/net/types'
@@ -9352,10 +9353,275 @@ describe('aiChatSimple — the provider\'s own stop verdict (§3.3.B6.f1)', () =
     await expect(stopReasonOf('gemini-api', gemini('IMAGE_SAFETY'))).resolves.toBe('interrupted')
   })
 
-  it('reports unknown for a 2xx whose body carried no usable text', async () => {
-    // A billed-but-unusable answer has no verdict to report, and inventing
-    // `stop` would tell a completeness-sensitive caller the opposite.
+  it('reports unknown for a 2xx that named no verdict at all', async () => {
+    // Nothing to read, so nothing to report — and inventing `stop` would tell a
+    // completeness-sensitive caller the opposite.
     await expect(stopReasonOf('openai-api', { choices: [] })).resolves.toBe('unknown')
+  })
+})
+
+/**
+ * 2026-08-31 incident, the evidence half.
+ *
+ * A reader pressed "translate", waited ~37 s, got "the AI provider did not
+ * return a translation — please try again", and then pressed "try again" seven
+ * times in three seconds. Every one of those clicks WAS a real, billed provider
+ * call (the log shows seven `translate: provider returned no usable text` warns
+ * and the audit log seven fresh `outcome: 'error'` rows); the UI simply repainted
+ * the identical sentence, so the button looked dead.
+ *
+ * What made that impossible to explain from inside the product: the endpoint had
+ * answered 2xx with an empty `content` while reporting BOTH its token usage and
+ * its finish reason — and this function replaced the whole result with
+ * `usage: null, stopReason: 'unknown'`. So the audit log recorded NULL tokens for
+ * nineteen billed calls, the settle charged an invented floor instead of the
+ * reported number, and the one fact that would have said "a retry is very
+ * unlikely to succeed" — a `length` verdict, or an output count sitting on the
+ * cap — was deleted before any caller could see it.
+ *
+ * A body that PARSED is not a body we failed to read. These tests pin that
+ * distinction on all three contours.
+ */
+describe('aiChatSimpleOutcome — a textless 2xx keeps what the provider reported', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    mockSecretStore.get.mockResolvedValue('test-key')
+  })
+
+  /** One 2xx body from `provider`, and the billed result it resolves to. */
+  async function resultOf(
+    provider: 'openai-api' | 'anthropic-api' | 'gemini-api',
+    body: Record<string, unknown>,
+  ) {
+    mockGetSettings.mockReturnValue({ aiProvider: provider, aiModel: 'm' } as never)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true, status: 200, json: async () => body,
+    } as Response)
+    const outcome = await aiChatSimpleOutcome('sys', 'user')
+    expect(outcome.kind).toBe('billed')
+    return (outcome as { kind: 'billed'; result: AiChatSimpleResult }).result
+  }
+
+  it('keeps the OpenAI usage and finish_reason of an empty completion', async () => {
+    // The incident's own shape: the whole output cap consumed, nothing returned.
+    const result = await resultOf('openai-api', {
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 285, completion_tokens: 2000 },
+    })
+    expect(result.text).toBe('')
+    expect(result.stopReason).toBe('length')
+    expect(result.usage).toEqual({ inputTokens: 285, outputTokens: 2000 })
+  })
+
+  it('keeps the Anthropic usage and stop_reason of an empty completion', async () => {
+    const result = await resultOf('anthropic-api', {
+      content: [{ text: '   ' }],
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 41, output_tokens: 2000 },
+    })
+    expect(result.text).toBe('')
+    expect(result.stopReason).toBe('length')
+    expect(result.usage).toEqual({ inputTokens: 41, outputTokens: 2000 })
+  })
+
+  it('keeps the Gemini usage and finishReason of an empty candidate', async () => {
+    const result = await resultOf('gemini-api', {
+      candidates: [{ content: { parts: [] }, finishReason: 'MAX_TOKENS' }],
+      usageMetadata: { promptTokenCount: 77, candidatesTokenCount: 2000 },
+    })
+    expect(result.text).toBe('')
+    expect(result.stopReason).toBe('length')
+    expect(result.usage).toEqual({ inputTokens: 77, outputTokens: 2000 })
+  })
+
+  it('still reports nothing for a 2xx body that could not be parsed at all', async () => {
+    // The one case where `usage: null` is honest: there is no body to read, so
+    // the conservative floor really is the only available charge.
+    mockGetSettings.mockReturnValue({ aiProvider: 'openai-api', aiModel: 'm' } as never)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true, status: 200, json: async () => { throw new Error('not json') },
+    } as unknown as Response)
+    const outcome = await aiChatSimpleOutcome('sys', 'user')
+    expect(outcome).toEqual({
+      kind: 'billed',
+      result: { text: '', model: 'm', usage: null, stopReason: 'unknown' },
+    })
+  })
+
+  it('leaves the text empty, so every caller still refuses', async () => {
+    // Preserving the provider's numbers must not turn a textless answer into a
+    // usable one: `text: ''` is the signal each generator reads to refuse.
+    const result = await resultOf('openai-api', {
+      choices: [{ message: { content: '   ' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 0 },
+    })
+    expect(result.text).toBe('')
+  })
+})
+
+/**
+ * Independent review, 2026-08-31, High: a HALF-REPORTED `usage` was billed as if
+ * the missing half were zero.
+ *
+ * `normalizeChatUsage` has always contracted "missing → null", but every adapter
+ * defaulted the field before handing it over (`json.usage.prompt_tokens ?? 0`),
+ * so the contract could not fire for the case it existed for. A 2xx reporting
+ * only `prompt_tokens` then priced as "N input tokens and NO output" — one half
+ * positive, so `estimateAiRuleCostUsd` returns a real number, the null-usage
+ * floor never applies, and the output the user PAID for is charged at zero.
+ *
+ * Reachable from any OpenAI-compatible endpoint that reports partial usage,
+ * without a line of code changing in this repository. A zero the provider sent
+ * and a zero we substituted for it are different facts (CLAUDE.md §5), and these
+ * tests pin the difference on all three contours.
+ */
+describe('aiChatSimpleOutcome — a half-reported usage is no usage', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    mockSecretStore.get.mockResolvedValue('test-key')
+  })
+
+  async function usageOf(
+    provider: 'openai-api' | 'anthropic-api' | 'gemini-api',
+    body: Record<string, unknown>,
+  ) {
+    mockGetSettings.mockReturnValue({ aiProvider: provider, aiModel: 'gpt-4o-mini' } as never)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true, status: 200, json: async () => body,
+    } as Response)
+    const outcome = await aiChatSimpleOutcome('sys', 'user')
+    expect(outcome.kind).toBe('billed')
+    return (outcome as { kind: 'billed'; result: AiChatSimpleResult }).result.usage
+  }
+
+  it('reports no usage when OpenAI omits the output half', async () => {
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 100 },
+    })).toBeNull()
+  })
+
+  it('reports no usage when OpenAI omits the input half', async () => {
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' } }],
+      usage: { completion_tokens: 2000 },
+    })).toBeNull()
+  })
+
+  it('reports no usage when Anthropic omits the output half', async () => {
+    expect(await usageOf('anthropic-api', {
+      content: [{ text: 'answer' }],
+      usage: { input_tokens: 100 },
+    })).toBeNull()
+  })
+
+  it('reports no usage when Gemini omits the candidates half', async () => {
+    expect(await usageOf('gemini-api', {
+      candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      usageMetadata: { promptTokenCount: 100 },
+    })).toBeNull()
+  })
+
+  it('reports no usage when a half is present but not a number', async () => {
+    // Same rule, other direction: `'2000'` is a string, and coercing it would
+    // price a call from a value the provider did not state numerically.
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' } }],
+      usage: { prompt_tokens: 100, completion_tokens: '2000' },
+    })).toBeNull()
+  })
+
+  it('keeps a zero the provider actually reported', async () => {
+    // The distinction this whole block is about: BOTH halves stated, one of them
+    // genuinely zero. That is a measurement and must price as one — collapsing
+    // it to null would charge the conservative floor for a call the provider
+    // told us was cheap.
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 100, completion_tokens: 0 },
+    })).toEqual({ inputTokens: 100, outputTokens: 0 })
+  })
+
+  it('reports no usage when a half is negative, rather than clamping it to zero', async () => {
+    // Independent review, 2026-08-31, Medium: the normalizer used to clamp with
+    // `Math.max(0, ...)`. A provider that reports -5 output tokens has not told
+    // us the output was free — it has told us its meter is broken, and clamping
+    // substitutes OUR zero for its broken number. That is the same defect as the
+    // `?? 0` this whole block exists to remove, one layer further in.
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' } }],
+      usage: { prompt_tokens: 100, completion_tokens: -5 },
+    })).toBeNull()
+  })
+
+  it('reports no usage when a half is fractional, rather than flooring it', async () => {
+    // Same rule for `Math.floor`: tokens come in whole units, so 12.7 is not a
+    // count to round but a response we may not price. Flooring would publish 12
+    // as though the provider had said 12.
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' } }],
+      usage: { prompt_tokens: 100, completion_tokens: 12.7 },
+    })).toBeNull()
+  })
+
+  it('reports no usage when a half has lost integer precision', async () => {
+    // Past 2^53 the value is no longer the number the provider sent, so pricing
+    // it books a fabricated charge. Real counts are seven orders of magnitude
+    // below this.
+    expect(await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' } }],
+      usage: { prompt_tokens: 100, completion_tokens: Number.MAX_SAFE_INTEGER + 2 },
+    })).toBeNull()
+  })
+
+  it('rejects a broken half on the Anthropic and Gemini contours too', async () => {
+    // The rejection lives in the shared normalizer, not in one adapter; pinned
+    // on the other two contours so a future per-adapter shortcut is caught.
+    expect(await usageOf('anthropic-api', {
+      content: [{ text: 'answer' }],
+      usage: { input_tokens: 100, output_tokens: -1 },
+    })).toBeNull()
+    expect(await usageOf('gemini-api', {
+      candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 0.5 },
+    })).toBeNull()
+  })
+
+  it('makes a clamped-away half unpriceable, so the caller charges the floor', async () => {
+    // The money consequence of the two tests above, end to end. What clamping
+    // used to charge instead: the input half alone, priced strictly below the
+    // fail-closed reservation for the same model — i.e. a provider with a broken
+    // output meter got its output for free on every call.
+    const broken = await usageOf('openai-api', {
+      choices: [{ message: { content: 'answer' } }],
+      usage: { prompt_tokens: 100, completion_tokens: -5 },
+    })
+    expect(coreModule.estimateAiRuleCostUsd('gpt-4o-mini', broken)).toBeUndefined()
+    const clampedPrice = coreModule.estimateAiRuleCostUsd('gpt-4o-mini', {
+      inputTokens: 100,
+      outputTokens: 0,
+    })
+    expect(clampedPrice).toBeGreaterThan(0)
+    expect(clampedPrice as number).toBeLessThan(coreModule.nullUsageReservationUsd('gpt-4o-mini'))
+  })
+
+  it('makes the half-reported call unpriceable, so the caller charges the floor', async () => {
+    // The money consequence, asserted end to end rather than inferred: a partial
+    // usage must reach the pricer as "unknown" (undefined cost → fail-closed
+    // reservation), not as a confidently small number.
+    const partial = await usageOf('openai-api', {
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 100 },
+    })
+    expect(coreModule.estimateAiRuleCostUsd('gpt-4o-mini', partial)).toBeUndefined()
+    // What the defect used to charge instead: the input half alone, at a price
+    // strictly below the fail-closed reservation for the same model.
+    const halfPriced = coreModule.estimateAiRuleCostUsd('gpt-4o-mini', {
+      inputTokens: 100,
+      outputTokens: 0,
+    })
+    expect(halfPriced).toBeGreaterThan(0)
+    expect(halfPriced as number).toBeLessThan(coreModule.nullUsageReservationUsd('gpt-4o-mini'))
   })
 })
 
@@ -9781,7 +10047,13 @@ describe('aiChatSimple — real token usage extraction', () => {
     expect(res?.usage).toBeNull()
   })
 
-  it('floors fractional provider token counts to non-negative integers', async () => {
+  it('reports no usage for fractional or negative provider token counts', async () => {
+    // This test used to assert the opposite — 123.9 floored to 123, -5 clamped
+    // to 0 — until the 2026-08-31 review pointed out that both repairs put OUR
+    // number where the provider's broken one was, and priced the call from it.
+    // Neither is a count, so neither is priceable; the caller charges the
+    // fail-closed reservation instead. Rejection is pinned per-cause in
+    // "a half-reported usage is no usage" above.
     mockGetSettings.mockReturnValue({ aiProvider: 'openai-api', aiModel: 'gpt-4o-mini' } as never)
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
@@ -9792,8 +10064,8 @@ describe('aiChatSimple — real token usage extraction', () => {
       }),
     } as Response)
     const res = await aiChatSimple('sys', 'user')
-    // 123.9 → 123 (floor), -5 → 0 (clamp).
-    expect(res?.usage).toEqual({ inputTokens: 123, outputTokens: 0 })
+    expect(res?.text).toBe('answer')
+    expect(res?.usage).toBeNull()
   })
 
   // §2.39 fix #2 — strict typeof gate: a non-`number` token count (boolean,
@@ -9869,7 +10141,12 @@ describe('aiChatSimple — per-call maxOutputTokens (§2.51.f1)', () => {
     mockSecretStore.get.mockResolvedValue('test-key')
   })
 
-  it('defaults to AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS (2000) when no options are given', async () => {
+  it('defaults to AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS (2500) when no options are given', async () => {
+    // The number is pinned in a test because it is an ESTIMATE about someone
+    // else's model (see the constant's docblock), and an estimate that drifts
+    // silently is indistinguishable from a measurement. Raised 2000 → 2500 on
+    // 2026-08-31 after a translation that succeeded at 1001 output tokens left
+    // the previous ceiling one comparable message from failing.
     mockGetSettings.mockReturnValue({ aiProvider: 'openai-api', aiModel: 'gpt-4o-mini' } as never)
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
@@ -9879,9 +10156,29 @@ describe('aiChatSimple — per-call maxOutputTokens (§2.51.f1)', () => {
 
     await aiChatSimple('sys', 'user')
 
-    expect(AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS).toBe(2000)
+    expect(AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS).toBe(2500)
     const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body)) as { max_tokens: number }
-    expect(body.max_tokens).toBe(2000)
+    expect(body.max_tokens).toBe(2500)
+  })
+
+  it('never requests more output than the reservation is priced for', () => {
+    // Independent review, 2026-08-31, Medium: the request cap was raised to 2500
+    // while the "worst realistic single call" the null-usage reservation prices
+    // stayed at 2000, so the documented worst case stopped being the worst case
+    // — a call could legitimately spend 2500 output tokens and be reserved for
+    // 2000. Layering forbids importing this constant into packages/core, so the
+    // relation is enforced here instead, and as an INEQUALITY: raising the
+    // request cap above the yardstick fails; lowering the request cap is free
+    // and must not drag down a floor the streaming contour also uses.
+    expect(AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS).toBeLessThanOrEqual(
+      coreModule.AI_RULE_MAX_OUTPUT_TOKENS,
+    )
+  })
+
+  it('keeps the flat floor as the hard minimum for an unpriceable call', async () => {
+    // The reservation stays model-aware ON TOP of AI_RULE_NULL_USAGE_COST_FLOOR,
+    // so a cheap model can never under-reserve however the yardstick moves.
+    expect(coreModule.nullUsageReservationUsd('gpt-4o-mini')).toBeGreaterThanOrEqual(0.05)
   })
 
   it('honours a lower caller-supplied cap on the OpenAI request body', async () => {
@@ -9939,7 +10236,51 @@ describe('aiChatSimple — per-call maxOutputTokens (§2.51.f1)', () => {
     await aiChatSimple('sys', 'user', undefined, { maxOutputTokens: value })
 
     const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body)) as { max_tokens: number }
-    expect(body.max_tokens).toBe(2000)
+    // Asserted against the CONSTANT, not a copy of its value: this test is about
+    // the fallback happening, and the one test that pins the number is the one
+    // above. A second literal here just breaks when the ceiling is retuned.
+    expect(body.max_tokens).toBe(AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS)
+  })
+
+  it('clamps a caller-supplied cap ABOVE the default back down to the default', async () => {
+    // Independent review, 2026-08-31, Low: the option accepted any finite
+    // positive number and sent it straight through, so a future caller passing
+    // 8000 would reopen the gap this wave just closed — the request would ask
+    // for more output than the reservation is priced for, while the test on the
+    // two CONSTANTS stayed green because neither constant moved. The option is
+    // documented as a narrowing knob; this makes that true.
+    mockGetSettings.mockReturnValue({ aiProvider: 'openai-api', aiModel: 'gpt-4o-mini' } as never)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'answer' } }] }),
+    } as Response)
+
+    await aiChatSimple('sys', 'user', undefined, {
+      maxOutputTokens: AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS * 4,
+    })
+
+    const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body)) as { max_tokens: number }
+    expect(body.max_tokens).toBe(AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS)
+    // The property that actually matters, stated as itself: no request this
+    // helper can be made to send exceeds what the null-usage reservation prices.
+    expect(body.max_tokens).toBeLessThanOrEqual(coreModule.AI_RULE_MAX_OUTPUT_TOKENS)
+  })
+
+  it('clamps an oversized cap on the Gemini contour too', async () => {
+    // The clamp lives once, before the provider branch; pinned on a second
+    // contour so a per-adapter regression is caught rather than assumed away.
+    mockGetSettings.mockReturnValue({ aiProvider: 'gemini-api', aiModel: 'gemini-2.0-flash' } as never)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'answer' }] } }] }),
+    } as Response)
+
+    await aiChatSimple('sys', 'user', undefined, { maxOutputTokens: 8000 })
+
+    const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body)) as { generationConfig: { maxOutputTokens: number } }
+    expect(body.generationConfig.maxOutputTokens).toBe(AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS)
   })
 
   it('floors a fractional maxOutputTokens rather than sending a non-integer cap', async () => {

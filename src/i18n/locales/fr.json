@@ -376,6 +376,7 @@
     "translate": {
       "action": "Traduire",
       "retry": "Réessayer",
+      "attempt": "Tentative {{n}}.",
       "loading": "Traduction en cours…",
       "showOriginal": "Afficher l'original",
       "showTranslation": "Afficher la traduction",
@@ -392,7 +393,8 @@
       "refusal": {
         "budget": "Le budget IA de cette période est épuisé. Augmentez-le dans Paramètres → IA, ou attendez la période suivante.",
         "no_provider": "Aucun fournisseur IA n’est configuré. Ajoutez-en un dans Paramètres → IA.",
-        "provider_error": "Le fournisseur IA n’a pas renvoyé de traduction. Veuillez réessayer.",
+        "provider_error": "Le fournisseur IA n’a pas renvoyé de traduction et n’en a pas indiqué la raison. Une nouvelle tentative renverra le message au fournisseur.",
+      "answer_too_long": "La traduction ne tient pas dans la limite de réponse du fournisseur IA : elle est revenue tronquée et n’est donc pas affichée. Une nouvelle tentative donnerait le même résultat : ni ce message ni la limite n’ont changé.",
         "empty_input": "Le texte de ce message n’est pas encore téléchargé. Réessayez une fois le message chargé.",
         "too_long": "Ce message est trop long pour être traduit en une seule fois, et il n'y a aucun moyen d'en traduire seulement une partie : le message entier compte dans la limite, y compris les échanges antérieurs qui y seraient cités.",
         "opt_out": "La traduction est désactivée pour ce compte. Activez-la dans Paramètres → IA → Traduire les messages."
@@ -1441,6 +1443,17 @@
         "placeholder": "Exemple :\n- Je travaille chez Acme Corp en tant que chef de projet\n- Mon fuseau horaire est UTC+3\n- Je préfère les emails concis",
         "clear": "Effacer"
       },
+      "consentMatrix": {
+        "title": "Fonctions d’IA par boîte",
+        "help": "Chaque fonction d’IA est demandée séparément et reste désactivée tant que vous ne l’activez pas. Une case cochée autorise seulement la fonction dans cette boîte — rien n’est résumé, rédigé, vérifié ni traduit tant que vous ne le demandez pas.",
+        "accountColumn": "Boîte",
+        "noAccounts": "Ajoutez une boîte pour choisir les fonctions d’IA qu’elle peut utiliser.",
+        "cellLabel": "« {{feature}} » dans {{account}}",
+        "allowAll_one": "Autoriser « {{feature}} » dans votre seule boîte",
+        "allowAll_other": "Autoriser « {{feature}} » dans les {{count}} boîtes",
+        "clearAll_one": "Désactiver « {{feature}} » dans votre seule boîte",
+        "clearAll_other": "Désactiver « {{feature}} » dans les {{count}} boîtes"
+      },
       "threadSummary": {
         "title": "Résumé IA du fil",
         "label": "Résumer les longs fils avec l'IA",
@@ -1481,6 +1494,7 @@
         "formal": "Formel",
         "grammar": "Corriger la grammaire"
       },
+      "presetTitle": "{{label}} — réécrit votre texte en entier ; le résultat s’accepte ou se rejette d’un bloc.",
       "diff": {
         "title": "Vérifier la réécriture IA",
         "before": "Avant",
@@ -1493,9 +1507,9 @@
         "unchangedLines_other": "{{count}} lignes inchangées",
         "plainText": "Texte brut",
         "replace": "Remplacer",
-        "insert": "Insérer au curseur",
+        "insert": "Ajouter sous mon texte",
         "cancel": "Annuler",
-        "staleWarning": "Vous avez modifié le brouillon pendant que l'IA travaillait ; le remplacement supprimerait ces modifications. Insérez au curseur ou relancez l'action.",
+        "staleWarning": "Vous avez modifié le brouillon pendant que l’IA travaillait ; le remplacement supprimerait ces modifications. Ajoutez plutôt le résultat sous votre texte, ou relancez l’action.",
         "staleReplaceHint": "Le remplacement est indisponible car le brouillon a changé après la demande de cette réécriture."
       },
       "refusal": {
@@ -1508,6 +1522,8 @@
       },
       "proofread": {
         "button": "Vérifier le texte",
+        "buttonTitle": "Vérifier le texte — les corrections sont listées une par une et vous acceptez chacune séparément.",
+        "disabledHint": "La vérification des brouillons par l’IA est désactivée pour cette boîte. Activez-la dans Réglages → IA.",
         "checking": "Vérification…",
         "title": "Corrections suggérées",
         "editCount_one": "{{count}} suggestion",
@@ -1541,6 +1557,7 @@
       },
       "translate": {
         "button": "Traduire",
+        "disabledHint": "La traduction des brouillons par l’IA est désactivée pour cette boîte. Activez-la dans Réglages → IA.",
         "loading": "Traduction…",
         "targetLabel": "Traduire le brouillon en",
         "targetPlaceholder": "Choisissez une langue",
@@ -1549,6 +1566,7 @@
           "budget": "Le budget IA de cette période est épuisé. Augmentez-le dans Paramètres → IA, ou attendez la période suivante.",
           "noProvider": "Aucun fournisseur d'IA n'est encore configuré. Ajoutez-en un dans Paramètres → IA.",
           "providerError": "Le fournisseur d'IA n'a pas renvoyé de traduction. Veuillez réessayer.",
+          "answerTooLong": "La traduction ne tient pas dans la limite de réponse du fournisseur IA : elle est revenue tronquée et n'est donc pas affichée. Une nouvelle tentative donnerait le même résultat : ni ce brouillon ni la limite n'ont changé. Raccourcissez votre propre texte, ou coupez-en une partie, traduisez ce qui reste et recollez la partie coupée.",
           "emptyInput": "Il n'y a rien à traduire pour l'instant — écrivez d'abord un texte.",
           "tooLong": "Ce brouillon est trop long pour être traduit en une seule fois, et il n'y a aucun moyen de n'en traduire qu'une sélection : MailCopilot prend toujours l'intégralité de votre propre texte. Raccourcissez le brouillon, ou coupez-en une partie, traduisez ce qui reste et recollez la partie coupée. Si votre propre texte vous semble court, MailCopilot n'a peut-être pas repéré où commence un message cité et l'a compté avec le vôtre.",
           "optOut": "La traduction est désactivée pour ce compte. Activez-la dans Paramètres → IA → Traduire les messages.",

@@ -71,6 +71,7 @@ import { useInboxZeroCounter } from './hooks/useInboxZeroCounter'
 import { useMaximized } from './hooks/useMaximized'
 import { useTooltipDelegation } from './hooks/useTooltipDelegation'
 import { useRefreshFolderCounts } from './hooks/useRefreshFolderCounts'
+import { useKeyedDebounce } from './hooks/useKeyedDebounce'
 import { useSidebarCompactMode } from './hooks/useSidebarCompactMode'
 import { useMailIframeDoc } from './hooks/useMailIframeDoc'
 import { useAccountIdentities } from './hooks/useAccountIdentities'
@@ -92,6 +93,9 @@ import { useMailTranslation } from './hooks/useMailTranslation'
 import './App.css'
 
 const PAGE_SIZE = 50
+
+/** Quiet window before a `mail:exists` event is acted on, per (account, folder). */
+const EXISTS_REFRESH_DEBOUNCE_MS = 600
 
 // Detects search queries that include any operator the FTS path can't handle.
 // Must mirror the operators recognized by parseSearchQuery in @mailcopilot/core.
@@ -449,7 +453,6 @@ export default function App() {
   const qRef = useRef(q)
   qRef.current = q
   const headerSyncInFlight = useRef(new Map<string, Promise<unknown>>())
-  const idleRefreshTimer = useRef<number | null>(null)
   const searchDebounceRef = useRef<number | null>(null)
   const authRecoveryCooldownUntil = useRef(new Map<number, number>())
   const authRecoveryInFlight = useRef(new Set<number>())
@@ -665,6 +668,19 @@ export default function App() {
   )
   const refreshCountsRef = useRef(refreshCounts)
   refreshCountsRef.current = refreshCounts
+
+  // `mail:exists` burst absorber, keyed per (account, folder).
+  //
+  // Main emits one event per affected pair in a single synchronous loop
+  // (`mailActionCallback` — an assistant bulk action across four mailboxes
+  // emits ~8 events in one tick). The previous single `idleRefreshTimer` let
+  // every event clear its predecessor, so only the LAST pair was ever acted
+  // on: the other mailboxes never re-read their counters and kept stale
+  // badges. Keying on the pair keeps the burst absorption while guaranteeing
+  // each subject is acted on; the per-account debounce inside
+  // `useRefreshFolderCounts` then merges several folders of one account back
+  // into a single `folder:refreshCounts` call.
+  const existsDebounce = useKeyedDebounce(EXISTS_REFRESH_DEBOUNCE_MS)
 
   // Start the renderer cold-start IPC telemetry span exactly once per process.
   // The span closes itself after ~12s and records how many duplicate IPC calls
@@ -1100,8 +1116,9 @@ export default function App() {
       if (!Number.isFinite(accountId) || accountId <= 0) return
       if (!path || (!force && count <= prevCount)) return
 
-      if (idleRefreshTimer.current) window.clearTimeout(idleRefreshTimer.current)
-      idleRefreshTimer.current = window.setTimeout(() => {
+      // One timer per (account, folder): a burst about several mailboxes must
+      // end in a refresh for EVERY mailbox, not only the last event's.
+      existsDebounce.schedule(`${accountId}:${path}`, () => {
         void (async () => {
           try {
             // §2.7 iter2: snapshot pending-move epoch BEFORE the await so we
@@ -1131,18 +1148,15 @@ export default function App() {
           // and-forget: this path does not need to block on completion.
           refreshCountsRef.current.schedule(accountId)
         })()
-      }, 600)
+      })
     }
 
     window.api?.on('mail:exists', onExists)
     return () => {
       window.api?.off('mail:exists', onExists)
-      if (idleRefreshTimer.current) {
-        window.clearTimeout(idleRefreshTimer.current)
-        idleRefreshTimer.current = null
-      }
+      existsDebounce.clearAll()
     }
-  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, q, setHasMore, viewMode])
+  }, [applyUnreadOverrides, currentAccountId, currentFolder, existsDebounce, filterSnoozed, q, setHasMore, viewMode])
 
   // clearSendUndo — from useUndoSystem
 
