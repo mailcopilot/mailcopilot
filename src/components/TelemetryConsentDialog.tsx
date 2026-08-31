@@ -88,6 +88,14 @@ type Props = {
  *   usage       — usage.session_summary feature bitmap, per-feature events, and
  *                 the `sentryLogger.info('AI chat completed', …)` structured log
  *                 (AI provider, model, tool names, estimated cost)
+ *   aiKeyStore  — ai.api_key_store_op: which provider, which operation on the
+ *                 OS secret store (read / write / delete) and how it ended
+ *                 (found / absent / ok / store_error). "Is there a key in your
+ *                 keychain" is an observation about the machine, not a feature
+ *                 the user invoked, so `usage` does not cover it — it needs its
+ *                 own bullet. The key VALUE is never part of the event, which
+ *                 the copy says out loud because that is the reader's first
+ *                 question.
  *   setup       — app.session_started / onboarding.* tags: accounts_count,
  *                 provider kind, auth_type, lang, theme, platform
  *   installId   — install_id_hash, also set as the Sentry user id. It is what
@@ -99,7 +107,7 @@ type Props = {
  * TELEMETRY_CONSENT_VERSION (electron/telemetryConsent.ts) so people who already
  * answered are asked again against the revised disclosure.
  */
-const SENT_ITEMS = ['errors', 'versions', 'performance', 'usage', 'setup', 'installId'] as const
+const SENT_ITEMS = ['errors', 'versions', 'performance', 'usage', 'aiKeyStore', 'setup', 'installId'] as const
 const NEVER_ITEMS = ['bodies', 'addresses', 'attachments', 'searchQueries', 'aiPrompts'] as const
 
 export default function TelemetryConsentDialog({ submitting, onDecide }: Props) {

@@ -9,12 +9,34 @@
  * A random token is generated on each server start and must be passed
  * via the Authorization header (Bearer <token>). CORS is restricted to
  * localhost origins only to prevent browser-based CSRF from remote sites.
+ *
+ * §2.158 — two further limits on what a connected client can reach:
+ *   - the requested whitelist is INTERSECTED with `ALL_EXPORTABLE_TOOLS`
+ *     (`resolveExportWhitelist`), so no settings value can register a tool
+ *     outside the declared ceiling;
+ *   - every session gets the same egress / internet gates the chat path
+ *     builds (`buildExportGates`), so an external client cannot use the
+ *     external-MCP bridge under a policy that forbids the chat path from
+ *     using it.
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { createMailMcpServer } from './ai'
+import {
+  EXPORTABLE_MCP_TOOLS,
+  getSettings,
+  isExportableMcpTool,
+  type ExportableMcpTool,
+} from '../../packages/net/config'
+import {
+  coerceEgressPolicy,
+  createEgressGate,
+  shouldDenyEgress,
+  type EgressGate,
+} from './aiEgressPolicy'
+import { createInternetGate, type InternetGate } from './aiInternetGate'
 import { createLogger } from '../logger'
 
 const log = createLogger('McpExport')
@@ -29,49 +51,152 @@ const ALLOWED_ORIGINS = new Set([
   'https://[::1]',
 ])
 
-/** Default read-only tools exposed to external clients */
-export const DEFAULT_EXPORT_WHITELIST = [
+/**
+ * Default read-only tools exposed to external clients.
+ *
+ * Typed as `ExportableMcpTool[]`, not `string[]`: a name that is not in the
+ * ceiling must fail to COMPILE here rather than be caught at runtime. The
+ * runtime intersection below still runs on this list (one enforcement point,
+ * no "trusted" branch), but a type error is the cheaper of the two signals.
+ */
+export const DEFAULT_EXPORT_WHITELIST: readonly ExportableMcpTool[] = [
   'get_email', 'list_emails', 'search_emails',
   'list_folders', 'get_thread', 'get_contacts',
   'get_account_info', 'count_unread', 'query_db',
   'list_attachments', 'read_attachment', 'get_attachment_hash',
 ]
 
-/** All tool names that can be exported (for UI checkboxes).
+/**
+ * All tool names that can be exported — the CEILING of the export surface.
  *
- * §3.10 P0: every mutating tool is now a preview_* / apply_* pair. The direct
- * variants (snooze_email, flag_email, add_followup, dismiss_followup,
- * mark_read_later, create_mail_rule, update_mail_rule, delete_mail_rule) have
- * been removed from this list — they are no longer registered on the MCP
- * server. Existing pairs (mail_action, unsubscribe, send_email, move_email)
- * remain. */
-export const ALL_EXPORTABLE_TOOLS = [
-  // Read-only
-  'get_email', 'list_emails', 'search_emails',
-  'list_folders', 'get_thread', 'get_contacts',
-  'get_account_info', 'count_unread', 'query_db',
-  'list_attachments', 'read_attachment', 'get_attachment_hash',
-  'get_current_context',
-  'list_mail_rules', 'get_rule_log',
-  // Destructive — preview/apply pairs (disabled by default).
-  // External clients calling apply_* without a renderer-issued
-  // confirmation_token will be rejected at the validation gate.
-  'preview_mail_action', 'apply_mail_action',
-  'preview_unsubscribe', 'apply_unsubscribe',
-  'send_email_preview', 'send_email_apply',
-  'move_email_preview', 'move_email_apply',
-  'preview_snooze_email', 'apply_snooze_email',
-  'preview_unsnooze_email', 'apply_unsnooze_email',
-  'preview_flag_email', 'apply_flag_email',
-  'preview_mark_read_later', 'apply_mark_read_later',
-  'preview_add_followup', 'apply_add_followup',
-  'preview_dismiss_followup', 'apply_dismiss_followup',
-  'preview_create_mail_rule', 'apply_create_mail_rule',
-  'preview_update_mail_rule', 'apply_update_mail_rule',
-  'preview_delete_mail_rule', 'apply_delete_mail_rule',
-  // Compose (no-send) + memory.
-  'create_draft', 'update_memory',
-]
+ * §2.158: this was a decorative declaration until now (zero production
+ * references; only the test file imported it), so any string in
+ * `Settings.mcpExportWhitelist` got registered verbatim on the export server —
+ * including `call_external_tool`, the un-gated egress bridge. `start()` now
+ * intersects with this list, and `rendererWritableSettingsSchema` bounds the
+ * settings field to the same enumeration.
+ *
+ * Canonical definition lives in `packages/net/config.ts`
+ * (`EXPORTABLE_MCP_TOOLS`) because the settings schema needs it and
+ * `packages/net` must not import from `electron/`. Re-exported here under the
+ * historical name so the tool-whitelist trio (`ALLOWED_TOOLS` /
+ * `ALL_EXPORTABLE_TOOLS` / `DEFAULT_EXPORT_WHITELIST`, CLAUDE.md §4) stays
+ * greppable from the service that enforces it.
+ */
+export const ALL_EXPORTABLE_TOOLS: readonly string[] = EXPORTABLE_MCP_TOOLS
+
+/**
+ * Intersect a list of tool names with the export ceiling.
+ *
+ * The ONLY place a name becomes exportable. Both the explicit-whitelist path
+ * and the default path go through here — see `resolveExportWhitelist`.
+ */
+function intersectWithExportCeiling(names: readonly unknown[]): Set<string> {
+  const allowed = new Set<string>()
+  let dropped = 0
+  for (const name of names) {
+    if (typeof name === 'string' && isExportableMcpTool(name)) allowed.add(name)
+    else dropped++
+  }
+  if (dropped > 0) {
+    // Count only: entries originate from renderer-writable settings, and an
+    // attacker-chosen tool name is attacker-chosen free text (same reasoning
+    // as the hashed identifiers in ai.ts `call_external_tool` logging).
+    log.warn(`MCP export whitelist: dropped ${dropped} entry/entries outside ALL_EXPORTABLE_TOOLS`)
+  }
+  return allowed
+}
+
+/**
+ * Narrow an incoming whitelist to what may actually be exported.
+ *
+ * `undefined` means "caller expressed no preference" → the read-only default.
+ * An explicit list is INTERSECTED with the ceiling: unknown or de-listed names
+ * are dropped, never registered. An explicit list whose every entry is dropped
+ * yields an EMPTY set (a server with no tools), not the default — the caller
+ * asked for something specific and none of it was allowed; silently falling
+ * back to twelve read-only tools would be a widening.
+ *
+ * The default list is NOT a trusted shortcut: it goes through the same
+ * intersection. It used to be returned verbatim, which meant the ceiling was
+ * enforced on one of the two branches only — the day a tool is added to the
+ * default and forgotten in `EXPORTABLE_MCP_TOOLS` (or removed from the ceiling
+ * and forgotten in the default), that branch would export it anyway, both at
+ * startup and on every call without an explicit list. The type annotation on
+ * `DEFAULT_EXPORT_WHITELIST` catches the same mistake at compile time; this is
+ * the runtime half of the same guarantee, so neither depends on the other.
+ */
+export function resolveExportWhitelist(whitelist?: readonly string[]): Set<string> {
+  return intersectWithExportCeiling(whitelist ?? DEFAULT_EXPORT_WHITELIST)
+}
+
+/**
+ * Test-only seam for the default-path intersection.
+ *
+ * Exists so a spec can feed a synthetic "default" containing an out-of-ceiling
+ * name and observe it being dropped — the production default cannot carry one
+ * (it would not compile), and a guarantee nobody can exercise is a guarantee
+ * nobody notices losing. Production code must call `resolveExportWhitelist`.
+ */
+export const __intersectWithExportCeilingForTest = intersectWithExportCeiling
+
+/**
+ * Build the per-session egress/internet gates for an export connection.
+ *
+ * §2.158: `createMailMcpServer` was called with the tool filter alone, so the
+ * handlers that consult these gates (`list_external_tools` /
+ * `call_external_tool`) ran with `egressGate === undefined` — i.e. no policy at
+ * all — while the chat path (`aiChat()`) always builds both. The export server
+ * must never be more permissive than chat.
+ *
+ * Same construction as chat, with two deliberate differences, both in the
+ * restrictive direction:
+ *   - `perRequestConsent` is always `false`. Per-request consent is a click in
+ *     the AI panel attached to one chat turn; an external client has no turn to
+ *     attach it to and cannot claim it.
+ *   - the per-turn consent state is pre-decided instead of left `'unset'`.
+ *     Chat leaves it unset so `interceptInternetTool` can ask the user; an
+ *     export session is headless and unattended, so "ask" would mean an
+ *     out-of-band modal raised by a background process — a prompt-fatigue
+ *     surface an attacker could spam. `allow` policy → `'approved'` (mirrors
+ *     the chat pre-seed); anything else → `'denied'`, which short-circuits the
+ *     interceptor at step 1 and returns the SAME `deniedToolResult(...)` payload
+ *     the chat path returns when the user declines, with the audit row and
+ *     `ai.egress.intercepted` telemetry still emitted.
+ *
+ * The gate is intentionally NOT registered in the `aiInternetGate` registry:
+ * registration exists so the renderer's approve/deny IPC can resolve a pending
+ * prompt, and this gate never has pendings. Not registering also means no
+ * cleanup obligation when a session dies without a DELETE.
+ *
+ * Settings are read per session (not at `start()`) so flipping
+ * `aiEgressPolicy` in Settings takes effect on the next connection without a
+ * server restart.
+ */
+export function buildExportGates(): { egressGate: EgressGate; internetGate: InternetGate } {
+  const settings = getSettings()
+  const egressGate = createEgressGate({
+    policy: coerceEgressPolicy(settings.aiEgressPolicy),
+    context: null,
+    perRequestConsent: false,
+  })
+  // §2.218 — attribution is EXPLICIT, never borrowed from `Settings`. This used
+  // to read `settings.aiProvider ?? 'subscription'`, which named an AI provider
+  // that had issued no request and, when the user had configured none, fell back
+  // to a value that has since been removed from the registry entirely (an unset
+  // provider would now substitute an unregistered id). An export session runs
+  // tools for an EXTERNAL client and has no AI provider behind it, so it says so.
+  // Deliberately NOT a refusal: the label feeds the audit log only (no gate
+  // decision reads it), and MCP export is routinely used precisely by people who
+  // run no in-app AI provider — refusing them a session over a log label would
+  // break the feature's main use case. See `EgressAttribution`.
+  const internetGate = createInternetGate({
+    requestId: `mcp-export:${randomUUID()}`,
+    provider: 'mcp-export',
+  })
+  internetGate.consentForTurn = shouldDenyEgress(egressGate) ? 'denied' : 'approved'
+  return { egressGate, internetGate }
+}
 
 export type McpExportStatus = 'running' | 'stopped' | 'error'
 
@@ -100,7 +225,9 @@ const MAX_SESSIONS = 10
 export class McpExportServer {
   private httpServer: Server | null = null
   private sessions = new Map<string, Session>()
-  private allowedTools = new Set(DEFAULT_EXPORT_WHITELIST)
+  // Same resolution as `start()` — the pre-start value must not be a second,
+  // unfiltered way of spelling the default set.
+  private allowedTools = resolveExportWhitelist()
   private _port = 0
   private _token = ''
 
@@ -111,7 +238,10 @@ export class McpExportServer {
   async start(port: number, whitelist?: string[]): Promise<void> {
     if (this.httpServer) throw new Error('MCP export server already running')
 
-    this.allowedTools = new Set(whitelist ?? DEFAULT_EXPORT_WHITELIST)
+    // §2.158: intersect with the ceiling. This is the single enforcement
+    // point for BOTH callers — the startup path in main.ts and the
+    // `mcpExport:start` IPC — so neither can widen the surface.
+    this.allowedTools = resolveExportWhitelist(whitelist)
     this._port = port
     this._token = randomUUID()
 
@@ -236,7 +366,13 @@ export class McpExportServer {
         }
       }
 
-      const mcpServer = createMailMcpServer(this.allowedTools)
+      // §2.158: the export path runs through the same egress/internet gates as
+      // the chat path — see `buildExportGates()` for the two deliberate
+      // (restrictive) differences. No `abortSignal`: an export session has no
+      // cancellable AI request behind it, and the consent state is pre-decided
+      // so nothing ever waits.
+      const { egressGate, internetGate } = buildExportGates()
+      const mcpServer = createMailMcpServer(this.allowedTools, egressGate, internetGate)
       await mcpServer.connect(transport)
       await transport.handleRequest(req, res, parsed)
     } else if (req.method === 'GET') {

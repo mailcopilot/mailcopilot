@@ -48,6 +48,8 @@ MailCopilot recherche dans votre cache local d'e-mails. L'indicateur de complét
 
 Les dossiers standard (Boîte de réception, Envoyés, Archive, Brouillons) sont entièrement indexés par défaut. Les dossiers Indésirables, Spam et Corbeille sont exclus de l'indexation en texte intégral par défaut afin de garder des résultats propres et de réduire l'utilisation du disque. Vous pouvez modifier le paramètre d'indexation de n'importe quel dossier via le clic droit dans la barre latérale ou dans **Paramètres > Dossiers**.
 
+Un message qui s'est ouvert normalement -- y compris un message dont le corps a été tronqué par la [limite souple de 1 Mo](../usage/reading-emails#messages-très-volumineux) -- est immédiatement consultable avec `body:`, comme n'importe quel autre message : les quelque 200 000 premiers caractères de son corps sont indexés. Un message dépassant la limite stricte de 100 Mo (voir la même section) est différent : comme son corps n'a jamais été décodé à l'ouverture, la recherche `body:` ne commence à le trouver qu'une fois que l'indexeur de corps en arrière-plan l'a récupéré et indexé depuis le serveur, ce qui peut prendre plus de temps que pour un message ordinaire.
+
 ## Recherche assistée par le serveur
 
 Lors de la recherche dans un dossier spécifique, MailCopilot peut également interroger le serveur IMAP. Les résultats du serveur sont marqués d'un badge « +N du serveur ».

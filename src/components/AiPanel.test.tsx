@@ -15,11 +15,11 @@ const i18nMap: Record<string, string> = {
   'ai.panel.placeholder': 'Спросите что-нибудь...',
   'ai.panel.send': 'Отправить',
   'ai.errors.requestBudgetStopped': 'Запрос остановлен: достигнут лимит стоимости одного запроса.',
+  // §2.123 — the turn used destructive tools but armed nothing to confirm.
+  'ai.errors.actionNotPrepared': 'Действие не подготовлено: кнопки подтверждения нет, ничего не изменено.',
   'ai.onboarding.title': 'AI Ассистент',
   'ai.onboarding.description': 'Встроенный ассистент',
   'ai.onboarding.chooseProvider': 'Выберите способ:',
-  'ai.onboarding.subscription': 'Подписка Claude',
-  'ai.onboarding.subscriptionHint': 'Pro/Max',
   'ai.onboarding.apiKey': 'API-ключ',
   'ai.onboarding.apiKeyHint': 'Оплата по токенам',
   'ai.onboarding.configure': 'Настроить',
@@ -42,8 +42,16 @@ const i18nMap: Record<string, string> = {
   'ai.chips.scopeEmail': 'Действия с письмом',
   'ai.errors.authCheck': 'Ошибка проверки авторизации',
   'ai.errors.errorPrefix': 'Ошибка',
+  // §2.127 closed vocabulary — the only error sentences the panel may render
+  // for a failed IPC call.
+  'app.errors.presented.auth': 'Вход отклонён',
+  'app.errors.presented.unknown': 'Не удалось выполнить запрос',
   'ai.errors.invalidKey': 'Неверный ключ',
-  'ai.errors.noSubscription': 'Нет подписки',
+  // §2.122 — the three storage outcomes the panel must keep apart.
+  'ai.errors.noKey': 'Ключ не задан, введите его',
+  'ai.errors.keyMissing': 'Ключ был сохранён, но не найден — введите заново',
+  'ai.errors.storeUnavailable': 'Хранилище ключей не ответило; проверить ключ не удалось',
+  'ai.errors.changeProvider': 'Сменить провайдер',
   'ai.errors.notConfigured': 'Не настроено',
   'ai.prompts.summarize': 'Суммируй это письмо',
   'ai.prompts.reply': 'Подготовь ответ на это письмо',
@@ -134,6 +142,21 @@ import React from 'react'
 // between tests so the 500ms result cache doesn't hide duplicate calls
 // across `it` blocks.
 import { __resetForTests as resetSingleFlight } from '../utils/ipcSingleFlight'
+import enLocale from '../i18n/locales/en.json'
+import ruLocale from '../i18n/locales/ru.json'
+import frLocale from '../i18n/locales/fr.json'
+import deLocale from '../i18n/locales/de.json'
+import esLocale from '../i18n/locales/es.json'
+import itLocale from '../i18n/locales/it.json'
+
+const LOCALES: Record<string, Record<string, unknown>> = {
+  en: enLocale as unknown as Record<string, unknown>,
+  ru: ruLocale as unknown as Record<string, unknown>,
+  fr: frLocale as unknown as Record<string, unknown>,
+  de: deLocale as unknown as Record<string, unknown>,
+  es: esLocale as unknown as Record<string, unknown>,
+  it: itLocale as unknown as Record<string, unknown>,
+}
 
 function renderPanel(props: Partial<AiPanelProps> = {}) {
   const defaults: AiPanelProps = {
@@ -141,7 +164,7 @@ function renderPanel(props: Partial<AiPanelProps> = {}) {
     onClose: vi.fn(),
     contextType: null,
     contextData: null,
-    aiProvider: 'subscription',
+    aiProvider: 'anthropic-api',
     aiPrivacyConsent: true,
     aiSendOnEnter: true,
     onSettingsChange: vi.fn(),
@@ -162,7 +185,7 @@ describe('AiPanel', () => {
     mockInvoke.mockImplementation((channel: string) => {
       if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'authenticated' })
       if (channel === 'aiSession:list') return Promise.resolve([])
-      if (channel === 'aiSession:create') return Promise.resolve({ id: 'test-session-uuid', title: '', provider: 'subscription' })
+      if (channel === 'aiSession:create') return Promise.resolve({ id: 'test-session-uuid', title: '', provider: 'anthropic-api' })
       if (channel === 'aiSession:addMessage') return Promise.resolve({ id: 1 })
       if (channel === 'aiSession:messages') return Promise.resolve([])
       if (channel === 'aiSession:generateTitle') return Promise.resolve('Test Title')
@@ -211,20 +234,16 @@ describe('AiPanel', () => {
       expect(screen.getByTestId('ai-onboarding')).toBeInTheDocument()
     })
 
-    it('shows two options: subscription and API key', async () => {
+    // §2.218 — the onboarding offered a "Claude subscription" option that
+    // authenticated through the local CLI session. It is REMOVED (Anthropic's
+    // Consumer Terms do not permit driving a Pro/Max session from a third-party
+    // client), so the panel offers only the key-based path plus the Settings
+    // link, and nothing in it may still mention a subscription.
+    it('offers the API-key option and no subscription option', async () => {
       await act(async () => { renderPanel({ aiProvider: undefined }) })
-      expect(screen.getByText('Подписка Claude')).toBeInTheDocument()
       expect(screen.getByText('API-ключ')).toBeInTheDocument()
-    })
-
-    it('calls onSettingsChange when selecting subscription', async () => {
-      const onSettingsChange = vi.fn()
-      await act(async () => { renderPanel({ aiProvider: undefined, onSettingsChange }) })
-
-      const subscriptionBtn = screen.getByText('Подписка Claude').closest('button')!
-      await act(async () => { fireEvent.click(subscriptionBtn) })
-
-      expect(onSettingsChange).toHaveBeenCalledWith('aiProvider', 'subscription')
+      const onboarding = screen.getByTestId('ai-onboarding')
+      expect(onboarding.textContent ?? '').not.toMatch(/подписк|subscription/i)
     })
 
     it('calls onSettingsChange when selecting API key', async () => {
@@ -240,6 +259,33 @@ describe('AiPanel', () => {
     it('shows settings link', async () => {
       await act(async () => { renderPanel({ aiProvider: undefined }) })
       expect(screen.getByText('Настроить')).toBeInTheDocument()
+    })
+
+    // §2.127 — electron/ipc.ts tags every rejection that crosses the boundary
+    // with `[mcerr:<key>] `; this catch used to store String(e) as the auth
+    // error detail, so the tag (and the CLI's own words) reached the screen as
+    // soon as a provider was selected.
+    // §2.127 — electron/ipc.ts tags every rejection that crosses the boundary
+    // with `[mcerr:<key>] `, and the original defect stored `String(e)` as the
+    // auth error detail, so the tag (and the provider's own words) reached the
+    // screen. §2.218 removed the onboarding CLI probe that used to raise it, so
+    // the surviving path is the mount-time auth check — same invariant, same
+    // guard: a rejected check shows OUR localized sentence and nothing of the
+    // rejection's text.
+    it('keeps the machine tag and provider text out of the auth error detail', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') {
+          return Promise.reject(new Error("[mcerr:auth] Error invoking remote method 'ai:checkAuth': credentials rejected by upstream"))
+        }
+        if (channel === 'aiSession:list') return Promise.resolve([])
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+
+      expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
+      expect(document.body.textContent).not.toContain('mcerr')
+      expect(document.body.textContent).not.toContain('credentials rejected')
     })
   })
 
@@ -286,15 +332,154 @@ describe('AiPanel', () => {
       expect(screen.getByText('Неверный ключ')).toBeInTheDocument()
     })
 
-    it('shows error on no_subscription', async () => {
+    // §2.218 — an AuthStatus member can disappear (the removed provider owned
+    // `no_subscription`), and main and renderer can be a version apart during an
+    // upgrade. Any verdict the panel does not recognise must still render the
+    // neutral "not configured" sentence rather than crash or blank the panel.
+    // Deliberately a generic unknown value, not the retired member: the
+    // guarantee is about UNRECOGNISED verdicts in general, and naming a
+    // specific dead string would suggest it is still meaningful.
+    it('falls back to the not-configured sentence for an unknown verdict', async () => {
       mockInvoke.mockImplementation((channel: string) => {
-        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_subscription' })
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'legacy_unknown_status' })
         return Promise.resolve()
       })
 
       await act(async () => { renderPanel() })
       expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
-      expect(screen.getByText('Нет подписки')).toBeInTheDocument()
+      expect(screen.getByText('Не настроено')).toBeInTheDocument()
+    })
+
+    // --- §2.122: "no key" and "cannot read the store" are not "wrong key" ---
+
+    it('shows "key is not set" on no_key, not "invalid key"', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_key' })
+        if (channel === 'settings:get') return Promise.resolve({ aiApiKeySaved: {} })
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
+      expect(screen.getByText('Ключ не задан, введите его')).toBeInTheDocument()
+      expect(screen.queryByText('Неверный ключ')).toBeNull()
+    })
+
+    it('shows "was saved but is gone" on no_key when settings say a key was saved', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_key' })
+        if (channel === 'settings:get') return Promise.resolve({ aiApiKeySaved: { 'anthropic-api': true } })
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByText('Ключ был сохранён, но не найден — введите заново')).toBeInTheDocument()
+    })
+
+    it('falls back to the neutral no_key wording when the saved marker is unreadable', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'no_key' })
+        if (channel === 'settings:get') return Promise.reject(new Error('settings unavailable'))
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByText('Ключ не задан, введите его')).toBeInTheDocument()
+    })
+
+    it('shows "key store unavailable" on store_unavailable and does not read the saved marker', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'store_unavailable' })
+        return Promise.resolve()
+      })
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
+      expect(screen.getByTestId('ai-auth-error')).toBeInTheDocument()
+      expect(screen.getByText('Хранилище ключей не ответило; проверить ключ не удалось')).toBeInTheDocument()
+      expect(screen.queryByText('Неверный ключ')).toBeNull()
+      // The store's own verdict is unknown here — nothing about a stored key
+      // may be claimed, so the marker is not even consulted.
+      expect(mockInvoke).not.toHaveBeenCalledWith('settings:get')
+    })
+
+    // REGRESSION GUARD (§2.122) — "Change provider" deleted the API keys of ALL
+    // three providers: it invoked `ai:deleteApiKey` with no argument, which the
+    // main process read as "delete everything", with no confirmation. Switching
+    // providers is a settings change and nothing else.
+    it('"change provider" never deletes a key', async () => {
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'invalid_key' })
+        return Promise.resolve()
+      })
+      const onSettingsChange = vi.fn()
+
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api', onSettingsChange }) })
+      await act(async () => { fireEvent.click(screen.getByText('Сменить провайдер')) })
+
+      expect(onSettingsChange).toHaveBeenCalledWith('aiProvider', '')
+      expect(mockInvoke).not.toHaveBeenCalledWith('ai:deleteApiKey')
+      expect(mockInvoke).not.toHaveBeenCalledWith('ai:deleteApiKey', expect.anything())
+      // Back to onboarding, so switching back to this provider is one click and
+      // the key it left behind is still usable.
+      expect(screen.getByTestId('ai-onboarding')).toBeInTheDocument()
+    })
+
+    // §2.122 — the open-effect gained a `cancelled` flag + cleanup this task,
+    // guarding BOTH `setAuthStatus` and the new `setKeyPreviouslySaved` write
+    // against a stale `ai:checkAuth` resolving after the provider changed.
+    // Without it, quickly switching providers could let an in-flight check for
+    // the OLD provider land after the NEW provider's check already resolved,
+    // silently reverting an authenticated panel back to an auth-error screen.
+    it('drops a stale checkAuth result for a provider the panel already switched away from', async () => {
+      let resolveAnthropic!: (v: unknown) => void
+      const anthropicPending = new Promise((res) => { resolveAnthropic = res })
+
+      mockInvoke.mockImplementation((channel: string, ...args: unknown[]) => {
+        if (channel === 'ai:checkAuth') {
+          if (args[0] === 'anthropic-api') return anthropicPending
+          if (args[0] === 'openai-api') return Promise.resolve({ status: 'authenticated' })
+        }
+        if (channel === 'settings:get') return Promise.resolve({ aiApiKeySaved: {} })
+        return Promise.resolve()
+      })
+
+      let view!: ReturnType<typeof renderPanel>
+      await act(async () => { view = renderPanel({ aiProvider: 'anthropic-api' }) })
+      // The anthropic-api check is still pending — no verdict yet either way
+      // (authStatus is still null, so the panel optimistically renders the
+      // composer rather than the auth-error screen).
+      expect(screen.queryByTestId('ai-auth-error')).toBeNull()
+
+      // Switch providers before the anthropic-api check settles. This unmounts
+      // the old effect (cancelled=true in its closure) and starts a fresh one
+      // for openai-api, which resolves immediately as authenticated.
+      await act(async () => {
+        const configured: AiPanelProps = {
+          open: true,
+          onClose: vi.fn(),
+          contextType: null,
+          contextData: null,
+          aiProvider: 'openai-api',
+          aiPrivacyConsent: true,
+          aiSendOnEnter: true,
+          onSettingsChange: vi.fn(),
+        }
+        view.rerender(React.createElement(AiPanel, configured))
+      })
+      expect(screen.getByTestId('ai-input')).toBeInTheDocument()
+
+      // Now the STALE anthropic-api promise resolves with a "no_key" verdict.
+      // If the cleanup guard is missing, this clobbers the authenticated
+      // openai-api view with an auth-error screen for a provider the user is
+      // no longer even looking at.
+      await act(async () => {
+        resolveAnthropic({ status: 'no_key' })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(screen.queryByTestId('ai-auth-error')).toBeNull()
+      expect(screen.getByTestId('ai-input')).toBeInTheDocument()
     })
   })
 
@@ -317,7 +502,7 @@ describe('AiPanel', () => {
         'Hello AI',
         undefined,
         'test-session-uuid',
-        'subscription',
+        'anthropic-api',
       )
     })
 
@@ -351,7 +536,7 @@ describe('AiPanel', () => {
         'Test',
         undefined,
         'test-session-uuid',
-        'subscription',
+        'anthropic-api',
       )
     })
 
@@ -368,7 +553,7 @@ describe('AiPanel', () => {
         'Test',
         undefined,
         'test-session-uuid',
-        'subscription',
+        'anthropic-api',
       )
     })
 
@@ -390,7 +575,7 @@ describe('AiPanel', () => {
         'Summarize',
         { type: 'email', data: { accountId: 1, folder: 'INBOX', uid: 42 } },
         'test-session-uuid',
-        'subscription',
+        'anthropic-api',
       )
     })
   })
@@ -440,7 +625,7 @@ describe('AiPanel', () => {
         'Суммируй это письмо',
         expect.any(Object),
         'test-session-uuid',
-        'subscription',
+        'anthropic-api',
       )
     })
 
@@ -490,7 +675,7 @@ describe('AiPanel', () => {
       // Change contextType → scope resets to email
       const threadProps: AiPanelProps = {
         open: true, onClose: vi.fn(), contextType: 'thread', contextData: null,
-        aiProvider: 'subscription', aiPrivacyConsent: true, aiSendOnEnter: true,
+        aiProvider: 'anthropic-api', aiPrivacyConsent: true, aiSendOnEnter: true,
       }
       await act(async () => { rerender(React.createElement(AiPanel, threadProps)) })
       expect(screen.getByText('Суммируй цепочку')).toBeInTheDocument()
@@ -542,7 +727,7 @@ describe('AiPanel', () => {
     // "new chat" button; this is the same class of bug via a different UI entry.
     it('loadSession invokes ai:newSession to clear preview registry', async () => {
       const otherSessions = [
-        { id: 'session-other', title: 'Other', updatedAt: Date.now(), provider: 'subscription' },
+        { id: 'session-other', title: 'Other', updatedAt: Date.now(), provider: 'anthropic-api' },
       ]
       mockInvoke.mockImplementation((channel: string) => {
         if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'authenticated' })
@@ -568,7 +753,7 @@ describe('AiPanel', () => {
     // pending preview from the deleted one.
     it('deleteSession of active session invokes ai:newSession', async () => {
       const sessions = [
-        { id: 'session-active', title: 'Active', updatedAt: Date.now(), provider: 'subscription' },
+        { id: 'session-active', title: 'Active', updatedAt: Date.now(), provider: 'anthropic-api' },
       ]
       mockInvoke.mockImplementation((channel: string) => {
         if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'authenticated' })
@@ -604,7 +789,7 @@ describe('AiPanel', () => {
     // the 4th and final session boundary.
     it('deleteAllSessions invokes ai:newSession to clear preview registry', async () => {
       const sessions = [
-        { id: 'session-active', title: 'Active', updatedAt: Date.now(), provider: 'subscription' },
+        { id: 'session-active', title: 'Active', updatedAt: Date.now(), provider: 'anthropic-api' },
       ]
       mockInvoke.mockImplementation((channel: string) => {
         if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'authenticated' })
@@ -631,8 +816,8 @@ describe('AiPanel', () => {
     // are still valid and should not be wiped.
     it('deleteSession of non-active session does NOT invoke ai:newSession', async () => {
       const sessions = [
-        { id: 'session-active', title: 'Active', updatedAt: Date.now(), provider: 'subscription' },
-        { id: 'session-other', title: 'Other', updatedAt: Date.now() - 1000, provider: 'subscription' },
+        { id: 'session-active', title: 'Active', updatedAt: Date.now(), provider: 'anthropic-api' },
+        { id: 'session-other', title: 'Other', updatedAt: Date.now() - 1000, provider: 'anthropic-api' },
       ]
       mockInvoke.mockImplementation((channel: string) => {
         if (channel === 'ai:checkAuth') return Promise.resolve({ status: 'authenticated' })
@@ -686,7 +871,7 @@ describe('AiPanel', () => {
         onClose: vi.fn(),
         contextType: null,
         contextData: null,
-        aiProvider: 'subscription',
+        aiProvider: 'anthropic-api',
         aiPrivacyConsent: true,
       }))
 
@@ -701,7 +886,7 @@ describe('AiPanel', () => {
     it('checks authorization on open', async () => {
       await act(async () => { renderPanel() })
 
-      expect(mockInvoke).toHaveBeenCalledWith('ai:checkAuth', 'subscription')
+      expect(mockInvoke).toHaveBeenCalledWith('ai:checkAuth', 'anthropic-api')
     })
 
     // §1.4 renderer IPC stampede fix: two mounts of AiPanel (e.g. the
@@ -718,7 +903,7 @@ describe('AiPanel', () => {
       })
 
       await act(async () => { renderPanel() })
-      await act(async () => { renderPanel({ aiProvider: 'subscription' }) })
+      await act(async () => { renderPanel({ aiProvider: 'anthropic-api' }) })
 
       const checkAuthCalls = mockInvoke.mock.calls.filter((c) => c[0] === 'ai:checkAuth')
       expect(checkAuthCalls.length).toBe(1)
@@ -841,6 +1026,32 @@ describe('AiPanel', () => {
       expect(lastMsg.textContent).not.toContain('Request stopped')
     })
 
+    // §2.123 — the honest refusal. The turn reached for destructive tools and
+    // armed nothing, so no confirmation block will appear below; saying so is
+    // what keeps the user from "confirming" destructive actions in prose.
+    it('renders the localized text for the destructive_action_not_prepared notice', async () => {
+      await act(async () => { renderPanel() })
+
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Archive the newsletters' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+
+      const handler = getStreamHandler()
+      await act(async () => {
+        handler({
+          type: 'notice',
+          requestId: 'test',
+          code: 'destructive_action_not_prepared',
+          message: 'No action was prepared, so there is no confirmation button and nothing has been changed.',
+        })
+      })
+
+      const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
+      const lastMsg = assistantMsgs[assistantMsgs.length - 1]
+      expect(lastMsg.textContent).toContain('Действие не подготовлено')
+      expect(lastMsg.textContent).not.toContain('No action was prepared')
+    })
+
     // A future main-process code the renderer does not recognize yet (version
     // skew between main and renderer bundles, e.g. mid-rollout) must not crash
     // the panel or render nothing — it falls back to the English `message` main
@@ -865,6 +1076,97 @@ describe('AiPanel', () => {
       const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
       const lastMsg = assistantMsgs[assistantMsgs.length - 1]
       expect(lastMsg.textContent).toContain('A future notice the renderer does not know yet.')
+    })
+
+    // The notice used to live on screen only. Reopening the session showed the
+    // answer WITHOUT the correction, so a turn that armed nothing came back
+    // looking like a turn that had a confirmation button somewhere — the exact
+    // belief §2.123 exists to remove.
+    it('persists a known-code notice to the session, after the assistant text', async () => {
+      await act(async () => { renderPanel() })
+
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Archive the newsletters' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+
+      const handler = getStreamHandler()
+      await act(async () => {
+        // Main emits `result` before any notice; the panel must keep that order
+        // when writing them, because row order is the reading order on restore.
+        handler({ type: 'result', requestId: 'test', text: 'Here is what I found.', sessionId: 's1' })
+        handler({
+          type: 'notice',
+          requestId: 'test',
+          code: 'destructive_action_not_prepared',
+          message: 'No action was prepared, so there is no confirmation button and nothing has been changed.',
+        })
+      })
+
+      const adds = mockInvoke.mock.calls
+        .filter(c => c[0] === 'aiSession:addMessage')
+        .map(c => c[1] as { sessionId: string; role: string; content: string })
+      const assistantIdx = adds.findIndex(a => a.content === 'Here is what I found.')
+      const noticeIdx = adds.findIndex(a => a.content.includes('Действие не подготовлено'))
+      expect(assistantIdx).toBeGreaterThan(-1)
+      expect(noticeIdx).toBeGreaterThan(assistantIdx)
+      // Localized text, the same role service inserts already use, no cost.
+      expect(adds[noticeIdx].role).toBe('assistant')
+      expect(adds[noticeIdx].sessionId).toBe('test-session-uuid')
+      expect(adds[noticeIdx].content).not.toContain('No action was prepared')
+      expect(adds[noticeIdx]).not.toHaveProperty('costUsd')
+    })
+
+    it('persists the budget notice too — every code the renderer can localize', async () => {
+      await act(async () => { renderPanel() })
+
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+
+      const handler = getStreamHandler()
+      await act(async () => {
+        handler({ type: 'result', requestId: 'test', text: 'Partial answer.', sessionId: 's1' })
+        handler({
+          type: 'notice',
+          requestId: 'test',
+          code: 'request_budget_exceeded',
+          message: 'Request stopped: the per-request cost limit of $2.00 was reached.',
+        })
+      })
+
+      const adds = mockInvoke.mock.calls
+        .filter(c => c[0] === 'aiSession:addMessage')
+        .map(c => c[1] as { content: string })
+      expect(adds.some(a => a.content.includes('Запрос остановлен'))).toBe(true)
+    })
+
+    // An unrecognized code falls back to main's English `message`. Freezing that
+    // into the history would leave an untranslated string there forever, so the
+    // fallback stays on screen only.
+    it('does not persist a notice whose code the renderer cannot localize', async () => {
+      await act(async () => { renderPanel() })
+
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+
+      const handler = getStreamHandler()
+      await act(async () => {
+        handler({ type: 'result', requestId: 'test', text: 'Here is what I found.', sessionId: 's1' })
+        handler({
+          type: 'notice',
+          requestId: 'test',
+          code: 'some_future_notice_code',
+          message: 'A future notice the renderer does not know yet.',
+        })
+      })
+
+      const adds = mockInvoke.mock.calls
+        .filter(c => c[0] === 'aiSession:addMessage')
+        .map(c => c[1] as { content: string })
+      // The answer is stored; the unknown notice is not.
+      expect(adds.some(a => a.content === 'Here is what I found.')).toBe(true)
+      expect(adds.some(a => a.content.includes('A future notice'))).toBe(false)
     })
 
     it('shows sources from result when aiShowSources=true', async () => {
@@ -1715,4 +2017,33 @@ describe('AiPanel', () => {
       expect(body.contains(confirmBlock)).toBe(false)
     })
   })
+})
+
+// ---------------------------------------------------------------------------
+// §2.122 — what the `store_unavailable` copy is allowed to claim.
+//
+// The verdict means the OS key store did not answer, so the existence of a key
+// is UNKNOWN (see `AuthStatus` in electron/services/ai.ts). The copy used to
+// say "your key is still there", which is our guess presented as fact: the
+// truth about the keychain belongs to the OS, not to us (CLAUDE.md §5 "who owns
+// the truth"). We may state what we did — nothing — and that we cannot check.
+// ---------------------------------------------------------------------------
+describe('ai.errors.storeUnavailable — i18n claims', () => {
+  const CANNOT_CHECK_MARKER: Record<string, string> = {
+    en: 'cannot check',
+    ru: 'не можем проверить',
+    fr: 'ne pouvons pas vérifier',
+    de: 'nicht prüfen',
+    es: 'no podemos comprobar',
+    it: 'non possiamo verificare',
+  }
+
+  it.each(Object.keys(CANNOT_CHECK_MARKER))(
+    '%s says the key cannot be checked rather than claiming it is there',
+    (lang) => {
+      const locale = LOCALES[lang]
+      const errors = (locale.ai as Record<string, Record<string, string>>).errors
+      expect(errors.storeUnavailable.toLowerCase()).toContain(CANNOT_CHECK_MARKER[lang])
+    },
+  )
 })

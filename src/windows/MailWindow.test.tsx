@@ -43,6 +43,14 @@ const i18nMap: Record<string, string> = {
   'app.empty.loadingMessage.title': 'Loading…',
   'app.empty.messageNotFound.title': 'Message not found',
   'app.errors.bodyNotAvailableOffline': 'Body not available offline',
+  'app.errors.bodyLoadTimedOut': 'Loading timed out — you can try again',
+  'app.errors.bodyLoadFailed': 'Could not load the body of this message',
+  'mail.actions.retry': 'Retry',
+  // §2.127 closed error vocabulary.
+  'app.errors.presented.offline': 'No connection to the mail server. MailCopilot will keep retrying.',
+  'app.errors.presented.timeout': 'The mail server did not respond in time. MailCopilot will keep retrying.',
+  'app.errors.presented.auth': 'Sign-in was rejected. Check the account password, or re-authorize the account in Settings.',
+  'app.errors.presented.unknown': 'Could not complete the request. Please try again.',
   // Link warning dialog
   'mail.links.title': 'This link looks suspicious',
   'mail.links.textLabel': 'Link text',
@@ -84,6 +92,14 @@ const i18nMap: Record<string, string> = {
   'compose.templates.replyIntroNoDate': '{{from}} wrote:',
   'compose.templates.unknownSender': 'Unknown sender',
   'compose.templates.unknownDate': 'Unknown date',
+  // §2.145 — parse-cap notice, rendered via the real MailParseCapNotice
+  // component wired in by MailWindow (see the describe block below).
+  'mail.parseCap.hard.title': 'This message is too large to open',
+  'mail.parseCap.hard.body': 'It is larger than {{limit}}, the most we can read.',
+  'mail.parseCap.soft.banner': 'Only the beginning of this message is shown.',
+  'mail.parseCap.soft.action': 'Show full message',
+  'mail.parseCap.soft.loading': 'Loading…',
+  'mail.parseCap.soft.atLimit': 'This is as much of it as MailCopilot will display.',
 }
 const stableT = (key: string, opts?: Record<string, unknown>) => {
   const val = i18nMap[key] ?? key
@@ -110,6 +126,10 @@ vi.mock('lucide-react', () => ({
   Loader2: () => React.createElement('span', { 'data-testid': 'icon-loader' }),
   AlertTriangle: () => React.createElement('span', { 'data-testid': 'icon-alert' }),
   WifiOff: () => React.createElement('span', { 'data-testid': 'icon-wifioff' }),
+  Timer: () => React.createElement('span', { 'data-testid': 'icon-timer' }),
+  // §2.17 Phase 1 fix wave — the 'unavailable' placeholder's icon. Not WifiOff
+  // on purpose: an expired password over a working connection lands there.
+  CloudOff: () => React.createElement('span', { 'data-testid': 'icon-cloudoff' }),
   Undo2: () => React.createElement('span', { 'data-testid': 'icon-undo2' }),
   ExternalLink: () => React.createElement('span', { 'data-testid': 'icon-external-link' }),
   // MailActionsToolbar icons (forwarded through the real component)
@@ -454,6 +474,32 @@ describe('MailWindow — loading and error states', () => {
     expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
   })
 
+  it('names the reason under the not-found title when the rejection is tagged (§2.127)', async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') {
+        return Promise.reject(
+          new Error("[mcerr:offline] Error invoking remote method 'net:messageDetails': AggregateError"),
+        )
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+    const reason = document.querySelector('[data-testid="mail-window-error-reason"]')
+    expect(reason).toBeInTheDocument()
+    expect(reason?.textContent).toContain('No connection to the mail server')
+    expect(reason?.textContent).not.toContain('mcerr')
+    expect(reason?.textContent).not.toContain('AggregateError')
+  })
+
+  it('shows no reason line for the invalid-params guard (not a presentation key)', async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockResolvedValue(undefined)
+    await act(async () => { renderMailWindow({ uid: 0 }) })
+    expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="mail-window-error-reason"]')).toBeNull()
+  })
+
   it('shows offline icon when offlineFallback is true', async () => {
     vi.clearAllMocks()
     mockInvoke.mockImplementation((channel: string) => {
@@ -464,6 +510,330 @@ describe('MailWindow — loading and error states', () => {
     })
     await act(async () => { renderMailWindow() })
     expect(document.querySelector('[data-testid="icon-wifioff"]')).toBeInTheDocument()
+  })
+
+  // §2.17 Phase 1 — the offline-fallback envelope now names its own cause;
+  // MailBodyContent already covered both branches, MailWindow only had the
+  // implicit-'offline' case (no `offlineFallbackReason` set at all).
+  it('shows the timeout icon and wording when offlineFallbackReason is timeout, not the offline one', async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') {
+        return Promise.resolve(makeMessageDetails({
+          offlineFallback: true,
+          offlineFallbackReason: 'timeout',
+          html: undefined,
+          text: undefined,
+        }))
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+    expect(document.querySelector('[data-testid="icon-timer"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="icon-wifioff"]')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-testid="mail-body-timeout"]')).toBeInTheDocument()
+    const body = document.querySelector('.empty-state.offline-fallback')
+    expect(body?.textContent).toContain('Loading timed out — you can try again')
+    expect(body?.textContent).not.toContain('Body not available offline')
+  })
+
+  // Fix wave — the catch-all branch of net:messageDetails now reports
+  // 'unavailable'. It used to say 'offline', which told a user whose password
+  // had expired, over a working connection, that they were offline — while
+  // the §2.165 "sign in again" badge sat above the message list next door.
+  it("shows the fetch-failed wording when offlineFallbackReason is unavailable, and claims nothing about the network", async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') {
+        return Promise.resolve(makeMessageDetails({
+          offlineFallback: true,
+          offlineFallbackReason: 'unavailable',
+          html: undefined,
+          text: undefined,
+        }))
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+    expect(document.querySelector('[data-testid="mail-body-unavailable"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="icon-cloudoff"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="icon-wifioff"]')).not.toBeInTheDocument()
+    const body = document.querySelector('.empty-state.offline-fallback')
+    expect(body?.textContent).toContain('Could not load the body of this message')
+    expect(body?.textContent).not.toContain('Body not available offline')
+  })
+
+  // Fix wave — the standalone window rendered the sentence but NOT the button,
+  // so a failed load here had no way out but closing the window. Every reason
+  // that can reach this block is checked, because the missing button was not a
+  // property of one reason: the whole block had been hand-copied without it.
+  it.each(['offline', 'timeout', 'unavailable'] as const)(
+    'offers Retry for reason %s, exactly as the main window does',
+    async reason => {
+      vi.clearAllMocks()
+      mockInvoke.mockImplementation((channel: string) => {
+        if (channel === 'net:messageDetails') {
+          return Promise.resolve(makeMessageDetails({
+            offlineFallback: true,
+            offlineFallbackReason: reason,
+            html: undefined,
+            text: undefined,
+          }))
+        }
+        return Promise.resolve(undefined)
+      })
+      await act(async () => { renderMailWindow() })
+      const retry = document.querySelector('[data-testid="mail-offline-retry"]')
+      expect(retry).toBeInTheDocument()
+      expect(retry?.textContent).toBe('Retry')
+    },
+  )
+
+  it('Retry re-runs the same body load rather than a second, different one', async () => {
+    vi.clearAllMocks()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') {
+        return Promise.resolve(makeMessageDetails({
+          offlineFallback: true,
+          offlineFallbackReason: 'timeout',
+          html: undefined,
+          text: undefined,
+        }))
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+    const detailCalls = () =>
+      mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === 'net:messageDetails')
+    expect(detailCalls()).toHaveLength(1)
+
+    const retry = document.querySelector('[data-testid="mail-offline-retry"]') as HTMLButtonElement
+    await act(async () => { retry.click() })
+
+    // Same channel, same arguments — a retry that fetched something else would
+    // be a second implementation of the load, which is what the duplication
+    // defect was made of.
+    expect(detailCalls()).toHaveLength(2)
+    expect(detailCalls()[1]).toEqual(detailCalls()[0])
+  })
+
+  it('a double-click on Retry lets the newest attempt win, not whichever replies last', async () => {
+    // Two loads in flight at once became reachable the moment Retry existed:
+    // both clicks of a double-click run before React re-renders the button
+    // away behind the loading state. The old `cancelled` closure guarded one
+    // in-flight call per effect run and would have let the slower of the two
+    // repaint the window with its stale answer; the load token decides by
+    // recency instead of by arrival order.
+    vi.clearAllMocks()
+    const pending: Array<(v: unknown) => void> = []
+    let call = 0
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel !== 'net:messageDetails') return Promise.resolve(undefined)
+      call += 1
+      // Call 1 = the mount load, resolved immediately so Retry is on screen.
+      if (call === 1) {
+        return Promise.resolve(makeMessageDetails({
+          offlineFallback: true,
+          offlineFallbackReason: 'offline',
+          html: undefined,
+          text: undefined,
+        }))
+      }
+      // Calls 2 and 3 = the double-click, both held open.
+      return new Promise(resolve => { pending.push(resolve) })
+    })
+
+    await act(async () => { renderMailWindow() })
+    const retry = document.querySelector('[data-testid="mail-offline-retry"]') as HTMLButtonElement
+    await act(async () => { retry.click(); retry.click() })
+    expect(pending).toHaveLength(2)
+
+    // The SECOND attempt (the newest) answers first...
+    await act(async () => {
+      pending[1](makeMessageDetails({
+        offlineFallback: true,
+        offlineFallbackReason: 'unavailable',
+        html: undefined,
+        text: undefined,
+      }))
+    })
+    expect(document.querySelector('[data-testid="mail-body-unavailable"]')).toBeInTheDocument()
+
+    // ...and the first, superseded one answers afterwards. It must be dropped.
+    await act(async () => {
+      pending[0](makeMessageDetails({
+        offlineFallback: true,
+        offlineFallbackReason: 'timeout',
+        html: undefined,
+        text: undefined,
+      }))
+    })
+    expect(document.querySelector('[data-testid="mail-body-unavailable"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="mail-body-timeout"]')).not.toBeInTheDocument()
+  })
+
+  // Coverage gap closed in the cleanup wave: the test above only ever
+  // interleaves two RESOLUTIONS, so deleting the token check from the `catch`
+  // arm left it green. The load has two arms and both write state, so both
+  // need the guard — and a rejection is exactly what a superseded attempt on a
+  // dying connection produces, which makes these the realistic orderings
+  // rather than exotic ones.
+  //
+  // `startTwoRetriesInFlight` reproduces the double-click setup: the mount
+  // load resolves immediately so Retry is on screen, then two clicks leave two
+  // calls open, to be settled in whichever order the test wants.
+  async function startTwoRetriesInFlight(): Promise<{
+    settle: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }>
+  }> {
+    vi.clearAllMocks()
+    const settle: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = []
+    let call = 0
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel !== 'net:messageDetails') return Promise.resolve(undefined)
+      call += 1
+      if (call === 1) {
+        return Promise.resolve(makeMessageDetails({
+          offlineFallback: true,
+          offlineFallbackReason: 'offline',
+          html: undefined,
+          text: undefined,
+        }))
+      }
+      return new Promise((resolve, reject) => { settle.push({ resolve, reject }) })
+    })
+    await act(async () => { renderMailWindow() })
+    const retry = document.querySelector('[data-testid="mail-offline-retry"]') as HTMLButtonElement
+    await act(async () => { retry.click(); retry.click() })
+    expect(settle).toHaveLength(2)
+    return { settle }
+  }
+
+  it('newest attempt FAILS, superseded one then succeeds — the failure stays on screen', async () => {
+    const { settle } = await startTwoRetriesInFlight()
+
+    // The newest attempt (index 1) rejects first.
+    await act(async () => {
+      settle[1].reject(new Error("[mcerr:auth] Error invoking remote method 'net:messageDetails'"))
+    })
+    const reason = document.querySelector('[data-testid="mail-window-error-reason"]')
+    expect(reason?.textContent).toContain('Sign-in was rejected')
+
+    // The superseded attempt answers afterwards with a perfectly good body. It
+    // must not repaint the window: recency decides, not arrival order.
+    await act(async () => {
+      settle[0].resolve(makeMessageDetails({ html: '<p>stale body</p>' }))
+    })
+    expect(document.querySelector('[data-testid="mail-window-error-reason"]')?.textContent)
+      .toContain('Sign-in was rejected')
+    expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
+    // And the spinner is gone — the newest attempt settled, so nothing is
+    // still being waited for.
+    expect(document.querySelector('[data-testid="icon-loader"]')).toBeNull()
+  })
+
+  it('newest attempt SUCCEEDS, superseded one then fails — the success stays on screen', async () => {
+    const { settle } = await startTwoRetriesInFlight()
+
+    await act(async () => {
+      settle[1].resolve(makeMessageDetails({
+        offlineFallback: true,
+        offlineFallbackReason: 'unavailable',
+        html: undefined,
+        text: undefined,
+      }))
+    })
+    expect(document.querySelector('[data-testid="mail-body-unavailable"]')).toBeInTheDocument()
+
+    // This is the ordering the missing guard would have broken: the stale
+    // rejection would have replaced a rendered message with "Message not
+    // found".
+    await act(async () => {
+      settle[0].reject(new Error("[mcerr:offline] Error invoking remote method 'net:messageDetails'"))
+    })
+    expect(document.querySelector('[data-testid="mail-body-unavailable"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="mail-window-error-reason"]')).toBeNull()
+    expect(document.querySelector('[data-testid="icon-alert"]')).toBeNull()
+    expect(document.querySelector('[data-testid="icon-loader"]')).toBeNull()
+  })
+
+  it('a reply that lands after the window closed never reaches the guarded block', async () => {
+    // React discards setState on an unmounted component, so the DOM cannot
+    // show whether the staleness check admitted this reply — which is exactly
+    // why the effect used to have no cleanup at all. The observation point is
+    // `d?.flags`: the load reads it ONLY inside the token check, so a getter
+    // on the reply answers the real question ("did the guard let this reply
+    // in?") without depending on React's tolerance for late updates.
+    vi.clearAllMocks()
+    let resolveDetails!: (v: unknown) => void
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel !== 'net:messageDetails') return Promise.resolve(undefined)
+      return new Promise(resolve => { resolveDetails = resolve })
+    })
+    const view = await act(async () => renderMailWindow())
+
+    const readFlags = vi.fn(() => ['\\Seen'])
+    const reply = makeMessageDetails()
+    Object.defineProperty(reply, 'flags', { get: readFlags, configurable: true })
+
+    view.unmount()
+    await act(async () => { resolveDetails(reply) })
+
+    expect(readFlags).not.toHaveBeenCalled()
+  })
+
+  it('a reply for the previous message is dropped once the window re-renders onto another one', async () => {
+    vi.clearAllMocks()
+    const settle: Array<(v: unknown) => void> = []
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel !== 'net:messageDetails') return Promise.resolve(undefined)
+      return new Promise(resolve => { settle.push(resolve) })
+    })
+    const view = await act(async () => renderMailWindow({ uid: 42 }))
+    expect(settle).toHaveLength(1)
+
+    // Same window, different message — a fresh load starts for uid 43.
+    await act(async () => {
+      view.rerender(React.createElement(MailWindow, { accountId: 1, folder: 'INBOX', uid: 43 }))
+    })
+    expect(settle).toHaveLength(2)
+
+    // uid 42's answer arrives late. Rendering it would show the wrong message
+    // under the new headers.
+    await act(async () => {
+      settle[0](makeMessageDetails({ uid: 42, html: '<p>body of the previous message</p>' }))
+    })
+    expect(document.body.textContent).not.toContain('body of the previous message')
+    expect(document.querySelector('[data-testid="icon-loader"]')).toBeInTheDocument()
+
+    // uid 43's answer is the one that lands.
+    await act(async () => {
+      settle[1](makeMessageDetails({ uid: 43, html: undefined, text: 'body of the current message' }))
+    })
+    expect(document.body.textContent).toContain('body of the current message')
+  })
+
+  it('a reply from valid props is dropped after a re-render into the invalid-params guard', async () => {
+    // The token is claimed BEFORE the parameter check for this case: the
+    // invalid-props run starts no request, so if it did not supersede the
+    // previous one first, the in-flight answer would overwrite the error the
+    // guard just set.
+    vi.clearAllMocks()
+    let resolveDetails!: (v: unknown) => void
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel !== 'net:messageDetails') return Promise.resolve(undefined)
+      return new Promise(resolve => { resolveDetails = resolve })
+    })
+    const view = await act(async () => renderMailWindow({ uid: 42 }))
+
+    await act(async () => {
+      view.rerender(React.createElement(MailWindow, { accountId: 1, folder: 'INBOX', uid: 0 }))
+    })
+    expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
+
+    await act(async () => { resolveDetails(makeMessageDetails({ html: '<p>stale body</p>' })) })
+    expect(document.querySelector('[data-testid="icon-alert"]')).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('stale body')
+    expect(document.querySelector('[data-testid="icon-loader"]')).toBeNull()
   })
 
   it('shows error icon when message has no html and no text', async () => {
@@ -2220,5 +2590,101 @@ describe('MailWindow — MEDIUM fix: flushPendingUndo idempotent (ref-based)', (
     await act(async () => { vi.advanceTimersByTime(3000) })
     expect(mockInvoke).toHaveBeenCalledWith('net:move', 1, 'INBOX', 'Archive', [42])
     expect(mockWindowClose).toHaveBeenCalledOnce()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §2.145 — two-tier parse-cap UI wiring, standalone message window.
+//
+// Live coverage for THIS WINDOW is absent — not unreachable. The parse
+// pipeline is reachable from e2e as of §2.145 fix wave 0.2: a fixture injected
+// through `e2e:injectMail` with `emlBase64` / `emlPadToBytes` gets real bytes
+// on disk and is served by the production path (`readEml` → `parseEmlBuffer` →
+// the caps), so a spec can drive the real caps end to end. What is missing is a
+// spec that does it for the STANDALONE message window specifically; the
+// main-window path is the one covered.
+//
+// (Historical note, kept because it is a trap worth not re-entering: a
+// `window.api.invoke` override attempted from a Playwright `page.evaluate` was
+// tried and removed — `contextBridge.exposeInMainWorld` hands the main world a
+// read-only proxy back to the isolated world, so the reassignment silently does
+// nothing and every call still reaches the real bridge, confirmed by the
+// production log showing a real `net.message_details.wall_ms
+// { cache_hit_level: 'imap' }` line for both the intercepted and the
+// non-intercepted click. Injecting real bytes, not intercepting the bridge, is
+// the way in.) See
+// `MailBodyContent.test.tsx`'s matching §2.145 section for the main-window
+// counterpart of this suite and the full writeup.
+//
+// This suite drives the REAL `MailWindow` component through its real
+// `net:messageDetails` invoke (mocked at the IPC boundary, same as every
+// other test in this file) — it is not a substitute for e2e coverage of the
+// IPC round trip, but it is real coverage of the standalone window actually
+// reaching `MailParseCapNotice` and `useShowFullMessage` with the props they
+// need, including the re-fetch with `{ full: true }` on click.
+describe('MailWindow — §2.145 parse-cap wiring', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+  afterEach(() => { cleanup() })
+
+  const HARD_CAP = { kind: 'hard' as const, rawBytes: 150 * 1024 * 1024, limitBytes: 100 * 1024 * 1024 }
+  const SOFT_CAP = { kind: 'soft' as const, rawBytes: 4 * 1024 * 1024, limitBytes: 1024 * 1024, canShowFull: true }
+
+  it('renders the hard-cap placeholder instead of the iframe/plain-text branches', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') {
+        return Promise.resolve(makeMessageDetails({ html: undefined, text: undefined, parseCap: HARD_CAP }))
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+
+    const card = document.querySelector('[data-testid="mail-parse-cap-hard"]')
+    expect(card).toBeInTheDocument()
+    // The limit, not the message's size — see MailBodyContent.test.tsx and
+    // §2.145 wave 3.1: `rawBytes` is a lower bound on one of the three hard
+    // paths, so the copy states "larger than {limit}" on all of them.
+    expect(card?.textContent).toContain('100.0 MB')
+    expect(card?.textContent).not.toContain('150.0 MB')
+    expect(document.querySelector('iframe[title="mail"]')).not.toBeInTheDocument()
+    expect(document.querySelector('pre.mail-text')).not.toBeInTheDocument()
+  })
+
+  it('renders the soft-cap banner below the clipped body and re-fetches with { full: true } on click', async () => {
+    mockInvoke.mockImplementation((channel: string, ...args: unknown[]) => {
+      if (channel === 'net:messageDetails') {
+        const opts = args[3] as { full?: boolean } | undefined
+        return Promise.resolve(
+          opts?.full
+            ? makeMessageDetails({ html: undefined, text: 'FULL body' })
+            : makeMessageDetails({ html: undefined, text: 'CLIPPED body', parseCap: SOFT_CAP }),
+        )
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 5, folder: 'INBOX', uid: 77 }) })
+
+    expect(document.querySelector('pre.mail-text')?.textContent).toBe('CLIPPED body')
+    expect(document.querySelector('[data-testid="mail-parse-cap-soft"]')).toBeInTheDocument()
+
+    const showFullBtn = document.querySelector<HTMLButtonElement>('[data-testid="mail-parse-cap-show-full"]')
+    await act(async () => { fireEvent.click(showFullBtn!) })
+
+    // The existing whitelisted channel, with an option — not a new IPC
+    // channel of its own (CLAUDE.md §5 — preload whitelist is a security
+    // boundary).
+    expect(mockInvoke).toHaveBeenCalledWith('net:messageDetails', 5, 'INBOX', 77, { full: true })
+    expect(document.querySelector('pre.mail-text')?.textContent).toBe('FULL body')
+    expect(document.querySelector('[data-testid="mail-parse-cap-soft"]')).not.toBeInTheDocument()
+  })
+
+  it('renders no parse-cap UI for an uncapped message', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow() })
+
+    expect(document.querySelector('[data-testid="mail-parse-cap-hard"]')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-testid="mail-parse-cap-soft"]')).not.toBeInTheDocument()
   })
 })

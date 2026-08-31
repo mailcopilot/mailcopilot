@@ -54,6 +54,18 @@ scripts/check-mirror-exclude.test.mjs
 scripts/check-mirror-export.test.mjs
 scripts/trigger-github-build.test.mjs
 scripts/enforce-e2e-wrapper.test.mjs
+scripts/reflection-checkpoint.test.mjs
+scripts/run-native-tests.test.mjs
+# §2.255: the GUARD (scripts/check-release-vars.mjs) is public — a source builder
+# benefits from reading why a build refuses, and it reads only variable names.
+# Its test is not, for the reason above: two of its assertions read
+# `.gitlab-ci.yml` (they pin that the guard is deliberately ABSENT from the two
+# dispatch-only jobs), and that file is excluded a few lines up. Exported, the
+# test would throw ENOENT. Making those assertions skip when the file is missing
+# was rejected: they are the negative half of the wiring contract, and coverage
+# that silently disappears in one environment is worse than coverage that lives
+# in one repository.
+scripts/check-release-vars.test.mjs
 
 # AI agents and internal instructions
 CLAUDE.md

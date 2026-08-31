@@ -71,6 +71,20 @@ describe('useMailListView', () => {
     expect(result.current.threadRows[0].count).toBe(1)
   })
 
+  it('threadRows without grouping derives unreadCount from each message, not a stub', () => {
+    // groupConversations=false must stay behaviourally identical to the
+    // pre-thread-row path: one row per message, bold iff that single message is
+    // unread. (Not byte-identical — the row object gained `unreadCount`.)
+    // This pins the ungrouped path to `singleMessageRow` rather than a literal
+    // row builder that could omit or hardcode `unreadCount`.
+    const { result } = renderHook(() => useMailListView({ mails, active: null, groupConversations: false, sortMode: 'date' }))
+    const byUid = new Map(result.current.threadRows.map(row => [row.lead.uid, row]))
+
+    expect(byUid.get(3)?.unreadCount).toBe(1) // unread: true
+    expect(byUid.get(2)?.unreadCount).toBe(0) // unread: false
+    expect(byUid.get(1)?.unreadCount).toBe(1) // unread: true
+  })
+
   it('activeThread finds the thread containing the active message', () => {
     const activeMail = mails[1]
     const { result } = renderHook(() => useMailListView({ mails, active: activeMail, groupConversations: false, sortMode: 'date' }))
@@ -93,6 +107,32 @@ describe('useMailListView', () => {
     })
     expect(result.current.selectedCount).toBe(2)
     expect(result.current.hasMultiSelection).toBe(true)
+  })
+
+  it('selectedCount collapses when rows merge under a live selection', () => {
+    // `groupConversations` is a live setting (App subscribes to it), so two
+    // separately selected messages become ONE row without the selection being
+    // touched. `selectedKeys.size` would keep saying two, and the bulk panel,
+    // the context menu branch and the AI context would all act on a count the
+    // user cannot see on screen.
+    const threaded: MailSummary[] = [
+      { ...makeMail({ uid: 30, subject: 'Re: Hello' }), messageId: '<m3@test>', inReplyTo: '<m1@test>' },
+      { ...makeMail({ uid: 20, subject: 'Hello' }), messageId: '<m1@test>' },
+    ]
+    const { result, rerender } = renderHook(
+      ({ group }: { group: boolean }) => useMailListView({ mails: threaded, active: null, groupConversations: group, sortMode: 'date' }),
+      { initialProps: { group: false } },
+    )
+
+    act(() => { result.current.setSelectedKeys(new Set(['1:INBOX:30', '1:INBOX:20'])) })
+    expect(result.current.selectedCount).toBe(2)
+    expect(result.current.hasMultiSelection).toBe(true)
+
+    rerender({ group: true })
+
+    expect(result.current.threadRows).toHaveLength(1)
+    expect(result.current.selectedCount).toBe(1)
+    expect(result.current.hasMultiSelection).toBe(false)
   })
 
   it('visibleLeadMails contains lead messages from threadRows', () => {

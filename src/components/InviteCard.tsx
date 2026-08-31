@@ -15,7 +15,15 @@
 import { useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CalendarDays, MapPin, User, Loader2, CheckCircle, Clock, XCircle } from 'lucide-react'
+import { ERROR_PRESENTATION_I18N_KEYS, decodeErrorPresentation } from '@mailcopilot/core'
 import type { CalendarInvitePublic, RsvpMethod } from '../../packages/types'
+import {
+  canonicalIanaZone,
+  inviteTimeDayKey,
+  inviteTimeFormatOptions,
+  resolveInviteTime,
+  type ResolvedInviteTime,
+} from './inviteTimeZone'
 
 export interface InviteCardProps {
   /**
@@ -58,74 +66,36 @@ function parseFloatingDate(dateStr: string): Date {
 }
 
 /**
- * Parse a wall-clock datetime string 'YYYY-MM-DDTHH:MM:SS' (no Z suffix) into
- * a local Date object using the Date(y, m-1, d, h, m, s) constructor.
- * This means the Date represents the given wall-clock numbers as if they were
- * in the viewer's local timezone — which is intentional: we display the original
- * wall-clock time (e.g. "14:00 NY") using plain local formatters (no timeZone
- * override), and annotate with the original TZID separately.
- */
-function parseWallClock(dtstart: string): Date {
-  const tIdx = dtstart.indexOf('T')
-  const datePart = tIdx >= 0 ? dtstart.slice(0, tIdx) : dtstart
-  const timePart = tIdx >= 0 ? dtstart.slice(tIdx + 1) : '00:00:00'
-  const [y, m, d] = datePart.split('-').map(Number)
-  const parts = timePart.split(':').map(Number)
-  const hh = parts[0] ?? 0
-  const mm = parts[1] ?? 0
-  const ss = parts[2] ?? 0
-  // Local Date constructor — wall-clock numbers are preserved as viewer-local
-  return new Date(y, m - 1, d, hh, mm, ss)
-}
-
-/**
  * Format a calendar date range for display. Handles:
  * - All-day events: "Friday, May 15" (or "May 15 – May 16" for multi-day)
  * - Same-day timed: "Friday, May 15 · 14:00–15:30"
  * - Multi-day timed: "Fri May 15, 14:00 – Sat May 16, 09:00"
  * - No end date: shows start only
  *
+ * Timed events are rendered in the viewer's own timezone whenever they denote a
+ * real instant, and the originating zone is surfaced as a caption by
+ * `getTzidAnnotation`. This matches Gmail, Outlook, Thunderbird and Apple Mail.
+ * The one exception is an invite whose TZID cannot be resolved: there is no
+ * instant to convert, so the organizer's numbers are printed verbatim through a
+ * UTC carrier (`resolveInviteTime` tags this case; see `inviteTimeZone`).
+ *
+ * Turning an organizer wall clock into an instant (including the DST gap /
+ * ambiguity policy) lives in `./inviteTimeZone`.
+ *
+ * The previous behaviour formatted in the organizer's zone whenever the TZID
+ * happened to be one Intl accepted, which silently produced wrong times: the
+ * same Exchange server sends `TZID=Russian Standard Time` (a Windows label,
+ * rejected by Intl, so the code accidentally fell back to viewer-local and was
+ * right) and `TZID=UTC` for updates of the same meeting (accepted by Intl, so a
+ * 15:00 Moscow meeting rendered as 12:00). A user acted on the 12:00 reading.
+ *
  * §2.22 fix iter2B:
  * - allDay=true: dtstart is 'YYYY-MM-DD', parsed as local midnight (no UTC shift)
- * - timed with Z suffix: dtstart is ISO UTC; rendered in viewer's local TZ (or tzid).
- * - timed without Z suffix: wall-clock in tzid; rendered via Date.UTC trick +
- *   Intl.DateTimeFormat({ timeZone: tzid }).
  *
  * §2.22 fix iter3B:
  * - RFC 5545 §3.6.1: all-day DTEND is exclusive (DTEND=May 17 → last day is May 16).
  *   DTEND one day after DTSTART = single-day event (show DTSTART only).
- * - Wall-clock dtstart (no Z) supported via parseWallClock + timeZone option.
  */
-/**
- * Validate that a TZID string is acceptable as `Intl.DateTimeFormat({ timeZone })`.
- * RFC 5545 TZID is an opaque label and does NOT have to be IANA — Outlook /
- * Exchange typically emit Windows-style names like `Russian Standard Time`,
- * `Pacific Standard Time`, `W. Europe Standard Time` which throw RangeError
- * when passed to Intl. Without this guard the InviteCard render escapes to the
- * Sentry error boundary the moment any Outlook invite is opened.
- *
- * Returning false here means the renderer falls back to viewer-local TZ for
- * formatting and surfaces the original tzid via `getTzidAnnotation`, so the
- * user still sees both the local wall-clock and the originating-zone label.
- *
- * Cached because `formatInviteDateRange` calls it on every render and the set
- * of distinct tzids in a session is tiny (one per open invite).
- */
-const ianaZoneCache = new Map<string, boolean>()
-function isValidIanaZone(tz: string): boolean {
-  const cached = ianaZoneCache.get(tz)
-  if (cached !== undefined) return cached
-  let ok = false
-  try {
-    // Construct-only is enough — RangeError fires at construction, not format().
-    new Intl.DateTimeFormat('en', { timeZone: tz })
-    ok = true
-  } catch {
-    ok = false
-  }
-  ianaZoneCache.set(tz, ok)
-  return ok
-}
 
 function formatInviteDateRange(
   invite: CalendarInvitePublic,
@@ -182,85 +152,43 @@ function formatInviteDateRange(
     return `${shortFmt.format(start)} – ${shortFmt.format(inclusiveEnd)}`
   }
 
-  // Timed event — dtstart is either ISO UTC (with Z) or wall-clock (without Z)
-  const isUtc = dtstart.endsWith('Z') || dtstart.includes('+') || dtstart.includes('-', 10)
-  const isWallClock = !isUtc
+  // Timed event. The organizer's zone is only ever a hint for interpreting a
+  // wall-clock string — never the display zone.
+  const sourceZone = tzid ? canonicalIanaZone(tzid) : null
 
-  let start: Date
-  try {
-    start = isWallClock ? parseWallClock(dtstart) : new Date(dtstart)
-    if (isNaN(start.getTime())) return dtstart
-  } catch {
-    return dtstart
-  }
-
-  // Wall-clock dtstart: do NOT pass timeZone to Intl — the local Date already
-  // holds the correct wall-clock numbers; viewer sees "14:00" with a tzid annotation.
-  // UTC dtstart: pass tzid to Intl so the display is in the event's original zone.
-  // Outlook/Exchange use Windows-style TZIDs (`Russian Standard Time`, etc.)
-  // which Intl rejects with RangeError — only fall back to tzid if it is a
-  // valid IANA zone; otherwise format in viewer-local and let
-  // `getTzidAnnotation` surface the original-zone label separately.
-  const rawDisplayTz: string | undefined = isWallClock
-    ? undefined
-    : (tzid ?? undefined)
-  const displayTz: string | undefined =
-    rawDisplayTz && isValidIanaZone(rawDisplayTz) ? rawDisplayTz : undefined
+  const start = resolveInviteTime(dtstart, sourceZone)
+  if (!start) return dtstart
 
   const dateOpts: Intl.DateTimeFormatOptions = {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
-    ...(displayTz ? { timeZone: displayTz } : {}),
   }
 
   const timeOpts: Intl.DateTimeFormatOptions = {
     hour: '2-digit',
     minute: '2-digit',
-    ...(displayTz ? { timeZone: displayTz } : {}),
   }
 
-  if (!dtend) {
-    const datePart = new Intl.DateTimeFormat(locale, dateOpts).format(start)
-    const timePart = new Intl.DateTimeFormat(locale, timeOpts).format(start)
-    return `${datePart} · ${timePart}`
-  }
+  /**
+   * Instants render in the viewer's zone; an unresolvable TZID leaves us with
+   * the organizer's bare numbers, which `inviteTimeFormatOptions` prints
+   * verbatim via a UTC carrier instead of re-reading them as viewer-local.
+   */
+  const fmt = (value: ResolvedInviteTime, opts: Intl.DateTimeFormatOptions): string =>
+    new Intl.DateTimeFormat(locale, inviteTimeFormatOptions(value, opts)).format(value.date)
 
-  // dtend: same wall-clock / UTC logic as dtstart
-  let end: Date
-  try {
-    const dtendIsWallClock = !dtend.endsWith('Z') && !dtend.includes('+') && !dtend.includes('-', 10)
-    end = dtendIsWallClock ? parseWallClock(dtend) : new Date(dtend)
-    if (isNaN(end.getTime())) {
-      const datePart = new Intl.DateTimeFormat(locale, dateOpts).format(start)
-      const timePart = new Intl.DateTimeFormat(locale, timeOpts).format(start)
-      return `${datePart} · ${timePart}`
-    }
-  } catch {
-    const datePart = new Intl.DateTimeFormat(locale, dateOpts).format(start)
-    const timePart = new Intl.DateTimeFormat(locale, timeOpts).format(start)
-    return `${datePart} · ${timePart}`
-  }
+  const startOnly = (): string => `${fmt(start, dateOpts)} · ${fmt(start, timeOpts)}`
 
-  // Compare start vs end date in the display timezone
-  const toDateKey = (d: Date): string => {
-    if (displayTz) {
-      return new Intl.DateTimeFormat('en-US', {
-        timeZone: displayTz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(d)
-    }
-    return d.toDateString()
-  }
+  if (!dtend) return startOnly()
 
-  if (toDateKey(start) === toDateKey(end)) {
+  // dtend: same resolution as dtstart
+  const end = resolveInviteTime(dtend, sourceZone)
+  if (!end) return startOnly()
+
+  if (inviteTimeDayKey(start) === inviteTimeDayKey(end)) {
     // Same day: "Friday, May 15 · 14:00–15:30"
-    const datePart = new Intl.DateTimeFormat(locale, dateOpts).format(start)
-    const startTime = new Intl.DateTimeFormat(locale, timeOpts).format(start)
-    const endTime = new Intl.DateTimeFormat(locale, timeOpts).format(end)
-    return `${datePart} · ${startTime}–${endTime}`
+    return `${fmt(start, dateOpts)} · ${fmt(start, timeOpts)}–${fmt(end, timeOpts)}`
   }
 
   // Multi-day: "Fri May 15, 14:00 – Sat May 16, 09:00"
@@ -270,28 +198,33 @@ function formatInviteDateRange(
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-    ...(displayTz ? { timeZone: displayTz } : {}),
   }
-  const startFmt = new Intl.DateTimeFormat(locale, shortDateOpts).format(start)
-  const endFmt = new Intl.DateTimeFormat(locale, shortDateOpts).format(end)
-  return `${startFmt} – ${endFmt}`
+  return `${fmt(start, shortDateOpts)} – ${fmt(end, shortDateOpts)}`
 }
 
 /**
- * Returns the IANA timezone annotation string when the event's original TZID
- * differs from the viewer's local timezone. Returns null when no annotation
- * is needed (tzid absent, or matches viewer's TZ, or allDay event).
+ * Returns the original-zone caption when the event's TZID names a zone other
+ * than the viewer's own. Returns null when no caption is needed (tzid absent,
+ * same zone as the viewer, or an all-day event, which carries no zone).
  *
- * §2.22 fix iter2B: variant A — show local time always + annotate origin TZ.
- * §2.22 fix iter3B: for wall-clock dtstart (no Z), tzid is always shown if
- * it differs from viewer TZ (same logic, but renderer displays in tzid, not
- * viewer local, so the annotation clarifies which zone is displayed).
+ * Times themselves are always shown in the viewer's zone (see
+ * `formatInviteDateRange`), so this caption is the only place the organizer's
+ * zone appears — and for a TZID Intl cannot resolve (Windows-style Outlook
+ * labels) it is also the signal that the printed wall clock is the
+ * organizer's, not a converted one.
+ *
+ * Comparison is done on canonical zone ids so that ICU links (`W-SU` →
+ * `Europe/Moscow`, `Etc/UTC` → `UTC`) do not produce a caption claiming a
+ * different zone. An unresolvable TZID never compares equal, so it is always
+ * captioned — which is exactly the case where the user needs it most.
  */
 function getTzidAnnotation(invite: CalendarInvitePublic): string | null {
   if (invite.allDay || !invite.tzid) return null
   try {
     const viewerTz = Intl.DateTimeFormat().resolvedOptions().timeZone
     if (viewerTz === invite.tzid) return null
+    const canonical = canonicalIanaZone(invite.tzid)
+    if (canonical && canonical === canonicalIanaZone(viewerTz)) return null
     return invite.tzid
   } catch {
     return null
@@ -340,10 +273,18 @@ export default function InviteCard({
         setRsvpState({ kind: 'error', response, errorMsg: result.error ?? 'Unknown error' })
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err)
-      setRsvpState({ kind: 'error', response, errorMsg })
+      // §2.127 — the IPC rejection path (SMTP unreachable, credentials
+      // rejected) reads as one of four sentences; the raw text was the
+      // "Error invoking remote method 'mail:rsvpInvite'" wrapper. The
+      // `result.error` branch above is a different channel — a structured
+      // envelope, not a rejection — and is left as-is.
+      setRsvpState({
+        kind: 'error',
+        response,
+        errorMsg: t(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(err)]),
+      })
     }
-  }, [accountId, messageUid, folder])
+  }, [accountId, messageUid, folder, t])
 
   const isSending = rsvpState.kind === 'sending'
 

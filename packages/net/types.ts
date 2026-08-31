@@ -18,6 +18,8 @@ export type {
   MessageEnvelope,
   AttachmentMeta,
   MessageDetails,
+  // §2.145 — two-tier parse caps.
+  MessageParseCap,
   UnsubscribeAttemptResult,
   ComposeAttachment,
   ComposeInit,

@@ -14,7 +14,13 @@ function makeMail(accountId: number, folder: string, uid: number): MailSummary {
 }
 
 function makeRow(lead: MailSummary, items: MailSummary[]): ThreadRow {
-  return { key: `${lead.accountId}:${lead.folder}:${lead.uid}`, lead, items, count: items.length }
+  return {
+    key: `${lead.accountId}:${lead.folder}:${lead.uid}`,
+    lead,
+    items,
+    count: items.length,
+    unreadCount: items.filter(m => m.unread).length,
+  }
 }
 
 describe('resolveThreadItems', () => {

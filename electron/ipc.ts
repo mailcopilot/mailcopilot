@@ -33,6 +33,7 @@ import { reportIpcHandlerError } from './sentry'
 import { recordEvent, recordHistogram, recordGauge, bucketDuration } from './metrics'
 import { METRIC_EVENTS, DOMAINS, type MetricKind, type TagSpec, type DomainName } from './metricsSchema'
 import { markFeatureReachFromEvent } from './featureReach'
+import { describeErrorForLog, presentedIpcMessage } from '@mailcopilot/core/errorPresentation'
 
 const logIpc = createLogger('IPC')
 const logUiFreeze = createLogger('UiFreeze')
@@ -79,13 +80,79 @@ const inflightIpc = new Map<number, { channel: string; start: number }>()
 let ipcSeq = 0
 
 /**
+ * Re-throwable copy of a handler failure carrying a presentation key.
+ *
+ * Measured on Electron 40 (real main+preload+renderer round trip): a rejected
+ * `ipcMain.handle` reaches the renderer as a brand-new plain `Error` whose only
+ * own properties are `message` and `stack`. `.errors[]`, `.code`, `.cause` and
+ * any custom own property set here are dropped by the serializer — the message
+ * text is the ONLY carrier that survives. That is why the classification has to
+ * happen here, in the process that still holds the real error object, and why
+ * the verdict rides inside the message.
+ *
+ * BACKLOG §2.127: without this the renderer rendered `String(e)` of an
+ * AggregateError, whose `message` is empty by construction, and the user read
+ * "Sync error: Error: Error invoking remote method 'net:inboxSummaries':
+ * AggregateError".
+ *
+ * The key is computed from the error OBJECT first (codes,
+ * `authenticationFailed`, the AggregateError tree), with two short text
+ * patterns as a fallback for servers that only say it in prose — see
+ * `classifyErrorPresentation`. Either way the verdict is reached HERE, in main,
+ * once; the renderer never re-derives one from text, which is the arms race
+ * this format exists to end. The original text is kept after the tag for
+ * DevTools; the UI reads the tag and renders a fixed sentence from a closed
+ * vocabulary, so untrusted server text never reaches the screen.
+ *
+ * The original text after the tag is LOAD-BEARING, not a courtesy: two renderer
+ * consumers already substring-match it and would break silently if a future
+ * cleanup dropped it —
+ *   - src/hooks/useCertRecovery.ts (`cert_trust_*` rejection codes → inline
+ *     dialog errors),
+ *   - src/sentry.ts beforeSend (isTransientNetworkError over the wrapped
+ *     message, which keeps update:* network noise out of Sentry).
+ * Both match by substring, so prepending the tag is safe; removing the text is
+ * not. What must NOT happen is the UI rendering that text — the renderer picks
+ * a sentence by key (packages/core/errorPresentation.ts).
+ *
+ * Retry/rollback behaviour is untouched: nothing in the main process consumes
+ * this rejection — `ipcMain.handle`'s reply path is its only consumer — and
+ * Sentry still receives the ORIGINAL error object (see below), so transient
+ * filtering keeps working on the real tree.
+ *
+ * Never throws: if anything about the error is hostile, the original value is
+ * re-thrown unchanged.
+ */
+function toPresentedIpcError(err: unknown): unknown {
+  try {
+    const presented = new Error(presentedIpcMessage(err))
+    // `cause` is assigned rather than passed to the constructor: tsconfig
+    // targets ES2020, where the two-argument Error constructor is not typed.
+    // It is main-process-only diagnostics anyway — the IPC serializer drops it.
+    if (err != null) (presented as { cause?: unknown }).cause = err
+    return presented
+  } catch {
+    return err
+  }
+}
+
+/**
  * Wrap `ipcMain.handle` with:
  *   - inflight-IPC tracking (so freeze reporters can show what's stuck);
  *   - slow-IPC warnings + `ipc.slow_ms` histogram for channels that finish
  *     above `SLOW_IPC_THRESHOLD_MS` and aren't on the long-running allowlist;
  *   - a uniform error funnel that logs via electron-log, reports a PII-free
- *     synthetic event to Sentry, and re-throws so the renderer still sees the
- *     rejection unchanged.
+ *     synthetic event to Sentry, and re-throws so the call still REJECTS for
+ *     the renderer.
+ *
+ * What is re-thrown is NOT the original value: since §2.127 it is a substitute
+ * `Error` built by `toPresentedIpcError`, whose message is the original text
+ * with a `[mcerr:<key>]` tag prepended (the original is kept on `.cause`, which
+ * the IPC serializer drops anyway). Callers that inspect the rejection are
+ * therefore looking at a NEW object with a CHANGED message — the two renderer
+ * consumers that substring-match that message are listed on
+ * `toPresentedIpcError`, and anything added later must read the tag rather than
+ * assume the text is verbatim. Only the fact of rejection is unchanged.
  *
  * Every IPC handler in the main process MUST go through this wrapper. Raw
  * `ipcMain.handle(...)` is banned by ESLint project-wide; the only exception
@@ -100,7 +167,11 @@ export function handleIpc(channel: string, handler: Parameters<typeof ipcMain.ha
     try {
       return await handler(event, ...args)
     } catch (err) {
-      logIpc.error(`[${channel}]`, err instanceof Error ? err.message : err)
+      // describeErrorForLog, not `err.message`: an AggregateError's message is
+      // the empty string, so the four §2.127 incidents left log lines with no
+      // cause in them at all. The flattened tree (messages + codes of every
+      // node) is the diagnostic record — local log only, never Sentry.
+      logIpc.error(`[${channel}]`, describeErrorForLog(err))
       // electron-log has NO Sentry bridge (CLAUDE.md §8), so before this the
       // entire IPC surface — every handler in the app — was invisible in error
       // monitoring. reportIpcHandlerError sends a PII-free synthetic event
@@ -110,7 +181,9 @@ export function handleIpc(channel: string, handler: Parameters<typeof ipcMain.ha
       // extra guard here is belt-and-braces so telemetry can never convert a
       // handled rejection into an unhandled one.
       try { reportIpcHandlerError(channel, err) } catch { /* telemetry must never throw */ }
-      throw err // re-throw so the renderer receives the error
+      // Re-throw so the renderer still receives the rejection — now tagged with
+      // a closed-vocabulary presentation key (see toPresentedIpcError).
+      throw toPresentedIpcError(err)
     } finally {
       const dur = Date.now() - start
       inflightIpc.delete(id)
@@ -246,15 +319,17 @@ export function registerUiFreezeHandler(): void {
       `UI(renderer) blocked ~${lagMs ?? '?'}ms (delta=${deltaMs ?? '?'}ms at=${at ?? '?'}) inflight-ipc=[${inflight.join(', ')}]`,
     )
     // Metrics: bucket lag so dashboards stay low-cardinality.
-    // Attribute the freeze to the OLDEST-inflight channel — that's the one most
-    // likely to be the source of the block, not the most recently started one.
-    const topInflight = others.length > 0
+    // `oldest_inflight` is context, NOT attribution (§2.156): a handler can be
+    // oldest because it is waiting on the network, which costs the event loop
+    // nothing. It was named `top_inflight` and read as "the culprit"; it never
+    // was one.
+    const oldestInflight = others.length > 0
       ? [...others].sort((a, b) => a.start - b.start)[0]!.channel
       : 'none'
     recordHistogram('ui.freeze.renderer_ms', lagMs ?? 0, {
       duration_bucket: bucketDuration(lagMs ?? 0),
       inflight_count: others.length,
-      top_inflight: topInflight,
+      oldest_inflight: oldestInflight,
     })
   })
 }
@@ -269,16 +344,65 @@ export function registerUiFreezeHandler(): void {
  * JSON parsing of huge payloads) that otherwise wouldn't show up in slow-IPC
  * logs because the offending code path may not be inside a handleIpc handler.
  *
- * Colocated with the renderer-freeze handler because both read `inflightIpc`
- * directly to attribute the stall to the oldest-inflight channel.
+ * ── Attribution (§2.156) ─────────────────────────────────────────────────
+ * The inflight-IPC snapshot is CONTEXT, not a culprit. A handler that is
+ * awaiting the network, or delegating to the search worker thread, occupies no
+ * event-loop time whatsoever — yet it is exactly the kind of handler that ends
+ * up "oldest", which is how the field log came to blame `net:setSeen` for 67 s
+ * and `search:coverageStats` (worker-bound) for 3 s while 216 of 229 stalls
+ * stayed unattributed.
+ *
+ * Real attribution comes from `drainSlowSql`: better-sqlite3 is synchronous, so
+ * a slow statement IS a blocked loop. Two rules make the attribution honest,
+ * and both are load-bearing:
+ *
+ *  - drain on EVERY poll, not only on a freeze — otherwise a statement from a
+ *    quiet window is carried forward and blamed for the next, unrelated stall;
+ *  - keep only samples whose completion falls inside the window the delay was
+ *    measured over. The buffer is filled by packages/db, which instruments
+ *    itself when the database opens — that is BEFORE this watchdog starts, so
+ *    the first poll would otherwise inherit the schema migrations and hand
+ *    them to whatever froze afterwards. Older samples are not silently
+ *    dropped: they are logged once, on their own line, attributed to nothing.
+ *
+ * No statement text reaches this file, in any form: a sample carries a
+ * "<verb> <table>" digest and an 8-hex fingerprint of the statement, and
+ * packages/db/sqlTiming.ts drops the text after hashing it. `sql=a3f19c2b` in a
+ * log line is resolved with `node scripts/sql-fingerprint.mjs a3f19c2b`.
+ *
+ * Colocated with the renderer-freeze handler because both read `inflightIpc`.
  */
-export function startMainLoopFreezeWatchdog(): void {
+export type SlowSqlSampleForFreeze = { digest: string; fingerprint: string; durationMs: number; at: number }
+export type SlowSqlProbe = () => SlowSqlSampleForFreeze[]
+
+export function startMainLoopFreezeWatchdog(options?: { drainSlowSql?: SlowSqlProbe }): void {
   const histogram = perfHooks.monitorEventLoopDelay({ resolution: 20 })
   histogram.enable()
   const FREEZE_THRESHOLD_MS = 200
+  const drainSlowSql = options?.drainSlowSql
+  // Start of the window the next poll will report on. Everything the buffer
+  // already holds at this point belongs to startup, not to any freeze this
+  // watchdog will observe.
+  let windowStart = Date.now()
   setInterval(() => {
     const maxNs = histogram.max
     histogram.reset()
+    const polledAt = Date.now()
+    let drained: SlowSqlSampleForFreeze[] = []
+    if (drainSlowSql) {
+      try { drained = drainSlowSql() } catch { drained = [] }
+    }
+    const slowSql = drained.filter((s) => s.at >= windowStart)
+    const beforeWindow = drained.filter((s) => s.at < windowStart)
+    if (beforeWindow.length > 0) {
+      // Reported, but never attributed: these ran before the watchdog existed.
+      logUiFreeze.info(
+        `slow SQL from before the watchdog started (not attributed to any freeze): [${
+          beforeWindow.slice(0, 3).map((s) => `${s.durationMs}ms ${s.digest} sql=${s.fingerprint}`).join(' | ')
+        }]`,
+      )
+    }
+    windowStart = polledAt
     if (!Number.isFinite(maxNs) || maxNs <= 0) return
     const maxMs = Math.round(maxNs / 1e6)
     if (maxMs >= FREEZE_THRESHOLD_MS) {
@@ -286,17 +410,22 @@ export function startMainLoopFreezeWatchdog(): void {
       const inflight = Array.from(inflightIpc.values())
         .map((x) => `${x.channel}(${now - x.start}ms)`)
         .slice(0, 10)
+      const sqlForLog = slowSql
+        .slice(0, 3)
+        .map((s) => `${s.durationMs}ms ${s.digest} sql=${s.fingerprint}`)
       logUiFreeze.warn(
-        `Main blocked ~${maxMs}ms (event loop max delay) inflight-ipc=[${inflight.join(', ')}]`,
+        `Main blocked ~${maxMs}ms (event loop max delay) slow-sql=[${sqlForLog.join(' | ')}] inflight-ipc=[${inflight.join(', ')}]`,
       )
-      // Oldest-inflight = most likely culprit of the block (longest-running).
-      const topInflight = inflightIpc.size > 0
+      const oldestInflight = inflightIpc.size > 0
         ? Array.from(inflightIpc.values()).sort((a, b) => a.start - b.start)[0]!.channel
         : 'none'
+      const worst = slowSql[0]
       recordHistogram('ui.freeze.main_ms', maxMs, {
         duration_bucket: bucketDuration(maxMs),
         inflight_count: inflightIpc.size,
-        top_inflight: topInflight,
+        oldest_inflight: oldestInflight,
+        top_sql: worst ? worst.digest : 'none',
+        sql_ms: worst ? worst.durationMs : 0,
       })
     }
   }, 1000).unref()

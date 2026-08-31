@@ -384,7 +384,7 @@ function rowToSummary(row: ThreadSummaryRow, opts: { cached: boolean; wasLocal: 
  *   2. ALWAYS recompute the stable thread hash from the trusted identity tokens.
  *   3. Cache HIT (account-scoped) → return cached WITHOUT provider call /
  *      audit / telemetry.
- *   4. Refuse (structured) if no usable provider is configured (or subscription).
+ *   4. Refuse (structured) if no usable provider is configured.
  *   5. §2.51 ATOMIC ADMISSION: reserve budget BEFORE the model call. Refuse
  *      (structured, reason 'budget') when the reservation is denied — whether
  *      because it would breach the cap (over-cap) or because the meter itself
@@ -398,8 +398,8 @@ function rowToSummary(row: ThreadSummaryRow, opts: { cached: boolean; wasLocal: 
  *      audit row → record ONE generate span → return. An `unbilled` outcome
  *      RELEASES the reservation with no spend; an `ambiguous` one (dispatched,
  *      then the transport failed) KEEPS the conservative floor because billing
- *      cannot be ruled out (§2.51.f2); the subscription / too-short / no-provider
- *      refusals never reserve at all (no call made).
+ *      cannot be ruled out (§2.51.f2); the too-short / no-provider refusals
+ *      never reserve at all (no call made).
  *
  * Never throws for an expected failure mode — always returns a discriminated
  * result. An unexpected throw from a dependency is caught and mapped to
@@ -450,18 +450,14 @@ export async function generateThreadSummary(
     return { ok: false, reason: 'no_provider' }
   }
 
-  // Subscription cannot run a one-shot summary completion (no Messages-API
-  // contour for it here). Rather than let the provider call silently return
-  // null and surface a generic `provider_error` — which would be indistinguishable
-  // from a real API failure and hide the actual cause — refuse explicitly with
-  // `no_provider` and a logged explanation. The key invariant (CLAUDE.md §5): the
-  // provider recorded as "used" must be the provider that actually ran; a
-  // subscription selection that cannot run must not be recorded as a failed API
-  // call. When a subscription summary contour lands, replace this branch.
-  if (opts.provider === 'subscription') {
-    deps.log.warn('Thread summary: subscription provider cannot run one-shot summary completions — refusing (no_provider)')
-    return { ok: false, reason: 'no_provider' }
-  }
+  // §2.218 — a second refusal used to sit here for the removed `subscription`
+  // provider, which had no one-shot Messages-API contour. Every provider that
+  // can be selected today can run a one-shot completion, so the only refusal
+  // left is the `!opts.provider` one above. The invariant that motivated it
+  // still holds and constrains any future keyless provider (CLAUDE.md §5): the
+  // provider recorded as "used" must be the provider that actually ran, so a
+  // selection that cannot run must refuse explicitly rather than be booked as a
+  // failed API call.
 
   // ── Generate ─────────────────────────────────────────────────────────────
   // Prompt assembly happens BEFORE the reservation on purpose: it is pure, sync
@@ -668,8 +664,8 @@ function admitSummaryBudget(
  * Settle the reservation of ONE `billed` completion with its ACTUAL cost.
  *
  * Invariant: called EXACTLY ONCE per `billed` outcome, BEFORE parsing — such a
- * completion already spent tokens on a PAID (non-subscription) provider,
- * regardless of whether the response parses.
+ * completion already spent tokens on a PAID provider, regardless of whether the
+ * response parses.
  *
  * Priced from real usage via the shared core pricing table; when usage is
  * unknown, `estimateCost` still yields a conservative model-aware amount rather

@@ -48,6 +48,8 @@ MailCopilot cerca nella cache locale delle email. L'indicatore di completezza mo
 
 Le cartelle standard (Posta in arrivo, Inviati, Archivio, Bozze) sono completamente indicizzate per impostazione predefinita. Le cartelle Posta indesiderata, Spam e Cestino sono escluse dall'indicizzazione full-text per impostazione predefinita, per mantenere i risultati di ricerca ordinati e ridurre l'utilizzo del disco. È possibile modificare l'impostazione di indicizzazione di qualsiasi cartella tramite il clic destro nella barra laterale o in **Impostazioni > Cartelle**.
 
+Un messaggio aperto normalmente -- incluso uno il cui corpo è stato troncato dal [limite morbido di 1 MB](../usage/reading-emails#messaggi-molto-grandi) -- è subito ricercabile con `body:`, come qualsiasi altro messaggio: vengono indicizzati i primi circa 200.000 caratteri del corpo. Un messaggio che supera il limite rigido di 100 MB (vedi la stessa sezione) è diverso: poiché il suo corpo non è mai stato decodificato all'apertura, la ricerca con `body:` inizia a trovarlo solo dopo che l'indicizzatore del corpo in background lo recupera e lo indicizza dal server, il che può richiedere più tempo rispetto a un messaggio normale.
+
 ## Ricerca assistita dal server
 
 Quando cerchi in una cartella specifica, MailCopilot può anche interrogare il server IMAP. I risultati dal server sono contrassegnati con «+N dal server».

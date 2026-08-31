@@ -68,14 +68,40 @@ vi.mock('./sentry', () => ({
   reportIpcHandlerError: (...args: unknown[]) => reportIpcHandlerErrorMock(...args),
 }))
 
+// §2.156 — the main-loop watchdog reads perf_hooks' event-loop delay histogram.
+// Mocked so a test can dictate the observed delay instead of trying to block a
+// real event loop for 200 ms.
+const eventLoopDelay = { max: 0, enable: vi.fn(), reset: vi.fn(() => { eventLoopDelay.max = 0 }) }
+vi.mock('node:perf_hooks', () => ({
+  monitorEventLoopDelay: () => eventLoopDelay,
+}))
+
 // Import AFTER mocks so the module picks them up.
 import {
   handleIpc,
   registerMetricsRecordHandler,
   registerUiFreezeHandler,
+  startMainLoopFreezeWatchdog,
 } from './ipc'
 
 // --- Shared helpers --------------------------------------------------------
+
+// tsconfig targets ES2020, so `AggregateError` has no type declaration here
+// even though the runtime (Node 22 / Electron 43) provides it. Reach it
+// structurally, like packages/core/transientErrors.ts does.
+type AggErrCtor = new (errors: unknown[], message?: string) => Error & { errors: unknown[] }
+const AggErr = (globalThis as unknown as { AggregateError: AggErrCtor }).AggregateError
+
+/** Invoke a registered handler and resolve with whatever it rejected with. */
+async function rejectionOf(channel: string, ...args: unknown[]): Promise<unknown> {
+  const wrapped = handleRegistrations.get(channel)!
+  try {
+    await wrapped(null, ...args)
+    return null
+  } catch (e) {
+    return e
+  }
+}
 
 function resetLogs() {
   logCalls.info.length = 0
@@ -127,6 +153,73 @@ describe('handleIpc', () => {
     expect(logCalls.error[0]?.[1]).toBe('boom')
   })
 
+  // --- Presentation tagging (BACKLOG §2.127) -------------------------------
+  // Electron's IPC serializer hands the renderer a brand-new plain Error with
+  // only `message` and `stack` — `.errors[]`, `.code` and `.cause` are gone
+  // (measured on Electron 40 with a real main+preload+renderer round trip).
+  // So the funnel classifies the LIVE error object here and encodes the verdict
+  // into the message, the only carrier that survives.
+
+  it('tags an AggregateError with a key derived from its inner errors, not from its (empty) message', async () => {
+    const inner = Object.assign(new Error('connect ETIMEDOUT 203.0.113.10:993'), { code: 'ETIMEDOUT' })
+    const agg = new AggErr([inner])
+    expect(agg.message).toBe('') // the production symptom: nothing to render
+
+    handleIpc('net:inboxSummaries', async () => {
+      throw agg
+    })
+    const rejection = await rejectionOf('net:inboxSummaries')
+    expect((rejection as Error).message.startsWith('[mcerr:timeout] ')).toBe(true)
+    expect((rejection as { cause?: unknown }).cause).toBe(agg)
+  })
+
+  it('tags credential failures separately from network failures', async () => {
+    handleIpc('net:testImap', async () => {
+      throw Object.assign(new Error('Invalid credentials'), { authenticationFailed: true })
+    })
+    const rejection = await rejectionOf('net:testImap')
+    expect((rejection as Error).message.startsWith('[mcerr:auth] ')).toBe(true)
+  })
+
+  it('tags an unrecognised failure with the neutral key instead of leaving it untagged', async () => {
+    handleIpc('test:novel', async () => {
+      throw new Error('something we have never seen')
+    })
+    const rejection = await rejectionOf('test:novel')
+    expect((rejection as Error).message.startsWith('[mcerr:unknown] ')).toBe(true)
+  })
+
+  it('keeps the original text after the tag — two renderer consumers substring-match it', async () => {
+    // src/hooks/useCertRecovery.ts maps `cert_trust_*` codes to inline dialog
+    // errors, and src/sentry.ts beforeSend runs isTransientNetworkError over
+    // the wrapped message to keep network noise out of Sentry. Both match by
+    // substring, so the tag may be prepended but the text must survive.
+    handleIpc('net:trustCert', async () => {
+      throw new Error('cert_trust_fingerprint_mismatch')
+    })
+    const certRejection = await rejectionOf('net:trustCert')
+    expect((certRejection as Error).message).toContain('cert_trust_fingerprint_mismatch')
+
+    handleIpc('update:download', async () => {
+      throw new Error('net::ERR_CONNECTION_RESET')
+    })
+    const netRejection = await rejectionOf('update:download')
+    expect((netRejection as Error).message).toContain('net::ERR_CONNECTION_RESET')
+  })
+
+  it('logs the flattened AggregateError tree — the log line used to be empty', async () => {
+    const agg = new AggErr([
+      Object.assign(new Error('connect ETIMEDOUT 203.0.113.10:993'), { code: 'ETIMEDOUT' }),
+    ])
+    handleIpc('net:syncFolderHeaders', async () => {
+      throw agg
+    })
+    await rejectionOf('net:syncFolderHeaders')
+
+    expect(logCalls.error[0]?.[0]).toBe('[net:syncFolderHeaders]')
+    expect(String(logCalls.error[0]?.[1])).toContain('connect ETIMEDOUT 203.0.113.10:993 (ETIMEDOUT)')
+  })
+
   // --- Sentry error funnel -------------------------------------------------
   // Before this, electron/ipc.ts had zero captureException call sites: every
   // handler failure went to electron-log only, which has no Sentry bridge
@@ -166,7 +259,14 @@ describe('handleIpc', () => {
     handleIpc('test:throwString', async () => {
       throw 'plain string failure'
     })
-    await expect(handleRegistrations.get('test:throwString')!(null)).rejects.toBe('plain string failure')
+    // §2.127: the funnel re-throws a tagged Error rather than the raw value,
+    // because the presentation key has to reach the renderer and the message
+    // is the only field that survives Electron's IPC serializer. The original
+    // value is preserved verbatim in the text and in `cause`.
+    const rejection = await rejectionOf('test:throwString')
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toContain('plain string failure')
+    expect((rejection as { cause?: unknown }).cause).toBe('plain string failure')
 
     expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
     expect(reportIpcHandlerErrorMock.mock.calls[0]![0]).toBe('test:throwString')
@@ -184,7 +284,13 @@ describe('handleIpc', () => {
       throw original
     })
 
-    await expect(handleRegistrations.get('test:sentryBroken')!(null)).rejects.toBe(original)
+    const rejection = await rejectionOf('test:sentryBroken')
+    // The rejection describes the HANDLER failure (wrapped with its
+    // presentation tag), not the telemetry failure, and keeps the original
+    // object reachable through `cause`.
+    expect((rejection as Error).message).toContain('original handler failure')
+    expect((rejection as Error).message).not.toContain('sentry transport exploded')
+    expect((rejection as { cause?: unknown }).cause).toBe(original)
     expect(reportIpcHandlerErrorMock).toHaveBeenCalledTimes(1)
   })
 
@@ -329,14 +435,14 @@ describe('registerUiFreezeHandler', () => {
     const wrappedFreeze = handleRegistrations.get('log:uiFreeze')!
     await wrappedFreeze(null, { lagMs: 300, deltaMs: 400, at: '2026-01-01T00:00:00.000Z' })
 
-    // Histogram MUST report inflight_count=1 and top_inflight=net:syncFolderHeaders,
+    // Histogram MUST report inflight_count=1 and oldest_inflight=net:syncFolderHeaders,
     // not 2 or log:uiFreeze. This is the exact regression guard.
     expect(recordHistogramMock).toHaveBeenCalledWith(
       'ui.freeze.renderer_ms',
       300,
       expect.objectContaining({
         inflight_count: 1,
-        top_inflight: 'net:syncFolderHeaders',
+        oldest_inflight: 'net:syncFolderHeaders',
       }),
     )
 
@@ -349,7 +455,7 @@ describe('registerUiFreezeHandler', () => {
     await bgPromise
   })
 
-  it('records inflight_count=0 / top_inflight=none when no other IPC is in flight', async () => {
+  it('records inflight_count=0 / oldest_inflight=none when no other IPC is in flight', async () => {
     registerUiFreezeHandler()
     const wrappedFreeze = handleRegistrations.get('log:uiFreeze')!
 
@@ -360,7 +466,7 @@ describe('registerUiFreezeHandler', () => {
       250,
       expect.objectContaining({
         inflight_count: 0,
-        top_inflight: 'none',
+        oldest_inflight: 'none',
       }),
     )
   })
@@ -397,7 +503,7 @@ describe('registerUiFreezeHandler', () => {
       400,
       expect.objectContaining({
         inflight_count: 2,
-        top_inflight: 'net:folderPage',
+        oldest_inflight: 'net:folderPage',
       }),
     )
 
@@ -524,5 +630,242 @@ describe('registerMetricsRecordHandler', () => {
     expect(logCalls.warn.some((args) =>
       String(args[0]).includes('rejecting main-only metric'),
     )).toBe(true)
+  })
+
+  // §2.156 — ui.freeze.renderer_ms (mainOnly=true). Named for the renderer but
+  // emitted by main: the renderer only sends numbers over `log:uiFreeze`, and
+  // registerUiFreezeHandler derives `oldest_inflight` from `inflightIpc`, which
+  // the renderer cannot write to. The bridge is therefore never a legitimate
+  // path for this name.
+  it('rejects ui.freeze.renderer_ms (mainOnly=true) from renderer without recording anything', () => {
+    registerMetricsRecordHandler()
+    const onHandler = onRegistrations.get('metrics:record')!
+
+    onHandler(null, {
+      name: 'ui.freeze.renderer_ms',
+      kind: 'histogram',
+      value: 700,
+      tags: { duration_bucket: 'bucket_700', inflight_count: 0, oldest_inflight: 'Fwd: bank statement — bob@example.test' },
+    })
+
+    expect(recordHistogramMock).not.toHaveBeenCalled()
+    expect(recordEventMock).not.toHaveBeenCalled()
+    expect(logCalls.warn.some((args) =>
+      String(args[0]).includes('rejecting main-only metric'),
+    )).toBe(true)
+    expect(JSON.stringify(logCalls)).not.toContain('bob@example.test')
+  })
+
+  // The legitimate path — main turning a renderer lag report into the metric —
+  // must keep working; a flag that silenced it would trade one defect for
+  // another.
+  it('still records ui.freeze.renderer_ms when main handles a log:uiFreeze report', () => {
+    registerUiFreezeHandler()
+    const freezeHandler = handleRegistrations.get('log:uiFreeze')!
+    freezeHandler(null, { lagMs: 350, deltaMs: 1350, at: 'test' })
+
+    const call = recordHistogramMock.mock.calls.find((c) => c[0] === 'ui.freeze.renderer_ms')
+    expect(call).toBeDefined()
+    expect(call![1]).toBe(350)
+  })
+
+  // §2.156 — ui.freeze.main_ms (mainOnly=true). The watchdog in main is its
+  // only emitter, and two of its tags (`top_sql`, `oldest_inflight`) are
+  // free-form strings that the per-tag enum check cannot narrow. Without the
+  // flag, a compromised renderer could post arbitrary text — a subject line, an
+  // address, a search query — into Sentry under a name the disclosure page
+  // describes as "verb + table".
+  it('rejects ui.freeze.main_ms (mainOnly=true) from renderer without recording anything', () => {
+    registerMetricsRecordHandler()
+    const onHandler = onRegistrations.get('metrics:record')!
+
+    onHandler(null, {
+      name: 'ui.freeze.main_ms',
+      kind: 'histogram',
+      value: 900,
+      tags: { duration_bucket: 'bucket_900', inflight_count: 0, top_sql: 'Re: salary review — alice@example.test' },
+    })
+
+    expect(recordHistogramMock).not.toHaveBeenCalled()
+    expect(recordEventMock).not.toHaveBeenCalled()
+    expect(logCalls.warn.some((args) =>
+      String(args[0]).includes('rejecting main-only metric'),
+    )).toBe(true)
+    // The rejected value must not survive anywhere in what we logged either.
+    expect(JSON.stringify(logCalls)).not.toContain('alice@example.test')
+  })
+
+  // The other half of the same rule: the main-process watchdog still records
+  // it. A `mainOnly` flag that also silenced the legitimate emitter would trade
+  // one defect for another.
+  it('still records ui.freeze.main_ms when the main-process watchdog emits it', async () => {
+    vi.useFakeTimers()
+    startMainLoopFreezeWatchdog({
+      drainSlowSql: () => [{ digest: 'select messages', fingerprint: 'adc55a42', durationMs: 300, at: Date.now() }],
+    })
+    eventLoopDelay.max = 400 * 1e6
+    await vi.advanceTimersByTimeAsync(1000)
+
+    const call = recordHistogramMock.mock.calls.find((c) => c[0] === 'ui.freeze.main_ms')
+    expect(call).toBeDefined()
+    expect(call![2]).toMatchObject({ top_sql: 'select messages' })
+  })
+
+  // §2.122 — ai.api_key_store_op (mainOnly=true). Emitted only from
+  // electron/services/ai.ts on a read/write/delete of a stored AI key; a
+  // compromised renderer must not be able to fabricate a clean storage
+  // history (or mask a real one) through the metrics:record bridge.
+  it('rejects ai.api_key_store_op (mainOnly=true) from renderer without recording anything', () => {
+    registerMetricsRecordHandler()
+    const onHandler = onRegistrations.get('metrics:record')!
+
+    onHandler(null, {
+      name: 'ai.api_key_store_op',
+      kind: 'event',
+      tags: { op: 'delete', provider: 'anthropic-api', outcome: 'ok' },
+    })
+
+    expect(recordEventMock).not.toHaveBeenCalled()
+    expect(recordHistogramMock).not.toHaveBeenCalled()
+    expect(logCalls.warn.some((args) =>
+      String(args[0]).includes('rejecting main-only metric'),
+    )).toBe(true)
+  })
+
+  // imap.header_response_unaddressable (mainOnly=true). Its only legitimate
+  // emitter is packages/net, bridged through setNetEventReporter in main.ts,
+  // so the flag silences nothing real. Both tags are enum domains, which means
+  // a compromised renderer could post a perfectly well-formed lie and invent a
+  // FETCH regression at one named provider that never happened.
+  it('rejects imap.header_response_unaddressable (mainOnly=true) from renderer', () => {
+    registerMetricsRecordHandler()
+    const onHandler = onRegistrations.get('metrics:record')!
+
+    onHandler(null, {
+      name: 'imap.header_response_unaddressable',
+      kind: 'event',
+      tags: { folder_role: 'inbox', provider: 'gmail' },
+    })
+
+    expect(recordEventMock).not.toHaveBeenCalled()
+    expect(logCalls.warn.some((args) =>
+      String(args[0]).includes('rejecting main-only metric'),
+    )).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// startMainLoopFreezeWatchdog — §2.156 attribution
+// ---------------------------------------------------------------------------
+
+describe('startMainLoopFreezeWatchdog', () => {
+  /** Report a `maxMs` stall to the watchdog on its next poll. */
+  async function poll(maxMs: number) {
+    eventLoopDelay.max = maxMs * 1e6
+    await vi.advanceTimersByTimeAsync(1000)
+  }
+
+  const freezeMetric = () =>
+    recordHistogramMock.mock.calls.find((c) => c[0] === 'ui.freeze.main_ms')
+
+  it('blames the slowest SQL statement of the window, not the oldest inflight IPC', async () => {
+    vi.useFakeTimers()
+    // The field case: an IPC handler that is merely waiting on the network is
+    // the oldest inflight one, while the event loop was actually held by a
+    // synchronous SQLite call.
+    handleIpc('net:setSeen', async () => new Promise(() => {}))
+    void handleRegistrations.get('net:setSeen')!(null)
+
+    startMainLoopFreezeWatchdog({
+      drainSlowSql: () => [
+        { digest: 'select messages', fingerprint: 'adc55a42', durationMs: 420, at: Date.now() },
+        { digest: 'pragma wal_checkpoint', fingerprint: '11aa22bb', durationMs: 90, at: Date.now() },
+      ],
+    })
+    await poll(500)
+
+    const call = freezeMetric()!
+    expect(call[2]).toMatchObject({ top_sql: 'select messages', sql_ms: 420 })
+    // The inflight snapshot is still reported — as context. It names a
+    // network-bound handler that occupied no event-loop time at all, which is
+    // precisely why it must not be the thing the metric blames.
+    expect(typeof (call[2] as { oldest_inflight?: unknown }).oldest_inflight).toBe('string')
+    expect((call[2] as { oldest_inflight?: unknown }).oldest_inflight).not.toBe('none')
+    // Kills the reintroduction of `top_inflight`, which read as "the culprit"
+    // while naming a handler that costs the event loop nothing.
+    expect(Object.keys(call[2] as object)).not.toContain('top_inflight')
+
+    const warned = String(logCalls.warn[logCalls.warn.length - 1]![0])
+    // The log names the statement by digest + fingerprint; the text of it never
+    // reaches this process boundary at all.
+    expect(warned).toContain('420ms select messages sql=adc55a42')
+  })
+
+  it('says so honestly when nothing was attributable', async () => {
+    vi.useFakeTimers()
+    startMainLoopFreezeWatchdog({ drainSlowSql: () => [] })
+    await poll(300)
+    expect(freezeMetric()![2]).toMatchObject({ top_sql: 'none', sql_ms: 0 })
+  })
+
+  it('drains every poll so a stale sample cannot be blamed for a later freeze', async () => {
+    vi.useFakeTimers()
+    let drains = 0
+    const samples = [{ digest: 'select messages', fingerprint: 'deadbeef', durationMs: 300, at: Date.now() }]
+    startMainLoopFreezeWatchdog({
+      drainSlowSql: () => {
+        drains += 1
+        return samples.splice(0, samples.length)
+      },
+    })
+
+    await poll(10)   // quiet window: below the freeze threshold, still drained
+    await poll(900)  // freeze in a window whose statements were all fast
+
+    expect(drains).toBe(2)
+    expect(freezeMetric()![2]).toMatchObject({ top_sql: 'none', sql_ms: 0 })
+  })
+
+  it('never attributes SQL that ran before it started, and reports it separately', async () => {
+    vi.useFakeTimers()
+    // packages/db instruments itself when the database opens — i.e. before this
+    // watchdog exists — so its buffer already holds the schema migrations.
+    const migration = () => [{
+      digest: 'create idx_messages_folder',
+      fingerprint: 'c0ffee11',
+      durationMs: 3_400,
+      at: Date.now() - 5_000,
+    }]
+    startMainLoopFreezeWatchdog({ drainSlowSql: migration })
+    await poll(700)
+
+    // Kills: draining the whole buffer on the first poll and handing a startup
+    // migration to whatever froze afterwards.
+    expect(freezeMetric()![2]).toMatchObject({ top_sql: 'none', sql_ms: 0 })
+    // Not dropped either — reported on its own line, attributed to nothing.
+    const startupLine = logCalls.info.map((a) => String(a[0])).find((l) => l.includes('before the watchdog started'))
+    expect(startupLine).toContain('3400ms create idx_messages_folder sql=c0ffee11')
+    expect(startupLine).not.toContain('blocked')
+  })
+
+  it('keeps samples that completed inside the measured window', async () => {
+    vi.useFakeTimers()
+    startMainLoopFreezeWatchdog({
+      drainSlowSql: () => [{ digest: 'select messages', fingerprint: 'abcd1234', durationMs: 260, at: Date.now() }],
+    })
+    await poll(300)
+    expect(freezeMetric()![2]).toMatchObject({ top_sql: 'select messages', sql_ms: 260 })
+  })
+
+  it('stays silent below the threshold and survives a throwing probe', async () => {
+    vi.useFakeTimers()
+    startMainLoopFreezeWatchdog({
+      drainSlowSql: () => { throw new Error('db closed') },
+    })
+    await poll(150)
+    expect(freezeMetric()).toBeUndefined()
+
+    await poll(400)
+    expect(freezeMetric()![2]).toMatchObject({ top_sql: 'none' })
   })
 })

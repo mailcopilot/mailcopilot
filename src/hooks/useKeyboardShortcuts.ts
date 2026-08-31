@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type { VirtuosoHandle } from 'react-virtuoso'
 import type { FolderRoles, MailSummary, MessageDetails } from '../../packages/net/types'
-import type { ThreadRow } from '../utils/threading'
+import { firstSelectedRow, leadKeyOfRowContaining, rowContaining, toggleRowSelection, type ThreadRow } from '../utils/threading'
 import type { ContextMenuState } from '../components/ContextMenu'
 import type { UndoInfo } from './useUndoSystem'
 
@@ -25,6 +25,9 @@ export interface UseKeyboardShortcutsParams {
   undoInfoRef: React.MutableRefObject<UndoInfo | null>
   qRef: React.MutableRefObject<string>
   viewMailsRef: React.MutableRefObject<MailSummary[]>
+  /** Rows behind `viewMailsRef`. Selection is a ROW property, so keyboard actions
+   *  resolve "the message the user means" from the rows, not the lead list. */
+  threadRowsRef: React.MutableRefObject<ThreadRow[]>
   selectionAnchorKey: React.MutableRefObject<MailKey | null>
   rolesByAccount: React.MutableRefObject<Map<number, FolderRoles>>
   virtuosoRef: React.RefObject<VirtuosoHandle | null>
@@ -75,7 +78,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
     active, activeThread, hasAccount, hasMultiSelection,
     hotkeysPreset, selectedKeys, showCommandPalette,
     sidebarWidth, currentAccountId,
-    undoInfoRef, qRef, viewMailsRef, selectionAnchorKey,
+    undoInfoRef, qRef, viewMailsRef, threadRowsRef, selectionAnchorKey,
     rolesByAccount, virtuosoRef, onSearchRef,
     openMail, replyMail, archiveMail, deleteMail, spamMail,
     bulkArchive, bulkDelete, bulkSpam, handleUndo,
@@ -261,7 +264,10 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
         if (list.length === 0) return
         e.preventDefault()
         if (active) { void openMail(active); return }
-        const picked = list.find(m => selectedKeys.has(mailKey(m))) ?? list[0]!
+        // No active message but a selection: resolve the selected ROW. Routine —
+        // `u` closes the viewer without touching the selection, and what it holds
+        // after opening a thread is a mid-thread key, absent from the lead list.
+        const picked = firstSelectedRow(threadRowsRef.current, selectedKeys)?.lead ?? list[0]!
         void openMail(picked)
         return
       }
@@ -285,7 +291,16 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
           if (!selectionAnchorKey.current) {
             selectionAnchorKey.current = activeKey || mailKey(list[next])
           }
-          const anchorIdx = list.findIndex(m => mailKey(m) === selectionAnchorKey.current)
+          const anchor = selectionAnchorKey.current
+          let anchorIdx = list.findIndex(m => mailKey(m) === anchor)
+          if (anchorIdx < 0) {
+            // Same lazy mapping as the Shift-CLICK path: the anchor is whatever
+            // was last selected, routinely a mid-thread message the lead-only
+            // `list` does not contain. Without this the range collapsed to the
+            // single destination row.
+            const anchorLead = leadKeyOfRowContaining(threadRowsRef.current, anchor)
+            if (anchorLead !== null) anchorIdx = list.findIndex(m => mailKey(m) === anchorLead)
+          }
           const start = Math.min(anchorIdx < 0 ? next : anchorIdx, next)
           const end = Math.max(anchorIdx < 0 ? next : anchorIdx, next)
           setSelectedKeys(new Set(list.slice(start, end + 1).map(m => mailKey(m))))
@@ -367,18 +382,20 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
       }
 
       if (lower === 'x') {
-        const list = viewMailsRef.current
-        const target = active ?? list.find(m => selectedKeys.has(mailKey(m))) ?? list[0]
-        if (!target) return
-        const k = mailKey(target)
+        const rows = threadRowsRef.current
+        // Same rule as Ctrl-click, end to end: `x` toggles the ROW, resolved from
+        // the rows themselves. Wrapping the target in a single-message row added
+        // its lead key next to a mid-thread key already in the set.
+        const row = active
+          ? (activeThread ?? rowContaining(rows, active))
+          : (firstSelectedRow(rows, selectedKeys) ?? rows[0])
+        if (!row) return
         e.preventDefault()
-        setSelectedKeys(prev => {
-          const next = new Set(prev)
-          if (next.has(k)) next.delete(k)
-          else next.add(k)
-          return next
-        })
-        if (!selectionAnchorKey.current) selectionAnchorKey.current = k
+        const next = toggleRowSelection(row, selectedKeys)
+        setSelectedKeys(next.keys)
+        // Unconditional, exactly like the mouse path: a stale anchor left on a
+        // deselected row makes the next Shift-click draw its range from it.
+        selectionAnchorKey.current = next.anchorKey
         return
       }
 
@@ -398,11 +415,18 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
       }
 
       if (lower === 'v') {
-        const list = viewMailsRef.current
-        const target = active ?? list.find(m => selectedKeys.has(mailKey(m))) ?? list[0]
-        if (!target) return
+        const rows = threadRowsRef.current
+        // Which ROW the user means — scanning the lead list for a key of the set
+        // missed a mid-thread selection and offered to move the first row instead.
+        const row = active
+          ? (activeThread ?? rowContaining(rows, active))
+          : (firstSelectedRow(rows, selectedKeys) ?? rows[0])
+        if (!row) return
+        const target = active ?? row.lead
         e.preventDefault()
-        const k = mailKey(target)
+        // Selection collapses to this row, keyed on its lead like every other
+        // row-level action; the menu still acts on the message in hand.
+        const k = mailKey(row.lead)
         setSelectedKeys(new Set([k]))
         selectionAnchorKey.current = k
         // Open the context menu directly in folder selection mode.
@@ -471,6 +495,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
     setCtxMenu,
     qRef,
     viewMailsRef,
+    threadRowsRef,
     selectionAnchorKey,
     rolesByAccount,
     searchDebounceRef,

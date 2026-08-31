@@ -1,0 +1,41 @@
+# Line-ending policy.
+#
+# Why this file exists: without it, Git for Windows applies its installer
+# default `core.autocrlf=true` and rewrites every checked-out text file to
+# CRLF. About 35 tests assert on the RAW SOURCE TEXT of electron/main.ts with
+# `\n` anchors — electron/main.accountAuthStateWiring.test.ts (20),
+# electron/main.mailRulesWiring.test.ts (12), electron/main.backgroundMail.test.ts
+# (3) — and every one of them fails on `\r\n`. A fresh Windows clone was red out
+# of the box; re-cloning with `core.eol=lf` turned them green. Measured on the
+# Windows stand 2026-08-27, not inferred.
+#
+# NOTE — the index and this policy do NOT yet agree. `git ls-files --eol`
+# reports 21 blobs stored as `i/crlf` plus 1 `i/mixed` (tsconfig.json,
+# tsconfig.node.json, .releaserc.json, .commitlintrc.json, src/vite-env.d.ts,
+# electron/logger.test.ts, electron/sentry.test.ts and the docs legal pages).
+# This file governs how the working tree is MATERIALISED; it does not rewrite
+# what is already stored. Until a deliberate `git add --renormalize .` lands in
+# its own commit, a `git add` touching one of those files can produce a
+# whole-file diff. That renormalisation is a pending decision, not an oversight.
+* text=auto eol=lf
+
+# Shell scripts are run by bash; a CRLF shebang line makes the interpreter
+# lookup fail with a confusing "bad interpreter: no such file or directory".
+*.sh text eol=lf
+
+# Windows-native batch files are the one place CRLF is correct.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never go through any line-ending filter.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.asar binary
+*.node binary

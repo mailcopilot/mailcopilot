@@ -40,8 +40,10 @@ import {
 } from '../packages/net/config'
 import {
   classifyUpdateError,
+  decideUpdateIpcGate,
   detectUpdateChannel,
-  canWriteAppDir,
+  isDirWritable,
+  resolveSelfUpdateSupport,
 } from './services/updateCheck'
 
 describe('§2.19 autoUpdateEnabled — schema roundtrip', () => {
@@ -146,10 +148,10 @@ describe('§2.19 classifyUpdateError — bucketed taxonomy for telemetry', () =>
   })
 })
 
-describe('§2.19 canWriteAppDir — install-path writability check', () => {
+describe('§2.19 isDirWritable — filesystem probe primitive', () => {
   it('returns true when the directory is writable', () => {
     vi.spyOn(fs, 'accessSync').mockImplementation(() => undefined)
-    expect(canWriteAppDir('/usr/local/bin/mailcopilot')).toBe(true)
+    expect(isDirWritable('/usr/local/bin')).toBe(true)
     vi.restoreAllMocks()
   })
 
@@ -158,16 +160,156 @@ describe('§2.19 canWriteAppDir — install-path writability check', () => {
       const err = Object.assign(new Error('EACCES'), { code: 'EACCES' })
       throw err
     })
-    expect(canWriteAppDir('/opt/mailcopilot/bin/mailcopilot')).toBe(false)
+    expect(isDirWritable('/opt/mailcopilot/bin')).toBe(false)
     vi.restoreAllMocks()
   })
 
-  it('checks the parent directory of execPath, not execPath itself', () => {
+  it('probes exactly the directory it is given (no dirname() surprise)', () => {
     const accessMock = vi.spyOn(fs, 'accessSync').mockImplementation(() => undefined)
-    canWriteAppDir('/opt/mailcopilot/bin/mailcopilot')
-    const checkedPath = accessMock.mock.calls[0]![0] as string
-    expect(checkedPath).toBe('/opt/mailcopilot/bin')
+    isDirWritable('/opt/mailcopilot/bin')
+    expect(accessMock.mock.calls[0]![0]).toBe('/opt/mailcopilot/bin')
     vi.restoreAllMocks()
+  })
+})
+
+/**
+ * §2.58 — end-to-end wiring of the capability verdict into the autoUpdater
+ * policy. `resolveSelfUpdateSupport` is unit-tested in
+ * services/updateCheck.test.ts; here we pin the four release-shape scenarios
+ * against the exact call main.ts makes, because the regression that shipped
+ * was a wrong *input* (process.execPath) rather than a wrong function.
+ */
+describe('§2.58 resolveSelfUpdateSupport — release-shape scenarios', () => {
+  const call = (opts: Parameters<typeof resolveSelfUpdateSupport>[0]) => resolveSelfUpdateSupport(opts)
+
+  it('AppImage on a writable location can self-update (was permanently false before)', () => {
+    const result = call({
+      platform: 'linux',
+      isPackaged: true,
+      // Real execPath inside the AppImage FUSE mount — read-only by design.
+      execPath: '/tmp/.mount_MailCoAbc123/mailcopilot',
+      resourcesPath: '/tmp/.mount_MailCoAbc123/resources',
+      env: { APPIMAGE: '/home/user/Apps/MailCopilot.AppImage' },
+      isDirWritableImpl: (dir) => dir === '/home/user/Apps',
+      readPackageTypeImpl: () => null,
+    })
+    expect(result.canSelfUpdate).toBe(true)
+    expect(result.blockedReason).toBeNull()
+  })
+
+  it('AppImage in a read-only location is blocked (and says why, as an enum)', () => {
+    const result = call({
+      platform: 'linux',
+      isPackaged: true,
+      execPath: '/tmp/.mount_MailCoAbc123/mailcopilot',
+      resourcesPath: '/tmp/.mount_MailCoAbc123/resources',
+      env: { APPIMAGE: '/opt/apps/MailCopilot.AppImage' },
+      isDirWritableImpl: () => false,
+      readPackageTypeImpl: () => null,
+    })
+    expect(result.canSelfUpdate).toBe(false)
+    expect(result.blockedReason).toBe('target-dir-readonly')
+  })
+
+  it('administrator-installed .deb is NOT pre-blocked — the refusal must come from the updater', () => {
+    const result = call({
+      platform: 'linux',
+      isPackaged: true,
+      execPath: '/opt/MailCopilot/mailcopilot',
+      resourcesPath: '/opt/MailCopilot/resources',
+      env: {},
+      isDirWritableImpl: () => false, // root-owned /opt — irrelevant, pkexec elevates
+      readPackageTypeImpl: () => 'deb',
+    })
+    expect(result.canSelfUpdate).toBe(true)
+    expect(result.blockedReason).toBeNull()
+  })
+
+  it('no APPIMAGE on Windows/macOS keeps the historical execPath-directory behaviour', () => {
+    expect(call({
+      platform: 'win32',
+      isPackaged: true,
+      execPath: 'C:\\Users\\u\\AppData\\Local\\Programs\\MailCopilot\\MailCopilot.exe',
+      env: {},
+      isDirWritableImpl: () => true,
+    }).canSelfUpdate).toBe(true)
+
+    expect(call({
+      platform: 'darwin',
+      isPackaged: true,
+      execPath: '/Applications/MailCopilot.app/Contents/MacOS/MailCopilot',
+      env: {},
+      isDirWritableImpl: () => false,
+    }).canSelfUpdate).toBe(false)
+  })
+
+  it('the verdict main.ts logs is enum-only — no user path can reach the log line', () => {
+    const result = call({
+      platform: 'linux',
+      isPackaged: true,
+      execPath: '/tmp/.mount_MailCoAbc123/mailcopilot',
+      resourcesPath: '/tmp/.mount_MailCoAbc123/resources',
+      env: { APPIMAGE: '/home/sergey/Apps/MailCopilot.AppImage' },
+      isDirWritableImpl: () => false,
+      readPackageTypeImpl: () => null,
+    })
+    // Mirror of the main.ts log line: only kind + blockedReason.
+    const logged = `In-place self-update unavailable target=${result.kind} reason=${result.blockedReason ?? 'none'}`
+    expect(logged).not.toContain('/home/sergey')
+    expect(logged).not.toContain('.AppImage')
+    expect(logged).toBe('In-place self-update unavailable target=appimage reason=target-dir-readonly')
+  })
+})
+
+/**
+ * §2.58 — `update:systemInfo`'s `installPathWritable` field changed meaning.
+ * Before: `installPathWritable: updateCanSelfUpdate` (i.e. identical to
+ * canSelfUpdate). Now: `installPathWritable: updateSelfUpdate.blockedReason
+ * !== 'target-dir-readonly'` — deliberately NOT the same as canSelfUpdate,
+ * because the "read-only install path" badge in SystemInfo.tsx is meant to
+ * flag a filesystem permission problem specifically, not every reason
+ * self-update might be unavailable. A 'no-in-place-target' build (extracted
+ * AppImage, no APPIMAGE env) has nothing to do with permissions, so it must
+ * NOT show the read-only badge even though canSelfUpdate is also false there.
+ *
+ * Pure policy mirror (see the file-level note on why main.ts isn't imported
+ * directly) — pins the exact formula from the `update:systemInfo` handler.
+ */
+describe('§2.58 installPathWritable — read-only badge is permission-specific, not a canSelfUpdate alias', () => {
+  const computeInstallPathWritable = (
+    blockedReason: 'not-packaged' | 'no-in-place-target' | 'target-dir-readonly' | null,
+  ): boolean => blockedReason !== 'target-dir-readonly'
+
+  it('is true when self-update is fully available (blockedReason=null)', () => {
+    expect(computeInstallPathWritable(null)).toBe(true)
+  })
+
+  it('is false for target-dir-readonly — the one reason that IS a permission problem', () => {
+    expect(computeInstallPathWritable('target-dir-readonly')).toBe(false)
+  })
+
+  it('is true for no-in-place-target — missing an updatable target is not a write-permission issue', () => {
+    expect(computeInstallPathWritable('no-in-place-target')).toBe(true)
+  })
+
+  it('is true for not-packaged — dev/e2e builds have no install-path permission concept', () => {
+    expect(computeInstallPathWritable('not-packaged')).toBe(true)
+  })
+
+  it('distro packages never surface as read-only: resolveSelfUpdateSupport never returns target-dir-readonly for linux-package', () => {
+    // Belt-and-suspenders link back to the source of truth: linux-package
+    // never sets blockedReason at all (see the "never pre-blocked" test
+    // above), so this formula can never see 'target-dir-readonly' for it.
+    const result = resolveSelfUpdateSupport({
+      platform: 'linux',
+      isPackaged: true,
+      execPath: '/opt/MailCopilot/mailcopilot',
+      resourcesPath: '/opt/MailCopilot/resources',
+      env: {},
+      isDirWritableImpl: () => false,
+      readPackageTypeImpl: () => 'deb',
+    })
+    expect(computeInstallPathWritable(result.blockedReason)).toBe(true)
   })
 })
 
@@ -199,15 +341,21 @@ describe('§2.19 detectUpdateChannel — dev/nightly/stable badge', () => {
  *
  * Real bug (codex bg-review): startup (electron/main.ts:1808) and runtime
  * (electron/main.ts:8262) used only `autoUpdateEnabled` to drive
- * `autoUpdater.autoDownload`. SystemInfo.tsx state machine disables the
- * checkbox when `canSelfUpdate=false` (read-only install — admin /opt,
- * system package), but the persisted setting can be `true` from a previous
- * writable install. Effect: app silently keeps auto-downloading updates
- * that can never be applied, and the user can't turn it off because the
- * UI control is disabled.
+ * `autoUpdater.autoDownload`, while the persisted setting can be `true` from
+ * a previous, updatable install. Effect: the app silently keeps
+ * auto-downloading updates that can never be applied. (At the time the
+ * checkbox was also disabled in that state, so the user could not turn it
+ * off either — §2.58 removed the lockout and kept the download gate.)
  *
  * Fix: gate at both call sites:
- *   `autoUpdater.autoDownload = autoUpdateEnabled && canWriteAppDir(execPath)`
+ *   `autoUpdater.autoDownload = autoUpdateEnabled && canSelfUpdate`
+ *
+ * §2.58 update: the second operand is now
+ * `resolveSelfUpdateSupport(...).canSelfUpdate` (a real target-directory
+ * verdict, not `canWriteAppDir(process.execPath)`), and the checkbox is no
+ * longer disabled — the user keeps control of the preference while the gate
+ * only suppresses a download we KNOW cannot be applied — the verdict is
+ * advisory (see `isDirWritable`), never a proof.
  *
  * The test below pins the policy as a pure function so a future change at
  * either call site that drops the gate fails the assertion.
@@ -220,7 +368,7 @@ describe('§2.19 iter3: autoDownload policy gate', () => {
     canSelfUpdate: boolean,
   ): boolean => autoUpdateEnabled === true && canSelfUpdate
 
-  it('autoDownload disabled when canWriteAppDir=false even if autoUpdateEnabled=true', () => {
+  it('autoDownload disabled when canSelfUpdate=false even if autoUpdateEnabled=true', () => {
     // The bug case: persisted setting says "yes please auto-download" but
     // install path is read-only. Must resolve to false.
     expect(computeAutoDownload(true, false)).toBe(false)
@@ -235,11 +383,11 @@ describe('§2.19 iter3: autoDownload policy gate', () => {
     expect(computeAutoDownload(false, false)).toBe(false)
   })
 
-  it('canWriteAppDir false ⇒ runtime autoDownload forced false (matches disabled UI affordance)', () => {
-    // Simulate the runtime onSettingsChangedMain branch with read-only
-    // install: even toggling the (disabled) checkbox to true must not
-    // re-enable auto-download. The matrix below is the truth table the
-    // settings observer must implement.
+  it('canSelfUpdate false ⇒ runtime autoDownload forced false (matches the warning shown in the UI)', () => {
+    // Simulate the runtime onSettingsChangedMain branch on a build that
+    // cannot update in place: toggling the (now enabled) checkbox to true
+    // must persist the preference but not start background downloads. The
+    // matrix below is the truth table the settings observer must implement.
     const matrix = [
       { setting: true,  writable: true,  expected: true  },
       { setting: true,  writable: false, expected: false },
@@ -571,34 +719,29 @@ describe('§2.19 iter4: update.* tag enums enforced at runtime via mainOnly + DO
  * §2.19 iter4 — Medium: update:download + update:install gated by
  * updateCanSelfUpdate.
  *
- * Real risk (codex): both handlers only checked `app.isPackaged`. SystemInfo's
- * disabled UI affordance kicks in when canSelfUpdate=false (read-only
- * install path), but a compromised renderer can call `window.api.invoke`
- * directly and bypass the UI. The handler MUST short-circuit before
- * touching autoUpdater.
+ * Real risk (codex): both handlers only checked `app.isPackaged`. SystemInfo
+ * hides the download/restart affordance when canSelfUpdate=false, but a
+ * compromised renderer can call `window.api.invoke` directly and bypass the
+ * UI. The handler MUST short-circuit before touching autoUpdater.
+ *
+ * §2.58 — the gate stays; only its predicate narrowed to "self-update is
+ * known impossible" (unpackaged / no AppImage target / unwritable target
+ * dir). On .deb/.rpm it no longer fires, and the boundary there rests on the
+ * updater itself: a fixed TLS-verified feed, an artifact verified against the
+ * feed metadata, and a polkit/sudo prompt the user answers.
  */
 describe('§2.19 iter4: update:download + update:install rejected when canSelfUpdate=false', () => {
-  // Pure policy mirror — the gate in main.ts looks like:
-  //   if (!updateCanSelfUpdate) return { ok: false, reason: 'permission_denied', error_class: 'permission' }
-  // The matrix here pins the truth table the IPC handler must implement.
-  const computeGate = (
-    isPackaged: boolean,
-    updateCanSelfUpdate: boolean,
-  ): { allow: boolean; rejectShape?: { ok: false; reason: string; error_class: string } } => {
-    if (!isPackaged) return { allow: true } // dev short-circuit returns ok:true
-    if (!updateCanSelfUpdate) {
-      return {
-        allow: false,
-        rejectShape: { ok: false, reason: 'permission_denied', error_class: 'permission' },
-      }
-    }
-    return { allow: true }
-  }
+  // These assertions run against the *real* decision function both IPC
+  // handlers call (`decideUpdateIpcGate`), not a hand-written mirror of it.
+  // The previous local `computeGate()` copy could not fail when the gate was
+  // deleted from main.ts — no test in the repo imports main.ts (it pulls the
+  // whole app), and e2e never reaches the gate because `vite build --mode e2e`
+  // leaves `app.isPackaged === false`, so both handlers return early.
 
   it('rejects download when packaged + canSelfUpdate=false', () => {
-    const result = computeGate(true, false)
-    expect(result.allow).toBe(false)
-    expect(result.rejectShape).toEqual({
+    const result = decideUpdateIpcGate({ isPackaged: true, canSelfUpdate: false })
+    expect(result.allowed).toBe(false)
+    expect(result.allowed === false && result.reject).toEqual({
       ok: false,
       reason: 'permission_denied',
       error_class: 'permission',
@@ -608,9 +751,9 @@ describe('§2.19 iter4: update:download + update:install rejected when canSelfUp
   it('rejects install when packaged + canSelfUpdate=false', () => {
     // Same gate, same shape — the policy is symmetric across both
     // handlers (codex finding requires both gated, not just one).
-    const result = computeGate(true, false)
-    expect(result.allow).toBe(false)
-    expect(result.rejectShape).toEqual({
+    const result = decideUpdateIpcGate({ isPackaged: true, canSelfUpdate: false })
+    expect(result.allowed).toBe(false)
+    expect(result.allowed === false && result.reject).toEqual({
       ok: false,
       reason: 'permission_denied',
       error_class: 'permission',
@@ -618,21 +761,71 @@ describe('§2.19 iter4: update:download + update:install rejected when canSelfUp
   })
 
   it('allows download/install when packaged + canSelfUpdate=true (normal path)', () => {
-    expect(computeGate(true, true).allow).toBe(true)
+    expect(decideUpdateIpcGate({ isPackaged: true, canSelfUpdate: true }).allowed).toBe(true)
   })
 
   it('allows in dev (!packaged) regardless of canSelfUpdate (handler returns early ok)', () => {
     // The !app.isPackaged branch returns { ok: true } unconditionally —
     // dev/e2e have no real updater. canSelfUpdate is only enforced for
     // packaged builds.
-    expect(computeGate(false, false).allow).toBe(true)
-    expect(computeGate(false, true).allow).toBe(true)
+    expect(decideUpdateIpcGate({ isPackaged: false, canSelfUpdate: false }).allowed).toBe(true)
+    expect(decideUpdateIpcGate({ isPackaged: false, canSelfUpdate: true }).allowed).toBe(true)
   })
 
   it('reject shape error_class is in the update_error_class enum domain (no raw text)', async () => {
     const { DOMAINS } = await import('./metricsSchema')
-    const result = computeGate(true, false)
-    expect(result.rejectShape).toBeDefined()
-    expect(DOMAINS.update_error_class.includes(result.rejectShape!.error_class as 'permission')).toBe(true)
+    const result = decideUpdateIpcGate({ isPackaged: true, canSelfUpdate: false })
+    expect(result.allowed).toBe(false)
+    if (result.allowed) throw new Error('unreachable — asserted above')
+    expect(DOMAINS.update_error_class.includes(result.reject.error_class)).toBe(true)
+  })
+
+  /**
+   * Deletion guard. The assertions above pin the *policy*; this one pins that
+   * both IPC handlers still apply it. Without it, dropping the two-line gate
+   * from main.ts leaves the whole suite green (see the note at the top of this
+   * describe), which is exactly the hole that let a §2.58-class regression
+   * ship unnoticed. Static read, no Electron process involved.
+   */
+  it('both update IPC handlers apply the gate (main.ts is not importable in unit tests)', () => {
+    const mainSrc = fs.readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
+
+    /**
+     * Slice a single `handleIpc('<channel>', …)` registration out of main.ts.
+     * Scoping matters: counting `decideUpdateIpcGate(` occurrences file-wide
+     * passes even if both call sites live in one handler (or in dead code
+     * elsewhere), which is precisely the regression this guard exists to catch.
+     * The slice ends at the next top-level `handleIpc(` — good enough for a
+     * text guard and far tighter than the whole file.
+     */
+    const handlerBody = (channel: string): string => {
+      const start = mainSrc.indexOf(`handleIpc('${channel}'`)
+      expect(start, `handleIpc('${channel}') not found in main.ts`).toBeGreaterThanOrEqual(0)
+      const next = mainSrc.indexOf('\nhandleIpc(', start + 1)
+      return mainSrc.slice(start, next === -1 ? mainSrc.length : next)
+    }
+
+    /**
+     * Assert the handler computes a gate decision, refuses on it, and does so
+     * BEFORE reaching the updater call. The local variable name is captured
+     * and back-referenced instead of hard-coded, so renaming `downloadGate`
+     * keeps the guard working while deleting the refusal still fails it.
+     */
+    const expectGatedBefore = (channel: string, updaterCall: string) => {
+      const body = handlerBody(channel)
+      const decl = /const\s+(\w+)\s*=\s*decideUpdateIpcGate\(/.exec(body)
+      expect(decl, `${channel}: no decideUpdateIpcGate(...) call`).not.toBeNull()
+      const gateVar = decl![1]
+      const refusal = new RegExp(`if\\s*\\(!${gateVar}\\.allowed\\)\\s*return\\s+${gateVar}\\.reject`)
+      const refusalMatch = refusal.exec(body)
+      expect(refusalMatch, `${channel}: gate decision computed but never acted upon`).not.toBeNull()
+      const updaterIdx = body.indexOf(updaterCall)
+      expect(updaterIdx, `${channel}: ${updaterCall} not found`).toBeGreaterThanOrEqual(0)
+      // Refusal must short-circuit ahead of the updater, not after it.
+      expect(refusalMatch!.index).toBeLessThan(updaterIdx)
+    }
+
+    expectGatedBefore('update:download', 'autoUpdater.downloadUpdate()')
+    expectGatedBefore('update:install', 'autoUpdater.quitAndInstall()')
   })
 })

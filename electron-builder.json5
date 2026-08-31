@@ -32,6 +32,23 @@
   }],
   "linux": {
     "maintainer": "MailCopilot Team <team@mailcopilot.io>",
+    // Window ↔ launcher association. Electron reads package.json `desktopName`
+    // at startup (app.setDesktopName) and every window's X11 WM_CLASS / Wayland
+    // app_id follows it; electron-builder reads THE SAME key for the entry's
+    // StartupWMClass, and `syncDesktopName` makes it name the file too. Without
+    // the key the two sides diverged silently: the app defaulted to a slug of
+    // app.getName() ("mailcopilot"), the entry fell back to productName
+    // ("MailCopilot"), and GNOME — which matches StartupWMClass against the
+    // running window's WM_CLASS — drew the generic placeholder instead of our
+    // icon. Measured on Ubuntu GNOME 46 / X11, WM_CLASS = ("mailcopilot",
+    // "mailcopilot") vs StartupWMClass=MailCopilot.
+    // The value is LOWERCASE on purpose, and equal to package.json `name`:
+    //   - it is also `linux.executableName` (sanitizedName.toLowerCase()), so
+    //     the entry keeps its current filename and pinned launchers survive;
+    //   - the prettier alternative would be to change app.getName(), which owns
+    //     the userData directory — renaming it would strand every existing
+    //     profile (~/.config/mailcopilot).
+    "syncDesktopName": true,
     // deb/rpm are required on Ubuntu 23.10+/24.04: their postinst installs
     // chrome-sandbox as root:root +4755, while the AppImage relies on
     // unprivileged user namespaces that those kernels restrict by default

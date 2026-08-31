@@ -92,7 +92,8 @@ test('AI panel: Shield icon is visible in panel header when egress policy is not
     await appCtx.page.evaluate(async () => {
       const api = (window as unknown as { api: { invoke: (ch: string, ...a: unknown[]) => Promise<unknown> } }).api
       await api.invoke('settings:save', {
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
         // default-deny is the application default for aiEgressPolicy
       })
@@ -118,7 +119,8 @@ test('AI panel: Shield icon is NOT visible when egress policy is set to allow', 
     await appCtx.page.evaluate(async () => {
       const api = (window as unknown as { api: { invoke: (ch: string, ...a: unknown[]) => Promise<unknown> } }).api
       await api.invoke('settings:save', {
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
         aiEgressPolicy: 'allow',
       })
@@ -143,7 +145,8 @@ test('AI panel: confirm modal appears and shows expected structure when pending 
     await appCtx.page.evaluate(async () => {
       const api = (window as unknown as { api: { invoke: (ch: string, ...a: unknown[]) => Promise<unknown> } }).api
       await api.invoke('settings:save', {
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
       })
     })
@@ -198,7 +201,8 @@ test('AI panel: confirm modal Deny closes modal', async () => {
     await appCtx.page.evaluate(async () => {
       const api = (window as unknown as { api: { invoke: (ch: string, ...a: unknown[]) => Promise<unknown> } }).api
       await api.invoke('settings:save', {
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
       })
     })

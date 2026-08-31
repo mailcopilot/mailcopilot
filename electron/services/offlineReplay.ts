@@ -16,6 +16,11 @@ import {
   deleteMessagesRemote,
   getMailboxStatus,
 } from '../../packages/net/imap'
+// From the leaf module rather than the `imap` barrel on purpose: this is a
+// scheduling scope with no IMAP dependency of its own, and specs that stub the
+// IMAP surface (offlineReplay.test.ts does) should not have to stub it too —
+// a stubbed-away scope would silently drop the tier the replay path sets.
+import { withImapPriority } from '../../packages/net/imapScheduler'
 import type { ImapConfig } from '../../packages/net/types'
 import { startMetricSpan } from '../metrics'
 import { bucketOpsCount, bucketCount } from '../metricsBuckets'
@@ -253,8 +258,33 @@ function batchByOpType(ops: OfflineOp[]): OfflineOp[][] {
   return batches
 }
 
-/** Execute a batch of same-type operations via IMAP */
+/**
+ * Execute a batch of same-type operations via IMAP.
+ *
+ * §2.17 Phase 1 — replay runs at the `sync` tier. These ops carry the user's
+ * own past intent, so they must complete, but nobody is watching a particular
+ * one land: a replay burst must not push the message the user is opening RIGHT
+ * NOW behind a hundred STORE/MOVE commands on the same lock.
+ *
+ * The scope spans the WHOLE batch, not one call: `executeBatchOps` issues
+ * several sequential IMAP commands (up to two STOREs, one MOVE per destination
+ * folder), and each of them takes and releases the lock on its own. That is the
+ * intent, not an oversight — the tier is a property of the reason, and the
+ * reason does not change between two STOREs of one batch. Splitting the scope
+ * per command would only give an interactive open a chance to slip in BETWEEN
+ * them, which it already has: the lock is released after every command, so
+ * spanning the batch does not hold it across the batch.
+ *
+ * Nothing is detached inside this scope — every call is awaited — so the tier
+ * cannot outlive the batch here. If detached work is ever added below, it must
+ * state its own tier (see the "What a scope does NOT promise" note in
+ * packages/net/imapScheduler.ts).
+ */
 async function executeBatch(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): Promise<void> {
+  return withImapPriority('sync', () => executeBatchOps(cfg, folder, batch, accountId))
+}
+
+async function executeBatchOps(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): Promise<void> {
   const opType = batch[0].opType
 
   if (opType === 'flag_seen') {

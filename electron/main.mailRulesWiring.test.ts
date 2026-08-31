@@ -243,3 +243,167 @@ describe('main.ts §2.86 — mutation control (proves the checks above can actua
     expect(mutated).not.toContain('seedMailRulesStateFromCache()')
   })
 })
+
+/**
+ * §2.162 — the two enforcement points that live in `electron/main.ts`.
+ *
+ * The DECISION is a pure function in `packages/core` and is covered
+ * behaviourally in `packages/core/mailRules.test.ts`; what cannot be covered
+ * there is whether main.ts actually asks it. Same technique and same limits as
+ * the §2.86 block above: structural, with a mutation control per assertion.
+ */
+const guardSlices = {
+  create: () =>
+    sliceBetween(source, `handleIpc('rules:create'`, `handleIpc('rules:update'`),
+  update: () =>
+    sliceBetween(source, `handleIpc('rules:update'`, `handleIpc('rules:delete'`),
+  // Only up to the message loop: the check has to happen BEFORE any message is
+  // touched, so a call that appears after `for (const msg of messages)` must
+  // not satisfy the assertion.
+  applyToFolderPreamble: () =>
+    sliceBetween(source, `handleIpc('rules:applyToFolder'`, 'for (const msg of messages)'),
+  test: () =>
+    sliceBetween(source, `handleIpc('rules:test'`, 'const messages = getMessagesForRuleTest'),
+}
+
+describe('main.ts §2.162 — rule save and retroactive apply ask the core decision', () => {
+  it('rules:create validates before storing', () => {
+    expect(guardSlices.create()).toContain('assertMailRuleAllowed(')
+  })
+
+  it('rules:update validates the rule as it will be after the patch, not the patch alone', () => {
+    const body = guardSlices.update()
+    expect(body).toContain('assertMailRuleAllowed(')
+    // The stored halves must be read back, otherwise a patch that only swaps
+    // the actions to `trash` sails past a stored legacy-`from` condition.
+    expect(body).toContain('getMailRule(rid)')
+  })
+
+  it('rules:applyToFolder refuses BEFORE it touches any message', () => {
+    expect(guardSlices.applyToFolderPreamble()).toContain('findEncodedMailRuleRefusal(')
+  })
+
+  it('rules:applyToFolder parses the stored rule structurally instead of casting it', () => {
+    // `JSON.parse(row) as MailRule['conditions']` is what let a structurally
+    // broken stored rule reach `matchRule` and throw there.
+    const body = guardSlices.applyToFolderPreamble()
+    expect(body).toContain('parseMailRuleParts(')
+    expect(body).not.toContain('JSON.parse(ruleRow.conditions)')
+  })
+
+  it('rules:test parses the submitted conditions structurally too', () => {
+    const body = guardSlices.test()
+    expect(body).toContain('parseMailRuleParts(')
+    expect(body).not.toContain('JSON.parse(parsed.conditions)')
+  })
+
+  it('the executor refuses an action it cannot actually perform', () => {
+    // Depth for rows written before the shape check: a `move` with no target
+    // and an action type with no branch both used to fall through to `break`,
+    // so the executor reported success and the caller wrote a rule_log row for
+    // work that never happened. Both must be distinguishable from success.
+    const body = sliceBetween(source, 'async function executeRuleAction', '\n}\n')
+    expect(body).toContain('mail rule move action has no target folder')
+    expect(body).toContain('unsupported mail rule action type')
+    expect(body).toMatch(/default: \{/)
+  })
+
+  it('the enforcement points import the decision from core rather than deciding locally', () => {
+    // A second list of fields or destructive actions inside the hotspot is the
+    // failure mode this pins: two lists drift, and the one in main.ts is the
+    // one nobody updates.
+    expect(source).toMatch(/import \{[^}]*parseMailRuleParts[^}]*\} from '\.\.\/packages\/core'/)
+    expect(source).toMatch(/import \{[^}]*findEncodedMailRuleRefusal[^}]*\} from '\.\.\/packages\/core'/)
+  })
+})
+
+describe('main.ts §2.162 — mutation control', () => {
+  it('create check fails once the assertion call is removed', () => {
+    const body = guardSlices.create()
+    const mutated = body.replace('assertMailRuleAllowed(parsed.conditions, parsed.actions)', '')
+    expect(mutated).not.toBe(body)
+    expect(mutated).not.toContain('assertMailRuleAllowed(')
+  })
+
+  it('applyToFolder check fails once the refusal lookup is removed', () => {
+    const body = guardSlices.applyToFolderPreamble()
+    const mutated = body.replace(/const refusal = findEncodedMailRuleRefusal\([^)]*\)/, '')
+    expect(mutated).not.toBe(body)
+    expect(mutated).not.toContain('findEncodedMailRuleRefusal(')
+  })
+})
+
+/**
+ * §2.162 (review round 3) — `executeRuleAction`'s `switch` on `action.type`
+ * must have a `default` case that THROWS, not one that falls through.
+ *
+ * Before this, a legacy row holding an action type `parseMailRuleParts` would
+ * now reject (a row written before that check existed) reached the switch,
+ * matched no `case`, and did NOTHING — while the caller still wrote a
+ * `rule_log` row saying the action was applied. That is worse than a dropped
+ * rule: an audit trail reporting work that never happened. This is structural,
+ * not behavioural, for the same reason as the §2.86 / §2.162 blocks above —
+ * `executeRuleAction` touches live IMAP collaborators and cannot be imported or
+ * called directly from a test in this repo. The BEHAVIOURAL half — that the
+ * runner counts a throwing action as failed rather than applied, and that a
+ * `rule_log` row is never written for it — is covered by
+ * `mailRulesRunner.test.ts` ("drops a rule whose action type the executor has
+ * no branch for, before it can be logged as applied"), which injects a fake
+ * `executeRuleAction` that throws to stand in for this real one.
+ */
+const executeRuleActionSwitch = () =>
+  sliceBetween(source, 'async function executeRuleAction', 'const mailRulesInflight = new Set<string>()')
+
+describe('main.ts §2.162 — executeRuleAction refuses an unknown action type instead of doing nothing', () => {
+  it('the switch has a default case that throws', () => {
+    const body = executeRuleActionSwitch()
+    expect(body).toContain('default: {')
+    expect(body).toContain("throw new Error('unsupported mail rule action type')")
+  })
+
+  it('mutation control: the assertion fails once the throw is replaced with a silent fall-through', () => {
+    const body = executeRuleActionSwitch()
+    const mutated = body.replace("throw new Error('unsupported mail rule action type')", '// no-op')
+    expect(mutated).not.toBe(body)
+    expect(mutated).not.toContain("throw new Error('unsupported mail rule action type')")
+  })
+})
+
+/**
+ * §2.203 — the `move` branch specifically, same depth-for-legacy-rows reason as
+ * the `default` case above: `findMailRuleRefusal`/`parseMailRuleParts` refuse a
+ * folderless `move` at save time now, but a row written before that check
+ * existed can still hold one. Before this throw existed, `if (action.folder &&
+ * action.folder !== folder)` treated an absent/blank folder as "nothing to do"
+ * and fell through to `break` — success from the executor's point of view,
+ * while the caller wrote a `rule_log` row for a move that never happened.
+ *
+ * The BEHAVIOURAL half (the runner counting this as a failed action, no
+ * `rule_log` row) is out of reach here for the same reason as every other
+ * `executeRuleAction` case — see the file-level doc above. §2.86-style: text
+ * assertion with a matching mutation control, same technique as the block
+ * above it.
+ */
+describe('main.ts §2.203 — executeRuleAction refuses a move with no target folder', () => {
+  it('the move branch throws before attempting anything when the folder is missing or blank', () => {
+    const body = executeRuleActionSwitch()
+    expect(body).toContain("throw new Error('mail rule move action has no target folder')")
+    // The check must run BEFORE the moveMessages call, not after — an empty
+    // folder must never reach the IMAP client.
+    const throwIdx = body.indexOf("throw new Error('mail rule move action has no target folder')")
+    const moveCallIdx = body.indexOf('await moveMessages(cfg.imap, folder, action.folder')
+    expect(throwIdx).toBeGreaterThan(-1)
+    expect(moveCallIdx).toBeGreaterThan(-1)
+    expect(throwIdx).toBeLessThan(moveCallIdx)
+  })
+
+  it('mutation control: the assertion fails once the folderless-move throw is removed', () => {
+    const body = executeRuleActionSwitch()
+    const mutated = body.replace(
+      /if \(!action\.folder \|\| !action\.folder\.trim\(\)\) \{\s*throw new Error\('mail rule move action has no target folder'\)\s*\}/,
+      '',
+    )
+    expect(mutated).not.toBe(body)
+    expect(mutated).not.toContain("throw new Error('mail rule move action has no target folder')")
+  })
+})

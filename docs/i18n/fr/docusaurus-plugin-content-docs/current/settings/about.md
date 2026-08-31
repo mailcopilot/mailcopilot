@@ -25,7 +25,7 @@ Le panneau **Informations système** affiche des détails techniques sur votre i
 - **Chromium** — la version du moteur Chromium intégré à Electron.
 - **Node.js** — la version de Node.js utilisée à l'intérieur de l'application.
 - **Plateforme** — le système d'exploitation et l'architecture.
-- **Chemin d'installation** — le répertoire dans lequel MailCopilot est installé. Si le chemin est marqué comme **lecture seule**, l'installation est effectuée pour l'ensemble du système et les mises à jour automatiques nécessitent des privilèges d'administrateur.
+- **Chemin d'installation** — le chemin de l'exécutable actuellement en cours d'exécution (`process.execPath`). Sous Windows et macOS, c'est l'emplacement réel d'installation de MailCopilot. Sur une AppImage, `execPath` pointe vers un emplacement temporaire `/tmp/.mount_*` créé pendant que l'application est ouverte, et non vers l'emplacement du fichier `.AppImage` lui-même — l'indicateur **lecture seule** reflète l'accessibilité en écriture du dossier réel du fichier AppImage, pas celle du chemin affiché ici. Cet indicateur n'apparaît jamais pour les installations `.deb`/`.rpm`/pacman, qui écrivent les mises à jour avec des privilèges d'administrateur au lieu de dépendre des droits sur le dossier.
 
 Ces informations sont utiles lors du signalement de bugs ou de la vérification de la compatibilité.
 
@@ -48,23 +48,35 @@ Cliquez sur le bouton **Rechercher les mises à jour** pour déclencher manuelle
 - **inactif** — le bouton **Rechercher les mises à jour** est visible et prêt à être utilisé.
 - **Vérification…** — une vérification des mises à jour est en cours ; le bouton est désactivé jusqu'à la fin de la vérification.
 - **Vous avez la dernière version** — aucune mise à jour n'est disponible.
-- **Mise à jour disponible : vX.Y.Z** — une nouvelle version a été détectée ; un bouton **Télécharger X.Y.Z** apparaît si l'installation prend en charge la mise à jour automatique.
+- **disponible** — une nouvelle version a été détectée : une indication **(dernière version disponible : X.Y.Z)** apparaît à côté de la version ci-dessus, et — si l'installation prend en charge la mise à jour automatique — un bouton **Télécharger X.Y.Z** apparaît ici.
 - **Téléchargement… N %** — le fichier de mise à jour est en cours de téléchargement ; un indicateur de progression affiche le pourcentage.
 - **Redémarrer pour installer** — le téléchargement est terminé ; cliquez pour redémarrer MailCopilot et appliquer la mise à jour immédiatement.
 - **Erreur réseau — réessayez quand vous serez en ligne** — la vérification ou le téléchargement a échoué en raison d'un problème réseau.
-- **Permission refusée — administrateur requis** — le répertoire d'installation n'est pas accessible en écriture par l'utilisateur actuel.
+- **Permission refusée — administrateur requis** — le mécanisme de mise à jour ou le système d'exploitation a refusé l'accès. Sur les installations qui utilisent des privilèges d'administrateur (`.deb`/`.rpm`/pacman), cela signifie généralement que l'étape d'élévation de privilèges ou l'étape d'installation du paquet a échoué, et non qu'un dossier n'est pas accessible en écriture.
 - **Échec de la mise à jour — voir les journaux pour les détails** — une erreur inattendue s'est produite ; consultez la journalisation détaillée pour plus d'informations.
 - **Les mises à jour sont désactivées dans cette version** — MailCopilot s'exécute en mode développement ou non packagé ; les mises à jour automatiques ne sont pas disponibles.
 
-### Installations en lecture seule
+### Quand la mise à jour automatique n'est pas disponible
 
-Si MailCopilot a été installé pour l'ensemble du système (par exemple, via un gestionnaire de paquets qui place l'application dans un répertoire protégé), le **Chemin d'installation** dans les Informations système est marqué comme **lecture seule**. Dans ce cas :
+MailCopilot peut normalement se mettre à jour lui-même sur toutes les plateformes qu'il prend en charge : une installation AppImage remplace le fichier `.AppImage` lui-même, et une installation `.deb`/`.rpm`/pacman laisse le mécanisme de mise à jour tenter l'écriture en demandant des privilèges d'administrateur (`pkexec`/`sudo`), de la même façon que `apt`/`dnf`/`pacman`. Le résultat final sur ces installations Linux packagées est décidé par l'invite d'élévation de privilèges et le gestionnaire de paquets, pas par MailCopilot — un échec à ce stade affiche une boîte de dialogue **Update installation failed** (« Échec de l'installation de la mise à jour ») proposant un lien vers la page de téléchargement, et non silencieusement.
 
-- La case **Télécharger automatiquement les mises à jour en arrière-plan** est affichée mais **désactivée** (grisée), avec une infobulle expliquant que l'installation est en lecture seule.
-- Le bouton **Rechercher les mises à jour** **reste fonctionnel** — vous pouvez toujours vérifier si une nouvelle version est disponible.
-- Les contrôles **Télécharger** et **Redémarrer pour installer** sont bloqués : ils n'apparaissent pas ou ne fonctionnent pas pour les installations en lecture seule, car MailCopilot ne peut pas écrire la mise à jour dans un répertoire protégé.
+MailCopilot ne décide à l'avance que la mise à jour automatique est indisponible que dans deux situations :
 
-Mettez à jour l'application via votre gestionnaire de paquets ou avec des privilèges d'administrateur.
+- **La version n'est pas packagée** — une version de développement ou de CI. Il n'y a alors aucun mécanisme de mise à jour du tout : le bouton **Rechercher les mises à jour** et la zone d'état n'apparaissent pas, et une note affiche à la place **« Les mises à jour sont désactivées dans cette version »**.
+- **La version est packagée, mais MailCopilot a une raison précise de penser que l'écriture échouerait**, ce qui se produit lorsque :
+  - la version Linux n'est ni une AppImage ni un paquet système pris en charge — par exemple une AppImage extraite ou un répertoire `linux-unpacked` brut, ou
+  - le répertoire dans lequel MailCopilot devrait écrire n'est pas accessible en écriture par votre compte utilisateur. Sur une AppImage, il s'agit du répertoire contenant le fichier `.AppImage` ; sous Windows et macOS, il s'agit du répertoire contenant l'exécutable installé. Cette vérification ne s'applique pas aux installations `.deb`/`.rpm`/pacman, car le mécanisme de mise à jour élève ses privilèges à leur place.
+
+Dans le second cas, la vérification des mises à jour continue de fonctionner normalement — seule l'écriture de la mise à jour sur place est affectée :
+
+- Le bouton **Rechercher les mises à jour** reste disponible et fonctionne — vous pouvez toujours vérifier si une nouvelle version existe.
+- La case **Télécharger automatiquement les mises à jour en arrière-plan** reste disponible et continue d'enregistrer votre préférence, mais rien ne se télécharge automatiquement tant que la mise à jour automatique n'est pas possible.
+- Un avertissement apparaît à côté de la case pour expliquer pourquoi — par exemple : « Cette version ne peut pas se remplacer sur place (elle ne s'exécute ni comme AppImage ni comme paquet système). Téléchargez la nouvelle version manuellement depuis le site. » ou « Le dossier contenant l'application n'est pas accessible en écriture, la mise à jour ne peut donc pas être installée sur place. Téléchargez la nouvelle version manuellement ou déplacez l'application dans un dossier vous appartenant. » Si MailCopilot ne peut pas déterminer la raison précise, un avertissement neutre apparaît à la place : « Cette installation ne peut pas se mettre à jour automatiquement. Téléchargez la nouvelle version manuellement depuis le site. »
+- Les contrôles **Télécharger** et **Redémarrer pour installer** n'apparaissent pas, car MailCopilot n'a aucun moyen d'écrire la mise à jour lui-même.
+
+Cette vérification s'exécute une seule fois, au démarrage de MailCopilot. Si vous déplacez le fichier AppImage vers un emplacement accessible en écriture ou changez les permissions du dossier d'installation, quittez et relancez MailCopilot pour que le changement prenne effet — une instance déjà en cours d'exécution conserve son verdict d'origine.
+
+Mettez à jour l'application via votre gestionnaire de paquets, avec des privilèges d'administrateur, ou en téléchargeant manuellement la nouvelle version depuis le site web.
 
 ## Diagnostics et données d'usage
 
@@ -79,6 +91,8 @@ Si MailCopilot n'a aucune trace d'une réponse à la question de consentement in
 Lorsque cette option est activée, MailCopilot écrit des journaux détaillés dans un fichier pour le dépannage. Ces journaux sont stockés localement sur votre ordinateur et ne sont jamais envoyés automatiquement.
 
 La journalisation détaillée est désactivée par défaut. Activez-la uniquement lors de l'investigation d'un problème — cela peut légèrement affecter les performances.
+
+MailCopilot décide une seule fois, au démarrage, s'il faut écrire ce fichier, en fonction de la valeur de ce réglage à cet instant précis -- l'activer ne prend effet qu'après avoir redémarré MailCopilot. Dans une copie installée de l'application, aucun fichier journal n'existe tant que vous n'avez pas activé cette option et redémarré au moins une fois ; si vous êtes en train de résoudre un problème, activez ce réglage, redémarrez, puis seulement essayez de reproduire le problème. Le fichier ne capture que ce qui se passe dans le processus principal de MailCopilot ; la sortie de diagnostic produite dans une fenêtre particulière -- ce que vous verriez dans la console des outils de développement de cette fenêtre -- n'y est pas écrite.
 
 ## Signaler un bug
 

@@ -7,6 +7,12 @@ title: Produktivitaet
 
 Desktop-Benachrichtigungen, IMAP IDLE, Sync-Intervall (1–30 Min), Entwuerfe-Synchronisierung, externe Bilder immer laden, Absenderfotos (Gravatar), Sortierreihenfolge, Konversationsgruppierung, Tastaturkuerzel-Preset (Gmail/Outlook), Versandverzoegerung und Offline-Modus.
 
+## Desktop-Benachrichtigungen
+
+Aktivieren oder deaktivieren Sie Desktop-Benachrichtigungen für neu eingehende Post. Wenn aktiviert, benachrichtigt Sie MailCopilot über neue Post, die in einem Ordner eintrifft, der zum [Symbol für ungelesene Nachrichten](general#symbol-für-ungelesene-nachrichten) zählt -- standardmäßig Ihr Posteingang, plus jeder Ordner, den Sie ausdrücklich in das Abzeichen einbezogen haben -- und nur, wenn dieser Ordner auf vollständige oder periodische Kopfzeilen-Synchronisierung eingestellt ist. Darüber hinaus überspringt MailCopilot standardmäßig einen festen Satz von Ordnern -- Papierkorb, Spam, Archiv und Entwürfe -- selbst wenn Sie einen davon ausdrücklich in das Abzeichen einbezogen haben; dies schränkt Benachrichtigungen weiter ein und erweitert sie niemals über die Abzeichen-Regel hinaus. Ordner, die vom Abzeichen ausgeschlossen sind, oder die nur auf Abruf synchronisiert werden, erzeugen niemals eine Benachrichtigung, selbst wenn dort neue Post eintrifft.
+
+Solange das MailCopilot-Fenster im Vordergrund ist, wird für neue Post keine Benachrichtigung angezeigt: Das Abzeichen und die Nachrichtenliste werden wie gewohnt aktualisiert, aber das Eintreffen wird nicht durch eine Benachrichtigung unterbrochen, da Sie die App bereits betrachten. Treffen mehrere Nachrichten innerhalb eines kurzen Zeitfensters ein, während die App im Hintergrund läuft, zeigt MailCopilot eine einzige Benachrichtigung pro Konto (zum Beispiel „5 neue Nachrichten“) statt einer je Nachricht -- treffen bei zwei Konten gleichzeitig neue Nachrichten ein, erhalten Sie trotzdem zwei getrennte Benachrichtigungen; ein Klick auf eine Benachrichtigung öffnet die betreffende Nachricht. Bei unsignierten macOS-Builds lässt das Betriebssystem Benachrichtigungen unter Umständen überhaupt nicht zu.
+
 ## Offline-Modus
 
 Laden Sie Nachrichten herunter, um sie ohne Internetverbindung zu lesen. Der Offline-Modus wird **pro Ordner** im Tab [Ordner](folders-settings#offline-mode) konfiguriert — Sie koennen ihn fuer Posteingang, Gesendet oder jeden anderen Ordner einzeln aktivieren.

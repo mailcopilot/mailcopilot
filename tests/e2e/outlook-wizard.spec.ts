@@ -172,4 +172,35 @@ test.describe('account wizard: Outlook provider card (2.2-E)', () => {
       await cleanupApp(ctx)
     }
   })
+
+  // §2.94 — the picker is now replaced by a waiting step for the duration of
+  // the flow, so a failed connect must hand the picker back. Without the
+  // restore the wizard would strand the user on a spinner that never resolves
+  // (in e2e the connect rejects immediately, which is exactly the case that
+  // exercises the restore path).
+  test('a failed OAuth connect returns the wizard to the provider picker', async () => {
+    const ctx: Partial<AppContext> = {}
+    try {
+      Object.assign(ctx, await launchApp())
+      const page = ctx.page!
+      const browser = ctx.browser!
+
+      await page.evaluate(() => window.api.invoke('ui:openAccount'))
+      const account = await waitForPage(browser, p => p.url().includes('#/account'))
+      await account.waitForLoadState('domcontentloaded')
+      await expect(account.getByTestId('account-wizard-provider')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+      await account.locator('#provider-card-outlook').click()
+
+      // The picker comes back...
+      await expect(account.getByTestId('account-wizard-provider')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+      // ...and the waiting step is gone, so nothing spins forever.
+      await expect(account.getByTestId('account-wizard-oauth-waiting')).toHaveCount(0)
+      // Retry must be possible: the provider cards are interactive again.
+      await expect(account.locator('#provider-card-gmail')).toBeEnabled()
+      await expect(account.locator('#provider-card-outlook')).toBeEnabled()
+    } finally {
+      await cleanupApp(ctx)
+    }
+  })
 })

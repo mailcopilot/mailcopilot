@@ -5,6 +5,23 @@ sidebar_position: 2
 
 # Telemetría
 
+{/*
+  MAINTAINED BY HAND. There is no generator for this page.
+
+  A script used to claim that role (scripts/gen-telemetry-docs.mjs). It knew
+  14 of the 29 event domains, silently dropped 57 of 95 events, rewrote the
+  file by full overwrite, and still exited 0 reporting the full count. It has
+  been deleted (BACKLOG.md 2.130). Edit this page, and its five translations,
+  by hand.
+
+  Completeness is enforced from the other side instead:
+  scripts/check-telemetry-docs.mjs requires every telemetry name registered in
+  electron/metricsSchema.ts to appear in this page AND in all five
+  translations. It runs in CI as part of npm run check:telemetry, and fails
+  closed — a name it cannot find, a schema block it cannot parse, or a
+  disclosure file it cannot read all turn the build red.
+*/}
+
 MailCopilot puede enviar una pequeña cantidad de datos de diagnóstico y de uso -- pero solo después de que des tu consentimiento activo. Nunca contienen el contenido de tu correo, pero sí un identificador aleatorio de esta instalación, por lo que los datos **no son totalmente anónimos**: consulta [Identificador de instalación](#identificador-de-instalación) más abajo para saber exactamente qué permite y qué no permite averiguar ese identificador. Esta página documenta exactamente qué se recopila y -- igual de importante -- qué no se recopila nunca.
 
 ## Consentimiento en el primer arranque
@@ -16,8 +33,8 @@ De ahí se derivan varias cosas:
 - **No se recopila nada antes de que respondas, no solo que no se envía.** Los contadores y búferes de diagnóstico y de uso no se abren mientras el consentimiento está pendiente -- MailCopilot no acumula en silencio un rezago para enviarlo de golpe en cuanto lo permitas. Lo que ocurrió antes de tu respuesta simplemente desaparece; en el momento en que lo permites, el conteo empieza de cero desde ese instante (una medición de duración de sesión, por ejemplo, empieza a contar desde el momento del consentimiento, no desde el inicio de la aplicación).
 - **Cerrar la pantalla o pulsar Escape cuenta como "No permitir".** No hay forma de cerrar la pantalla y terminar habiendo consentido.
 - **Tu decisión se guarda junto con la versión de esta divulgación.** MailCopilot solo vuelve a mostrar la pantalla si la lista de lo recopilado realmente se amplía -- una nueva categoría de datos, un nuevo destino, o un alcance más amplio que antes. Las actualizaciones normales de la aplicación, los ajustes de redacción y las correcciones de errores nunca provocan una nueva pregunta.
-- **Si ya habías desactivado el diagnóstico** en Ajustes -> Acerca de antes de que existiera esta pantalla, esa negativa se respeta y no se te vuelve a preguntar. A todos los demás se les desactiva el diagnóstico automáticamente, y se les pregunta una vez en el siguiente inicio.
-- **Puedes cambiar de opinión en cualquier momento** en **Ajustes -> Acerca de**. Hasta que respondas a la pregunta inicial, el interruptor allí se muestra apagado y deshabilitado, con una nota que explica que solo tendrá efecto una vez que respondas en la pantalla de consentimiento.
+- **Si ya habías desactivado el diagnóstico** en Configuración -> Acerca de antes de que existiera esta pantalla, esa negativa se respeta y no se te vuelve a preguntar. A todos los demás se les desactiva el diagnóstico automáticamente, y se les pregunta una vez en el siguiente inicio.
+- **Puedes cambiar de opinión en cualquier momento** en **Configuración -> Acerca de**. Hasta que respondas a la pregunta inicial, el interruptor allí se muestra apagado y deshabilitado, con una nota que explica que solo tendrá efecto una vez que respondas en la pantalla de consentimiento.
 
 ## Qué enviamos
 
@@ -27,6 +44,7 @@ Si lo permites, MailCopilot envía:
 - **Versiones** -- la versión de MailCopilot, tu sistema operativo y la versión de este.
 - **Rendimiento** -- la duración de operaciones como la sincronización de correo, la búsqueda, el envío y las peticiones a la IA.
 - **Uso de funciones** -- qué funciones has usado en una sesión y con qué frecuencia (búsqueda, redacción de mensajes, IA, reglas, plantillas, posponer y más), además, cuando usas el asistente de IA, qué proveedor y modelo atendieron la petición y el coste estimado de esa petición. Consulta [Registro de uso de IA](#registro-de-uso-de-ia) más abajo para los campos específicos de la IA.
+- **Actividad del almacén de claves de IA** -- acciones sobre el almacén donde se guardan tus claves API de IA: qué proveedor, si la clave se estaba leyendo, guardando o eliminando, y cómo salió, incluido si se encontró una clave allí. El valor de la clave nunca se envía -- ni como texto, ni como longitud, ni como hash.
 - **Contexto de configuración** -- cuántas cuentas tienes conectadas, el tipo de servicio de correo de cada una (por ejemplo, Gmail u Outlook), cómo iniciaste sesión (OAuth o contraseña), el idioma de tu interfaz y tu tema.
 - **Identificador de instalación** -- un identificador aleatorio creado en el primer arranque, descrito en detalle más abajo. Conecta los datos de tus distintas sesiones entre sí -- por eso mismo los datos no son totalmente anónimos.
 
@@ -35,7 +53,7 @@ Si lo permites, MailCopilot envía:
 MailCopilot no diseña ninguna ruta de código para enviar lo siguiente. En el caso de las métricas tipadas y del diagnóstico de fallo al guardar la copia enviada, es una garantía absoluta, reforzada por un conjunto cerrado de campos estructurales que el código tiene permitido rellenar. El resto de informes de diagnóstico dependen sobre todo de que el punto de envío no ponga ahí el contenido en primer lugar, respaldado por un filtro basado en formas que atrapa, como segunda capa, formas reconocibles de direcciones y rutas -- no un filtro universal de contenido. Consulta [Cómo se limpian direcciones y rutas](#cómo-se-limpian-direcciones-y-rutas) más abajo para ver exactamente qué atrapa y qué no atrapa esa segunda capa.
 
 - El texto de tus mensajes (asunto, cuerpo, adjuntos, borradores)
-- Tus direcciones de correo ni las de tus contactos -- el formulario de comentarios en Ajustes -> Acerca de es el único lugar donde se envía una dirección a propósito, cuando escribes allí tú mismo una para poder recibir una respuesta.
+- Tus direcciones de correo ni las de tus contactos -- el formulario de comentarios en Configuración -> Acerca de es el único lugar donde se envía una dirección a propósito, cuando escribes allí tú mismo una para poder recibir una respuesta.
 - Los nombres o rutas de tus carpetas en tu servidor IMAP -- en los datos solo aparece el tipo general de carpeta (como Bandeja de entrada, Enviados o Papelera), nunca el nombre que le hayas puesto
 - Nombres de archivos de adjuntos
 - Lo que escribes en la búsqueda -- solo se cuentan la longitud de la consulta y el número de resultados, nunca el texto en sí
@@ -46,7 +64,7 @@ MailCopilot no diseña ninguna ruta de código para enviar lo siguiente. En el c
 
 ## Cómo se enrutan los datos
 
-Toda la telemetría se envía a [Sentry](https://sentry.io), nuestra plataforma de monitorización de errores y rendimiento, y solo después de que la hayas permitido en la pantalla de consentimiento (o más tarde, activando el interruptor en Ajustes -> Acerca de). Cuando el diagnóstico está desactivado -- ya sea porque lo rechazaste, aún no has respondido, o desactivaste el interruptor más tarde -- la canalización se omite por completo y no se envía nada. Si activas el registro de depuración, los mismos eventos aparecen además en tu archivo local `main.log` para que puedas inspeccionar exactamente qué se transmitiría.
+Toda la telemetría se envía a [Sentry](https://sentry.io), nuestra plataforma de monitorización de errores y rendimiento, y solo después de que la hayas permitido en la pantalla de consentimiento (o más tarde, activando el interruptor en Configuración -> Acerca de). Cuando el diagnóstico está desactivado -- ya sea porque lo rechazaste, aún no has respondido, o desactivaste el interruptor más tarde -- la canalización se omite por completo y no se envía nada. Si activas el registro de depuración, los mismos eventos aparecen además en tu archivo local `main.log` para que puedas inspeccionar exactamente qué se transmitiría.
 
 ### Identificador de instalación
 
@@ -54,7 +72,7 @@ En el primer arranque, MailCopilot genera un UUID aleatorio y lo guarda en el ar
 
 - **Seudónimo, no identificativo, pero tampoco inconectable** -- no se deriva de un email de cuenta, una huella del dispositivo, una dirección IP ni un identificador de hardware, y en nuestro lado no existe correspondencia que lo devuelva al UUID ni a tu dispositivo. Pero está deliberadamente pensado como un identificador estable de esta instalación concreta: enlaza en un mismo hilo cada evento y transacción que esta instalación envíe jamás -- y, como cualquier identificador seudónimo entregado a un tercero, en principio podría cruzarse con otros datos disponibles para Sentry o para nosotros. Esta es la razón por la que la pantalla de consentimiento llama a los datos «no totalmente anónimos» en lugar de anónimos.
 - **Estable entre versiones**: la misma instalación conserva el mismo hash tras una autoactualización, de modo que las métricas de retención sobreviven a los cambios de versión.
-- **Se descarta al desactivar la telemetría**: poner el interruptor de Ajustes en off limpia inmediatamente el identificador en el cliente Sentry y detiene cualquier transmisión posterior.
+- **Se descarta al desactivar la telemetría**: poner el interruptor de Configuración en off limpia inmediatamente el identificador en el cliente Sentry y detiene cualquier transmisión posterior.
 
 Usamos este identificador como una herramienta de analítica web usaría un visitor id: nos permite contar instalaciones *distintas* en lugar de *eventos totales*. Esa diferencia es justamente lo que hace que la telemetría sea útil: sin ella, una instalación ruidosa parecería igual a cien tranquilas.
 
@@ -69,7 +87,7 @@ Dos filtros basados en la forma del texto se ejecutan sobre cada evento saliente
 
 ### Registro de uso de IA
 
-Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una entrada de registro estructurada al terminar la petición, además del booleano de la sinopsis de uso descrita arriba. Esa entrada incluye: el **proveedor de IA** (por ejemplo el proveedor de tu clave de API, o «subscription»), el **modelo** que atendió la petición, el **número total de llamadas a herramientas** y los **nombres de las herramientas que llamó** (por ejemplo `send_email` o `mail_action`, nunca los argumentos que se les pasaron), si la petición se canceló o falló, y el **coste estimado** de la petición en USD cuando el proveedor expone precios. Nada de esto incluye el texto de tu petición, la respuesta de la IA ni contenido de correo -- para el desglose completo de lo que el propio asistente de IA envía a los proveedores (un tema aparte y mucho más amplio, que no debe confundirse con esta entrada de registro estructurada), consulta [Datos de IA y registro de auditoría](./ai-data). Las mediciones de latencia de funciones concretas de IA llevan sus propios campos agregados (tipo de contexto de la conversación, si ya había un historial, recuentos de tokens, el preset de reescritura usado, el número de borradores generados y similares) -- consulta [Spans de rendimiento](#spans-de-rendimiento) más abajo.
+Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una entrada de registro estructurada al terminar la petición, además del booleano de la sinopsis de uso descrita arriba. Esa entrada incluye: el **proveedor de IA** (el proveedor de tu clave de API), el **modelo** que atendió la petición, el **número total de llamadas a herramientas** y los **nombres de las herramientas que llamó** (por ejemplo `send_email` o `mail_action`, nunca los argumentos que se les pasaron), si la petición se canceló o falló, y el **coste estimado** de la petición en USD cuando el proveedor expone precios. Nada de esto incluye el texto de tu petición, la respuesta de la IA ni contenido de correo -- para el desglose completo de lo que el propio asistente de IA envía a los proveedores (un tema aparte y mucho más amplio, que no debe confundirse con esta entrada de registro estructurada), consulta [Datos de IA y registro de auditoría](./ai-data). Las mediciones de latencia de funciones concretas de IA llevan sus propios campos agregados (tipo de contexto de la conversación, si ya había un historial, recuentos de tokens, el preset de reescritura usado, el número de borradores generados y similares) -- consulta [Spans de rendimiento](#spans-de-rendimiento) más abajo.
 
 ## Eventos
 
@@ -82,12 +100,18 @@ Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una ent
 | `app.updated` | event | no | `from_version`, `to_version` | Una vez tras instalar una nueva versión por autoactualización. |
 | `app.startup_ms` | histogram | no | `accounts_count` | Tiempo desde `app.whenReady` hasta el primer `BrowserWindow` visible. |
 | `window.rescued` | event | no | `windows_moved`, `pass` | Un ciclo de rescate devolvió a la vista al menos una ventana que había quedado fuera de la pantalla tras un cambio en la configuración de pantallas (conexión de monitor, cambio de resolución, reactivación). |
+| `tray.created` | event | no | `outcome`, `platform` | Resultado de un intento de crear el objeto del icono de la bandeja del sistema (al iniciar o al volver a activarla en Configuración) — `outcome` es `created` o `failed`. Un resultado `failed` es un fallo de nuestro lado (imagen del icono vacía o ilegible, error al construirlo) y no dice nada sobre tu escritorio: MailCopilot no comprueba si el escritorio muestra realmente el icono. El motivo del fallo no se distingue. |
+| `tray.menu_action` | event | no | `action` | Qué entrada del menú de la bandeja se usó (abrir / mensaje nuevo / comprobar correo / salir) — un clic directo en el icono de la bandeja en Linux y Windows también se registra como `open` (macOS no registra un manejador de clic para el icono, ya que hacer clic en él abre directamente el menú). |
+| `notification.shown` | event | sí (ventana 10 s) | `batched` | Se mostró una notificación de correo nuevo; `batched` indica si una notificación cubrió varios mensajes. Sin cuenta, carpeta, asunto ni remitente. |
+| `notification.suppressed` | event | sí (ventana 10 s) | `reason` | Se decidió una notificación de correo nuevo pero no se mostró, porque ya estabas mirando la aplicación. |
+| `notification.clicked` | event | sí (ventana 10 s) | — | Se hizo clic en una notificación de correo nuevo. Sin identificadores. |
+| `badge.updated` | event | sí (ventana 10 s) | `has_unread` | Cambió el total de no leídos del distintivo / la información sobre herramientas. Solo si hay algo sin leer, nunca la cifra. |
 
 ### Consentimiento de telemetría
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
 | --- | --- | --- | --- | --- |
-| `telemetry.consent_granted` | event | no | `version` | Solo se dispara cuando pulsas Permitir en la pantalla de consentimiento, con la versión del listado de datos que viste. Un rechazo no dispara ningún evento -- medir un «no» sería en sí mismo la transmisión que el rechazo pretende evitar. Volver a activar el interruptor en Ajustes -> Acerca de después de desactivarlo tampoco dispara este evento -- solo lo hace una respuesta a la pantalla de consentimiento. |
+| `telemetry.consent_granted` | event | no | `version` | Solo se dispara cuando pulsas Permitir en la pantalla de consentimiento, con la versión del listado de datos que viste. Un rechazo no dispara ningún evento -- medir un «no» sería en sí mismo la transmisión que el rechazo pretende evitar. Volver a activar el interruptor en Configuración -> Acerca de después de desactivarlo tampoco dispara este evento -- solo lo hace una respuesta a la pantalla de consentimiento. |
 
 ### Resumen de uso
 
@@ -147,7 +171,7 @@ Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una ent
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
 | --- | --- | --- | --- | --- |
-| `search.duration_ms` | histogram | no | `scope`, `folder_role`, `account_count`, `sort`, `pagination`, `len_bucket`, `token_count`, `result_bucket`, `duration_bucket`, `zero_results` | Latencia extremo a extremo de la búsqueda FTS (lado main, antes del merge remoto). Se sustituirá por `search.completed` en PR 2. |
+| `search.duration_ms` | histogram | no | `scope`, `folder_role`, `account_count`, `sort`, `pagination`, `len_bucket`, `token_count`, `result_bucket`, `duration_bucket`, `zero_results` | Cuánto tardó una búsqueda entre los mensajes guardados en este dispositivo, sin contar los resultados que después se descargan del servidor de correo. |
 | `search.error` | event | no | `scope`, `kind` | El manejador de búsqueda lanzó: cancelación del usuario o fallo real. |
 
 ### Indexador de cuerpos
@@ -163,8 +187,8 @@ Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una ent
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
 | --- | --- | --- | --- | --- |
-| `fts.optimize.duration_ms` | histogram | no | `segments_before`, `segments_after`, `reduction` | Pasada FTS5 optimize: tiempo y número de segmentos antes/después. |
-| `fts.optimize.failed` | event | no | `reason` | FTS5 optimize lanzó un error. |
+| `fts.merge.work_ms` | histogram | no | `outcome`, `steps`, `max_step_ms`, `segments_before`, `segments_after` | Ciclo de fusión incremental de FTS5: tiempo total de las fusiones síncronas, paso más largo y número de segmentos antes/después. |
+| `fts.merge.failed` | event | no | `reason` | La fusión incremental de FTS5 lanzó un error. |
 
 ### Sincronización de cabeceras
 
@@ -180,6 +204,19 @@ Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una ent
 | `mail.open` | histogram | no | `cache_hit_level`, `body_size_bucket`, `attachments_count` | Latencia de extremo a extremo de la apertura de un mensaje, observada desde el renderer (desde el clic hasta el renderizado del cuerpo). La etiqueta `cache_hit_level` indica qué nivel de caché sirvió el cuerpo: `memory`, `db`, `eml`, `imap` o `imap_timeout`. |
 | `net.message_details.wall_ms` | histogram | no | `cache_hit_level` | Tiempo de pared del manejador IPC `net:messageDetails` en el proceso principal. Aisla la latencia del servidor del ruido del viaje de ida y vuelta renderer a main. Una muestra por rama terminal (`memory`, `db`, `eml`, `imap`, `imap_timeout`). |
 | `imap.pool_queue_wait_ms` | event | no | `requester`, `wait_ms_bucket` | Tiempo de espera para adquirir una conexión del pool IMAP por cuenta. Se emite solo cuando la espera supera 500 ms, para que los paneles capturen la cola larga sin ruido de adquisiciones rápidas. |
+
+### Análisis de archivos EML
+
+| Evento | Tipo | Agregado | Etiquetas | Propósito |
+| --- | --- | --- | --- | --- |
+| `eml.parse_dispatch` | event | no | `path`, `size_bucket` | Un análisis de EML, con la ruta que realmente siguió: `worker` (analizado fuera del hilo principal), `worker_failed` (el worker estaba disponible, pero este análisis en concreto falló), `worker_aborted` (cerró el mensaje antes de que el worker terminara), `inline_below_threshold` (lo bastante pequeño como para analizarse en el hilo principal por diseño), o `inline_unavailable` (analizado en el hilo principal porque el propio worker no es utilizable en esta sesión). |
+| `eml.parse_worker_unavailable` | event | no | `reason` | Se dispara como máximo una vez por sesión, en el momento en que el análisis de EML fuera del hilo principal resulta imposible durante el resto de esa sesión — todo análisis posterior recurrirá a `inline_unavailable` de arriba. `reason` es `script_missing`, `spawn_failed`, `startup_failed` o `not_main_thread`. |
+| `eml.parse_cap_hard` | event | no | `size_bucket` | Un mensaje cuyo tamaño en bruto superaba el límite estricto de análisis: su cuerpo y sus adjuntos nunca se leyeron. La mayoría de las veces esto significa que el mensaje se abrió como un marcador de posición solo con las cabeceras, pero el evento también se dispara cuando una sincronización sin conexión en segundo plano rechaza una descarga demasiado grande a medio camino -- en ese caso no se abrió nada y no se mostró ningún marcador de posición, porque no hubo una apertura a la que responder. Lleva únicamente la banda de tamaño aproximada descrita arriba, nada sobre el mensaje en sí. Indica si alguien recibe realmente correo de ese tamaño, es decir, si el límite está en el lugar correcto. |
+| `eml.parse_cap_soft` | event | no | `size_bucket`, `tier` | Un cuerpo de mensaje descodificado que se cortó en el límite flexible. La mayoría de las veces esto significa que apareció un aviso en el panel de lectura indicando que solo se muestra el principio, pero el evento también se dispara cuando la herramienta de listado de adjuntos del asistente de IA analiza en segundo plano un mensaje almacenado localmente -- en ese caso no se muestra ningún aviso, porque no hay panel de lectura donde mostrarlo. `tier` es `default` para el límite con el que se abre cualquier mensaje, o `full` cuando ni siquiera el límite ampliado que pediste al pulsar «Mostrar el mensaje completo» bastó. Sin texto, sin longitud en bytes, sin asunto: solo la banda y cuál de los dos límites estaba en vigor. |
+
+Ninguno de estos cuatro eventos se agrega: cada uno se registra individualmente en lugar de fusionarse con otros de la misma ráfaga, porque de lo contrario el dato que necesita quien mantiene el proyecto — qué ruta siguió un análisis, por qué murió el worker, o si realmente se alcanzó algún límite — quedaría oculto en el recuento. `eml.parse_dispatch` y `eml.parse_worker_unavailable` describen cómo se desarrolló un análisis; `eml.parse_cap_hard` y `eml.parse_cap_soft` registran que se superó un límite de tamaño — en el caso del límite flexible, durante un análisis real; en el caso del límite estricto, posiblemente antes de que empiece ningún análisis — y no se emiten al mismo ritmo que el evento de análisis: un mensaje que supera el límite estricto nunca se entrega a un analizador, así que produce `eml.parse_cap_hard` sin ningún `eml.parse_dispatch`; un mensaje que solo supera el límite flexible sí se analiza, así que produce su `eml.parse_dispatch` habitual además de `eml.parse_cap_soft`.
+
+Lo que está garantizado es un evento `eml.parse_dispatch` por cada archivo EML que MailCopilot realmente entrega a un analizador — no un evento por cada mensaje que abres, y, como se explica arriba, ninguno para un mensaje detenido por el límite estricto antes de que empiece el análisis. Abrir un mensaje que ya está en la caché de detalles en memoria o en disco (los niveles `memory` y `db` de la etiqueta `cache_hit_level`, descritos más arriba en [Instrumentación de apertura de mensajes](#instrumentación-de-apertura-de-mensajes)) nunca analiza un archivo `.eml`, así que no se genera ninguno de estos cuatro eventos para esa apertura. Más allá de esa excepción por acierto de caché, `eml.parse_dispatch`, `eml.parse_worker_unavailable` y `eml.parse_cap_soft` solo se disparan cuando un mensaje se lee de un archivo `.eml` almacenado localmente o se acaba de descargar y hay que analizarlo -- esto incluye las búsquedas de adjuntos en segundo plano del asistente de IA, que leen un archivo `.eml` almacenado localmente igual que una apertura normal. `eml.parse_cap_hard` se dispara en esos mismos casos, más uno adicional que no toca ningún archivo `.eml`: una sincronización sin conexión en segundo plano que rechaza una descarga demasiado grande a medio camino, antes de que se guarde nada en disco. Cada evento `eml.parse_dispatch` lleva el `path` de ese análisis en concreto y el `size_bucket` de ese mensaje en concreto; cada evento `eml.parse_cap_hard` o `eml.parse_cap_soft` lleva el `size_bucket` del mensaje que activó el límite — además de, como cualquier otro evento que envía la aplicación, el identificador de instalación descrito en [Identificador de instalación](#identificador-de-instalación), que lo vincula con el resto de eventos de su sesión. La etiqueta `size_bucket` usa el mismo tratamiento de franjas gruesas ya aplicado al tamaño de los mensajes en otras partes de esta página (véase `body_size_bucket` en [Cola de envío](#cola-de-envío) e [Instrumentación de apertura de mensajes](#instrumentación-de-apertura-de-mensajes)): una de cinco franjas — `<1KB`, `1-10KB`, `10-100KB`, `100KB-1MB`, `1MB+` — no un tamaño exacto en bytes, ni un tamaño con mayor resolución, ni nunca un asunto, un remitente, un nombre de archivo o un identificador de mensaje.
 
 ### Invitaciones de calendario
 
@@ -210,6 +247,16 @@ Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una ent
 
 Ninguna de estas etiquetas lleva jamás el nombre de host, la huella del certificado, el nombre del emisor o el texto de error en bruto -- solo la clasificación enumerada `provider` y códigos de motivo cerrados.
 
+### Insignia de reinicio de sesión de la cuenta
+
+| Evento | Tipo | Agregado | Etiquetas | Propósito |
+| --- | --- | --- | --- | --- |
+| `account.reauth_flagged` | event | no | `flagged_accounts_bucket` | Un buzón superó el umbral de fallos de autenticación consecutivos y ahora muestra la insignia «Iniciar sesión de nuevo». Se emite una sola vez cuando aparece la insignia, no en cada intento de sincronización fallido -- así se cuentan credenciales rotas, no simples cortes de red. |
+| `account.reauth_badge_clicked` | event | no | — | Hiciste clic en «Iniciar sesión de nuevo» en la insignia. Se registra en el momento del clic, no según el resultado: el registro permanece aunque el editor de la cuenta no llegue a abrirse. |
+| `account.reauth_cleared` | event | no | `reason`, `flag_duration` | La insignia de un buzón dejó de mostrarse -- con la razón (`signed_in`, el buzón volvió a autenticarse, o `account_removed`, eliminaste la cuenta en su lugar) y cuánto tiempo estuvo mostrándose la insignia (`flag_duration`: `<1min`, `1-10min`, `10-60min`, `1-6h`, `6-24h`, `24h+`, o `unknown` para el caso poco frecuente en que no se registró una hora de inicio). |
+
+Ninguno de estos tres eventos lleva un identificador de cuenta, dirección de correo, proveedor de correo o texto del servidor. `flagged_accounts_bucket` es un rango aproximado de cuántos buzones están marcados a la vez en toda la instalación, no cuáles.
+
 ### Retención del caché
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
@@ -223,6 +270,7 @@ Ninguna de estas etiquetas lleva jamás el nombre de host, la huella del certifi
 | --- | --- | --- | --- | --- |
 | `db.mass_delete_messages` | event | no | `folder_role`, `reason`, `deleted_count_bucket`, `watermark_preserved` | Se emitió un `DELETE FROM messages` a nivel de carpeta. Cada llamador suministra un motivo para distinguir una regresión que borra una caché sana de un bump UIDVALIDITY legítimo. |
 | `imap.stale_wipe_guard_tripped` | event | no | `folder_role`, `provider` | La protección mass-delete se negó a vaciar la caché local de la carpeta porque `mailbox.exists` no era numérico. Un pico aquí apunta a un problema del proveedor o de conexión, no a pérdida real de datos. |
+| `imap.header_response_unaddressable` | event | no | `folder_role`, `provider` | Una respuesta FETCH de cabecera no traía un UID utilizable: el mensaje no pudo guardarse y la pasada de sincronización se declaró incompleta. Cuenta pasadas, no mensajes; señala al proveedor cuyo flujo FETCH pierde UID. |
 | `db.shutdown_wal_checkpoint_ms` | histogram | no | `busy`, `reclaimed_kb_bucket`, `ok` | Duración del `PRAGMA wal_checkpoint(TRUNCATE)` que ejecutamos antes de salir, para que las escrituras committed-pero-no-checkpointed sobrevivan al reinicio. |
 
 ### Límites de gasto en IA
@@ -252,6 +300,7 @@ Ninguna de estas etiquetas lleva jamás el nombre de host, la huella del certifi
 | `ai.action.apply_duration_ms` | histogram | no | `kind` | Duración de un apply exitoso: cuánto duró la mutación subyacente (DB / IMAP / SMTP). |
 | `ai.action.preview_skipped` | event | no | `kind`, `reason` | Una herramienta MCP `*_preview` se negó a registrar una acción pendiente porque el conjunto de objetivos resuelto quedó vacío (sin coincidencias tras resolver la consulta). |
 | `ai.action.batch_size` | event | no | `kind`, `accounts_count_bucket`, `emails_count_bucket`, `folders_count_bucket` | Se registra cuando el registro de un preview abarca un lote de mensajes. Los tres recuentos son rangos aproximados, nunca números exactos. |
+| `ai.turn.action_not_prepared` | event | no | `role`, `search_calls_bucket` | Un turno del chat de IA usó el mecanismo de acciones destructivas (una llamada preview o apply) pero terminó sin registrar una acción nueva y sin canjear con éxito una acción ya confirmada (solo cuenta un token de confirmación aceptado por MailCopilot — una confirmación caducada o inválida no cuenta, mientras que un canje exitoso excluye este evento incluso si la acción falla después): no apareció ningún botón de confirmación y no se cambió nada. El panel te lo dice también con palabras. `role` indica qué mitad del par se llamó: `preview` o `apply`. `search_calls_bucket` es un rango aproximado del número de búsquedas realizadas en ese turno. No se envía ni tu petición, ni la respuesta del asistente, ni las consultas de búsqueda: la detección se basa únicamente en qué herramientas se ejecutaron. |
 
 ### Puerta de salida (egress) de IA
 
@@ -275,11 +324,19 @@ Ninguna de estas etiquetas lleva jamás el nombre de host, la huella del certifi
 | `ai.rule.applied` | event | no | `action` | El proceso de reglas de IA en segundo plano aplicó automáticamente una acción reversible (archivar, mover, marcar como leído o marcar con estrella) a un mensaje. |
 | `ai.rule.destructive_preview` | event | no | `action` | El proceso de reglas de IA en segundo plano propuso una acción destructiva (eliminar o marcar como spam), pero la registró como preview pendiente en lugar de aplicarla automáticamente. |
 
+### Acciones rápidas al redactar
+
+| Evento | Tipo | Agregado | Etiquetas | Propósito |
+| --- | --- | --- | --- | --- |
+| `ai.quick_action.input_too_long` | event | no | `preset`, `length_bucket` | Una acción rápida (Mejorar / Acortar / Formal / Corregir gramática) rechazó tu borrador porque supera el límite que acepta esta función, así que no se envió nada al proveedor de IA. `preset` es cuál de los cuatro botones pulsaste. `length_bucket` es una franja de tamaño aproximada — `<=8k`, `8k-12k`, `12k-20k`, `20k-50k`, `50k-100k` o `100k+` caracteres — nunca la longitud exacta ni un solo carácter del propio borrador. Existe para que podamos saber si el límite es demasiado estrecho para correos largos normales. El valor `<=8k` está declarado por completitud, pero hoy es inalcanzable: este evento solo se dispara por encima del límite de 8000 caracteres de las acciones rápidas, y existe únicamente para que una futura reducción de ese límite no produzca un valor fuera del conjunto declarado. |
+| `ai.proofread.input_too_long` | event | no | `length_bucket` | La revisión de corrección rechazó su borrador porque superaba el límite que acepta la función, así que no se envió nada al proveedor de IA. `length_bucket` es la misma banda de tamaño aproximada que arriba: nunca la longitud exacta ni un solo carácter del borrador. Existe para saber si el límite es demasiado estricto para correos largos normales. |
+| `ai.quick_action.preview_outcome` | event | no | `preset`, `outcome` | Qué hiciste con una reescritura de acción rápida que se te mostró en el panel de revisión. `preset` es cuál de los cuatro botones pulsaste. `outcome` es exactamente uno de tres valores: `replaced`, `inserted` o `cancelled`. No se incluye nada del texto: ni el borrador, ni la reescritura, ni su longitud, ni cuántos cambios encontró el panel. Existe para que podamos saber si esas reescrituras se aprovechan o se descartan. Un panel que desaparece sin elección (cerraste la ventana o lanzaste otro preajuste encima) no registra nada en absoluto. |
+
 ### Actualizaciones automáticas
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
 | --- | --- | --- | --- | --- |
-| `update.check_triggered` | event | no | `source` | Se emitió una comprobación de actualizaciones, ya fuera por el temporizador horario en segundo plano o por tu clic en Ajustes -> Acerca de. |
+| `update.check_triggered` | event | no | `source` | Se emitió una comprobación de actualizaciones, ya fuera por el temporizador horario en segundo plano o por tu clic en Configuración -> Acerca de. |
 | `update.check_result` | event | no | `result`, `error_class` | Terminó una comprobación de actualizaciones: al día, hay una actualización disponible, o falló. |
 | `update.download_started` | event | no | `source` | Comenzó una descarga de actualización, ya fuera automática o por tu clic. |
 | `update.download_completed` | event | no | — | La descarga de una actualización terminó con éxito y queda lista para instalarse en el próximo reinicio. |
@@ -300,6 +357,24 @@ Ninguno de estos lleva la cadena de versión de la versión implicada -- solo el
 | --- | --- | --- | --- | --- |
 | `secret_store.fallback_active` | event | no | `surface`, `platform` | Una lectura del almacén de secretos de tu sistema operativo (keytar / libsecret / Secret Service) falló, lo que significa que esta instalación funciona sin un llavero accesible. `surface` identifica qué tipo de lectura de credenciales falló, nunca la credencial, la cuenta ni su dirección de correo. |
 
+### Almacenamiento de claves API de IA
+
+| Evento | Tipo | Agregado | Etiquetas | Propósito |
+| --- | --- | --- | --- | --- |
+| `ai.api_key_store_op` | event | sí (ventana 10 s) | `op`, `provider`, `outcome` | Una clave API de IA almacenada fue leída, escrita o eliminada del almacén de secretos de tu sistema operativo. `op` es `read`, `write` o `delete`. `provider` es `anthropic-api`, `openai-api` o `gemini-api`. `outcome` es `found` o `absent` para una lectura (hay una clave o no la hay en este momento), `ok` para una escritura o eliminación exitosa, o `store_error` cuando no se pudo acceder al propio almacén de secretos. El valor de la clave nunca aparece: ni como texto, ni como longitud, ni como hash. |
+
+### Confirmación de destino de IA
+
+| Evento | Tipo | Agregado | Etiquetas | Propósito |
+| --- | --- | --- | --- | --- |
+| `ai.destination_confirm` | event | no | `field`, `outcome` | El resultado de la comprobación de confirmación de destino que protege un cambio de la dirección del endpoint de IA o del proxy (consulta [Confirmar un nuevo destino de IA](../ai-assistant#confirmar-un-nuevo-destino-de-ia)). `field` es `endpoint` o `proxy`. `outcome` es `accepted`, `declined` (el cambio no se aprobó — hiciste clic en Cancelar o pulsaste Esc, la ventana de confirmación se cerró antes de que respondieras, o el propio diálogo no pudo mostrarse), `blocked_invalid` (la nueva dirección no era una URL http(s) utilizable, rechazada sin mostrar ningún diálogo), o `blocked_busy` (el cambio llegó mientras ya había otra confirmación abierta — solo puede haber un diálogo abierto a la vez en toda la aplicación, así que esto puede ocurrir incluso para el mismo campo). Un recuento de `declined` no es solo un recuento de rechazos deliberados — también incluye un diálogo que no llegó a mostrarse. Ni la dirección ni el host se incluyen nunca. |
+
+### Guardado de ajustes
+
+| Evento | Tipo | Agregado | Etiquetas | Propósito |
+| --- | --- | --- | --- | --- |
+| `settings.field_refused` | event | sí (ventana 10 s) | `field`, `code` | Los ajustes se guardaron dejando fuera un campo, porque el valor enviado para él quedaba fuera de lo que esta versión acepta. Todos los demás campos aceptados del mismo guardado se aplicaron, y el campo omitido conservó el valor que ya tenía. `field` es el nombre del campo omitido (`mcpExportWhitelist`). `code` es el motivo legible por máquina (`unknown_export_tool` — la lista contenía el nombre de una herramienta MCP que esta versión no exporta, normalmente heredado de una versión anterior). El valor omitido nunca se incluye. |
+
 ### Rendimiento de IPC
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
@@ -310,8 +385,23 @@ Ninguno de estos lleva la cadena de versión de la versión implicada -- solo el
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
 | --- | --- | --- | --- | --- |
-| `ui.freeze.renderer_ms` | histogram | sí (ventana 10 s) | `duration_bucket`, `inflight_count`, `top_inflight` | El bucle de eventos del renderer estuvo bloqueado más que el umbral de congelación. |
-| `ui.freeze.main_ms` | histogram | sí (ventana 10 s) | `duration_bucket`, `inflight_count`, `top_inflight` | El bucle de eventos del proceso main estuvo bloqueado (medido con `perf_hooks` delay). |
+| `ui.freeze.renderer_ms` | histogram | sí (ventana 10 s) | `duration_bucket`, `inflight_count`, `oldest_inflight` | El bucle de eventos del renderer estuvo bloqueado más que el umbral de congelación. |
+| `ui.freeze.main_ms` | histogram | sí (ventana 10 s) | `duration_bucket`, `inflight_count`, `oldest_inflight`, `top_sql`, `sql_ms` | El bucle de eventos del proceso main estuvo bloqueado (medido con `perf_hooks` delay). La etiqueta `top_sql` es un resumen `<verbo> <tabla>` de la sentencia SQL más lenta medida en esa ventana: solo la forma de la sentencia, nunca los valores de los parámetros. |
+
+### Menu contextual
+
+| Evento | Tipo | Agregado | Etiquetas | Proposito |
+| --- | --- | --- | --- | --- |
+| `ui.context_menu_shown` | event | sí (ventana 10 s) | `context` | Se mostro el menu contextual nativo (clic derecho). `context` indica que seccion se ofrecio: `link` (enlace), `editable` (campo de texto) o `selection` (texto seleccionado no editable). |
+| `ui.context_menu_link_action` | event | sí (ventana 10 s) | `action` | Se activo una de las dos opciones de enlace del menu contextual. `action` es `open` (Abrir enlace en el navegador) o `copy_address` (Copiar dirección del enlace). Ni la URL del enlace ni su texto visible se incluyen nunca. |
+| `ui.context_menu_spell_action` | event | sí (ventana 10 s) | `action` | Usaste una opcion de ortografia del menu contextual. `action` es `replace` (se aplico una sugerencia) o `add_to_dictionary` (se añadio una palabra a tu diccionario personal). Ni la palabra ni el reemplazo se incluyen nunca. |
+
+### Correccion ortografica
+
+| Evento | Tipo | Agregado | Etiquetas | Proposito |
+| --- | --- | --- | --- | --- |
+| `spellcheck.configured` | event | sí (ventana 10 s) | `enabled`, `language_count`, `platform_owned` | El estado de la correccion ortografica aplicado a la aplicacion, al iniciar y despues de cada guardado de ajustes: si esta activada, CUANTOS diccionarios estan habilitados y si el sistema operativo posee la lista de idiomas (macOS). Los idiomas que elegiste nunca se incluyen, solo su numero. |
+| `spellcheck.dictionary_consent` | event | no | `outcome`, `language_count` | Como termino la peticion de permiso para descargar un diccionario: `accepted`, `declined`, `blocked_busy` (ya habia otra peticion abierta), `failed` (no se pudo mostrar el dialogo) o `unconsented_download` (una descarga empezo sin respuesta registrada: un defecto del que queremos enterarnos). Los nombres de los idiomas nunca se envian. |
 
 ## Spans de rendimiento
 
@@ -342,6 +432,11 @@ Además de los eventos discretos e histogramas anteriores, MailCopilot cronometr
 | `ai.thread_summary.generate` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class` | Una generación de resumen IA del hilo. Solo se dispara ante una llamada real al proveedor, nunca ante un acierto de caché. |
 | `ai.quick_action.rewrite` | span | no | `preset`, `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class` | Una reescritura mediante las acciones rápidas al redactar. `preset` registra cuál de los presets (Mejorar / Acortar / Formal / Corregir gramática) elegiste, nunca el texto de tu borrador. |
 | `ai.instant_reply.generate` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `draft_count` | Una llamada de generación de respuesta instantánea. `draft_count` es cuántas opciones de respuesta se generaron, nunca su texto. |
+| `ai.proofread.check` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `edit_count`, `dropped_count` | Una revisión de corrección de un borrador. `edit_count` es cuántas sugerencias se le ofrecieron; `dropped_count` es cuántas sugerencias devueltas por el modelo no pudieron asociarse con su texto y se descartaron. Ambos son solo recuentos: nunca una sugerencia, nunca un fragmento del borrador, nunca la explicación que se muestra junto a una sugerencia. |
+| `ai.translate.message` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `source_labeled`, `target_lang`, `cache_hit` | Una traducción de mensaje. Se registra también en los aciertos de caché — `cache_hit` los distingue, y un acierto de caché no lleva tokens ni coste; un rechazo por traducción desactivada, texto vacío, mensaje demasiado largo, falta de proveedor o presupuesto agotado no genera ningún span. `target_lang` es un código de idioma de la lista cerrada de dieciséis valores que se ofrece en el selector de idioma de destino. `source_labeled` es un booleano que solo indica si la detección local (o su propia elección posterior) pudo nombrar un idioma de origen para la leyenda -- nunca cuál, ya que eso sería un dato derivado del contenido de su correo. |
+| `ai.translate.draft` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `target_lang` | Una traducción de borrador desde la ventana de redacción: su propio texto del borrador, traducido a petición. Se registra solo cuando se seleccionó un proveedor; un rechazo por traducción desactivada, texto vacío, falta de texto propio, mensaje demasiado largo, falta de proveedor o presupuesto agotado no genera ningún span. `target_lang` es un código de idioma de la misma lista cerrada de dieciséis valores, el que usted eligió en la ventana de redacción -- nunca el idioma que MailCopilot pudo haber sugerido para la respuesta, y nunca un indicador de que esa elección provino de esa sugerencia: tal indicador no existe aquí, deliberadamente, ya que junto con `target_lang` revelaría débilmente el idioma del mensaje al que está respondiendo -- la misma identidad que el span anterior, del lado de lectura, no revela. |
+
+El atributo `provider` de los spans de latencia de IA anteriores que lo incluyen (todos salvo `ai.chat`, que usa el atributo `ai.provider`, definido por separado) toma uno de un conjunto fijo de valores: `anthropic-api`, `openai-api`, `gemini-api`, `local` (la futura ruta del modelo en el dispositivo) o `unknown`. Cualquier valor que MailCopilot no reconozca se asigna a `unknown` antes de registrarse, de modo que este atributo nunca puede ampliarse a una cadena libre o inesperada.
 
 ### Base de datos local
 
@@ -353,4 +448,4 @@ Además de los eventos discretos e histogramas anteriores, MailCopilot cronometr
 
 ## Contacto
 
-¿Preguntas o dudas sobre lo que recopilamos? Abre una incidencia en [github.com/mailcopilot/mailcopilot](https://github.com/mailcopilot/mailcopilot) o contacta con el equipo directamente a través del formulario de comentarios en Ajustes -> Acerca de.
+¿Preguntas o dudas sobre lo que recopilamos? Abre una incidencia en [github.com/mailcopilot/mailcopilot](https://github.com/mailcopilot/mailcopilot) o contacta con el equipo directamente a través del formulario de comentarios en Configuración -> Acerca de.

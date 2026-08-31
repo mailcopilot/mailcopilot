@@ -35,6 +35,61 @@ La registrazione e opt-in: MailCopilot non si appropria del protocollo finche no
 
 Quando MailCopilot viene avviato una seconda volta -- per esempio cliccando un link `mailto:` mentre l'app e gia aperta -- la finestra esistente viene portata in primo piano invece di aprirne una duplicata, cosi e sempre attiva una sola istanza.
 
+## Controllo ortografico
+
+Il controllo ortografico è **disattivato per impostazione predefinita**. Attivarlo scarica un file di dizionario da un server esterno (quello di Google), e MailCopilot chiede prima il permesso -- per ogni nuova lingua aggiunta. È una scelta deliberata: MailCopilot non attiva mai una lingua che non hai approvato. Il download vero e proprio viene eseguito dal motore del browser integrato nell'applicazione (Chromium), che contatta il server di Google -- MailCopilot non può annullare una richiesta già avviata. Se un download parte comunque per una lingua che non hai approvato, MailCopilot se ne accorge e disattiva di nuovo il controllo ortografico, invece di lasciarlo attivo senza che tu lo sappia.
+
+Attiva **«Controlla l’ortografia mentre scrivo»** per accendere il controllo. Da quel momento le parole scritte in modo errato vengono sottolineate ovunque tu possa digitare testo -- nella composizione, nei campi delle impostazioni e così via.
+
+### Scegliere i dizionari
+
+Una volta attivato il controllo ortografico, usa **«Dizionari»** per aggiungere una o più lingue. L'elenco delle lingue disponibili proviene dal motore di controllo ortografico stesso, non da un elenco fisso integrato in MailCopilot -- ciò che vedi dipende da ciò che questa build dell'applicazione può effettivamente offrire. Puoi aggiungere più lingue contemporaneamente; vengono tutte controllate insieme. Ogni lingua aggiunta può essere rimossa di nuovo con il suo pulsante **«Rimuovi»**. Se «Controlla l’ortografia mentre scrivo» è attivo ma non è stato scelto alcun dizionario, il controllo resta di fatto disattivato -- un dizionario è obbligatorio.
+
+Il numero di dizionari attivi contemporaneamente è limitato; il limite attuale è mostrato accanto al selettore.
+
+### Permesso di download
+
+La prima volta che aggiungi una lingua non ancora approvata, MailCopilot mostra una finestra di dialogo che chiede se scaricare il dizionario di quella lingua, indicando il server esterno da cui proviene il file. Nulla di ciò che digiti viene mai inviato da nessuna parte -- il controllo avviene sempre sul tuo computer; viene scaricato solo il file del dizionario stesso.
+
+- Scegliere **«Scarica»** approva la lingua: MailCopilot memorizza l'approvazione e lascia procedere il download. L'approvazione resta valida per quella lingua anche in seguito -- se il dizionario deve essere scaricato di nuovo più avanti (per esempio dopo aver riattivato una lingua già approvata), questo avviene senza chiedertelo di nuovo.
+- Scegliere **«Annulla»** (o chiudere la finestra di dialogo) equivale a rifiutare: quella lingua **non** viene attivata, ma la decisione non viene memorizzata come rifiuto permanente -- puoi aggiungere di nuovo la stessa lingua più avanti e ti verrà semplicemente richiesto ancora. Le altre modifiche fatte nello stesso salvataggio vengono comunque applicate: rifiutare il download di un dizionario non blocca mai il resto delle tue modifiche.
+
+### macOS
+
+Su macOS, il controllo ortografico appartiene al sistema operativo, non a MailCopilot. Su macOS non c'è né un selettore di dizionari né una finestra di dialogo per il permesso di download, perché macOS non scarica nulla e ignora qualsiasi elenco di lingue che MailCopilot potrebbe inviargli -- le impostazioni lo spiegano e mostrano solo l'interruttore acceso/spento. Per cambiare le lingue controllate da macOS, apri Impostazioni di Sistema → Tastiera → Inserimento testo.
+
+### Correggere una parola scritta in modo errato
+
+Fai clic con il tasto destro su una parola sottolineata come errata per vedere un breve elenco di sostituzioni suggerite, oltre a una voce **«Aggiungi al dizionario»**. Cliccare su un suggerimento sostituisce la parola; **«Aggiungi al dizionario»** aggiunge la parola al tuo dizionario personale in modo che non venga più segnalata. Al momento non c'è modo di consultare o rimuovere le parole aggiunte al dizionario personale da MailCopilot.
+
+## Icona nell'area di notifica e funzionamento in background
+
+MailCopilot può mostrare un'icona nell'area di notifica del sistema. **«Mostra icona nell'area di notifica»** è attiva per impostazione predefinita; il suo menu offre **«Apri MailCopilot»**, **«Nuovo messaggio»**, **«Controlla la posta»** e **«Esci»**, e finché l'icona esiste, passandoci sopra con il mouse viene mostrato il numero di messaggi non letti nel suggerimento -- fino a 999, poi **«999+»**.
+
+### Alla chiusura riduci nell'area di notifica
+
+Attiva **«Alla chiusura riduci nell'area di notifica»** (disattivata per impostazione predefinita) affinché MailCopilot continui a funzionare quando chiudi la finestra principale invece di uscire -- la posta continua a sincronizzarsi in background e le notifiche di nuova posta continuano ad arrivare. Per far tornare la finestra, clicca sull'icona nell'area di notifica (o sulla sua voce di menu **«Apri MailCopilot»**); usa **«Esci»** nel menu dell'icona per uscire davvero dall'applicazione.
+
+Scegliere **«Esci»** non rimuove subito l'icona dall'area di notifica. Prima di uscire davvero, MailCopilot esegue un checkpoint del suo database locale -- da qui la breve attesa, normalmente molto meno di un secondo. Durante questa fase, il suggerimento dell'icona mostra **«Chiusura in corso…»**, e il suo menu mostra un'unica voce inattiva **«Chiusura in corso…»** al posto delle opzioni abituali, così puoi capire che l'applicazione sta ancora chiudendosi invece di pensare che Esci abbia solo rimosso l'icona. Se al momento dell'uscita un messaggio era ancora in fase di invio, non va perso: MailCopilot invia attraverso una coda locale, quindi un invio non completato resta semplicemente in coda e riparte al successivo avvio di MailCopilot.
+
+Questa impostazione dipende dal fatto che l'icona sia stata creata con successo, non da chi la disegni: su Linux, MailCopilot crea l'icona anche quando nessun host dell'area di notifica la accetta, quindi **«Alla chiusura riduci nell'area di notifica»** funziona ogni volta che l'oggetto icona esiste -- che il desktop la mostri davvero oppure no. L'impostazione non ha effetto solo se MailCopilot non è riuscito a creare l'icona (un'immagine dell'icona vuota o illeggibile, oppure una piattaforma che rifiuta di costruirla).
+
+MailCopilot non verifica, prima di nascondere la finestra, se il desktop disegni davvero l'icona -- è una decisione del desktop, non di MailCopilot; una nota sotto l'impostazione lo segnala per Linux. Se l'icona non viene mai disegnata, non c'è nulla su cui cliccare, ma nascondere la finestra resta comunque reversibile: riavviare MailCopilot riporta in primo piano la finestra nascosta, che l'icona funzioni, venga disegnata male o non sia mai comparsa.
+
+Se le notifiche sono attive, la prima volta che una chiusura nasconde la finestra nell'area di notifica in una sessione, MailCopilot mostra una breve notifica una tantum che conferma che l'app continua a funzionare in background e che cliccando sull'icona la finestra torna visibile.
+
+Se un giorno chiudete MailCopilot aspettandovi che resti nell'area di notifica e poi non lo trovate più, consultate [Ho chiuso la finestra e ora non trovo più MailCopilot](../faq#ho-chiuso-la-finestra-e-ora-non-trovo-più-mailcopilot) nelle domande frequenti.
+
+### Badge dei non letti
+
+Finché ci sono messaggi non letti, MailCopilot mostra un badge sull'icona dell'applicazione -- un badge numerico nel dock (macOS) o nel launcher di Unity (Linux), e un punto sul pulsante della barra delle applicazioni (Windows); il numero stesso (fino a 999, poi **«999+»**) è disponibile nel suggerimento dell'icona nell'area di notifica finché quell'icona esiste. Il badge rispetta le stesse cartelle escluse dal conteggio dei non letti nelle [impostazioni delle cartelle](folders-settings#badge-dei-non-letti).
+
+### Avvia all'accesso
+
+Attiva **«Avvia all'accesso»** (disattivata per impostazione predefinita) per far avviare MailCopilot automaticamente quando accedi al tuo computer. Su Windows e macOS, questo registra MailCopilot come voce di avvio automatico presso il sistema operativo; su Linux, crea una voce di avvio automatico (un file `.desktop`) affinché il tuo ambiente desktop avvii MailCopilot all'accesso.
+
+L'interruttore registra ciò che hai richiesto; sotto di esso compare una nota ogni volta che il risultato effettivo non corrisponde. Se questa piattaforma o versione non può registrare l'avvio automatico, MailCopilot avvisa che qui l'impostazione non ha effetto. Se l'attivazione non è riuscita, una nota spiega che l'avvio automatico non è stato registrato e che verrà ritentato al prossimo salvataggio. Se la disattivazione non è riuscita, MailCopilot avvisa che l'app continuerà comunque ad avviarsi all'accesso e che la rimozione verrà ritentata automaticamente al prossimo salvataggio -- così non pensi mai che l'avvio automatico sia disattivato quando in realtà non lo è.
+
 ## Attendibilita dei certificati TLS
 
 MailCopilot verifica ogni certificato TLS presentato dai tuoi server di posta sia rispetto al pacchetto di certificati Mozilla integrato, sia rispetto all'archivio dei certificati del tuo sistema operativo. Attendersi anche all'archivio di sistema significa che i software di sicurezza che ispezionano il traffico TLS (per esempio Kaspersky e antivirus simili) e i proxy aziendali non interrompono piu la sincronizzazione della posta su Windows, macOS o Linux -- MailCopilot riconosce come validi i certificati presentati da questi strumenti invece di rifiutare la connessione. La verifica dei certificati non viene mai indebolita da questo: un certificato deve comunque essere attendibile secondo una di queste due fonti, oppure essere pinnato esplicitamente, per essere accettato. Se l'archivio dei certificati del tuo sistema operativo non puo essere letto, MailCopilot ripiega sul solo pacchetto Mozilla integrato invece di saltare la verifica.
@@ -59,7 +114,7 @@ Per risolvere, riconferma il certificato tramite quella stessa finestra di dialo
 
 ### Avviso di ispezione
 
-Dopo la prima sincronizzazione riuscita di un account in una sessione, MailCopilot verifica una volta se la sua connessione al server di posta viene ispezionata da un antivirus o proxy (il certificato e attendibile solo tramite l'archivio di sistema) e, in tal caso, mostra un avviso come "La connessione a `{host}` e sotto ispezione.", indicando l'emittente quando e noto. Questa verifica viene eseguita al massimo una volta per server per l'intera durata del tuo profilo, sia che venga rilevata un'ispezione sia che non venga rilevata -- quindi se l'ispezione viene attivata su un server *dopo* che questa verifica una tantum e gia stata eseguita senza trovare nulla, MailCopilot non se ne accorgera. L'avviso puo essere chiuso.
+Dopo la prima sincronizzazione riuscita di un account in una sessione, MailCopilot verifica una volta se la sua connessione al server di posta viene ispezionata da un antivirus o proxy (il certificato e attendibile solo tramite l'archivio di sistema) e, in tal caso, mostra un avviso come "La connessione a `{{host}}` viene ispezionata.", indicando l'emittente quando e noto. Questa verifica viene eseguita al massimo una volta per server per l'intera durata del tuo profilo, sia che venga rilevata un'ispezione sia che non venga rilevata -- quindi se l'ispezione viene attivata su un server *dopo* che questa verifica una tantum e gia stata eseguita senza trovare nulla, MailCopilot non se ne accorgera. L'avviso puo essere chiuso.
 
 Gli errori di certificato vengono ritentati con un intervallo lungo (6 ore) anziche l'intervallo breve usato per i normali problemi di rete, poiche richiedono una tua decisione e non si risolvono da soli.
 
@@ -77,9 +132,9 @@ La sezione mostra una tabella dei certificati pinnati con host, porta, impronta 
 
 ### Aggiungere un pin
 
-1. Clicca su **Add pin** (Aggiungi pin).
+1. Clicca su **Aggiungi pin**.
 2. Inserisci l'**host** (ad esempio, `imap.gmail.com`) e la **porta** (ad esempio, `993`).
-3. Clicca su **Recupera e pinna**. MailCopilot si connette al server, recupera il suo certificato e ti mostra l'impronta digitale.
+3. Clicca su **Recupera e blocca**. MailCopilot si connette al server, recupera il suo certificato e ti mostra l'impronta digitale.
 4. Conferma per salvare il pin.
 
 Un pin aggiunto in questo modo *restringe* solo quale certificato viene accettato per un server gia attendibile tramite il pacchetto Mozilla abituale o l'archivio dei certificati del tuo sistema operativo -- non rende da solo attendibile un certificato autofirmato o con autorita di certificazione privata altrimenti non attendibile. Per un server di posta autofirmato (o con autorita di certificazione privata non ancora presente nell'archivio del tuo sistema operativo), aggiungere un pin qui non basta per connettersi; devi confermarlo tramite la finestra di dialogo di ripristino del certificato descritta in [Attendibilita dei certificati TLS](#attendibilita-dei-certificati-tls), l'unico punto in cui MailCopilot concede attendibilita a un certificato di questo tipo.

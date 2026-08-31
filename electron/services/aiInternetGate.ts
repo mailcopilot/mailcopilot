@@ -116,6 +116,24 @@ export function isInternetTool(toolName: string): boolean {
 export type TurnConsentState = 'unset' | 'approved' | 'denied'
 
 /**
+ * Who an intercepted egress decision is attributed to in the audit log.
+ *
+ * Either the AI provider running a chat turn, or `'mcp-export'` — the MCP
+ * export server, which executes tool calls on behalf of an EXTERNAL client
+ * (Claude Desktop et al.) and has no AI provider of its own.
+ *
+ * §2.218 — the export path used to borrow an AI provider id for this label,
+ * defaulting to the (now removed) `subscription` value when the user had not
+ * configured one. That was untrue in both directions: it attributed an
+ * external client's egress to a provider that issued no request, and after the
+ * removal it would have named a provider that no longer exists. Attribution is
+ * a LABEL ONLY — no gate decision reads it — so the honest answer is a distinct
+ * member rather than a borrowed one, and an unconfigured in-app AI provider
+ * must not disable MCP export (external-client users routinely have none).
+ */
+export type EgressAttribution = AiProvider | 'mcp-export'
+
+/**
  * Per-AI-request gate state. One instance per `aiChat()` invocation. The
  * lifetime is tied to the request (created in `aiChat()`, garbage-collected
  * when the request finishes). This is identical lifetime to `EgressGate`
@@ -127,8 +145,8 @@ export type TurnConsentState = 'unset' | 'approved' | 'denied'
 export type InternetGate = {
   /** AI request id (matches `AiChatOptions.requestId`). */
   requestId: string
-  /** Provider running this request — recorded in the audit log. */
-  provider: AiProvider
+  /** Who this request is attributed to — recorded in the audit log. */
+  provider: EgressAttribution
   /** Per-turn consent state. */
   consentForTurn: TurnConsentState
   /**
@@ -148,7 +166,7 @@ export type InternetGate = {
 /** Build a fresh per-request gate. */
 export function createInternetGate(input: {
   requestId: string
-  provider: AiProvider
+  provider: EgressAttribution
 }): InternetGate {
   return {
     requestId: input.requestId,
@@ -539,7 +557,7 @@ function recordIntercepted(input: {
  *     stolen data into the very query string we'd otherwise persist.
  */
 function appendAuditRow(input: {
-  provider: AiProvider
+  provider: EgressAttribution
   toolName: string
   toolInput: unknown
   decision: 'approved' | 'denied'

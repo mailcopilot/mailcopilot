@@ -96,6 +96,8 @@
       "load": "Ladefehler: {{error}}",
       "loadMessage": "Fehler beim Laden der Nachricht: {{error}}",
       "bodyNotAvailableOffline": "Der Nachrichteninhalt ist offline nicht verfügbar. Nur die Kopfzeilen sind zwischengespeichert.",
+      "bodyLoadTimedOut": "Die Nachricht wurde nicht innerhalb der vorgesehenen Zeit geladen. Das kann vorkommen, wenn Hintergrundarbeit die Verbindung belegt, wenn der Server langsam antwortet oder wenn die Nachricht sehr groß ist. Sie können es erneut versuchen.",
+      "bodyLoadFailed": "MailCopilot konnte den Inhalt dieser Nachricht nicht laden — es werden nur ihre Kopfzeilen angezeigt. Sie können es erneut versuchen.",
       "delete": "Löschfehler: {{error}}",
       "archive": "Archivierungsfehler: {{error}}",
       "search": "Suchfehler: {{error}}",
@@ -106,7 +108,13 @@
       "pin": "Fehler beim Anheften: {{error}}",
       "compose": "Fehler beim Erstellen: {{error}}",
       "attachment": "Anhangfehler: {{error}}",
-      "openExternal": "Fehler beim Öffnen des Links: {{error}}"
+      "openExternal": "Fehler beim Öffnen des Links: {{error}}",
+      "presented": {
+        "offline": "Keine Verbindung zum Mailserver. MailCopilot versucht es weiter.",
+        "timeout": "Der Mailserver hat nicht rechtzeitig geantwortet. MailCopilot versucht es weiter.",
+        "auth": "Anmeldung abgelehnt. Kontopasswort prüfen oder das Konto in den Einstellungen neu autorisieren.",
+        "unknown": "Anfrage konnte nicht ausgeführt werden. Bitte erneut versuchen."
+      }
     },
     "authRecovery": {
       "googlePrompt": "Die Google-Autorisierung für {{account}} ist abgelaufen. Jetzt neu verbinden?",
@@ -141,6 +149,11 @@
       "message": "Nachricht zugestellt, aber die Kopie konnte nicht im Ordner „Gesendet“ gespeichert werden",
       "messageWithFolder": "Nachricht zugestellt, aber die Kopie konnte nicht in „{{folder}}“ gespeichert werden",
       "dismiss": "Schließen"
+    },
+    "accountAuth": {
+      "message": "„{{account}}“ empfängt keine E-Mails mehr – die Anmeldung ist abgelaufen. Melden Sie sich erneut an, um die Synchronisierung fortzusetzen.",
+      "messageNoAccount": "Ein Postfach empfängt keine E-Mails mehr – die Anmeldung ist abgelaufen. Melden Sie sich erneut an, um die Synchronisierung fortzusetzen.",
+      "action": "Erneut anmelden"
     },
     "certRecovery": {
       "title": "Der Server hat ein anderes Zertifikat vorgelegt",
@@ -360,6 +373,61 @@
       "imagesBlocked": "Externe Bilder sind zum Schutz Ihrer Privatsphäre blockiert.",
       "showImages": "Bilder anzeigen"
     },
+    "translate": {
+      "action": "Übersetzen",
+      "retry": "Erneut versuchen",
+      "loading": "Wird übersetzt…",
+      "showOriginal": "Original anzeigen",
+      "showTranslation": "Übersetzung anzeigen",
+      "targetLabel": "Übersetzen nach",
+      "sourceLabel": "Sprache des Originals",
+      "sourcePlaceholder": "Sprache auswählen",
+      "sourceOffer": "Die Sprache des Originals konnte nicht bestimmt werden, deshalb trägt die Übersetzung oben keine entsprechende Angabe. Sie anzugeben ist freiwillig: Es aktualisiert nur die Angabe und verwendet die bereits erstellte Übersetzung weiter, ohne beim Anbieter eine neue anzufordern.",
+      "sourceApply": "Angabe aktualisieren",
+      "sourceRestate": "Nicht die richtige Sprache?",
+      "sourceRestateHint": "Geben Sie die Sprache des Originals selbst an. Das ändert nur die Angabe oben: Die Übersetzung, die Sie lesen, bleibt unverändert und wird weiterverwendet, ohne beim Anbieter eine neue anzufordern.",
+      "produced": "Maschinelle Übersetzung ins {{target}}. Das Original ist einen Klick entfernt.",
+      "producedFrom": "Maschinelle Übersetzung aus dem {{source}} ins {{target}}. Das Original ist einen Klick entfernt.",
+      "textProjection": "Übersetzt wurde die Textfassung der Nachricht — Formatierung und Bilder sind daher nicht Teil der Übersetzung.",
+      "refusal": {
+        "budget": "Das KI-Budget dieses Zeitraums ist aufgebraucht. Erhöhen Sie es unter Einstellungen → KI oder warten Sie auf den nächsten Zeitraum.",
+        "no_provider": "Es ist noch kein KI-Anbieter eingerichtet. Fügen Sie einen unter Einstellungen → KI hinzu.",
+        "provider_error": "Der KI-Anbieter hat keine Übersetzung geliefert. Bitte versuchen Sie es erneut.",
+        "empty_input": "Der Text dieser Nachricht ist noch nicht geladen. Versuchen Sie es erneut, sobald die Nachricht geladen ist.",
+        "too_long": "Diese Nachricht ist zu lang, um sie in einem Durchgang zu übersetzen, und es gibt keine Möglichkeit, nur einen Teil davon zu übersetzen: Für die Grenze zählt die gesamte Nachricht, einschließlich früherer Korrespondenz, die darin zitiert sein könnte.",
+        "opt_out": "Für dieses Konto ist die Übersetzung ausgeschaltet. Schalten Sie sie unter Einstellungen → KI → Nachrichten übersetzen ein."
+      },
+      "languages": {
+        "en": "Englisch",
+        "ru": "Russisch",
+        "uk": "Ukrainisch",
+        "de": "Deutsch",
+        "fr": "Französisch",
+        "es": "Spanisch",
+        "it": "Italienisch",
+        "pt": "Portugiesisch",
+        "nl": "Niederländisch",
+        "pl": "Polnisch",
+        "tr": "Türkisch",
+        "ar": "Arabisch",
+        "zh": "Chinesisch (vereinfacht)",
+        "ja": "Japanisch",
+        "ko": "Koreanisch",
+        "hi": "Hindi"
+      }
+    },
+    "parseCap": {
+      "hard": {
+        "title": "Diese Nachricht ist zu groß zum Öffnen",
+        "body": "Sie ist größer als {{limit}} – mehr kann MailCopilot nicht sicher lesen, daher wurden Text und Anhänge nicht geöffnet. Die Nachricht selbst bleibt auf dem Server unverändert – Sie können sie in einem anderen E-Mail-Programm öffnen."
+      },
+      "soft": {
+        "banner": "Es wird nur der Anfang dieser Nachricht angezeigt.",
+        "action": "Vollständige Nachricht anzeigen",
+        "loading": "Wird geladen…",
+        "atLimit": "Mehr davon kann MailCopilot nicht anzeigen."
+      }
+    },
     "links": {
       "title": "Dieser Link sieht verdächtig aus",
       "textLabel": "Linktext",
@@ -373,7 +441,9 @@
     },
     "attachments": {
       "download": "Anhang herunterladen",
-      "unnamed": "Anhang"
+      "unnamed": "Anhang",
+      "showMore": "Mehr anzeigen ({{hidden}})",
+      "showLess": "Weniger anzeigen"
     },
     "list": {
       "filter": "Filtern",
@@ -430,6 +500,26 @@
   "settings": {
     "title": "Einstellungen",
     "unsavedWarning": "Es gibt ungespeicherte Änderungen. Ohne Speichern schließen?",
+    "aiDestination": {
+      "declinedTitle": "Adresse unverändert",
+      "invalidTitle": "Adresse nicht übernommen",
+      "busyTitle": "Adressänderung nicht angewendet",
+      "unchangedFields": "Es gilt weiterhin der bisherige Wert für: {{fields}}.",
+      "otherSettingsSaved": "Die übrigen angenommenen Änderungen auf dieser Seite wurden gespeichert.",
+      "retry": "Erneut versuchen"
+    },
+    "mcpExport": {
+      "refusedTitle": "Die Werkzeugliste des MCP-Exports wurde nicht gespeichert",
+      "refusedUnknownTool": "Sie enthält ein Werkzeug, das diese Version der App nicht exportiert; es gilt daher weiterhin die zuvor gespeicherte Liste.",
+      "refusedOther": "Sie wurde nicht übernommen; es gilt daher weiterhin die zuvor gespeicherte Liste.",
+      "repairedTitle": "Veraltete Werkzeugnamen wurden aus der Liste entfernt",
+      "repairedTools": "Aus der Werkzeugliste des MCP-Exports entfernt: {{tools}}.",
+      "repairedExplain": "Diese Version exportiert diese Werkzeuge nicht, sie hatten also keine Wirkung. Klicken Sie erneut auf Speichern, um die korrigierte Liste zu speichern.",
+      "otherSettingsSaved": "Die übrigen angenommenen Änderungen auf dieser Seite wurden gespeichert."
+    },
+    "saveRefusal": {
+      "unknownField": "Diese Einstellung wurde nicht gespeichert: {{field}}."
+    },
     "hint": "Passen Sie das Aussehen und Verhalten der App an",
     "tabs": {
       "accounts": "Konten",
@@ -507,6 +597,27 @@
     "general": {
       "defaultMailApp": "Als Standard-E-Mail-App festlegen",
       "defaultMailAppHint": "Mailto-Links aus Browsern und anderen Apps verarbeiten"
+    },
+    "spellcheck": {
+      "title": "Rechtschreibprüfung",
+      "enabled": "Rechtschreibung beim Tippen prüfen",
+      "hint": "Standardmäßig aus. Beim Einschalten einer Sprache wird ihr Wörterbuch von einem externen Server geladen — wir fragen vorher, bei jeder neu hinzugefügten Sprache.",
+      "languagesLabel": "Wörterbücher",
+      "addLanguage": "Sprache hinzufügen…",
+      "none": "Keine Wörterbücher gewählt — die Rechtschreibprüfung bleibt aus.",
+      "remove": "Entfernen",
+      "macOwned": "macOS prüft die Rechtschreibung mit eigenen Wörterbüchern, die in den Systemeinstellungen → Tastatur → Texteingabe gewählt werden. MailCopilot kann diese Liste nicht ändern und lädt nichts herunter.",
+      "unavailable": "Dieser Build meldet keine Rechtschreibwörterbücher.",
+      "limit": "Höchstens {{count}} Wörterbücher gleichzeitig."
+    },
+    "tray": {
+      "enabled": "Symbol im Infobereich anzeigen",
+      "closeToTray": "Beim Schließen in den Infobereich minimieren",
+      "launchAtLogin": "Beim Anmelden starten",
+      "linuxNoTrayNote": "Manche Linux-Desktops zeigen kein Symbol im Infobereich. Das Fenster wird trotzdem ausgeblendet – starten Sie MailCopilot erneut, um es zurückzuholen.",
+      "launchAtLoginUnsupported": "Diese Version oder Plattform kann den Autostart nicht einrichten, die Einstellung bleibt hier wirkungslos.",
+      "launchAtLoginFailed": "Der Autostart konnte nicht eingerichtet werden. Beim nächsten Speichern wird es erneut versucht.",
+      "launchAtLoginDisableFailed": "Der Autostart konnte nicht entfernt werden, die App wird daher weiterhin beim Anmelden gestartet. Beim nächsten Speichern wird es erneut versucht."
     },
     "bodyRetentionDays": {
       "label": "Vollständige Nachrichtenkopie speichern für",
@@ -646,11 +757,14 @@
       "conditions": "Bedingungen",
       "actions": "Aktionen",
       "field": {
-        "from": "Absender",
+        "from_address": "Absender — Adresse",
+        "from_name": "Absender — Anzeigename",
+        "from": "Absender — Name oder Adresse (veraltet)",
         "to": "Empfänger",
         "cc": "Cc",
         "subject": "Betreff",
-        "has_attachment": "Hat Anhang"
+        "has_attachment": "Hat Anhang",
+        "unknown": "Unbekanntes Feld"
       },
       "op": {
         "contains": "enthält",
@@ -685,9 +799,24 @@
       "addCondition": "Bedingung hinzufügen",
       "addAction": "Aktion hinzufügen",
       "folderPlaceholder": "Ordnername",
+      "moveFolderRequired": "Geben Sie den Ordner an, in den Nachrichten verschoben werden sollen — ohne ihn lässt sich die Regel nicht speichern.",
       "saveFailed": "Die Regel konnte nicht gespeichert oder angewendet werden. Bitte versuchen Sie es erneut.",
       "conditionField": "Bedingungsfeld",
       "conditionOp": "Bedingungsoperator",
+      "removeCondition": "Bedingung entfernen",
+      "malformedBadge": "Nicht anwendbar",
+      "refusedBadge": "Wird nicht angewendet",
+      "displayNameCaveat": "Den Anzeigenamen wählt der Absender selbst und kann jeden beliebigen angeben — Regeln, die Nachrichten verschieben, archivieren, löschen oder als Spam markieren, müssen stattdessen die Adresse vergleichen.",
+      "unsupportedFieldCaveat": "MailCopilot speichert „{{field}}“ nicht, daher lässt sich diese Bedingung nie prüfen: Die Regel trifft auf nichts zu und wird nicht mehr ausgeführt. Entfernen Sie die Bedingung oder wählen Sie ein anderes Feld.",
+      "unverifiableSenderCaveat": "Diese Bedingung vergleicht den Anzeigenamen, den der Absender selbst schreibt und den niemand prüft, und kann „{{action}}“ deshalb nicht rechtfertigen. Vergleichen Sie stattdessen „{{suggestion}}“ — sonst lässt sich die Regel nicht speichern.",
+      "saveRefused": "Die Regel wurde nicht gespeichert. {{reason}}",
+      "applyRefused": "Die Regel wurde gespeichert, aber nicht auf vorhandene Nachrichten angewendet. {{reason}}",
+      "refusal": {
+        "malformedRule": "Die Regel ist nicht in einer Form geschrieben, die MailCopilot anwenden kann: Einige ihrer Bedingungen oder Aktionen sind unvollständig. Falls ein Assistent sie eingerichtet hat, bitten Sie ihn, die Regel neu zu erstellen — oder legen Sie die Regel hier im Editor an.",
+        "unsupportedField": "MailCopilot speichert das Feld „{{field}}“ nicht, daher lässt sich eine Bedingung darauf nie prüfen. Entfernen Sie diese Bedingung oder verwenden Sie ein Feld, das der Client speichert.",
+        "unverifiableSender": "Die Bedingung „{{field}}“ vergleicht den Anzeigenamen, den der Absender selbst schreibt und den niemand prüft, und kann „{{action}}“ nicht rechtfertigen. Vergleichen Sie stattdessen „{{suggestion}}“.",
+        "unknown": "Diese Regel kann in dieser Form nicht ausgeführt werden."
+      },
       "actionType": "Aktionstyp"
     },
     "aiRules": {
@@ -713,7 +842,7 @@
       "website": "Webseite",
       "docs": "Dokumentation",
       "sentryEnabled": "Diagnose- und Nutzungsdaten senden",
-      "sentryHint": "Umfasst Absturzberichte, Leistungsmessungen, Nutzungsereignisse (welche Funktionen verwendet werden, welcher KI-Anbieter und welches Modell, die geschätzten Kosten einer Anfrage) sowie eine zufällige Installationskennung, die Ihre Sitzungen verbindet. Nachrichteninhalte, Betreffzeilen und Ordnernamen werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf, und aus dem Fehlertext, den Ihr Mailserver zurückgibt, werden Adressen und Dateipfade automatisch entfernt, soweit sie erkannt werden. Die einzige Adresse, die gesendet wird, ist die, die Sie unten selbst in das Feedback-Formular eintragen, damit Sie eine Antwort erhalten können.",
+      "sentryHint": "Umfasst Absturzberichte, Leistungsmessungen, Nutzungsereignisse (welche Funktionen verwendet werden, welcher KI-Anbieter und welches Modell, die geschätzten Kosten einer Anfrage) sowie eine zufällige Installationskennung, die Ihre Sitzungen verbindet. Nachrichteninhalte, Betreffzeilen und Ordnernamen werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf — mit einer Ausnahme: Lehnt eine Schnellaktion einen zu langen Entwurf ab, wird diese Ablehnung mit einer von sechs benannten Längenklassen gezählt, nie der Text und nie die genaue Länge. Aus dem Fehlertext, den Ihr Mailserver zurückgibt, werden Adressen und Dateipfade automatisch entfernt, soweit sie erkannt werden. Die einzige Adresse, die gesendet wird, ist die, die Sie unten selbst in das Feedback-Formular eintragen, damit Sie eine Antwort erhalten können.",
       "sentryConsentPending": "Die Diagnose bleibt aus, solange die Einwilligungsfrage nicht beantwortet ist. MailCopilot fragt beim nächsten Start einmal nach; bis dahin hat dieser Schalter keine Wirkung.",
       "debugLogging": "Debug-Protokollierung aktivieren",
       "debugLoggingHint": "Schreibt detaillierte Protokolle in eine Datei zur Fehlerbehebung. Protokolle werden lokal gespeichert und nie automatisch gesendet.",
@@ -737,7 +866,9 @@
         "title": "Updates",
         "autoDownload": "Updates automatisch im Hintergrund herunterladen",
         "autoDownloadHint": "Wenn aktiviert, werden neue Versionen still heruntergeladen und Sie werden zum Neustart aufgefordert. Wenn deaktiviert, entscheiden Sie selbst, ob jedes Update heruntergeladen wird.",
-        "cannotSelfUpdateHint": "Diese Installation ist schreibgeschützt (systemweite Installation). Updates erfordern Administratorrechte.",
+        "cannotSelfUpdateHint": "Der Ordner mit der App ist nicht beschreibbar, daher kann das Update nicht an Ort und Stelle installiert werden. Laden Sie die neue Version manuell herunter oder verschieben Sie die App in einen eigenen Ordner.",
+        "cannotSelfUpdateNoTarget": "Diese Version kann sich nicht selbst ersetzen (sie läuft weder als AppImage noch als Systempaket). Laden Sie die neue Version manuell von der Website herunter.",
+        "cannotSelfUpdateUnknown": "Diese Installation kann sich nicht automatisch aktualisieren. Laden Sie die neue Version manuell von der Website herunter.",
         "checkNow": "Nach Updates suchen",
         "checking": "Wird geprüft…",
         "upToDate": "Sie haben die neueste Version",
@@ -760,12 +891,13 @@
       "versions": "Die MailCopilot-Version, Ihr Betriebssystem und dessen Version",
       "performance": "Die Dauer von Vorgängen — Mail-Synchronisierung, Suche, Versand, KI-Anfragen",
       "usage": "Welche Funktionen Sie wie oft genutzt haben — Suche, Verfassen von E-Mails, KI, Regeln, Vorlagen, Zurückstellen — sowie den verwendeten KI-Anbieter, das Modell und die geschätzten Kosten einer Anfrage",
+      "aiKeyStore": "Zugriffe auf den Speicher, in dem Ihre KI-Schlüssel liegen: welcher Anbieter, ob der Schlüssel gelesen, gespeichert oder gelöscht wurde, und wie es ausging — auch, ob dort ein Schlüssel vorhanden war. Der Schlüssel selbst wird nie gesendet.",
       "setup": "Grunddaten zur Einrichtung: wie viele Konten Sie haben, die Art des Maildienstes (zum Beispiel Gmail oder Outlook), die Anmeldemethode, die Sprache der Oberfläche und das Design",
       "installId": "Eine zufällige Kennung dieser Installation, die beim ersten Start erzeugt wird. Sie ist nicht mit Ihrer E-Mail-Adresse verknüpft, verbindet aber die Daten Ihrer verschiedenen Sitzungen mit derselben Installation."
     },
     "neverTitle": "MailCopilot sendet niemals:",
     "never": {
-      "bodies": "Nachrichtentexte, Betreffzeilen und die Namen Ihrer Ordner werden nicht erfasst: Nichts von dem, was gesendet wird, baut darauf auf, und in den Daten steht nur die Art des Ordners, etwa Posteingang oder Papierkorb. Der einzige Text, den nicht wir verfassen, ist die Fehlermeldung eines Mailservers; Adressen und Dateipfade werden vor dem Senden automatisch daraus entfernt, soweit sie erkannt werden",
+      "bodies": "Nachrichtentexte, Betreffzeilen und die Namen Ihrer Ordner werden nicht erfasst: In den Daten steht nur die Art des Ordners, etwa Posteingang oder Papierkorb, und nichts von dem, was gesendet wird, baut auf Ihrem Text auf — mit einer einzigen eng begrenzten Ausnahme. Wenn eine Schnellaktion im Schreibfenster einen Entwurf ablehnt, weil er länger ist als zulässig, wird diese Ablehnung zusammen mit einer von sechs vorab benannten Größenklassen gezählt, etwa 8.000 bis 12.000 Zeichen: nicht die Länge selbst, kein einziges Wort des Entwurfs und nur im Moment dieser Ablehnung. Der einzige Text, den nicht wir verfassen, ist die Fehlermeldung eines Mailservers; Adressen und Dateipfade werden vor dem Senden automatisch daraus entfernt, soweit sie erkannt werden",
       "addresses": "E-Mail-Adressen, weder Ihre noch die anderer. Die einzige Ausnahme ist das Feedback-Formular unter Einstellungen → Über: Eine Adresse, die Sie dort selbst eintragen, wird zusammen mit Ihrer Nachricht gesendet, damit Sie eine Antwort erhalten können",
       "attachments": "Anhänge und deren Dateinamen",
       "searchQueries": "Was Sie in die Suche eingeben — gezählt werden nur die Länge der Anfrage und die Anzahl der Treffer",
@@ -854,6 +986,8 @@
       "enterPassword": "Geben Sie IMAP- und SMTP-Passwörter ein, um die Verbindung zu testen",
       "enterEmailPassword": "Geben Sie E-Mail und Passwort ein",
       "imapSmtp": "IMAP: {{imap}}, SMTP: {{smtp}}",
+      "imapOnly": "IMAP: {{error}}",
+      "smtpOnly": "SMTP: {{error}}",
       "enterEmailForAutoconfig": "Geben Sie die E-Mail-Adresse für die automatische Konfiguration ein",
       "autoconfigNotFound": "Servereinstellungen konnten nicht automatisch erkannt werden",
       "autoconfigFailed": "Fehler bei der automatischen Konfiguration: {{error}}",
@@ -896,7 +1030,19 @@
       },
       "smtpSeparate": "SMTP-Login/Passwort weicht ab",
       "imapDetected": "IMAP: {{host}}:{{port}}",
-      "smtpDetected": "SMTP: {{host}}:{{port}}"
+      "smtpDetected": "SMTP: {{host}}:{{port}}",
+      "oauthWaiting": {
+        "title": "{{provider}} wird verbunden",
+        "stage": {
+          "browser": "Warten auf die Freigabe im Browser…",
+          "token": "Zugriff wird abgerufen…",
+          "imap": "E-Mail-Server wird geprüft…",
+          "smtp": "Versandserver wird geprüft…",
+          "saving": "Konto wird gespeichert…"
+        },
+        "browserHint": "Es sollte sich ein Browserfenster geöffnet haben. Erteilen Sie dort die Freigabe und kehren Sie hierher zurück.",
+        "appHint": "Fast fertig. Bei langsamer Verbindung können die Serverprüfungen bis zu einer Minute dauern."
+      }
     },
     "confirm": {
       "remove": "Konto {{label}} entfernen? Der lokale Cache wird gelöscht.",
@@ -1071,8 +1217,6 @@
         "digest": "E-Mail-Digest"
       },
       "chooseProvider": "Wählen Sie die Verbindungsmethode:",
-      "subscription": "Claude-Abonnement",
-      "subscriptionHint": "Pro/Max — wenn Sie bereits über CLI autorisiert sind",
       "apiKey": "API-Schlüssel",
       "apiKeyHint": "Abrechnung pro Token",
       "configure": "In Einstellungen konfigurieren"
@@ -1217,9 +1361,12 @@
       "errorPrefix": "Fehler",
       "notConfigured": "KI-Anbieter ist nicht konfiguriert. Konfigurieren Sie ihn in den Einstellungen.",
       "invalidKey": "Ungültiger API-Schlüssel. Überprüfen Sie Ihren Schlüssel unter Einstellungen → KI.",
-      "noSubscription": "Autorisieren Sie sich über `claude login` im Terminal.",
+      "noKey": "Für diesen Anbieter ist kein API-Schlüssel hinterlegt. Geben Sie ihn unter Einstellungen → KI ein.",
+      "keyMissing": "Für diesen Anbieter wurde ein API-Schlüssel gespeichert, er ist aber nicht mehr im Schlüsselspeicher. Geben Sie ihn unter Einstellungen → KI erneut ein.",
+      "storeUnavailable": "Der Schlüsselspeicher des Systems hat nicht geantwortet, der API-Schlüssel konnte nicht gelesen werden. Wir haben nichts gelöscht, können aber im Moment nicht prüfen, ob der Schlüssel noch vorhanden ist. Versuchen Sie es später erneut oder starten Sie die App neu.",
       "quotaExceeded": "Nachrichtenlimit erreicht. Versuchen Sie es später oder wechseln Sie zu einem API-Schlüssel.",
       "requestBudgetStopped": "Anfrage gestoppt: Das Kostenlimit pro Anfrage wurde erreicht. Passen Sie es unter Einstellungen → KI an.",
+      "actionNotPrepared": "Es wurde keine Aktion vorbereitet: Es gibt keine Bestätigungsschaltfläche und es wurde nichts geändert. Fragen Sie erneut und nennen Sie die betroffenen E-Mails.",
       "offline": "KI-Assistent ist offline nicht verfügbar.",
       "timeout": "Zeitüberschreitung der Anfrage. Versuchen Sie es erneut.",
       "changeProvider": "Anbieter wechseln"
@@ -1247,7 +1394,6 @@
     "settings": {
       "tab": "KI",
       "provider": "Anbieter",
-      "providerSubscription": "Claude-Abonnement",
       "providerApi": "Anthropic API-Schlüssel",
       "providerOpenAI": "OpenAI API-Schlüssel",
       "providerGemini": "Google Gemini API-Schlüssel",
@@ -1287,7 +1433,7 @@
       "chooseProvider": "Verbindungsmethode wählen:",
       "back": "Zurück",
       "resetProvider": "Konfiguration zurücksetzen",
-      "resetConfirm": "AI-Konfiguration zurücksetzen? Der API-Schlüssel wird gelöscht.",
+      "resetConfirm": "AI-Konfiguration zurücksetzen? Der API-Schlüssel dieses Anbieters wird gelöscht. Die Schlüssel anderer Anbieter bleiben erhalten.",
       "checkRequired": "Verbindung zuerst prüfen",
       "memory": {
         "title": "KI-Gedächtnis",
@@ -1304,6 +1450,16 @@
         "title": "Sofortantwort",
         "label": "Antwortentwürfe mit KI vorschlagen",
         "help": "Fügt der geöffneten Nachricht eine Schaltfläche „Sofortantwort“ hinzu, die zwei oder drei bearbeitungsfertige Antworten entwirft. Es wird nichts automatisch gesendet. Standardmäßig aus; pro Konto aktivierbar."
+      },
+      "proofread": {
+        "title": "KI-Korrekturlesen",
+        "label": "Entwürfe mit KI auf Fehler prüfen",
+        "help": "Fügt im Schreibfenster eine Schaltfläche „Text prüfen“ hinzu, die Korrekturvorschläge zu dem von Ihnen geschriebenen Text auflistet. Sie übernehmen jeden Vorschlag einzeln, und nichts wird von selbst geändert oder gesendet. Die Prüfung blockiert oder verzögert das Senden nie. Standardmäßig deaktiviert; pro Konto aktivierbar."
+      },
+      "translate": {
+        "title": "KI-Übersetzung",
+        "label": "Übersetzen empfangener Nachrichten und eigener Entwürfe durch die KI erlauben",
+        "help": "Fügt über der geöffneten Nachricht eine Schaltfläche „Übersetzen“ hinzu. Nichts wird von selbst übersetzt: Ein Anbieter wird nur auf Ihren Klick hin aufgerufen, und das Original ist immer einen Klick entfernt. Die Übersetzung erscheint als reiner Text und ersetzt die gespeicherte Nachricht nie. Dieselbe Schaltfläche erscheint im Schreibfenster für den Entwurf, den Sie verfassen: MailCopilot sendet nur den Text, den Sie selbst geschrieben haben — ein Zitat, ein Weiterleitungskopf oder eine Signatur, die es erkennt, gelangen nicht in die Anfrage und kommen unverändert zurück. Diese Erkennung ist nicht vollständig: Manche Zitierstile anderer E-Mail-Programme tragen kein für MailCopilot erkennbares Merkmal, und dann wird der gesamte Entwurf gesendet. Auch hier wird nichts von selbst übersetzt: Das Ergebnis erscheint in einem Vergleichsbereich neben Ihrem Entwurf und ersetzt ihn nur, wenn Sie sich dafür entscheiden. Standardmäßig aus, pro Konto aktivierbar."
       }
     },
     "threadSummary": {
@@ -1329,15 +1485,75 @@
         "title": "KI-Umformulierung prüfen",
         "before": "Vorher",
         "after": "Nachher",
+        "changeCount_one": "{{count}} Änderung",
+        "changeCount_other": "{{count}} Änderungen",
+        "noChanges": "Die Überarbeitung entspricht Ihrem Text — es gibt nichts zu ändern.",
+        "editsHeading": "Änderungen",
+        "unchangedLines_one": "{{count}} unveränderte Zeile",
+        "unchangedLines_other": "{{count}} unveränderte Zeilen",
+        "plainText": "Nur Text",
         "replace": "Ersetzen",
         "insert": "An Cursor einfügen",
-        "cancel": "Abbrechen"
+        "cancel": "Abbrechen",
+        "staleWarning": "Sie haben den Entwurf geändert, während die KI gearbeitet hat; ein Ersetzen würde diese Änderungen verwerfen. Fügen Sie stattdessen an der Cursorposition ein oder starten Sie die Aktion erneut.",
+        "staleReplaceHint": "Ersetzen ist nicht verfügbar, weil sich der Entwurf nach dieser Anfrage geändert hat."
       },
       "refusal": {
         "budget": "Tägliches KI-Budget erreicht — Umformulierung pausiert, bis es zurückgesetzt wird.",
         "noProvider": "Konfigurieren Sie in den Einstellungen einen KI-Anbieter, um Entwürfe umzuschreiben.",
         "providerError": "Dieser Entwurf konnte gerade nicht umgeschrieben werden.",
-        "emptyInput": "Schreiben Sie zuerst etwas Text und wählen Sie dann eine Schnellaktion."
+        "emptyInput": "Schreiben Sie zuerst etwas Text und wählen Sie dann eine Schnellaktion.",
+        "tooLong": "Dieser Entwurf ist zu lang, um ihn in einem Durchgang umzuschreiben, und es gibt keine Möglichkeit, nur eine Auswahl umzuschreiben — MailCopilot nimmt immer Ihren gesamten eigenen Text. Kürzen Sie den Entwurf, oder schneiden Sie einen Teil aus, schreiben Sie den Rest um und fügen Sie den ausgeschnittenen Teil wieder ein. Wenn Ihr eigener Text kurz wirkt, hat MailCopilot möglicherweise nicht erkannt, wo eine zitierte Nachricht beginnt, und sie zusammen mit Ihrem Text gezählt.",
+        "noOwnText": "Schnellaktionen schreiben nur Ihren eigenen Text um — die zitierte Nachricht und Ihre Signatur bleiben unangetastet. Schreiben Sie zuerst etwas über dem Zitat."
+      },
+      "proofread": {
+        "button": "Text prüfen",
+        "checking": "Wird geprüft…",
+        "title": "Korrekturvorschläge",
+        "editCount_one": "{{count}} Vorschlag",
+        "editCount_other": "{{count}} Vorschläge",
+        "noEdits": "Keine Fehler gefunden — Ihr Text liest sich gut.",
+        "dropped_one": "{{count}} Vorschlag konnte nicht in Ihrem Text platziert werden und wurde verworfen.",
+        "dropped_other": "{{count}} Vorschläge konnten nicht in Ihrem Text platziert werden und wurden verworfen.",
+        "accept": "Übernehmen",
+        "accepted": "Übernommen",
+        "undo": "Rückgängig",
+        "acceptAll": "Alle übernehmen",
+        "apply": "Auswahl anwenden",
+        "cancel": "Abbrechen",
+        "category": {
+          "spelling": "Rechtschreibung",
+          "grammar": "Grammatik",
+          "punctuation": "Zeichensetzung",
+          "wording": "Wortwahl",
+          "clarity": "Verständlichkeit"
+        },
+        "refusal": {
+          "notEnabled": "Aktivieren Sie das KI-Korrekturlesen für dieses Konto in den Einstellungen, um Ihren Text zu prüfen.",
+          "noOwnText": "Das Korrekturlesen prüft nur Ihren eigenen Text — die zitierte Nachricht und Ihre Signatur bleiben unangetastet. Schreiben Sie zuerst etwas über dem Zitat.",
+          "emptyInput": "Schreiben Sie zuerst etwas Text und starten Sie dann die Prüfung.",
+          "tooLong": "Dieser Entwurf ist zu lang, um ihn in einem Durchgang zu prüfen, und es gibt keine Möglichkeit, nur eine Auswahl zu prüfen — MailCopilot nimmt immer Ihren gesamten eigenen Text. Kürzen Sie den Entwurf, oder schneiden Sie einen Teil aus, prüfen Sie den Rest und fügen Sie den ausgeschnittenen Teil wieder ein. Wenn Ihr eigener Text kurz wirkt, hat MailCopilot möglicherweise nicht erkannt, wo eine zitierte Nachricht beginnt, und sie zusammen mit Ihrem Text gezählt.",
+          "budget": "Tägliches KI-Budget erreicht — Korrekturlesen pausiert, bis es zurückgesetzt wird.",
+          "noProvider": "Konfigurieren Sie in den Einstellungen einen KI-Anbieter, um Entwürfe Korrektur zu lesen.",
+          "providerError": "Dieser Entwurf konnte gerade nicht geprüft werden."
+        },
+        "staleWarning": "Sie haben den Entwurf geändert, während die Prüfung lief; diese Vorschläge passen nicht mehr dazu. Starten Sie die Prüfung erneut."
+      },
+      "translate": {
+        "button": "Übersetzen",
+        "loading": "Wird übersetzt…",
+        "targetLabel": "Entwurf übersetzen in",
+        "targetPlaceholder": "Sprache auswählen",
+        "diffLabel": "Übersetzung",
+        "refusal": {
+          "budget": "Das KI-Budget für diesen Zeitraum ist aufgebraucht. Erhöhen Sie es unter Einstellungen → KI oder warten Sie auf den nächsten Zeitraum.",
+          "noProvider": "Es ist noch kein KI-Anbieter eingerichtet. Fügen Sie unter Einstellungen → KI einen hinzu.",
+          "providerError": "Der KI-Anbieter hat keine Übersetzung geliefert. Bitte versuchen Sie es erneut.",
+          "emptyInput": "Es gibt noch nichts zu übersetzen — schreiben Sie zuerst einen Text.",
+          "tooLong": "Dieser Entwurf ist zu lang, um ihn auf einmal zu übersetzen, und es gibt keine Möglichkeit, nur eine Auswahl zu übersetzen — MailCopilot nimmt immer Ihren gesamten eigenen Text. Kürzen Sie den Entwurf, oder schneiden Sie einen Teil aus, übersetzen Sie den Rest und fügen Sie den ausgeschnittenen Teil wieder ein. Wenn Ihr eigener Text kurz wirkt, hat MailCopilot möglicherweise nicht erkannt, wo eine zitierte Nachricht beginnt, und sie zusammen mit Ihrem Text gezählt.",
+          "optOut": "Die Übersetzung ist für dieses Konto deaktiviert. Aktivieren Sie sie unter Einstellungen → KI → Nachrichten übersetzen.",
+          "noOwnText": "Ihr Entwurf enthält nur zitierten Text und eine Signatur. Schreiben Sie Ihren eigenen Text über das Zitat — Zitate und Signaturen werden nie übersetzt."
+        }
       }
     },
     "instantReply": {
@@ -1372,7 +1588,6 @@
     "disabledHint": "Fehlerberichte sind deaktiviert. Besuchen Sie unsere Website für Unterstützung."
   },
   "attachments": {
-    "previewAvailable": "Vorschau verfügbar",
     "downloadAction": "Anhang herunterladen: {{name}}",
     "iconLabel": {
       "pdf": "PDF-Dokument",
@@ -1409,5 +1624,44 @@
     "maximize": "Maximieren",
     "restore": "Wiederherstellen",
     "close": "Schließen"
+  },
+  "contextMenu": {
+    "openLink": "Link im Browser öffnen",
+    "copyLinkAddress": "Linkadresse kopieren",
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einfügen",
+    "selectAll": "Alles auswählen",
+    "addToDictionary": "Zum Wörterbuch hinzufügen"
+  },
+  "spellcheck": {
+    "consentTitle": "Wörterbuch für die Rechtschreibprüfung herunterladen?",
+    "consentMessage": "Für die Rechtschreibprüfung in dieser Sprache wird eine Wörterbuchdatei benötigt.",
+    "consentDetail": "Die Datei wird von {{origin}} geladen; dieser Server gehört nicht zu MailCopilot. Die Anfrage verrät ihm, welche Sprache Sie gewählt haben und von welcher Netzwerkadresse Sie kommen. Nichts von dem, was Sie schreiben, wird übertragen — geprüft wird auf diesem Rechner. Mit Abbrechen bleibt die Sprache ausgeschaltet.",
+    "consentLanguages": "Sprachen",
+    "consentButton": "Herunterladen",
+    "cancelButton": "Abbrechen",
+    "declined": "Der Wörterbuch-Download wurde abgelehnt, daher wurde die Sprache nicht aktiviert. Alle übrigen Änderungen wurden gespeichert."
+  },
+  "aiDestination": {
+    "confirmTitle": "Adresse für KI-Anfragen ändern?",
+    "confirmMessage": "KI-Anfragen laufen künftig über eine andere Adresse.",
+    "confirmDetail": "Fahren Sie nur fort, wenn Sie diese Adresse selbst eingegeben haben. Falls Sie die KI-Einstellungen gerade nicht geändert haben, wählen Sie Abbrechen.",
+    "endpointLabel": "Adresse des KI-Dienstes",
+    "proxyLabel": "Proxy für KI-Anfragen",
+    "endpointRisk": "Jede KI-Anfrage an diese Adresse enthält Ihren API-Schlüssel. Wer diese Adresse betreibt, erhält damit den Schlüssel und alles, was der Assistent sendet.",
+    "endpointRiskCleartext": "Jede KI-Anfrage an diese Adresse enthält Ihren API-Schlüssel. Wer diese Adresse betreibt, erhält damit den Schlüssel und alles, was der Assistent sendet. Die Adresse beginnt mit http:// statt https://, daher sind diese Anfragen unverschlüsselt: Jeder auf dem Netzwerkweg kann sie mitlesen, auch ein Proxy.",
+    "endpointRiskInactive": "Diese Adresse wird nur verwendet, wenn als KI-Anbieter ein OpenAI-kompatibler Dienst eingestellt ist — das ist derzeit nicht der Fall. Wird ein solcher Anbieter später ausgewählt, enthält jede KI-Anfrage an diese Adresse Ihren API-Schlüssel: Wer die Adresse betreibt, erhielte dann diesen Schlüssel und alles, was der Assistent sendet.",
+    "endpointRiskInactiveCleartext": "Diese Adresse wird nur verwendet, wenn als KI-Anbieter ein OpenAI-kompatibler Dienst eingestellt ist — das ist derzeit nicht der Fall. Wird ein solcher Anbieter später ausgewählt, enthält jede KI-Anfrage an diese Adresse Ihren API-Schlüssel: Wer die Adresse betreibt, erhielte dann diesen Schlüssel und alles, was der Assistent sendet. Zudem beginnt die Adresse mit http:// statt https://, sodass diese Anfragen unverschlüsselt wären: Jeder auf dem Netzwerkweg könnte sie mitlesen, auch ein Proxy.",
+    "proxyRisk": "Alle KI-Anfragen laufen über diesen Proxy. Wer ihn betreibt, sieht, welche Adressen Sie kontaktieren sowie Umfang und Häufigkeit. Ihren API-Schlüssel und die Inhalte der Nachrichten kann er nur lesen, wenn der Proxy verschlüsselte Verbindungen mit einem Zertifikat aufbricht, dem dieser Computer vertraut.",
+    "proxyRiskCleartext": "Alle KI-Anfragen laufen über diesen Proxy, und die Adresse des KI-Dienstes beginnt mit http:// statt https://, daher sind diese Anfragen unverschlüsselt. Wer den Proxy betreibt, kann somit Ihren API-Schlüssel und die Inhalte der Nachrichten lesen und nicht nur sehen, welche Adressen Sie kontaktieren.",
+    "currentValue": "Jetzt",
+    "newValue": "Neu",
+    "directValue": "kein Proxy (direkte Verbindung)",
+    "confirmButton": "Adresse ändern",
+    "cancelButton": "Abbrechen",
+    "declined": "Die neue Adresse für KI-Anfragen wurde nicht bestätigt; es gilt weiterhin die bisherige.",
+    "invalid": "Diese Adresse ist für KI-Anfragen nicht verwendbar. Geben Sie eine vollständige Adresse mit http:// oder https:// an; die Adresse des KI-Dienstes darf keine Abfrageparameter und kein #Fragment enthalten.",
+    "busy": "Es ist bereits eine Bestätigung der Adresse für KI-Anfragen offen. Beantworten Sie sie und versuchen Sie es erneut."
   }
 }

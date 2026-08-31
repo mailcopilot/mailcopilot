@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { ImapFlow } from 'imapflow'
 import type { ExistsEvent } from 'imapflow'
 import type { ImapConfig, MailSummary, Mailbox, FolderRoles } from './types'
@@ -30,27 +31,103 @@ import {
   folderRoleFromPath,
   providerFromHost,
 } from '../../electron/metricsBuckets'
+import {
+  KeyedPriorityMutex,
+  PriorityMutex,
+  resolveImapPriority,
+  selectNextWaiter,
+  IMAP_PRIORITY_RANK,
+} from './imapScheduler'
+import type { ImapPoolRequester } from './imapScheduler'
+
+export {
+  withImapPriority,
+  currentImapPriority,
+  IMAP_PRIORITY_RANK,
+  MAX_OVERTAKES_BEFORE_PROMOTION,
+} from './imapScheduler'
 
 /**
- * §2.17 Phase 0 — requester tag for `imap.pool_queue_wait_ms`.
+ * §2.17 — requester tier for the IMAP locks.
  *
- * Identifies which subsystem is waiting on the per-account pool semaphore so
- * dashboards can answer "is the interactive open path being blocked by the
- * background indexer?". Phase 0 only records timing — Phase 1 will use this
- * tag to give the interactive tier priority. Kept as a narrow union so the
- * value space mirrors DOMAINS.imap_pool_requester in metricsSchema.ts.
+ * Phase 0 recorded it as a metric tag only. Phase 1 makes it the scheduling
+ * key: `interactive` is served ahead of the bulk producers on both the
+ * singleton op lock and the per-account pool. Definition, ranking and the
+ * anti-starvation rule live in ./imapScheduler; re-exported here because that
+ * is where every consumer already imports it from.
  */
-export type ImapPoolRequester = 'interactive' | 'background' | 'indexer' | 'sync' | 'other'
+export type { ImapPoolRequester }
 
-/** §2.17 Phase 0 — opts for withImapRetryPerAccount. Forward-compat shape:
- *  Phase 1 will plumb `priority` through to a real priority semaphore. */
-export type WithImapRetryPerAccountOpts = {
+/** §2.17 — opts for the retry wrappers. `priority` is explicit and always wins
+ *  over the ambient tier set by `withImapPriority`. */
+export type WithImapRetryOpts = {
   priority?: ImapPoolRequester
 }
+
+/** @deprecated Use `WithImapRetryOpts` — kept so existing call sites compile. */
+export type WithImapRetryPerAccountOpts = WithImapRetryOpts
 
 /** §2.17 Phase 0 — emit imap.pool_queue_wait_ms only above the long-tail
  *  threshold so dashboards aren't drowned by sub-millisecond fast paths. */
 const POOL_QUEUE_WAIT_REPORT_THRESHOLD_MS = 500
+
+/**
+ * §2.17 — lock-wait stopwatch shared by both retry wrappers.
+ *
+ * The clock starts where the operation enters the acquire path and stops at the
+ * first `fn()` invocation, so what is measured is queueing, not work. Retries
+ * do not re-report: the first invocation is the one that answers "was the
+ * interactive tier queued behind bulk work?", and connection-loss / auth
+ * retries have their own events.
+ *
+ * Phase 1 added the `lock` tag. Phase 0 only instrumented the per-account pool,
+ * which is not where the reported incident happened — the offline body sync and
+ * the interactive open share the SINGLETON lock, and that wait was invisible.
+ * Without this tag Phase 1's effect would be as unfalsifiable as Phase 0's was.
+ *
+ * WHAT THIS INSTRUMENT DOES NOT MEASURE — read before quoting it as evidence.
+ * §2.17 stalled for a long time on trusting a gauge past its range, so the range
+ * is written down here rather than inferred from the metric's name:
+ *
+ *  1. **Only queueing, and only above the threshold.** The clock covers the wait
+ *     to ENTER the lock, and the event is suppressed below
+ *     POOL_QUEUE_WAIT_REPORT_THRESHOLD_MS (500 ms). Time spent behind a holder
+ *     that is already RUNNING — one slow FETCH can hold the singleton lock for
+ *     tens of seconds — is invisible here, and so is every wait under half a
+ *     second. Therefore: an empty `requester=interactive` long tail is NOT proof
+ *     that interactive latency is bounded. It is proof that the queue is not
+ *     where the remaining time goes. Bounding the holder's own duration is a
+ *     different mechanism (pre-emption), which this scheduler deliberately does
+ *     not have (see ./imapScheduler, property 1).
+ *
+ *  2. **`imap_timeout` names our budget, not a culprit.** The `cache_hit_level`
+ *     value means exactly "our local IMAP_FETCH_TIMEOUT_MS elapsed" — it does
+ *     not distinguish a slow server, a dead network and contention with
+ *     background work. Reading it as "background work delayed the user" is the
+ *     same over-reading as (1), one layer up.
+ */
+function startLockWaitReport(lock: 'singleton' | 'pool', priority: ImapPoolRequester) {
+  const waitStart = Date.now()
+  let reported = false
+  return {
+    reportOnce(): void {
+      if (reported) return
+      reported = true
+      // Fire-and-forget telemetry — must never delay or break the open path.
+      // The seam (reportNetEvent) is itself wrapped in try/catch.
+      try {
+        const waitMs = Date.now() - waitStart
+        if (waitMs >= POOL_QUEUE_WAIT_REPORT_THRESHOLD_MS) {
+          reportNetEvent('imap.pool_queue_wait_ms', {
+            requester: priority,
+            wait_ms_bucket: bucketDuration(waitMs),
+            lock,
+          })
+        }
+      } catch { /* telemetry must not throw */ }
+    },
+  }
+}
 
 const noop = () => {}
 /** Silent logger suppresses all ImapFlow debug/info output to keep logs clean. */
@@ -131,11 +208,21 @@ let idleExistsHandler: ((data: ExistsEvent) => void) | null = null
 // All commands on the main IMAP client must be executed sequentially:
 // `mailboxOpen()` changes the global connection state (SELECT mailbox).
 // Without serialization, parallel operations can "switch" mailboxes on each other.
-let imapOpChain: Promise<void> = Promise.resolve()
-function withImapOpLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = imapOpChain.then(() => fn())
-  imapOpChain = run.then(() => {}, () => {})
-  return run
+//
+// §2.17 Phase 1 — the serialization is unchanged; the ORDER is not. This used
+// to be a `chain = chain.then(fn)` FIFO, which is what made an interactive open
+// wait behind the offline body sync's EML downloads (all of which run through
+// this same lock via `downloadRawMessage`) and blow the 10 s budget in
+// `net:messageDetails`. Selection policy and the anti-starvation rule live in
+// ./imapScheduler.
+const imapOpLock = new PriorityMutex()
+function withImapOpLock<T>(fn: () => Promise<T>, priority?: ImapPoolRequester): Promise<T> {
+  return imapOpLock.run(resolveImapPriority(priority), fn)
+}
+
+/** §2.17 Phase 1 — singleton op lock depth, for tests and diagnostics. */
+export function __imapOpLockStateForTest(): { locked: boolean; queued: number } {
+  return { locked: imapOpLock.isLocked, queued: imapOpLock.queueLength }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -300,6 +387,225 @@ function notifyCertError(accountId: number, cfg: ImapConfig, err: unknown): void
       protocol: 'imap',
     })
   } catch { /* subscriber failures must not affect the retry path */ }
+}
+
+// ---------------------------------------------------------------------------
+// Account-generation provider (§2.165 fix wave 4) — fourth injection seam
+// ---------------------------------------------------------------------------
+// Account ids are REUSED: a new account is minted as "max(id) + 1", so deleting
+// the last account and adding another hands the fresh mailbox the id the old
+// one had. A verdict is therefore not self-identifying — a report produced by
+// an operation of the deleted mailbox, arriving after the id was reissued, is
+// indistinguishable from a report about the new mailbox and would move the new
+// mailbox's sign-in state.
+//
+// Time-based defences do not close this: a hostile or merely wedged server can
+// hold an operation open past any window, and a window wide enough to cover
+// that also swallows the FIRST verdict of the new account — which, for a
+// mailbox whose folders are all on manual sync, may be the only verdict about
+// its sign-in there is. The verdict must instead carry an identity that is
+// stable across the operation, so the subscriber can compare rather than wait.
+//
+// Same shape as the three registries around it: packages/net must not import
+// electron/ and does not own the account lifecycle, so it holds no counter and
+// keeps no notion of "account exists". It asks an injected provider for the
+// current generation of an id and carries the answer. Minting, bumping on
+// delete/create, and deciding what a mismatch means all live in the main
+// process.
+
+/** Reads the current generation of an account id.
+ *
+ *  `null` means "no live account behind this id" — the provider knows the id
+ *  space and is free to answer that for an id that was deleted, never existed,
+ *  or is otherwise not addressable right now. Must not throw and must be
+ *  cheap: it is called synchronously on the hot path of every outward IMAP
+ *  operation. A provider that throws is treated as absent for that call. */
+export type AccountGenerationProvider = (accountId: number) => number | null
+
+let accountGenerationProvider: AccountGenerationProvider | null = null
+
+/** Register the account-generation provider. Last registration wins — there is
+ *  exactly one production provider (the main-process account registry), and it
+ *  must be registered BEFORE the connection-outcome subscriber, otherwise the
+ *  first verdicts of the session go out unstamped. */
+export function registerAccountGenerationProvider(provider: AccountGenerationProvider): void {
+  accountGenerationProvider = provider
+}
+
+/** Remove the account-generation provider. Idempotent. */
+export function unregisterAccountGenerationProvider(): void {
+  accountGenerationProvider = null
+}
+
+/**
+ * Snapshot the generation of `accountId` at the moment the caller asks.
+ *
+ * Deliberately synchronous and total: it returns `null` rather than throwing or
+ * awaiting, because every call site is on the path of a real IMAP operation and
+ * the stamp must never be able to change that operation's outcome, latency or
+ * retry semantics.
+ *
+ * `null` is produced by three different situations that this module cannot and
+ * should not tell apart — no provider registered, provider says the id has no
+ * live account, provider misbehaved (threw, or returned a non-finite number).
+ * All three mean the same thing to a consumer: THIS VERDICT IS UNATTRIBUTABLE.
+ * Deciding what to do about that is the subscriber's call, not ours; see the
+ * `accountGeneration` field doc on ImapConnectionOutcome for the contract.
+ */
+function captureAccountGeneration(accountId: number): number | null {
+  const provider = accountGenerationProvider
+  if (!provider) return null
+  try {
+    const generation = provider(accountId)
+    return typeof generation === 'number' && Number.isFinite(generation) ? generation : null
+  } catch {
+    // A broken provider degrades the stamp, never the IMAP operation.
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Connection-outcome registry (§2.165) — the single reporting boundary
+// ---------------------------------------------------------------------------
+// Third injection seam in this file, built like the two above (packages/net
+// must not import electron/, so the main process registers a callback and this
+// module invokes it fire-and-forget). What it reports is different in kind:
+// not a specific failure mode, but the verdict of EVERY outward IMAP
+// operation — did this account's connection work, or not.
+//
+// Why it has to live here and not at hand-picked call sites: the previous
+// design reported the verdict from three chosen places in main.ts, all of them
+// header fetches. Every other proof that the credentials work — folder
+// listing, remote search, pagination, flag sync, move, delete, drafts, body
+// fetch, offline replay — was invisible, and an account whose folders are all
+// on manual sync ran none of the three, so a "sign in again" banner raised
+// once could never come down. Reporting from the wrappers that own connection
+// and retry makes the set of observed paths equal to the set of paths that
+// actually talk to the server, by construction rather than by upkeep.
+//
+// Single subscriber, NOT keyed by accountId — a deliberate departure from the
+// two registries above. Those are per-account because their payload is
+// per-account state (this mailbox's refresh handler). This one is a stream of
+// verdicts consumed by a single main-process service, and per-account keying
+// would reintroduce exactly the defect being closed: an account whose handler
+// was never registered (added at runtime, registration lost on a re-wire)
+// would report nothing, silently, forever. Ordering against account deletion
+// is the subscriber's business — it knows which ids still exist.
+
+/** Verdict of one outward-facing IMAP operation for one account.
+ *
+ *  On failure the ORIGINAL error object is carried, not a formatted string:
+ *  classification is the subscriber's job and the project has exactly one
+ *  classifier (`classifyImapError`). The boundary itself never logs, formats
+ *  or telemeters the error — an IMAP server's response text echoes the user
+ *  name and host, and anything derived from this payload that reaches a
+ *  renderer must be the account id and the error class only.
+ *
+ *  `accountGeneration` is the anti-reuse half of the identity. Account ids are
+ *  reused, so `accountId` alone does not say WHICH mailbox this verdict is
+ *  about; the pair (accountId, accountGeneration) does. The stamp is taken at
+ *  the START of the operation, never at report time — see the call sites — so
+ *  a verdict produced by an operation that outlived the account it belongs to
+ *  carries that account's generation, not whatever generation the id happens
+ *  to hold when the verdict finally lands.
+ *
+ *  Contract for the subscriber: act on a verdict only when its
+ *  `accountGeneration` equals the generation the id holds NOW. `null` means
+ *  unattributable (no provider, unknown id, misbehaving provider) and must not
+ *  be treated as a wildcard — a `null` stamp fails the comparison like any
+ *  other mismatch. A provider that is never registered therefore silences the
+ *  whole stream, which is deliberate: the failure mode of a broken wiring is a
+ *  state that does not move, not a state that moves for the wrong mailbox.
+ *  Wave B backs this with a wiring test rather than a runtime fallback. */
+export type ImapConnectionOutcome =
+  | { accountId: number; accountGeneration: number | null; ok: true }
+  | { accountId: number; accountGeneration: number | null; ok: false; error: unknown }
+
+/** Callback invoked once per outward IMAP operation. */
+export type OnConnectionOutcome = (outcome: ImapConnectionOutcome) => void
+
+let connectionOutcomeHandler: OnConnectionOutcome | null = null
+
+/** Register the connection-outcome subscriber. Last registration wins —
+ *  there is exactly one production subscriber (the main-process account auth
+ *  state service). */
+export function registerConnectionOutcomeHandler(handler: OnConnectionOutcome): void {
+  connectionOutcomeHandler = handler
+}
+
+/** Remove the connection-outcome subscriber. Idempotent. */
+export function unregisterConnectionOutcomeHandler(): void {
+  connectionOutcomeHandler = null
+}
+
+/** Fire-and-forget outcome notification. Never throws: a broken subscriber
+ *  must not change the result of an IMAP operation nor its retry semantics. */
+function notifyConnectionOutcome(outcome: ImapConnectionOutcome): void {
+  const handler = connectionOutcomeHandler
+  if (!handler) return
+  try {
+    handler(outcome)
+  } catch { /* subscriber failures must not affect the caller */ }
+}
+
+/**
+ * Marks the async context of the OUTERMOST reporting boundary.
+ *
+ * One external request must produce exactly one verdict. Wrappers do nest
+ * (a wrapped helper called from inside another wrapped operation), and a
+ * double-counted failure would raise the badge after a single failed login —
+ * the threshold on the subscriber's side is two.
+ *
+ * AsyncLocalStorage rather than a module-level depth counter: the counter is
+ * wrong under the concurrency this module is built for. Two unrelated
+ * operations on two accounts overlap constantly (periodic sync + IDLE + body
+ * indexer), and a counter would read the second one as "nested inside" the
+ * first and drop its verdict. Promise continuations inherit the context they
+ * were registered in, so the store survives every await between this boundary
+ * and the command — in particular the wait inside the op lock that both the
+ * singleton and the per-account wrapper go through. (Until §2.17 Phase 1 those
+ * locks were `chain = chain.then(fn)` promise chains; they are priority queues
+ * now — see ./imapScheduler. The propagation argument is unchanged, because it
+ * is a property of continuations, not of the chain shape.)
+ */
+const outcomeReportingScope = new AsyncLocalStorage<{
+  accountId: number
+  accountGeneration: number | null
+}>()
+
+/**
+ * Run `op` as an outward IMAP operation and report its verdict exactly once.
+ *
+ * Nested invocations (store already present) pass straight through: the
+ * outermost boundary owns the report, and it reports the outcome the CALLER
+ * sees — so an auth failure repaired by a token refresh plus a successful
+ * retry is a success, not a failure followed by a success.
+ *
+ * The generation stamp is taken HERE, synchronously, before anything is
+ * awaited — in particular before the op lock this operation is about to queue
+ * behind. That ordering is the whole point of the mechanism, and it is the
+ * opposite of the intuitive one: an operation issued with account 7's
+ * credentials, that then waits minutes behind a lock while account 7 is
+ * deleted and its id reissued, must report the generation it was ISSUED under
+ * so the subscriber discards it. Reading the generation at report time would
+ * hand the stale verdict to the new mailbox — the exact defect this closes.
+ *
+ * Nested calls do not re-read: the outermost scope's stamp is the operation's
+ * stamp, matching the rule that the outermost boundary owns the report.
+ */
+function withOutcomeReporting<T>(accountId: number, op: () => Promise<T>): Promise<T> {
+  if (outcomeReportingScope.getStore() !== undefined) return op()
+  const accountGeneration = captureAccountGeneration(accountId)
+  return outcomeReportingScope.run({ accountId, accountGeneration }, async () => {
+    try {
+      const value = await op()
+      notifyConnectionOutcome({ accountId, accountGeneration, ok: true })
+      return value
+    } catch (err) {
+      notifyConnectionOutcome({ accountId, accountGeneration, ok: false, error: err })
+      throw err
+    }
+  })
 }
 
 /**
@@ -572,6 +878,90 @@ export function collectAttachmentFilenames(bs: unknown): string[] {
   return names
 }
 
+/** RFC 3501: a UID is a 32-bit unsigned number, numbered from 1. */
+const MAX_RFC3501_UID = 4294967295
+
+/**
+ * Read the UID out of a FETCH response, or `undefined` when the response
+ * does not carry a usable one.
+ *
+ * ImapFlow types `msg.uid` as `number`, which is why every call site used to
+ * write `msg.uid as number`. The cast silenced the compiler and guaranteed
+ * nothing at runtime: a fetch stream yields whatever untagged FETCH
+ * responses the server emits, and a response can legitimately arrive
+ * carrying only the items the server chose to send. Such a value would have
+ * travelled straight into SQLite, producing a row that is unopenable at the
+ * IPC boundary and that no later sync repairs (see `isStorableUid` in
+ * packages/db/index.ts).
+ *
+ * This is a REACHABLE path, not an established diagnosis. Unopenable rows
+ * were found on a live profile in August 2026 and the logs covering the
+ * window they were written in no longer exist, so what actually produced
+ * them is unknown. Closing a route that provably reaches the defect does
+ * not amount to having identified the one that was taken.
+ *
+ * The accepted range is the one RFC 3501 defines — a UID is a 32-bit
+ * unsigned number starting at 1. Bounding it is not pedantry: `Number
+ * .isInteger(1e100)` is true, better-sqlite3 binds such a value as REAL, and
+ * the storage guard in packages/db then RAISE(ABORT)s the INSERT — turning a
+ * single malformed response into a failed transaction for the whole sync
+ * batch, which is a worse outcome than the one the guard exists to prevent.
+ * Negative and zero values are refused for the same reason they cannot be
+ * messages: the server never mints them (negative UIDs in the cache are
+ * OUR offline-move placeholders, which never travel this path).
+ */
+export function readServerUid(msg: { uid?: unknown }): number | undefined {
+  const uid = msg.uid
+  if (typeof uid !== 'number' || !Number.isInteger(uid)) return undefined
+  if (uid < 1 || uid > MAX_RFC3501_UID) return undefined
+  return uid
+}
+
+/**
+ * Decide whether a streamed UID enumeration may be used as the proof that a
+ * locally cached message is gone from the server.
+ *
+ * The only proof available is a count. Every UID we read belongs to one of the
+ * `serverExists` messages the server says it holds, so holding that many
+ * DISTINCT UIDs means the set covers the mailbox. Below that we cannot tell,
+ * and abandoning the reconcile is the safe direction — an expunge seen one
+ * cycle late is recoverable, a deleted local message is not.
+ *
+ * The count is checked UNCONDITIONALLY, and this is the whole point: an
+ * earlier form short-circuited to `true` whenever no response had been
+ * rejected outright, which left every other way of losing a message
+ * unexamined. A stream that simply ends early, a server that repeats one UID
+ * instead of sending another, a mailbox whose `exists` is not a usable
+ * number — none of those produce a rejected response, and all of them yield
+ * a set too small to reconcile against.
+ *
+ * `distinctServerUids` must therefore be the size of a SET (or the key count
+ * of a Map), never the number of responses seen: two responses for the same
+ * UID are one message, and counting them as two is exactly the hole above.
+ *
+ * Counting also matters in the other direction: a mailbox with a second
+ * active client emits unsolicited FETCH responses constantly, and a guard
+ * that tripped on their mere presence would never reconcile an expunge again.
+ */
+export function serverUidEnumerationIsComplete(args: {
+  distinctServerUids: number
+  serverExists: number
+}): boolean {
+  if (!Number.isFinite(args.serverExists) || args.serverExists < 0) return false
+  if (!Number.isFinite(args.distinctServerUids) || args.distinctServerUids < 0) return false
+  return args.distinctServerUids >= args.serverExists
+}
+
+/**
+ * Mailbox size to hold an enumeration to: the count from SELECT, raised to the
+ * live one when the connection saw an untagged EXISTS while streaming (mail
+ * arriving mid-scan makes the SELECT-time count too low a bar).
+ */
+function liveServerExists(c: ImapFlow, atSelect: number): number {
+  const live = c.mailbox ? c.mailbox.exists : undefined
+  return typeof live === 'number' && Number.isFinite(live) ? Math.max(atSelect, live) : atSelect
+}
+
 function normalizeReferences(raw: unknown): string | undefined {
   if (Array.isArray(raw)) {
     const vals = raw
@@ -584,6 +974,37 @@ function normalizeReferences(raw: unknown): string | undefined {
     return v || undefined
   }
   return undefined
+}
+
+/**
+ * Splits the first ENVELOPE `From` entry into the three fields every fetch path
+ * stores: `fromAddr` (address only), `fromName` (display name only) and `from`
+ * (the label the list view renders).
+ *
+ * Single hard rule, and the reason this helper exists at all: **`fromAddr` is
+ * the parsed address or nothing.** It is never back-filled from the display
+ * name. The name is attacker-controlled free text — `From: "victim@example.com"`
+ * with no angle-bracket address parses as `{ name: 'victim@example.com',
+ * address: undefined }`, and the older fallback (`address || name`) stored that
+ * string as the sender's address. Anything downstream that treats `fromAddr` as
+ * an identity then inherits the spoof: the `from_address` static-rule condition
+ * (`packages/core/mailRules.ts`) matches on `fromAddr` alone and can carry
+ * destructive actions (move / delete / mark spam), so a forged display name was
+ * enough to steer another sender's rules.
+ *
+ * The guarantee has to live here, at the parser, not at each consumer: consumers
+ * cannot tell a real address apart from a name that looks like one. An empty
+ * `fromAddr` is a truthful "this message declares no sender address" and every
+ * consumer already degrades on it (display falls back to the name, address-only
+ * features such as the sender-filter chip and contact capture skip the row,
+ * `from_address` rules simply do not match — fail-closed).
+ */
+export function senderFromEnvelope(
+  from0: { address?: string; name?: string } | undefined,
+): { from: string; fromAddr: string; fromName: string | undefined } {
+  const fromAddr = (from0?.address || '').trim()
+  const fromName = (from0?.name || '').trim() || undefined
+  return { from: (fromName || fromAddr || '').trim(), fromAddr, fromName }
 }
 
 /** Extracts the References header from IMAP BODY.PEEK[HEADER.FIELDS (REFERENCES)]. */
@@ -616,12 +1037,24 @@ export function extractReferencesHeader(buf: Buffer | undefined): string | undef
  *  operation is retried exactly once. If the retry also produces an auth
  *  error, it is thrown without further attempts (prevents infinite loops
  *  when the refresh token itself is expired/revoked). */
-export async function withImapRetry<T>(accountId: number, cfg: ImapConfig, fn: () => Promise<T>, retries = 2): Promise<T> {
-  return withImapOpLock(async () => {
+export async function withImapRetry<T>(
+  accountId: number,
+  cfg: ImapConfig,
+  fn: () => Promise<T>,
+  retries = 2,
+  opts?: WithImapRetryOpts,
+): Promise<T> {
+  // §2.17 Phase 1 — resolve the tier synchronously, before anything is awaited:
+  // the ambient store belongs to the caller's context, and the lock is entered
+  // from here.
+  const priority = resolveImapPriority(opts?.priority)
+  const waitReporter = startLockWaitReport('singleton', priority)
+  return withOutcomeReporting(accountId, () => withImapOpLock(async () => {
     let remaining = retries
     let authRetryUsed = false
     for (;;) {
       try {
+        waitReporter.reportOnce()
         return await fn()
       } catch (e: unknown) {
         const errClass = classifyImapError(e)
@@ -677,7 +1110,7 @@ export async function withImapRetry<T>(accountId: number, cfg: ImapConfig, fn: (
         await connectImap(cfg)
       }
     }
-  })
+  }, priority))
 }
 
 function userKey(cfg: ImapConfig) {
@@ -810,6 +1243,27 @@ export async function startIdle(
   // failure here used to propagate to the caller unclassified, so IDLE never
   // started and the main process was never told WHY (no interception banner,
   // no recovery UX — the account just looked silently offline).
+  //
+  // §2.165 wave 4 — the generation stamp for EVERY verdict this call produces,
+  // prologue and loop alike, is taken here and only here.
+  //
+  // The loop is the reason this is a single up-front snapshot rather than a
+  // per-report read. It outlives the call that started it and holds one
+  // authenticated connection for hours; every verdict it emits — a parked
+  // cycle, a failed cycle, an exhausted refresh brake, a recovered reconnect,
+  // a terminal reconnect failure — is a statement about THAT login, made with
+  // the credentials captured in `cfg` at this moment. Re-reading the
+  // generation at report time would do precisely what the fix exists to
+  // prevent: a loop that main forgot to stop (or could not stop in time)
+  // would keep re-attaching itself to whatever mailbox currently holds the id,
+  // and its failures would raise the badge on a mailbox that never failed.
+  //
+  // The in-loop token refresh is not a new generation either. It mints a fresh
+  // access token for the SAME account through a handler keyed by the same id
+  // and patches the same `cfg`; the mailbox identity is unchanged, so the
+  // stamp must be unchanged too. A re-read there would reopen the same hole
+  // through a narrower door.
+  const idleGeneration = captureAccountGeneration(accountId)
   let c: ImapFlow
   try {
     c = await connectIdle(cfg)
@@ -821,8 +1275,15 @@ export async function startIdle(
     }
   } catch (e) {
     if (classifyImapError(e) === 'cert') notifyCertError(accountId, cfg, e)
+    // §2.165: the connect/select prologue IS a full login, so it is a verdict
+    // on the credentials in its own right. Reported directly rather than
+    // through `withOutcomeReporting`: startIdle is invoked from the main
+    // process outside any retry wrapper, and the loop below outlives the call
+    // that started it, so there is no enclosing scope to nest into.
+    notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: false, error: e })
     throw e
   }
+  notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: true })
 
   if (idleExistsHandler) {
     try { c.removeListener('exists', idleExistsHandler) } catch { /* ignore */ }
@@ -884,6 +1345,11 @@ export async function startIdle(
           // a later auth expiry starts from zero rather than inheriting an
           // old streak (M-1 storm-brake reset point).
           authRefreshConsecutiveCount.delete(accountId)
+          // §2.165: a cycle that parked without throwing is live proof that
+          // this account's credentials still work — for a mailbox whose
+          // folders are all on manual sync it is the only such proof there is.
+          // Not reported on the shutdown path: a stop is not a verdict.
+          if (!idleStop) notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: true })
           __exitReason = idleStop ? 'stopped' : 'refresh'
         } catch (err) {
           if (idleStop) {
@@ -937,6 +1403,10 @@ export async function startIdle(
                 provider: providerFromHost(cfg.host),
                 consecutive,
               })
+              // §2.165: refresh attempts are exhausted — the provider keeps
+              // minting tokens the IMAP server rejects. That is a credentials
+              // verdict, and the loop is about to go quiet for an hour.
+              notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: false, error: err })
               await sleep(BACKOFF_MS.auth)
               continue
             }
@@ -1068,6 +1538,10 @@ export async function startIdle(
                 reportNetEvent('imap.idle_auth_refreshed', {
                   provider: providerFromHost(cfg.host),
                 })
+                // §2.165: refresh + reconnect + re-select all succeeded — the
+                // account is signed in again, and it got there without the
+                // user touching anything.
+                notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: true })
                 // Skip BACKOFF_MS.auth sleep — IDLE resumes immediately.
                 continue
               }
@@ -1105,6 +1579,11 @@ export async function startIdle(
                   exit_reason: 'auth_refresh_reconnect_failed_terminal',
                 })
               }
+              // §2.165: the reconnect budget is spent and IDLE is leaving.
+              // Report the reconnect error when we have one — it describes why
+              // we are giving up — and otherwise the auth error that started
+              // the recovery.
+              notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: false, error: lastReconnectErr ?? err })
               break
             }
           }
@@ -1122,6 +1601,12 @@ export async function startIdle(
             folder_role: folderRoleFromPath(mailbox),
             exit_reason: errClass,
           })
+          // §2.165: the cycle failed and nothing repaired it — reached either
+          // by a non-auth class or by an auth error the refresh path could not
+          // fix (no handler, cooldown active, refresh rejected). Every class is
+          // reported; the subscriber owns the decision of which ones say
+          // something about credentials.
+          notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: false, error: err })
           if (errClass === 'permanent') break
           // Cert failures: notify the main process ONCE and exit the loop
           // cleanly. Sleeping BACKOFF_MS.cert (6h) inside the loop was doubly
@@ -1243,7 +1728,7 @@ export async function listMailboxes(accountId: number, cfg: ImapConfig): Promise
 }
 
 /** Load latest messages from a folder (delegates to fetchFolderSummariesPage). */
-export async function fetchInboxSummaries(cfg: ImapConfig, folder = 'INBOX', limit = 50, accountId = 1, skipBodyStructure = false): Promise<MailSummary[]> {
+export async function fetchInboxSummaries(cfg: ImapConfig, folder = 'INBOX', limit = 50, accountId: number, skipBodyStructure = false): Promise<MailSummary[]> {
   return fetchFolderSummariesPage(cfg, folder, limit, undefined, accountId, skipBodyStructure)
 }
 
@@ -1292,6 +1777,17 @@ async function withDedicatedImapRetry<T>(
   cfg: ImapConfig,
   fn: (c: ImapFlow) => Promise<T>,
   retries = 2,
+): Promise<T> {
+  return withOutcomeReporting(accountId, () => runDedicatedImapRetry(accountId, cfg, fn, retries))
+}
+
+/** Retry body of `withDedicatedImapRetry`, split out so the outcome-reporting
+ *  boundary wraps the whole retry budget rather than a single attempt. */
+async function runDedicatedImapRetry<T>(
+  accountId: number,
+  cfg: ImapConfig,
+  fn: (c: ImapFlow) => Promise<T>,
+  retries: number,
 ): Promise<T> {
   let remaining = retries
   let authRetryUsed = false
@@ -1364,7 +1860,18 @@ export async function fetchAllFolderHeaders(
     /** UIDVALIDITY from last sync — if changed, forces full resync. */
     knownUidValidity?: number
   },
-): Promise<{ fetched: number; highestModseq: string | null; uidValidity: number | null; exists: number; skipped?: boolean }> {
+): Promise<{
+  fetched: number
+  highestModseq: string | null
+  uidValidity: number | null
+  exists: number
+  skipped?: boolean
+  /** Set when at least one header response could not be stored, so this run
+   *  did NOT cover every UID it set out to fetch. The caller must not treat
+   *  the folder as fully crawled on the strength of it — see the header-fetch
+   *  loop for why a dropped UID is otherwise unreachable forever. */
+  headersIncomplete?: true
+}> {
   // Telemetry: wrap the entire sync in a performance span so dashboards
   // can track FETCH/CONDSTORE batch latency per (folder_role, provider)
   // without any content leaking into span attributes. The span survives
@@ -1379,10 +1886,12 @@ export async function fetchAllFolderHeaders(
   // (via the registered onAuthError handler) works on the initial connect.
   // withDedicatedImapRetry handles connection creation, auth-retry, cleanup.
   //
-  // §2.24 PR1: per-account periodic sync opens exactly one dedicated sync
-  // connection per account (withDedicatedImapRetry creates one connection
-  // per call). Accounts run concurrently, but each account's folders stay
-  // strictly sequential, so there is no per-account connection storm.
+  // §2.24 PR1: periodic sync runs on DEDICATED connections, one per call —
+  // and the folder loop calls this function once per folder, so a pass opens
+  // (and logs out) one sync connection per folder, not one per account.
+  // Accounts run concurrently, but each account's folders stay strictly
+  // sequential, so an account never holds more than one sync connection at a
+  // time: no per-account connection storm, and IDLE is never crowded out.
   return withDedicatedImapRetry(accountId, cfg, async (c) => {
     const mailbox = await c.mailboxOpen(folder)
     const total = typeof mailbox.exists === 'number' ? mailbox.exists : 0
@@ -1457,13 +1966,30 @@ export async function fetchAllFolderHeaders(
           // Mismatch: either expunge or expunge+add happened despite same modseq — reconcile UIDs
           try {
             const fullServerUids = new Set<number>()
+            // This set is used as proof that a local message no longer exists,
+            // so a UID we could not read may be a hole in that proof and
+            // acting on it deletes live mail. Keep draining the stream (an
+            // abandoned response tells us nothing) and let
+            // serverUidEnumerationIsComplete judge the resulting set size.
             for await (const msg of c!.fetch('1:*', { uid: true, flags: true }, { uid: true })) {
-              fullServerUids.add(msg.uid as number)
+              const uid = readServerUid(msg)
+              if (uid === undefined) continue
+              fullServerUids.add(uid)
             }
-            const localUids = getFolderUids(accountId, folder)
-            const staleUids = localUids.filter(uid => !fullServerUids.has(uid))
-            if (staleUids.length > 0) {
-              removeStaleMessagesByUids(accountId, folder, staleUids)
+            if (serverUidEnumerationIsComplete({
+              distinctServerUids: fullServerUids.size,
+              serverExists: liveServerExists(c!, total),
+            })) {
+              const localUids = getFolderUids(accountId, folder)
+              const staleUids = localUids.filter(uid => !fullServerUids.has(uid))
+              if (staleUids.length > 0) {
+                removeStaleMessagesByUids(accountId, folder, staleUids)
+              }
+            } else {
+              reportNetEvent('imap.stale_wipe_guard_tripped', {
+                folder_role: folderRoleFromPath(folder),
+                provider: providerFromHost(cfg.host),
+              })
             }
           } catch { /* non-critical */ }
         }
@@ -1527,7 +2053,12 @@ export async function fetchAllFolderHeaders(
             if (done) break
             resetWatchdog()
             flagsFetched++
-            const uid = msg.uid as number
+            const uid = readServerUid(msg)
+            // No UID, no addressable message: this response cannot be
+            // attributed to any row, so it cannot carry a flag update. The
+            // expunge detection below does not take the resulting key set on
+            // trust — it measures its size against the mailbox.
+            if (uid === undefined) continue
             const flags = msg.flags as Set<string> | undefined
             serverUidFlags.set(uid, { seen: isSeen(flags), flagged: isFlagged(flags) })
           }
@@ -1590,12 +2121,27 @@ export async function fetchAllFolderHeaders(
     // FLAGS fetch is always 1:* so serverUidFlags contains the complete server UID set
     // (unless changedSince is used, where only changed messages are returned).
     if (!changedSince) {
-      // Full UID set available — direct reconciliation
-      const serverUidSet = new Set(allUids)
-      const localUids = [...localUidSet]
-      const staleUids = localUids.filter(uid => !serverUidSet.has(uid))
-      if (staleUids.length > 0) {
-        try { removeStaleMessagesByUids(accountId, folder, staleUids) } catch { /* non-critical */ }
+      // Full UID set available — direct reconciliation, but only if the scan
+      // above can be shown to cover the mailbox. Without this gate a short
+      // enumeration silently narrows serverUidSet and the live messages it
+      // omits are deleted as stale — the same data loss the reconcile paths
+      // guard against, on the most-travelled sync path. `allUids` comes from
+      // Map keys, so its length is a distinct-UID count.
+      if (serverUidEnumerationIsComplete({
+        distinctServerUids: allUids.length,
+        serverExists: liveServerExists(c, total),
+      })) {
+        const serverUidSet = new Set(allUids)
+        const localUids = [...localUidSet]
+        const staleUids = localUids.filter(uid => !serverUidSet.has(uid))
+        if (staleUids.length > 0) {
+          try { removeStaleMessagesByUids(accountId, folder, staleUids) } catch { /* non-critical */ }
+        }
+      } else {
+        reportNetEvent('imap.stale_wipe_guard_tripped', {
+          folder_role: folderRoleFromPath(folder),
+          provider: providerFromHost(cfg.host),
+        })
       }
     } else if (changedSince) {
       // CONDSTORE path (Thunderbird: nsImapProtocol.cpp:4274, nsImapMailFolder.cpp:2592):
@@ -1609,13 +2155,28 @@ export async function fetchAllFolderHeaders(
       if (total !== expectedTotal) {
         try {
           const fullServerUids = new Set<number>()
+          // Same reasoning as the CONDSTORE reconcile above: this set is the
+          // evidence that a local message was expunged, and a set smaller than
+          // the mailbox is a hole in that evidence.
           for await (const msg of c!.fetch('1:*', { uid: true, flags: true }, { uid: true })) {
-            fullServerUids.add(msg.uid as number)
+            const uid = readServerUid(msg)
+            if (uid === undefined) continue
+            fullServerUids.add(uid)
           }
-          const localUids = [...localUidSet]
-          const staleUids = localUids.filter(uid => !fullServerUids.has(uid))
-          if (staleUids.length > 0) {
-            removeStaleMessagesByUids(accountId, folder, staleUids)
+          if (serverUidEnumerationIsComplete({
+            distinctServerUids: fullServerUids.size,
+            serverExists: liveServerExists(c!, total),
+          })) {
+            const localUids = [...localUidSet]
+            const staleUids = localUids.filter(uid => !fullServerUids.has(uid))
+            if (staleUids.length > 0) {
+              removeStaleMessagesByUids(accountId, folder, staleUids)
+            }
+          } else {
+            reportNetEvent('imap.stale_wipe_guard_tripped', {
+              folder_role: folderRoleFromPath(folder),
+              provider: providerFromHost(cfg.host),
+            })
           }
         } catch { /* non-critical — expunge detection is best-effort */ }
       }
@@ -1623,17 +2184,28 @@ export async function fetchAllFolderHeaders(
 
     // Fetch full headers only for NEW messages (Thunderbird: FolderMsgDumpLoop with AllocateImapUidString)
     let fetched = 0
+    let headersDropped = 0
     for (let i = 0; i < newUids.length; i += FETCH_WINDOW_SIZE) {
       const window = newUids.slice(i, i + FETCH_WINDOW_SIZE)
       const range = window.join(',')
 
       let batch: MailSummary[] = []
       for await (const msg of c.fetch(range, fullFetchFields, { uid: true })) {
-        const uid = msg.uid as number
+        const uid = readServerUid(msg)
+        // A header with no usable UID cannot be stored: the row would be
+        // unopenable and would duplicate on every later sync.
+        //
+        // Dropping it is not free, and the count is why. `newUids` is a
+        // local array rebuilt from scratch on the next run, and the caller
+        // derives the incremental watermark from the highest UID that
+        // actually LANDED (getMaxUidForFolder). A neighbour with a higher
+        // UID stored fine, so the watermark moves above the hole and the
+        // next run's `sinceUid` filter (below) excludes it — permanently.
+        // Reporting the run as incomplete is what keeps the folder off the
+        // 'covered_full' path, where that filter applies.
+        if (uid === undefined) { headersDropped++; continue }
         const from0 = msg.envelope?.from?.[0] as { address?: string; name?: string } | undefined
-        const fromAddr = (from0?.address || from0?.name || '').trim()
-        const fromName = (from0?.name || '').trim() || undefined
-        const from = (fromName || fromAddr || '').trim()
+        const { from, fromAddr, fromName } = senderFromEnvelope(from0)
         const messageId = (msg.envelope?.messageId || '').trim() || undefined
         const inReplyTo = (msg.envelope?.inReplyTo || '').trim() || undefined
         const references = normalizeReferences(extractReferencesHeader(msg.headers as Buffer | undefined))
@@ -1666,7 +2238,19 @@ export async function fetchAllFolderHeaders(
       }
     }
 
-    return { fetched, highestModseq, uidValidity, exists: total }
+    if (headersDropped > 0) {
+      reportNetEvent('imap.header_response_unaddressable', {
+        folder_role: folderRoleFromPath(folder),
+        provider: providerFromHost(cfg.host),
+      })
+    }
+    return {
+      fetched,
+      highestModseq,
+      uidValidity,
+      exists: total,
+      ...(headersDropped > 0 ? { headersIncomplete: true as const } : {}),
+    }
   })
   }, (result) => {
     // Attach post-hoc attributes. fetched_headers_bucket is the count of
@@ -1754,6 +2338,10 @@ export async function syncFolderFlagsOnly(
     // UID FETCH FLAGS streams results and per-read socket timeout works correctly.
     // Stall watchdog: if no progress for 60s, close connection and throw.
     const serverFlags = new Map<number, { seen: boolean; flagged: boolean }>()
+    // This map's key set doubles as the proof that a locally cached message
+    // still exists on the server (see the deletion detection below), so a set
+    // smaller than the mailbox makes it unsafe to treat absence as expunge —
+    // see serverUidEnumerationIsComplete.
     await new Promise<void>((resolve, reject) => {
       let watchdog: ReturnType<typeof setTimeout> | null = null
       let done = false
@@ -1773,7 +2361,8 @@ export async function syncFolderFlagsOnly(
           for await (const msg of c.fetch('1:*', { uid: true, flags: true }, { uid: true })) {
             if (done) break
             resetWatchdog()
-            const uid = msg.uid as number
+            const uid = readServerUid(msg)
+            if (uid === undefined) continue
             const flags = msg.flags as Set<string> | undefined
             serverFlags.set(uid, { seen: isSeen(flags), flagged: isFlagged(flags) })
           }
@@ -1790,11 +2379,27 @@ export async function syncFolderFlagsOnly(
     const allUids = [...serverFlags.keys()]
     const serverUidSet = new Set(allUids)
 
-    // Detect deletions: local UIDs not on server
+    // Detect deletions: local UIDs not on server. Suppressed when the scan
+    // above cannot be shown to have read every message — an incomplete server
+    // set makes live messages look expunged, and deleting cached mail is not a
+    // failure mode we accept in exchange for detecting an expunge one round
+    // earlier.
+    const serverUidSetComplete = serverUidEnumerationIsComplete({
+      distinctServerUids: serverFlags.size,
+      serverExists: liveServerExists(c, total),
+    })
     const localUids = getFolderUids(accountId, folder)
-    const deletedUids = localUids.filter(uid => !serverUidSet.has(uid))
+    const deletedUids = serverUidSetComplete
+      ? localUids.filter(uid => !serverUidSet.has(uid))
+      : []
     if (deletedUids.length > 0) {
       removeStaleMessagesByUids(accountId, folder, deletedUids)
+    }
+    if (!serverUidSetComplete) {
+      reportNetEvent('imap.stale_wipe_guard_tripped', {
+        folder_role: folderRoleFromPath(folder),
+        provider: providerFromHost(cfg.host),
+      })
     }
 
     // Detect new messages: server UIDs not in local cache
@@ -1811,7 +2416,17 @@ export async function syncFolderFlagsOnly(
     if (diff.markFlagged.length > 0) { setFlaggedDb(accountId, folder, diff.markFlagged, true); flagsUpdated += diff.markFlagged.length }
     if (diff.markUnflagged.length > 0) { setFlaggedDb(accountId, folder, diff.markUnflagged, false); flagsUpdated += diff.markUnflagged.length }
 
-    return { newUids, deletedCount: deletedUids.length, flagsUpdated, uidValidity }
+    // An incomplete scan is untrusted in both directions: a message the
+    // enumeration never covered is one we would have reported as new. Same
+    // signal the ambiguous mailbox.exists branches raise, so the caller leaves
+    // the crawl state where it is instead of pinning 'covered_full' on a hole.
+    return {
+      newUids,
+      deletedCount: deletedUids.length,
+      flagsUpdated,
+      uidValidity,
+      ...(serverUidSetComplete ? {} : { stalewipeGuardTripped: true }),
+    }
   })
 }
 
@@ -1826,8 +2441,12 @@ export async function fetchFolderSummariesPage(
   cfg: ImapConfig,
   folder = 'INBOX',
   limit = 50,
-  beforeUid?: number,
-  accountId = 1,
+  // Explicitly nullable rather than optional (`?`): `accountId` after it is
+  // required now (§2.165 — a defaulted account id would report the connection
+  // verdict against the wrong mailbox), and TypeScript forbids a required
+  // parameter after an optional one. Every caller already passes both.
+  beforeUid: number | undefined,
+  accountId: number,
   skipBodyStructure = false,
 ): Promise<MailSummary[]> {
   return withDedicatedImapRetry(accountId, cfg, async (c) => {
@@ -1864,6 +2483,13 @@ export async function fetchFolderSummariesPage(
     }
 
     const result: MailSummary[] = []
+    // DISTINCT UIDs this page holds. `result.length` is not the same number —
+    // a server that answers one sequence number twice produces two entries
+    // for one message, and measuring the page by entry count would let a page
+    // that covers only part of the folder pass for the whole of it. The
+    // reconcile at the end of this function treats the page as the keep-list,
+    // so that difference is a deletion.
+    const pageUids = new Set<number>()
 
     if (typeof beforeUid !== 'number') {
       // Fastest fetch for new messages: last N by sequence numbers.
@@ -1874,10 +2500,14 @@ export async function fetchFolderSummariesPage(
         ? { envelope: true, flags: true, internalDate: true, uid: true, headers: ['References'] }
         : { envelope: true, flags: true, internalDate: true, uid: true, bodyStructure: true, headers: ['References'] }
       for await (const msg of c.fetch(seqRange, fetchFields)) {
+        // Sequence-numbered fetch: the UID is data the server chose to send
+        // back, not something we asked it to key the response by. Without a
+        // usable one the summary is unstorable — drop it.
+        const uid = readServerUid(msg)
+        if (uid === undefined) continue
+        pageUids.add(uid)
         const from0 = msg.envelope?.from?.[0] as { address?: string; name?: string } | undefined
-        const fromAddr = (from0?.address || from0?.name || '').trim()
-        const fromName = (from0?.name || '').trim() || undefined
-        const from = (fromName || fromAddr || '').trim()
+        const { from, fromAddr, fromName } = senderFromEnvelope(from0)
         const messageId = (msg.envelope?.messageId || '').trim() || undefined
         const inReplyTo = (msg.envelope?.inReplyTo || '').trim() || undefined
         const references = normalizeReferences(extractReferencesHeader(msg.headers as Buffer | undefined))
@@ -1889,7 +2519,7 @@ export async function fetchFolderSummariesPage(
         result.push({
           accountId,
           folder,
-          uid: msg.uid as number,
+          uid,
           from,
           fromAddr,
           fromName,
@@ -1926,15 +2556,21 @@ export async function fetchFolderSummariesPage(
           ? { envelope: true, flags: true, internalDate: true, uid: true, headers: ['References'] }
           : { envelope: true, flags: true, internalDate: true, uid: true, bodyStructure: true, headers: ['References'] }
         for await (const msg of c.fetch(range, fetchFieldsPaged, { uid: true })) {
-          const uid = msg.uid as number
+          const uid = readServerUid(msg)
+          // Unlike the header-fetch loop in fetchAllFolderHeaders, dropping a
+          // response here does NOT strand the message: this cursor
+          // (`beforeUid`) is the renderer's scroll position for one view
+          // session, derived from the page it just received and never
+          // persisted, so the next open of the folder re-requests the same
+          // window from the top. Folder completeness is the crawl's job, and
+          // the crawl treats a dropped header as an incomplete run.
+          if (uid === undefined) continue
           if (uid >= beforeUid) continue
           if (seen.has(uid)) continue
           seen.add(uid)
 
           const from0 = msg.envelope?.from?.[0] as { address?: string; name?: string } | undefined
-          const fromAddr = (from0?.address || from0?.name || '').trim()
-          const fromName = (from0?.name || '').trim() || undefined
-          const from = (fromName || fromAddr || '').trim()
+          const { from, fromAddr, fromName } = senderFromEnvelope(from0)
           const messageId = (msg.envelope?.messageId || '').trim() || undefined
           const inReplyTo = (msg.envelope?.inReplyTo || '').trim() || undefined
           const references = normalizeReferences(extractReferencesHeader(msg.headers as Buffer | undefined))
@@ -1975,7 +2611,11 @@ export async function fetchFolderSummariesPage(
     upsertMessages(accountId, folder, result.map(r => ({
       uid: r.uid,
       subject: r.subject,
-      fromAddr: (r.fromAddr || r.from || '').trim(),
+      // No `|| r.from` fallback: `r.from` is the display label and degrades to
+      // the sender-controlled display name. Persisting it as `from_addr` would
+      // re-introduce, one layer below, exactly the spoof `senderFromEnvelope`
+      // removes — see its doc comment.
+      fromAddr: (r.fromAddr || '').trim(),
       fromName: r.fromName,
       toAddr: r.toAddr,
       date: r.date,
@@ -1992,12 +2632,28 @@ export async function fetchFolderSummariesPage(
     // For large folders this first page is just the newest slice, and purging
     // everything else would destroy previously synced data.
     if (typeof beforeUid !== 'number' && result.length > 0 && total <= limit) {
-      try {
-        // `result.length > 0` narrows the UID array to non-empty. Pass
-        // reason='reconcile' — caller has the full authoritative UID set
-        // (first page = entire folder given total <= limit).
-        removeStaleMessages(accountId, folder, result.map(r => r.uid), { reason: 'reconcile' })
-      } catch { /* non-critical */ }
+      // …and only when the page can be shown to hold every message the server
+      // reports. `result` is the keep-list here, so any message missing from
+      // it is deleted locally. The bar is the LIVE mailbox size, not the one
+      // from SELECT: mail that arrived while the page was streaming is not in
+      // the page, and reconciling against the SELECT-time count would delete
+      // whatever the concurrent delivery pushed out of the window.
+      if (serverUidEnumerationIsComplete({
+        distinctServerUids: pageUids.size,
+        serverExists: liveServerExists(c, total),
+      })) {
+        try {
+          // `result.length > 0` narrows the UID array to non-empty. Pass
+          // reason='reconcile' — caller has the full authoritative UID set
+          // (first page = entire folder given total <= limit).
+          removeStaleMessages(accountId, folder, result.map(r => r.uid), { reason: 'reconcile' })
+        } catch { /* non-critical */ }
+      } else {
+        reportNetEvent('imap.stale_wipe_guard_tripped', {
+          folder_role: folderRoleFromPath(folder),
+          provider: providerFromHost(cfg.host),
+        })
+      }
     }
     upsertContactsIncoming(
       result
@@ -2063,7 +2719,7 @@ export async function fetchSummariesByUids(
   cfg: ImapConfig,
   folder: string,
   uids: number[],
-  accountId = 1,
+  accountId: number,
 ): Promise<MailSummary[]> {
   if (uids.length === 0) return []
   return withImapRetry(accountId, cfg, async () => {
@@ -2084,10 +2740,12 @@ export async function fetchSummariesByUids(
       bodyStructure: true,
       headers: ['References'],
     }, { uid: true })) {
+      // Unstorable without a UID — drop rather than persist a row no reader
+      // can address.
+      const uid = readServerUid(msg)
+      if (uid === undefined) continue
       const from0 = msg.envelope?.from?.[0] as { address?: string; name?: string } | undefined
-      const fromAddr = (from0?.address || from0?.name || '').trim()
-      const fromName = (from0?.name || '').trim() || undefined
-      const from = (fromName || fromAddr || '').trim()
+      const { from, fromAddr, fromName } = senderFromEnvelope(from0)
       const messageId = (msg.envelope?.messageId || '').trim() || undefined
       const inReplyTo = (msg.envelope?.inReplyTo || '').trim() || undefined
       const references = normalizeReferences(extractReferencesHeader(msg.headers as Buffer | undefined))
@@ -2099,7 +2757,7 @@ export async function fetchSummariesByUids(
       result.push({
         accountId,
         folder,
-        uid: msg.uid as number,
+        uid,
         from,
         fromAddr,
         fromName,
@@ -2121,7 +2779,9 @@ export async function fetchSummariesByUids(
     upsertMessages(accountId, folder, result.map(r => ({
       uid: r.uid,
       subject: r.subject,
-      fromAddr: (r.fromAddr || r.from || '').trim(),
+      // No `|| r.from` fallback — see the identical note in
+      // fetchFolderSummariesPage and `senderFromEnvelope`.
+      fromAddr: (r.fromAddr || '').trim(),
       fromName: r.fromName,
       toAddr: r.toAddr,
       date: r.date,
@@ -2138,7 +2798,7 @@ export async function fetchSummariesByUids(
   })
 }
 
-export async function setSeen(cfg: ImapConfig, mailbox: string, uids: number[], seen: boolean, accountId = 1) {
+export async function setSeen(cfg: ImapConfig, mailbox: string, uids: number[], seen: boolean, accountId: number) {
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(mailbox)
@@ -2149,7 +2809,7 @@ export async function setSeen(cfg: ImapConfig, mailbox: string, uids: number[], 
   setUnread(accountId, mailbox, uids, !seen)
 }
 
-export async function setFlagged(cfg: ImapConfig, mailbox: string, uids: number[], flagged: boolean, accountId = 1) {
+export async function setFlagged(cfg: ImapConfig, mailbox: string, uids: number[], flagged: boolean, accountId: number) {
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(mailbox)
@@ -2184,7 +2844,7 @@ function insertMoveDestination(accountId: number, toMailbox: string, destUid: nu
   }
 }
 
-export async function moveMessages(cfg: ImapConfig, fromMailbox: string, toMailbox: string, uids: number[], accountId = 1) {
+export async function moveMessages(cfg: ImapConfig, fromMailbox: string, toMailbox: string, uids: number[], accountId: number) {
   let uidMap: Map<number, number> | undefined
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
@@ -2244,7 +2904,7 @@ async function safeMessageDelete(c: ImapFlow, uids: number[]): Promise<boolean> 
   return await c.messageDelete(uids, { uid: true })
 }
 
-export async function deleteMessagesRemote(cfg: ImapConfig, mailbox: string, uids: number[], accountId = 1) {
+export async function deleteMessagesRemote(cfg: ImapConfig, mailbox: string, uids: number[], accountId: number) {
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(mailbox)
@@ -2746,20 +3406,33 @@ export async function sweepOrphanDrafts(
 
 const perAccountClients = new Map<string, ImapFlow>()
 const perAccountConnecting = new Map<string, Promise<ImapFlow>>()
-const perAccountOpChains = new Map<string, Promise<void>>()
+/** §2.17 Phase 1 — per-account op serialization, priority-ordered. */
+const perAccountOpLocks = new KeyedPriorityMutex()
 
 /** Maximum concurrent per-account connections (Thunderbird: 5, our limit: 3) */
 export const MAX_CONNECTIONS_PER_ACCOUNT = 3
 const perAccountConnectionCount = new Map<string, number>()
-type PoolWaiter = { resolve: () => void; reject: (err: Error) => void; timeout: ReturnType<typeof setTimeout> }
+type PoolWaiter = {
+  resolve: () => void
+  reject: (err: Error) => void
+  timeout: ReturnType<typeof setTimeout>
+  /** §2.17 Phase 1 — scheduling fields consumed by `selectNextWaiter`. */
+  rank: number
+  seq: number
+  overtaken: number
+}
 const perAccountWaiters = new Map<string, PoolWaiter[]>()
+let poolWaiterSeq = 0
 
-function acquirePerAccountSlot(ukey: string): Promise<void> {
+function acquirePerAccountSlot(ukey: string, priority?: ImapPoolRequester): Promise<void> {
   const count = perAccountConnectionCount.get(ukey) ?? 0
   if (count < MAX_CONNECTIONS_PER_ACCOUNT) {
     perAccountConnectionCount.set(ukey, count + 1)
     return Promise.resolve()
   }
+  // Resolve the tier before the promise executor runs so the ambient store is
+  // read in the caller's context.
+  const tier = resolveImapPriority(priority)
   return new Promise<void>((resolve, reject) => {
     const waiters = perAccountWaiters.get(ukey) ?? []
     const waiter: PoolWaiter = {
@@ -2777,33 +3450,38 @@ function acquirePerAccountSlot(ukey: string): Promise<void> {
         if (idx >= 0) waiters.splice(idx, 1)
         reject(new Error(`Connection pool limit reached for account (max ${MAX_CONNECTIONS_PER_ACCOUNT}), timed out after 30s`))
       }, 30_000),
+      rank: IMAP_PRIORITY_RANK[tier] ?? IMAP_PRIORITY_RANK.other,
+      seq: poolWaiterSeq++,
+      overtaken: 0,
     }
     waiters.push(waiter)
     perAccountWaiters.set(ukey, waiters)
   })
 }
 
-/** Release a per-account connection slot. Call after disconnecting. */
+/** Release a per-account connection slot. Call after disconnecting.
+ *
+ *  §2.17 Phase 1 — the next waiter is chosen by priority (with the same
+ *  overtake-based promotion that guards the op locks) instead of `shift()`.
+ *  The 30 s acquire timeout is unchanged: it is the ceiling on how long ANY
+ *  waiter can sit here, promoted or not. */
 export function releasePerAccountSlot(ukey: string): void {
   const count = perAccountConnectionCount.get(ukey) ?? 0
   if (count > 0) perAccountConnectionCount.set(ukey, count - 1)
   const waiters = perAccountWaiters.get(ukey)
   if (waiters && waiters.length > 0) {
-    const next = waiters.shift()!
-    next.resolve()
+    const next = selectNextWaiter(waiters)
+    if (next) next.resolve()
   }
 }
 
-/** Serialize IMAP operations for a specific account */
-function withPerAccountOpLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const chain = perAccountOpChains.get(key) ?? Promise.resolve()
-  const run = chain.then(() => fn())
-  perAccountOpChains.set(key, run.then(() => {}, () => {}))
-  return run
+/** Serialize IMAP operations for a specific account, interactive tier first. */
+function withPerAccountOpLock<T>(key: string, priority: ImapPoolRequester, fn: () => Promise<T>): Promise<T> {
+  return perAccountOpLocks.run(key, priority, fn)
 }
 
 /** IMAP connection for a specific account (per-account pool, bounded to MAX_CONNECTIONS_PER_ACCOUNT) */
-export async function connectImapPerAccount(cfg: ImapConfig): Promise<ImapFlow> {
+export async function connectImapPerAccount(cfg: ImapConfig, priority?: ImapPoolRequester): Promise<ImapFlow> {
   const ukey = userKey(cfg)
   const existing = perAccountClients.get(ukey)
   if (existing && existing.usable) return existing
@@ -2812,8 +3490,9 @@ export async function connectImapPerAccount(cfg: ImapConfig): Promise<ImapFlow> 
   const pending = perAccountConnecting.get(ukey)
   if (pending) return pending
 
-  // Acquire connection slot (waits if pool is full, timeout 30s)
-  await acquirePerAccountSlot(ukey)
+  // Acquire connection slot (waits if pool is full, timeout 30s). §2.17 Phase 1:
+  // the tier decides who gets the slot first when the pool is saturated.
+  await acquirePerAccountSlot(ukey, priority)
 
   // Close old connection (if not usable)
   if (existing) { try { await existing.logout() } catch { /* ignore */ } }
@@ -2869,33 +3548,21 @@ export async function withImapRetryPerAccount<T>(
 ): Promise<T> {
   const ukey = userKey(cfg)
   // §2.17 Phase 0 — start the wait clock at the moment we enter the
-  // semaphore-or-pool acquire path. We re-zero on retries because the
-  // first fn() invocation is what we care about for diagnosing
-  // "interactive open is queued behind background indexer". Auth-retry
-  // and connection-loss retries fall under a separate bucket (the
-  // existing `imap.auth_refresh_*` events) and would muddle the signal.
-  const waitStart = Date.now()
-  let waitReported = false
-  return withPerAccountOpLock(ukey, async () => {
+  // semaphore-or-pool acquire path. The report is ONCE, on the first fn()
+  // invocation, and retries do NOT restart it: the first invocation is what
+  // answers "was the interactive open queued behind the background indexer?",
+  // while auth and connection-loss retries have their own bucket
+  // (`imap.auth_refresh_*`) and would muddle this signal. (An earlier comment
+  // here said the clock is "re-zeroed on retries" — it never was; see
+  // `startLockWaitReport`, where `reported` latches.)
+  const priority = resolveImapPriority(opts?.priority)
+  const waitReporter = startLockWaitReport('pool', priority)
+  return withOutcomeReporting(accountId, () => withPerAccountOpLock(ukey, priority, async () => {
     let remaining = retries
     let authRetryUsed = false
     for (;;) {
       try {
-        if (!waitReported) {
-          waitReported = true
-          // Fire-and-forget telemetry — must never delay or break the
-          // open path. The seam (reportNetEvent) is itself wrapped in
-          // try/catch.
-          try {
-            const waitMs = Date.now() - waitStart
-            if (waitMs >= POOL_QUEUE_WAIT_REPORT_THRESHOLD_MS) {
-              reportNetEvent('imap.pool_queue_wait_ms', {
-                requester: opts?.priority ?? 'other',
-                wait_ms_bucket: bucketDuration(waitMs),
-              })
-            }
-          } catch { /* telemetry must not throw */ }
-        }
+        waitReporter.reportOnce()
         return await fn()
       } catch (e: unknown) {
         const errClass = classifyImapError(e)
@@ -2919,7 +3586,7 @@ export async function withImapRetryPerAccount<T>(
             perAccountClients.delete(ukey)
             perAccountConnecting.delete(ukey)
             releasePerAccountSlot(ukey)
-            await connectImapPerAccount(cfg)
+            await connectImapPerAccount(cfg, priority)
             continue
           }
           throw e
@@ -2937,10 +3604,10 @@ export async function withImapRetryPerAccount<T>(
         perAccountConnecting.delete(ukey)
         releasePerAccountSlot(ukey)
         await sleep(1000)
-        await connectImapPerAccount(cfg)
+        await connectImapPerAccount(cfg, priority)
       }
     }
-  })
+  }))
 }
 
 /** Close per-account connection for a specific account */
@@ -2949,7 +3616,9 @@ export async function disconnectPerAccount(cfg: ImapConfig): Promise<void> {
   const c = perAccountClients.get(ukey)
   perAccountClients.delete(ukey)
   perAccountConnecting.delete(ukey)
-  perAccountOpChains.delete(ukey)
+  // Only an idle lock is dropped: a held one still guards an in-flight
+  // operation on this account (see KeyedPriorityMutex.forgetIfIdle).
+  perAccountOpLocks.forgetIfIdle(ukey)
   if (c) { try { await c.logout() } catch { /* ignore */ } }
   releasePerAccountSlot(ukey)
 }
@@ -2959,7 +3628,7 @@ export async function disconnectAllPerAccount(): Promise<void> {
   const entries = Array.from(perAccountClients.entries())
   perAccountClients.clear()
   perAccountConnecting.clear()
-  perAccountOpChains.clear()
+  perAccountOpLocks.forgetAllIdle()
   perAccountConnectionCount.clear()
   // Reject all waiters — connections are going away
   const poolShutdownErr = new Error('Connection pool shut down')

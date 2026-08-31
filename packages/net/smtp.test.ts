@@ -528,15 +528,20 @@ describe('nodemailer v9 — createTransport auth and TLS config', () => {
     const callArg = vi.mocked(nodemailer.createTransport).mock.calls[0][0] as Record<string, unknown>
     // buildTlsOptions(cfg) with no tlsPinsSha256 and no servername: on Node
     // builds with tls.getCACertificates the transport gets the combined
-    // default + system CA list; on older builds it degrades to undefined
-    // (Node's own default verification). Either way verification is never
-    // weakened: rejectUnauthorized is stated EXPLICITLY as true, so no
-    // transport library's own default can relax it, and there is no
-    // checkServerIdentity override on the no-pin path.
+    // default + system CA list, since §2.156 as a prebuilt shared
+    // `secureContext` rather than a per-connection `ca` array; on older builds
+    // it degrades to undefined (Node's own default verification). Either way
+    // verification is never weakened: rejectUnauthorized is stated EXPLICITLY
+    // as true, so no transport library's own default can relax it, and there is
+    // no checkServerIdentity override on the no-pin path.
     const { getCombinedCaCertificates } = await import('./tls')
     const combined = getCombinedCaCertificates()
     if (combined) {
-      expect(callArg.tls).toEqual({ rejectUnauthorized: true, ca: combined })
+      const tlsOpts = callArg.tls as Record<string, unknown>
+      expect(Object.keys(tlsOpts).sort()).toEqual(['rejectUnauthorized', 'secureContext'])
+      expect(tlsOpts.rejectUnauthorized).toBe(true)
+      expect(tlsOpts.secureContext).toBeDefined()
+      expect(tlsOpts.checkServerIdentity).toBeUndefined()
     } else {
       expect(callArg.tls).toBeUndefined()
     }

@@ -1,7 +1,7 @@
 /**
  * AI Agent Integration Tests
  *
- * Runs real AI providers (Claude CLI subscription + OpenAI) against a seeded
+ * Runs real AI providers (Anthropic API + OpenAI) against a seeded
  * SQLite database, exercising all 27 MCP mail tools across 13 representative
  * scenarios.
  *
@@ -21,7 +21,11 @@ import { randomUUID } from 'node:crypto'
 dotenv.config({ path: path.resolve(__dirname, '../../.env.integration') })
 
 const INTEG_ENABLED = process.env.INTEG_ENABLED === '1'
-const CLAUDE_ENABLED = process.env.INTEG_CLAUDE_ENABLED === '1'
+// §2.218 — the Claude leg runs against the ANTHROPIC API with the operator's
+// own key (the consumer-subscription provider was removed). It shares
+// `streamClaudeChat` with the former subscription leg, so the Agent SDK path is
+// still covered end to end.
+const ANTHROPIC_KEY = process.env.INTEG_ANTHROPIC_API_KEY || ''
 const OPENAI_KEY = process.env.INTEG_OPENAI_API_KEY || ''
 const OPENAI_MODEL = process.env.INTEG_OPENAI_MODEL || 'gpt-4o-mini'
 const OPENAI_BASE_URL = process.env.INTEG_OPENAI_BASE_URL || ''
@@ -77,6 +81,7 @@ vi.mock('electron', () => ({
 // keytar: in-memory store pre-populated with OpenAI key
 const keytarStore = new Map<string, string>()
 if (OPENAI_KEY) keytarStore.set('openai_api_key', OPENAI_KEY)
+if (ANTHROPIC_KEY) keytarStore.set('anthropic_api_key', ANTHROPIC_KEY)
 
 vi.mock('keytar', () => ({
   default: {
@@ -333,15 +338,16 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
 
   const providers: ProviderConfig[] = [
     {
-      name: 'Claude CLI (subscription)',
-      provider: 'subscription',
-      skip: !CLAUDE_ENABLED,
+      name: 'Claude (Anthropic API)',
+      provider: 'anthropic-api',
+      skip: !ANTHROPIC_KEY,
       setup() {
         currentSettings = {
           ...currentSettings,
-          aiProvider: 'subscription',
+          aiProvider: 'anthropic-api',
           aiModel: 'claude-sonnet-4-5-20250929',
           aiMaxTurns: 10,
+          aiMaxBudgetPerRequest: 1,
         }
       },
     },

@@ -79,13 +79,21 @@ test('uiaudit.1 portal: hovering data-tooltip element shows .tooltip-portal', as
     const composeBtn = page.locator('[data-testid="sidebar-compose"]')
     await expect(composeBtn).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
-    // Portal div must appear in DOM (hover re-dispatched until it mounts)
-    const portal = await hoverForPortal(fullCtx, composeBtn)
-
-    // Text must match the data-tooltip attribute value on the button
-    const tooltipText = await composeBtn.getAttribute('data-tooltip')
-    expect(tooltipText).toBeTruthy()
-    await expect(portal).toContainText(tooltipText!)
+    // `hoverForPortal` returns as soon as the portal is visible, but the reads
+    // below are a second, separate round-trip: under full-suite load the portal
+    // can unmount in between (the pointer drifts, or the hover state lapses)
+    // and the text assertion then finds no element. Retrying only the read would
+    // spin forever on an unmounted node, so the hover is re-established inside
+    // the same block — same shape as the retry already used in
+    // `hoverForPortal` itself and in the bounding-box test below. Pre-existing
+    // flake, §2.85.
+    await expect(async () => {
+      const portal = await hoverForPortal(fullCtx, composeBtn)
+      // Text must match the data-tooltip attribute value on the button
+      const tooltipText = await composeBtn.getAttribute('data-tooltip')
+      expect(tooltipText).toBeTruthy()
+      await expect(portal).toContainText(tooltipText!)
+    }).toPass({ timeout: EXPECT_TIMEOUT })
   } finally {
     await cleanupApp(ctx)
   }
@@ -136,12 +144,22 @@ test('uiaudit.1 portal: .tooltip-portal is rendered outside <aside>', async () =
     const composeBtn = page.locator('[data-testid="sidebar-compose"]')
     await expect(composeBtn).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
-    const portal = await hoverForPortal(fullCtx, composeBtn)
-
-    // Verify the portal is NOT a descendant of <aside>
-    const isInsideAside = await portal.evaluate((el: HTMLElement) => {
-      return el.closest('aside') !== null
-    })
+    // `hoverForPortal` returns as soon as the portal is visible, but the read
+    // below is a second, separate round-trip: under full-suite load the portal
+    // can unmount in between (the pointer drifts, or the hover state lapses)
+    // and `evaluate()` then throws on the detached node. Retrying only the read
+    // would spin forever on an unmounted node, so the hover is re-established
+    // inside the same block — same shape as the retry already used in
+    // `hoverForPortal` itself and in the bounding-box test below. Pre-existing
+    // flake, §2.85.
+    let isInsideAside = true
+    await expect(async () => {
+      const portal = await hoverForPortal(fullCtx, composeBtn)
+      // Verify the portal is NOT a descendant of <aside>
+      isInsideAside = await portal.evaluate((el: HTMLElement) => {
+        return el.closest('aside') !== null
+      })
+    }).toPass({ timeout: EXPECT_TIMEOUT })
     expect(isInsideAside).toBe(false)
   } finally {
     await cleanupApp(ctx)

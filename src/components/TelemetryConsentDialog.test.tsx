@@ -138,7 +138,7 @@ describe('TelemetryConsentDialog — disclosure', () => {
     const sent = screen.getByTestId('telemetry-consent-sent')
     const never = screen.getByTestId('telemetry-consent-never')
 
-    expect(sent.querySelectorAll('li')).toHaveLength(6)
+    expect(sent.querySelectorAll('li')).toHaveLength(7)
     expect(sent).toHaveTextContent('telemetryConsent.sent.errors')
     expect(sent).toHaveTextContent('telemetryConsent.sent.versions')
     expect(sent).toHaveTextContent('telemetryConsent.sent.performance')
@@ -147,6 +147,10 @@ describe('TelemetryConsentDialog — disclosure', () => {
     // install identifier. Their absence made the list read as exhaustive while
     // it was not — see the disclosure note in TelemetryConsentDialog.tsx.
     expect(sent).toHaveTextContent('telemetryConsent.sent.usage')
+    // `ai.api_key_store_op` observes the OS keychain (is a key there at all),
+    // which is not something the user "used" — it needs its own bullet or the
+    // list stops matching what is actually transmitted.
+    expect(sent).toHaveTextContent('telemetryConsent.sent.aiKeyStore')
     expect(sent).toHaveTextContent('telemetryConsent.sent.setup')
     expect(sent).toHaveTextContent('telemetryConsent.sent.installId')
 
@@ -308,7 +312,7 @@ describe('TelemetryConsentDialog — i18n (AC14)', () => {
   const REQUIRED_KEYS = [
     'title', 'intro', 'sentTitle', 'neverTitle', 'changeLater', 'learnMore', 'allow', 'deny',
   ]
-  const SENT_KEYS = ['errors', 'versions', 'performance', 'usage', 'setup', 'installId']
+  const SENT_KEYS = ['errors', 'versions', 'performance', 'usage', 'aiKeyStore', 'setup', 'installId']
   const NEVER_KEYS = ['bodies', 'addresses', 'attachments', 'searchQueries', 'aiPrompts']
 
   it.each(LOCALES)('%s carries a real translation for every consent key', (_lang, locale) => {
@@ -369,6 +373,20 @@ describe('TelemetryConsentDialog — i18n (AC14)', () => {
     expect((block.intro as string).toLowerCase()).toContain(word)
     const sent = block.sent as Record<string, string>
     expect(sent.installId.toLowerCase()).toContain(word)
+  })
+
+  // The key-store bullet discloses an observation about the user's keychain, so
+  // the obvious follow-up question ("does my key travel with it?") has to be
+  // answered in the bullet itself, in every locale — not left to the privacy
+  // page behind the "learn more" link.
+  const NEVER_SENT_MARKER: Record<string, string> = {
+    en: 'never sent', ru: 'никогда', fr: 'jamais',
+    de: 'nie gesendet', es: 'nunca', it: 'mai',
+  }
+
+  it.each(LOCALES)('%s promises the AI key value itself is never sent', (lang, locale) => {
+    const sent = (locale.telemetryConsent as Record<string, unknown>).sent as Record<string, string>
+    expect(sent.aiKeyStore.toLowerCase()).toContain(NEVER_SENT_MARKER[lang])
   })
 
   // "Email addresses are never sent" is read as unconditional, but Settings →

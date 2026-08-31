@@ -1,13 +1,29 @@
 import http from 'node:http'
 import crypto from 'node:crypto'
+import { normalizeProviderDisplayName } from '../packages/core/providerDisplayName'
 
 export type GoogleOAuthTokens = {
   email: string
+  /** Human display name from the OIDC `name` claim (or the userinfo
+   *  fallback). Empty string when the provider returned none — the caller
+   *  decides how to fall back, this module never invents a name.
+   *
+   *  We already request the `profile` scope; before this field existed the
+   *  claim was fetched and discarded, so freshly connected accounts had no
+   *  name at all and every account picker showed a bare address. */
+  displayName: string
   accessToken: string
   /** Epoch ms */
   expiresAt: number
   refreshToken: string
 }
+
+/** Coarse progress signal for the connect flow.
+ *
+ *  `browser` covers the whole out-of-app round trip; `token` fires the
+ *  moment the redirect lands, which is what makes the following ~1 minute
+ *  of server probing explainable to the user rather than looking hung. */
+export type GoogleOAuthStage = 'browser' | 'token'
 
 function base64UrlEncode(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
@@ -59,9 +75,17 @@ async function httpGetJson(url: string, headers: Record<string, string>): Promis
   return parsed
 }
 
-function extractEmailFromIdToken(idToken?: string): string {
-  const payload = idToken ? decodeJwtPayload<{ email?: string }>(idToken) : undefined
-  return (payload?.email || '').trim()
+function extractProfileFromIdToken(idToken?: string): { email: string; displayName: string } {
+  // The payload is attacker-influenceable (see normalizeProviderDisplayName):
+  // read both fields as `unknown` rather than asserting their types, so a
+  // non-string claim degrades instead of throwing mid-flow.
+  const payload = idToken
+    ? decodeJwtPayload<{ email?: unknown; name?: unknown }>(idToken)
+    : undefined
+  return {
+    email: typeof payload?.email === 'string' ? payload.email.trim() : '',
+    displayName: normalizeProviderDisplayName(payload?.name) ?? '',
+  }
 }
 
 export async function runGoogleOAuthFlow(params: {
@@ -70,8 +94,14 @@ export async function runGoogleOAuthFlow(params: {
   openExternal: (url: string) => void | Promise<void>
   timeoutMs?: number
   scopes?: string[]
+  /** Best-effort progress sink. Never awaited and never allowed to fail the
+   *  flow — a broken progress listener must not cost the user their sign-in. */
+  onStage?: (stage: GoogleOAuthStage) => void
 }): Promise<GoogleOAuthTokens> {
   const { clientId, clientSecret, openExternal } = params
+  const emitStage = (stage: GoogleOAuthStage) => {
+    try { params.onStage?.(stage) } catch { /* progress is advisory */ }
+  }
   const timeoutMs = params.timeoutMs ?? 3 * 60 * 1000
   const scopes = params.scopes ?? ['https://mail.google.com/', 'openid', 'email', 'profile']
   const { verifier, challenge } = pkcePair()
@@ -169,6 +199,7 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
       authUrl.searchParams.set('code_challenge', challenge)
       authUrl.searchParams.set('code_challenge_method', 'S256')
       authUrl.searchParams.set('scope', scopes.join(' '))
+      emitStage('browser')
       Promise.resolve(openExternal(authUrl.toString()))
         .catch((e) => {
           try { server.close() } catch { /* ignore */ }
@@ -183,6 +214,10 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
 
     server.once('close', () => clearTimeout(timeout))
   })
+
+  // The browser round trip is over — everything past this point happens
+  // inside the app while the user waits at the wizard.
+  emitStage('token')
 
   const tokenParams = new URLSearchParams({
     client_id: clientId,
@@ -209,16 +244,27 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
   const expiresAt = Date.now() + Math.max(0, expiresIn) * 1000
 
   // Usually email is available directly in id_token, but if missing — fallback to userinfo endpoint.
-  const emailFromId = extractEmailFromIdToken(tokenJson.id_token)
-  if (emailFromId) return { email: emailFromId, accessToken, expiresAt, refreshToken }
+  const fromId = extractProfileFromIdToken(tokenJson.id_token)
+  if (fromId.email) {
+    return { email: fromId.email, displayName: fromId.displayName, accessToken, expiresAt, refreshToken }
+  }
 
-  const userinfo = await httpGetJson('https://openidconnect.googleapis.com/v1/userinfo', {
+  const userinfoRaw: unknown = await httpGetJson('https://openidconnect.googleapis.com/v1/userinfo', {
     Authorization: `Bearer ${accessToken}`,
-  }) as { email?: string }
-  const emailFromUserinfo = (userinfo.email || '').trim()
+  })
+  // Narrow the document itself, not just its fields: a successful body of
+  // `null` (or a bare string) would otherwise throw on property access before
+  // any field guard runs — after the user has already authorized.
+  const userinfo: { email?: unknown; name?: unknown } =
+    userinfoRaw && typeof userinfoRaw === 'object' ? userinfoRaw as { email?: unknown; name?: unknown } : {}
+  const emailFromUserinfo = typeof userinfo.email === 'string' ? userinfo.email.trim() : ''
   if (!emailFromUserinfo) throw new Error('Could not retrieve user email from Google')
 
-  return { email: emailFromUserinfo, accessToken, expiresAt, refreshToken }
+  // The id_token may still have carried a name even when it lacked an email;
+  // prefer it, then the userinfo document. Same normalization on both paths.
+  const displayName = fromId.displayName || (normalizeProviderDisplayName(userinfo.name) ?? '')
+
+  return { email: emailFromUserinfo, displayName, accessToken, expiresAt, refreshToken }
 }
 
 export async function refreshGoogleAccessToken(params: { clientId: string; clientSecret?: string; refreshToken: string }): Promise<{ accessToken: string; expiresAt: number }> {

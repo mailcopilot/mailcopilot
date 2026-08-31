@@ -54,6 +54,7 @@ export const CRITICAL_PATHS = [
   'scripts/check-mirror-export.test.mjs',
   'scripts/trigger-github-build.test.mjs',
   'scripts/enforce-e2e-wrapper.test.mjs',
+  'scripts/reflection-checkpoint.test.mjs',
   // AI agents and internal instructions
   'CLAUDE.md',
   'AGENTS.md',

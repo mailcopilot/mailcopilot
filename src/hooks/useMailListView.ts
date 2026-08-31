@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import type { MailSummary } from '../../packages/net/types'
-import { buildThreadRows, type ThreadRow } from '../utils/threading'
+import { buildThreadRows, countSelectedRows, singleMessageRow, type ThreadRow } from '../utils/threading'
 
 type MailKey = string
 
@@ -31,6 +31,7 @@ export interface UseMailListViewReturn {
   selectedCount: number
   hasMultiSelection: boolean
   viewMailsRef: React.MutableRefObject<MailSummary[]>
+  threadRowsRef: React.MutableRefObject<ThreadRow[]>
 }
 
 export function useMailListView({ mails, active, groupConversations, sortMode }: UseMailListViewParams): UseMailListViewReturn {
@@ -38,6 +39,11 @@ export function useMailListView({ mails, active, groupConversations, sortMode }:
   const [selectedKeys, setSelectedKeys] = useState<Set<MailKey>>(() => new Set())
   const selectionAnchorKey = useRef<MailKey | null>(null)
   const viewMailsRef = useRef<MailSummary[]>([])
+  // Rows behind `viewMailsRef`, kept in step with it. Callbacks that resolve a
+  // message to the row containing it (selection is a row property — see
+  // `rowLeadKeyFor`) need the rows without taking a render-time dependency on
+  // them, exactly like `viewMailsRef` does for the lead list.
+  const threadRowsRef = useRef<ThreadRow[]>([])
 
   const viewMails = useMemo(() => {
     let list = mails
@@ -60,12 +66,13 @@ export function useMailListView({ mails, active, groupConversations, sortMode }:
   }, [filterMode, mails, sortMode])
 
   const threadRows = useMemo<ThreadRow[]>(
-    () => groupConversations ? buildThreadRows(viewMails) : viewMails.map(m => ({ key: mailKey(m), lead: m, items: [m], count: 1 })),
+    () => groupConversations ? buildThreadRows(viewMails) : viewMails.map(singleMessageRow),
     [groupConversations, viewMails],
   )
 
   const visibleLeadMails = useMemo(() => threadRows.map(row => row.lead), [threadRows])
   viewMailsRef.current = visibleLeadMails
+  threadRowsRef.current = threadRows
 
   const activeThread = useMemo(() => {
     if (!active) return null
@@ -76,7 +83,9 @@ export function useMailListView({ mails, active, groupConversations, sortMode }:
     return null
   }, [active, threadRows])
 
-  const selectedCount = selectedKeys.size
+  // Rows, not `selectedKeys.size`: rows are rebuilt behind the set, so two
+  // selected messages can merge into one row. See `countSelectedRows`.
+  const selectedCount = useMemo(() => countSelectedRows(threadRows, selectedKeys), [threadRows, selectedKeys])
   const hasMultiSelection = selectedCount > 1
 
   return {
@@ -92,5 +101,6 @@ export function useMailListView({ mails, active, groupConversations, sortMode }:
     selectedCount,
     hasMultiSelection,
     viewMailsRef,
+    threadRowsRef,
   }
 }

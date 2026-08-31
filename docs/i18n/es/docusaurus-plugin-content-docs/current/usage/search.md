@@ -48,6 +48,8 @@ MailCopilot busca en su caché local de correos. El indicador de completitud mue
 
 Las carpetas estándar (Bandeja de entrada, Enviados, Archivo, Borradores) se indexan completamente por defecto. Las carpetas de correo no deseado, Spam y Papelera están excluidas de la indexación de texto completo de forma predeterminada para mantener los resultados de búsqueda limpios y reducir el uso del disco. Puede cambiar la configuración de indexación de cualquier carpeta haciendo clic derecho en la barra lateral o en **Configuración > Carpetas**.
 
+Un mensaje que se abrió con normalidad -- incluido uno cuyo cuerpo se recortó por el [límite flexible de 1 MB](../usage/reading-emails#mensajes-muy-grandes) -- se puede buscar de inmediato con `body:`, como cualquier otro mensaje: se indexan los primeros aproximadamente 200 000 caracteres de su cuerpo. Un mensaje que supera el límite estricto de 100 MB (véase la misma sección) es diferente: como su cuerpo nunca se decodificó al abrirlo, la búsqueda con `body:` solo empieza a encontrarlo una vez que el indexador de cuerpos en segundo plano lo recupera e indexa desde el servidor, lo que puede tardar más que con un mensaje normal.
+
 ## Búsqueda asistida por servidor
 
 Al buscar en una carpeta específica, MailCopilot puede consultar el servidor IMAP. Los resultados del servidor se marcan con «+N del servidor».

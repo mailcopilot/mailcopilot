@@ -22,7 +22,7 @@ function mail(uid: number, overrides: Partial<MailSummary> = {}): MailSummary {
 function thread(items: MailSummary[]): ThreadRow {
   const lead = items[0]
   const key = `${lead.accountId}:${lead.folder}:${lead.uid}`
-  return { key, lead, items, count: items.length }
+  return { key, lead, items, count: items.length, unreadCount: items.filter(m => m.unread).length }
 }
 
 describe('threadToolbar.isThreadMode', () => {
@@ -77,7 +77,7 @@ describe('threadToolbar.pickLatestMail', () => {
 
   it('falls back when thread has zero items (defensive)', () => {
     const fallback = mail(99)
-    const t: ThreadRow = { key: 'x', lead: fallback, items: [], count: 0 }
+    const t: ThreadRow = { key: 'x', lead: fallback, items: [], count: 0, unreadCount: 0 }
     expect(pickLatestMail(t, fallback, true)).toBe(fallback)
   })
 

@@ -4,13 +4,22 @@ import os from 'node:os'
 import fs from 'node:fs'
 import { createHash, randomUUID, X509Certificate } from 'node:crypto'
 import { isAdvancedSearch, parseSearchQuery } from './searchParser'
-import { withDbSpan, reportDbEvent } from './telemetry'
+import { withDbSpan, reportDbEvent, reportDbError } from './telemetry'
+import { installSqlTiming } from './sqlTiming'
+import {
+  FTS_MERGE_PAGES_PER_STEP,
+  mergeFtsStep,
+  readFtsSegmentCount,
+  type FtsMergeStepResult,
+} from './ftsIndex'
 // Pure per-account enabled-rule cap logic lives in packages/core (no side
 // effects, no DB/net/Electron). packages/core never imports packages/db, so
 // this is an acyclic, layer-clean dependency.
 import {
   canEnableAiRule,
   AI_RULE_ENABLED_LIMIT_ERROR,
+  findEncodedMailRuleRefusal,
+  mailRuleRefusalError,
   type AiRuleEnabledScope,
 } from '../core'
 // electron/metricsBuckets.ts is intentionally zero-dep (no Sentry / electron-log /
@@ -107,7 +116,8 @@ export type TlsPinRow = {
    * Load-bearing for self-signed / private-CA endpoints: the pinned TLS path
    * verifies the chain with `rejectUnauthorized: true`, and a bare SHA-256
    * fingerprint cannot act as a trust anchor. The certificate itself can —
-   * `buildTlsOptions` feeds it to OpenSSL via `ca`. NULL for pins created
+   * `buildTlsOptions` builds it into the shared `SecureContext` it hands the
+   * transport, i.e. OpenSSL treats this body as a root. NULL for pins created
    * before the column existed (fail-closed: such a self-signed endpoint keeps
    * failing with a normal certificate error until the pin is re-confirmed).
    */
@@ -120,6 +130,13 @@ export const dataDir = process.env.MAILCOPILOT_DATA_DIR || path.join(os.homedir(
 const dbPath = path.join(dataDir, 'cache.db')
 fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 const db = new Database(dbPath)
+
+// §2.156: time every synchronous SQLite call so a main-process freeze can be
+// attributed to the statement that caused it instead of to whichever IPC
+// handler happened to be inflight. Installed before the first pragma so the
+// schema migrations below are covered too. Best-effort by contract — a failed
+// patch returns false and the database opens exactly as before.
+installSqlTiming(db)
 
 db.pragma('journal_mode = WAL')
 db.pragma('synchronous = NORMAL')
@@ -524,8 +541,11 @@ export function listRecentMcpAuditEvents(limit = 100): Array<{
 //     enumerated outcome strings.
 //   - `goal` is a short caller-supplied label (e.g. 'chat', 'quick_action',
 //     'summarize') — main code MUST NOT pass user prompt text into it.
-//   - `cost_usd` is null for the subscription provider (no per-request cost
-//     reported by the upstream API). The UI renders 'n/a' in that case.
+//   - `cost_usd` is null whenever no per-request price could be named — either
+//     the caller never had one (egress-intercept rows, MCP export sessions) or
+//     the provider reported none. Historical rows written by the removed
+//     `subscription` provider (§2.218) are all null for that reason. The UI
+//     renders 'n/a' in that case and NEVER fabricates a 0.
 //
 // Append-only invariant: rows are NEVER mutated except for the soft-delete
 // path which only sets `deleted_at`. The append-only audit log is part of
@@ -607,6 +627,95 @@ CREATE TABLE IF NOT EXISTS ai_summaries(
 );
 CREATE INDEX IF NOT EXISTS idx_ai_summaries_account ON ai_summaries(account_id);
 `)
+
+// §3.3 B6 AI Translate cache — one row per (account, source text, target
+// language). Same account-scoping discipline as `ai_summaries` above, with two
+// deliberate differences worth reading before touching this table.
+//
+// KEYED ON THE TEXT, NOT ON (folder, uid). `source_hash` is the SHA-256 of the
+// exact text that was translated. A (folder, uid) key would be smaller and
+// wrong: IMAP UIDs are reused once UIDVALIDITY changes, so after a server-side
+// mailbox rebuild the key `(inbox, 42)` addresses a DIFFERENT message, and the
+// cache would confidently hand back the translation of the message that used to
+// be there. Hashing the content makes the key mean what the cache actually
+// promises — "this exact text, into this language, was already translated" —
+// and makes the answer correct across folder moves, re-syncs and re-fetches for
+// free. It is also a one-way key: the source text is not recoverable from it.
+//
+// NO EXPIRY — BUT NOT BECAUSE A ROW CANNOT GO STALE (§3.3.B6.f1 corrected this).
+// The content hash makes the key mean what it says about the INPUT: change the
+// message text and the hash changes, so a row can never be handed back for text
+// it was not produced from. It says nothing whatsoever about the OUTPUT side.
+// The same text translated by a different provider, a different model, or a
+// later revision of the instruction is a different answer, and before the
+// contract-version component existed the FIRST of those answers won forever:
+// a bad translation, a provider switch or a prompt fix left the cache serving
+// the old text with no way to ask again. The earlier note here claimed staleness
+// was impossible by construction; that was true of one half of the key and
+// asserted of both.
+//
+// `contract_version` is that missing half. It is minted by the caller
+// (`AI_TRANSLATION_CONTRACT_VERSION` in electron/services/aiTranslate.ts, which
+// owns the prompt) and is part of the PRIMARY KEY, so bumping it retires every
+// row that the old contract produced without deleting anything: the old rows
+// simply stop being addressed and age out through the ceiling below. A TTL is
+// still not the answer — time was never what made a row wrong.
+//
+// What unbounded growth needs instead is a CEILING —
+// AI_TRANSLATIONS_MAX_ROWS_PER_ACCOUNT, enforced on every write by evicting the
+// oldest rows of that account (§2.68: "grows without a bound" is the defect
+// this table is not allowed to repeat).
+//
+// `source_lang` is the advisory detected/stated language and may be NULL; it is
+// stored so a cache hit can restate the same label the fresh run showed.
+// `was_local` records whether the run that produced the row went to inference on
+// the user's own machine — stored rather than re-derived, because a cache hit
+// runs no inference and the CURRENT provider configuration is not evidence about
+// a row written under an earlier one (§3.3.B6.f1).
+// Privacy: the translated text is derived email content, so account deletion
+// removes these rows (see deleteAccountData).
+db.exec(`
+CREATE TABLE IF NOT EXISTS ai_translations(
+  account_id TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  target_lang TEXT NOT NULL,
+  contract_version TEXT NOT NULL,
+  source_lang TEXT,
+  translated_text TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  was_local INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(account_id, source_hash, target_lang, contract_version)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_translations_account_created ON ai_translations(account_id, created_at);
+`)
+
+// Migration for a database created before `contract_version` joined the primary
+// key. DROP-and-recreate rather than ALTER: the new column belongs to the KEY,
+// which SQLite cannot alter in place, and this table is a pure cache with no
+// referents — losing it costs one re-translation per message the user asks for
+// again, and every pre-migration row was written under an unversioned contract
+// we can no longer name. Reconstructing the DDL is exactly the risk §2.212 warns
+// about for `messages`; here there are no FTS triggers and no external content
+// to rebuild, so the cheap path is also the safe one.
+if (!hasColumn('ai_translations', 'contract_version')) {
+  db.exec(`
+DROP TABLE IF EXISTS ai_translations;
+CREATE TABLE ai_translations(
+  account_id TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  target_lang TEXT NOT NULL,
+  contract_version TEXT NOT NULL,
+  source_lang TEXT,
+  translated_text TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  was_local INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(account_id, source_hash, target_lang, contract_version)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_translations_account_created ON ai_translations(account_id, created_at);
+`)
+}
 
 export type AiActionLogEntry = {
   provider: string
@@ -879,8 +988,12 @@ export function listAiActionLog(opts: AiActionLogListOptions = {}): AiActionLogL
 /**
  * Aggregate usage and privacy counters per-provider for the requested period.
  * Soft-deleted rows are excluded. `cost_usd` is summed across rows where it
- * is non-null; if every row in the period has null cost (e.g. subscription
- * provider only) the aggregate `costUsd` is null.
+ * is non-null; if every row in the period has null cost (e.g. only rows that
+ * never carried a price) the aggregate `costUsd` is null.
+ *
+ * `provider` is read back as an opaque STRING, never validated against the live
+ * `AiProvider` union: the log is append-only history and legitimately contains
+ * ids that are no longer selectable (e.g. `subscription`, removed in §2.218).
  */
 export function aggregateAiUsage(period: AiUsageAggregatePeriod): AiUsageAggregateRow[] {
   let cutoff: string
@@ -1111,7 +1224,46 @@ if (!hasColumn('messages', 'has_attachments')) {
   db.exec(`ALTER TABLE messages ADD COLUMN has_attachments INTEGER DEFAULT 0`)
 }
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_flagged ON messages(account_id, folder_path, flagged)`)
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(account_id, folder_path, unread)`)
+// §2.229 — the folder-counter aggregates need FOUR columns, not three.
+// `listFolderStats` (and the tray/badge aggregate `countUnreadByFolder`) filter
+// and group by `account_id`/`folder_path`, sum `unread`, and correlate `uid`
+// against `snoozed` to drop snoozed messages. The old key stopped at `unread`,
+// so `uid` had to come from the table itself: one row lookup per message, over
+// a 416 MB / 106 906-row `messages` table on the profile that reported this.
+// better-sqlite3 is synchronous, so that cost IS a main-process freeze — 88,
+// 126, 207 and 225 ms were measured in the field, and the shape reproduces on
+// a seeded copy at 208-218 ms per call, repeating constantly.
+//
+// Appending `uid` makes the aggregate covering: the plan becomes
+// `SEARCH messages USING COVERING INDEX idx_messages_unread_uid` and the table
+// is never opened. Measured on the seeded 112k-row / 469 MB copy, alternating
+// the two index shapes three times so warm-cache ordering cannot masquerade as
+// the effect: listFolderStats 211.9/210.7 ms -> 23.1/21.9 ms, countUnreadByFolder
+// 39.6/36.8 ms -> 4.7/4.6 ms, countUnreadMessages 0.52/0.51 ms -> 0.19/0.20 ms.
+// The floor for the same aggregate with the snoozed correlation removed
+// entirely is 6.3 ms, so what is left is the per-row probe into `snoozed`, not
+// the table.
+//
+// It REPLACES `idx_messages_unread` instead of joining it, because
+// (account_id, folder_path, unread) is an exact prefix of the new key: every
+// plan that used the narrow index can use the wide one unchanged, and the
+// write side keeps paying for one index rather than two. Cost of the extra
+// column, same seed: 2 383 872 B -> 2 539 520 B (+152 KB, +6.5%) of index, no
+// regression in `upsertMessages` batches above run-to-run noise (11.7 ms per
+// 500 rows either way), and a one-time ~240 ms rebuild at the first start after
+// the upgrade. Idempotence comes from `CREATE INDEX IF NOT EXISTS` on its own:
+// once the wide index exists this pair is two no-ops, and the DROP contributes
+// nothing to that. What the DROP buys is the RETIREMENT of the narrow index on
+// databases that predate the widening. Since its key is an exact prefix,
+// keeping both would make every write maintain a second B-tree over the same
+// access paths, and cost the storage, without buying any plan the wide index
+// cannot already serve. The ORDER is load-bearing for a different reason:
+// creating the wide index BEFORE dropping the narrow one means there is never a
+// moment with neither, so an interrupted upgrade leaves the database in one of
+// narrow-only / both / wide-only — all three are usable, and all three are
+// finished by the next start.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_unread_uid ON messages(account_id, folder_path, unread, uid)`)
+db.exec(`DROP INDEX IF EXISTS idx_messages_unread`)
 
 // Migration: offline storage of message bodies
 if (!hasColumn('messages', 'body_downloaded')) {
@@ -1219,6 +1371,36 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_pinned ON messages(account_id, 
 if (!hasColumn('messages', 'attachment_filenames')) {
   db.exec(`ALTER TABLE messages ADD COLUMN attachment_filenames TEXT`)
 }
+
+// §2.115 — partial indexes over the *pending* side of indexing.
+//
+// The body indexer asks "is there anything left to index?" every tick. Before
+// these indexes, that question cost a full pass over `messages`: none of the
+// existing indexes carries `body_text`, so `... AND body_text IS NULL LIMIT 200`
+// could only be answered by visiting every row of the folder to prove that no
+// row qualifies. The perverse consequence was that the *more* complete the
+// index was, the *more* expensive "nothing to do" became — measured on a live
+// instance as 480-800 ms of main thread every 2 s (99.77% of ticks did no work).
+//
+// A partial index only contains the rows matching its WHERE clause, so once a
+// folder is fully indexed its slice of the index is empty and the probe is a
+// single B-tree seek. The index is also the cheap source for "which folders
+// still have work" — enumerating it touches only the backlog, never the corpus.
+//
+// The column order mirrors the query shape (`account_id=? AND folder_path=?
+// ORDER BY uid DESC`) so the planner can both seek and satisfy the ORDER BY
+// from the index. `getUidsWithoutBodyText` asserts the resulting plan in
+// packages/db/index.test.ts — a partial index the planner ignores fixes nothing.
+//
+// Cost of maintenance: an entry is written when a row is inserted with a NULL
+// body (every new message) and removed when the body is filled in. Rows in
+// folders excluded from search (`index_in_search=0`) keep `body_text` NULL by
+// design (§2.15-ter), so they stay in the index permanently — they are filtered
+// out by the callers, not by the index, which cannot reference another table.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_body_pending
+  ON messages(account_id, folder_path, uid DESC) WHERE body_text IS NULL`)
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_filenames_pending
+  ON messages(account_id, folder_path) WHERE attachment_filenames IS NULL`)
 
 // Search Excellence Hardening: folder crawl state for background header coverage
 db.exec(`
@@ -1424,33 +1606,179 @@ try {
 }
 
 /**
- * Run FTS5 'optimize' to merge segments. Without periodic optimization the
- * messages_fts_data table accumulates one segment per upsert — on a churning
- * mailbox this can grow to tens of thousands of segments and bloat the index
- * 10-20× its natural size, which dramatically slows cold searches because the
- * engine has to merge results from every segment on each MATCH query.
+ * A `messages` row is storable only when its UID is a non-zero integer.
  *
- * 'optimize' is fast on small corpora (sub-second on tens of thousands of rows)
- * and idempotent: a no-op when the index is already in a single segment.
- * We run it once per startup and then on a 6-hour interval.
+ * "Non-zero" and not "positive": `moveMessagesLocally` deliberately mints
+ * NEGATIVE placeholder UIDs for offline moves, so sign is not part of the
+ * invariant. Zero is — RFC 3501 numbers UIDs from 1 and we never mint 0.
+ *
+ * "Integer" means SAFE integer, and that word carries the agreement with SQL.
+ * `Number.isInteger(1e100)` is true, but better-sqlite3 binds a value that
+ * large as REAL, which `typeof(uid) <> 'integer'` in the SQL mirror rejects —
+ * so a laxer JS predicate would hand the storage guard a row it must ABORT,
+ * failing the surrounding transaction instead of skipping one row. Every JS
+ * value this predicate accepts binds as an INTEGER, which is what makes the
+ * two forms agree (see `messageUidGuard.test.ts` for the truth table).
+ *
+ * The reverse direction needs the explicit range in the SQL mirror: SQLite's
+ * INTEGER is 64-bit, so 2^53 stores as a perfectly good INTEGER while JS
+ * cannot round-trip it. Without the bound the two forms disagree on every
+ * value between 2^53 and 2^63 — the exact class of drift that produced a real
+ * defect here once already.
+ *
+ * A row failing this predicate is not degraded, it is UNREACHABLE:
+ *  - `net:messageDetails` and `ai:threadSummary:generate` validate `uid` as
+ *    a number at the IPC boundary, so opening it is rejected before any
+ *    request reaches the server ("Ошибка загрузки письма").
+ *  - `ON CONFLICT(account_id, folder_path, uid)` can never match a NULL,
+ *    since NULL <> NULL in SQLite: a re-sync appends another copy instead of
+ *    repairing it. That is why such rows accumulate rather than heal.
  */
-export function optimizeFts(): { ok: boolean; durationMs: number; segmentsBefore?: number; segmentsAfter?: number } {
-  if (!ftsEnabled) return { ok: false, durationMs: 0 }
-  const start = Date.now()
-  let segmentsBefore: number | undefined
-  let segmentsAfter: number | undefined
-  try {
-    segmentsBefore = (db.prepare(`SELECT COUNT(*) as c FROM messages_fts_data`).get() as { c: number } | undefined)?.c
-  } catch { /* ignore */ }
-  try {
-    db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
-  } catch {
-    return { ok: false, durationMs: Date.now() - start, segmentsBefore }
+export function isStorableUid(uid: unknown): uid is number {
+  return typeof uid === 'number' && Number.isSafeInteger(uid) && uid !== 0
+}
+
+/**
+ * The SQL mirror of `isStorableUid`, negated — every SQL site that has to
+ * know about UID storability is generated from HERE, so the predicate has one
+ * definition per language rather than one per call site. Three SQL copies
+ * existed before, and the drift they invited was real: the JS side accepted
+ * values the SQL side rejected until `isStorableUid` gained `isSafeInteger`.
+ *
+ * `col` is an identifier supplied by this module only (`uid`, `new.uid`) —
+ * it never carries user input. The bounds are inlined as literals because a
+ * SQL trigger body cannot carry a bound parameter.
+ */
+export function unstorableUidSql(col: string): string {
+  return `(${col} IS NULL OR typeof(${col}) <> 'integer' OR ${col} = 0`
+    + ` OR ${col} > ${Number.MAX_SAFE_INTEGER} OR ${col} < ${-Number.MAX_SAFE_INTEGER})`
+}
+
+/**
+ * Storage-level enforcement of the UID invariant, plus a one-time purge of
+ * rows that predate it.
+ *
+ * Why triggers and NOT `uid INTEGER NOT NULL` in the CREATE TABLE: SQLite
+ * cannot alter a column declaration, so the only route is the 12-step table
+ * rebuild (shadow table, copy, drop, rename). On `messages` that is not a
+ * cheap schema edit — it runs synchronously at import time over the whole
+ * corpus (106 743 rows on a live profile); `messages_fts` is an
+ * external-content FTS5 table keyed on `messages.id` whose three triggers
+ * DROP TABLE would take with it, and getting that sequencing wrong yields a
+ * silently wrong search index rather than a loud failure; and the column
+ * list is not static (a dozen columns arrived by ALTER TABLE), so the
+ * shadow DDL would have to be reconstructed from PRAGMA table_info on each
+ * user's actual schema. The payoff would be the declaration string alone,
+ * because the enforcement it buys is precisely what a BEFORE INSERT/UPDATE
+ * RAISE(ABORT) gives. A silently broken full-text index over 106k messages
+ * is far worse than the absence of the words NOT NULL in sqlite_master.
+ *
+ * The purge is narrow on purpose: only rows the predicate rejects, which
+ * cannot be opened, cannot be repaired by re-syncing, and gain a duplicate
+ * every sync round. Offline-move placeholders (negative) are untouched.
+ *
+ * FTS bookkeeping: the DELETE fires `messages_ad`, which issues the FTS5
+ * 'delete' command with the OLD values. In folders excluded from search
+ * those values are already out of the index, so an unbalanced 'delete'
+ * corrupts the FTS5 shadow tables ("database disk image is malformed").
+ * `rebalanceFtsForBulkDelete` re-inserts them first — the same dance every
+ * other bulk delete in this file performs.
+ */
+const UNSTORABLE_UID_PREDICATE = unstorableUidSql('uid')
+try {
+  const uidless = db.prepare(
+    `SELECT COUNT(*) AS n FROM messages WHERE ${UNSTORABLE_UID_PREDICATE}`
+  ).get() as { n?: number } | undefined
+  const purgedCount = typeof uidless?.n === 'number' ? uidless.n : 0
+  if (purgedCount > 0) {
+    db.transaction(() => {
+      rebalanceFtsForBulkDelete(UNSTORABLE_UID_PREDICATE, [])
+      db.prepare(`DELETE FROM messages WHERE ${UNSTORABLE_UID_PREDICATE}`).run()
+    })()
+    // Aggregate only — how many rows, never which ones. Reported as a
+    // synthetic error because a silent successful migration teaches us
+    // nothing about how widespread the defect is in the wild.
+    //
+    // Reachability, stated so nobody reads this as working telemetry: this
+    // file runs during main.ts's hoisted imports, so no error reporter is
+    // installed yet and nothing buffers the report — today it goes nowhere,
+    // for every user. It is kept rather than deleted because the call is
+    // correct and becomes observable the moment the two-stage bootstrap
+    // (Sentry + consent gate first, everything else behind await import())
+    // lands; packages/db tests already observe it by installing the reporter
+    // before importing this module.
+    reportDbError(
+      'db.migrate_purge_uidless_messages',
+      new Error('messages.uid_unstorable_rows_purged'),
+      { purged_count: purgedCount },
+    )
   }
-  try {
-    segmentsAfter = (db.prepare(`SELECT COUNT(*) as c FROM messages_fts_data`).get() as { c: number } | undefined)?.c
-  } catch { /* ignore */ }
-  return { ok: true, durationMs: Date.now() - start, segmentsBefore, segmentsAfter }
+} catch (err) {
+  // A failed purge leaves the rows in place — unopenable, exactly as
+  // before this migration existed. It must not stop the module from
+  // loading, because that would take the whole app down with it.
+  // Same import-time reachability caveat as the success report above.
+  reportDbError('db.migrate_purge_uidless_messages', err, {})
+}
+
+// Defense in depth behind `upsertMessages`'s row filter: whatever bypasses
+// the TypeScript signature (a cast, a future call site, a raw statement)
+// still cannot land an unopenable row in the corpus. The WHEN clause is a
+// register test on a single column, so the per-insert cost is negligible
+// next to the three FTS triggers already firing on the same row.
+try {
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_uid_guard_ins
+    BEFORE INSERT ON messages
+    WHEN ${unstorableUidSql('new.uid')}
+    BEGIN
+      SELECT RAISE(ABORT, 'messages.uid must be a non-zero integer');
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_uid_guard_upd
+    BEFORE UPDATE OF uid ON messages
+    WHEN ${unstorableUidSql('new.uid')}
+    BEGIN
+      SELECT RAISE(ABORT, 'messages.uid must be a non-zero integer');
+    END;
+  `)
+} catch (err) {
+  // Without the trigger the code-level filter in upsertMessages is still
+  // in force; losing the backstop is not a reason to fail startup.
+  // Same import-time reachability caveat as the purge report above.
+  reportDbError('db.install_uid_guard_trigger', err, {})
+}
+
+/**
+ * Run ONE bounded FTS5 merge step (§2.156). Without periodic merging the FTS
+ * index accumulates a segment per batch of upserts, and a search has to merge
+ * results from every segment — so the index does need maintenance. What it does
+ * NOT need is `optimize`: that command rewrites the entire index in one
+ * synchronous call (measured at 4 277 ms on a 110 MB index, eight times per
+ * session, on the main-process event loop), which is exactly what the FTS5
+ * documentation warns about and exactly why it is replaced here.
+ *
+ * `pages` follows the FTS5 convention: negative starts a merge regardless of
+ * the automerge criteria, positive continues one. Returns null when FTS is
+ * unavailable; errors from SQLite propagate to the caller, which owns the
+ * failure metric. Scheduling — including the pause between steps that lets the
+ * event loop breathe — lives in electron/services/ftsMaintenance.ts.
+ */
+export function mergeFtsIndexStep(pages: number = FTS_MERGE_PAGES_PER_STEP): FtsMergeStepResult | null {
+  if (!ftsEnabled) return null
+  return mergeFtsStep(db, pages)
+}
+
+/**
+ * Current number of FTS5 index SEGMENTS, or undefined when it cannot be
+ * determined. Note the unit: the previous implementation counted rows of
+ * `messages_fts_data` and called them segments, which is what produced log
+ * lines like "29397 → 29374 segments" on an index that actually held six.
+ * A row there is a ~4 KB storage BLOCK; segments are what search latency
+ * depends on. See packages/db/ftsIndex.ts for how this is read cheaply.
+ */
+export function ftsSegmentCount(): number | undefined {
+  if (!ftsEnabled) return undefined
+  return readFtsSegmentCount(db)
 }
 
 /**
@@ -1718,8 +2046,11 @@ function getIndexInSearchCached(accountId: number, folderPath: string): boolean 
 // `indexInSearch=false`, the row must NOT live in `messages_fts`
 // regardless of what the triggers do.
 //
-// Four FTS-mutation paths exist in this file. Each balances the trigger
-// asymmetry differently:
+// The FTS-mutation paths in this file are enumerated below. The list is
+// meant to be exhaustive and is deliberately NOT prefixed with a count:
+// it said "four" while listing six, because every later path was appended
+// without the header being touched. If you add a path, append it here.
+// Each balances the trigger asymmetry differently:
 //
 //   1. INSERT (`upsertMessages`, fresh row):
 //        Trigger inserts row into FTS → caller follows up with FTS5 'delete'
@@ -1741,7 +2072,8 @@ function getIndexInSearchCached(accountId: number, folderPath: string): boolean 
 //
 //   4. DELETE (`deleteMessages`, `removeStaleMessages`,
 //      `removeStaleMessagesByUids`, `removeTempPlaceholders`,
-//      `deleteAccountData`, the DELETE half of `moveMessagesLocally`):
+//      `deleteAccountData`, the DELETE half of `moveMessagesLocally`, and
+//      the startup purge of rows with an unstorable `uid`):
 //        Trigger does 'delete' on OLD VALUES — same corruption when the
 //        row is missing from FTS. Fix: caller pre-inserts OLD VALUES
 //        before DELETE so the trigger's 'delete' is balanced. No
@@ -1789,7 +2121,7 @@ function getIndexInSearchCached(accountId: number, folderPath: string): boolean 
 // ---------------------------------------------------------------------------
 
 /**
- * Helper for the DELETE-path FTS rebalance pattern (case 3 above).
+ * Helper for the DELETE-path FTS rebalance pattern (case 4 above).
  *
  * Returns a `rebalance(rowsToDelete)` function that, when called inside the
  * caller's transaction BEFORE the DELETE statement runs, re-inserts OLD
@@ -1944,6 +2276,31 @@ export function upsertMessages(
     references?: string
   }[]
 ) {
+  // Reject unusable UIDs per ROW, not per batch.
+  //
+  // `rows` is one folder-sync window of headers, not an atomic user action.
+  // Rejecting the whole batch would make a single unusable UID cost every
+  // other header in the window, and the sync loop — which advances its
+  // position from what got stored — would either stall the folder or retry
+  // the same window forever. Skipping the one header costs only that
+  // message, which was already lost (see `isStorableUid`: unopenable at the
+  // IPC boundary, unrepairable by any later sync). "One header missing until
+  // the next sync round" beats "the folder stops syncing".
+  //
+  // The skip is never silent. How the observed rows were written is NOT
+  // known — the logs for that window are gone — so this report is the only
+  // way a recurrence gets attributed to a path instead of guessed at.
+  const storable = rows.filter(r => isStorableUid(r.uid))
+  if (storable.length !== rows.length) {
+    // Counters only: no subject, no address, no folder name, no server text.
+    reportDbError(
+      'db.upsert_messages',
+      new Error('messages.uid_unstorable_row_skipped'),
+      { skipped_count: rows.length - storable.length, batch_size: rows.length },
+    )
+  }
+  if (storable.length === 0) return
+
   const stmt = db.prepare(`INSERT INTO messages(
       account_id, folder_path, uid,
       subject, from_addr, from_name, to_addr, body_text,
@@ -1981,10 +2338,15 @@ export function upsertMessages(
   // to_addr, body_text, attachment_filenames) into messages_fts. When the
   // folder is excluded from search we follow up with the FTS5 'delete'
   // command for each rowid so the row leaves the search index but stays
-  // visible in the list view (Spam/Trash management). The 'delete' command
-  // is idempotent — running it on a rowid that was never indexed is a no-op.
-  // We resolve message ids inside the same transaction so the lookup sees
-  // the rows we just upserted.
+  // visible in the list view (Spam/Trash management). We resolve message ids
+  // inside the same transaction so the lookup sees the rows we just upserted.
+  //
+  // Note that 'delete' is NOT idempotent, whatever the earlier wording here
+  // claimed: it is an instruction to subtract a document's terms from the
+  // index, so issuing it for content the index does not hold corrupts the
+  // shadow tables — the whole reason the rebalance dance below exists. It
+  // merely LOOKS idempotent on a token-free document (empty subject and
+  // sender), which is exactly how the corruption stayed hidden.
   //
   // §2.15-ter (codex iteration 4 BLOCKER): the conflict-update path needs
   // an OLD-VALUES pre-insert. Flow on a SECOND upsert into an excluded
@@ -2087,10 +2449,10 @@ export function upsertMessages(
   withDbSpan(
     'db.upsert_messages',
     {
-      row_count_bucket: bucketFetchedHeaders(rows.length),
+      row_count_bucket: bucketFetchedHeaders(storable.length),
       folder_role: folderRoleFromPath(folder),
     },
-    () => { trx(rows) },
+    () => { trx(storable) },
   )
 }
 
@@ -2209,6 +2571,35 @@ export function countUnreadMessages(accountId: number, folder: string): number {
        )`
   ).get(accountId, folder) as { cnt: number } | undefined
   return row?.cnt ?? 0
+}
+
+/** One (account, folder) unread bucket — the row shape of `countUnreadByFolder`. */
+export type FolderUnreadCount = { accountId: number; folder: string; unread: number }
+
+/**
+ * §2.99 — unread counts for EVERY account, grouped by (account_id, folder_path).
+ *
+ * Same semantics as `countUnreadMessages` (snoozed rows excluded) but produced
+ * in one statement: the tray tooltip and the OS badge need a whole-install
+ * total, and the caller must not turn that into N+M round trips per refresh.
+ * Which folders are excluded from the total is NOT decided here — that is the
+ * user's `hiddenUnreadFolders` setting, applied by the pure aggregation in
+ * electron/unreadBadge.ts. Folders with zero unread produce no row.
+ */
+export function countUnreadByFolder(): FolderUnreadCount[] {
+  const rows = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as unread
+       FROM messages
+      WHERE unread=1
+        AND NOT EXISTS (
+          SELECT 1 FROM snoozed s
+          WHERE s.account_id = messages.account_id
+            AND s.folder = messages.folder_path
+            AND s.uid = messages.uid
+        )
+      GROUP BY account_id, folder_path`
+  ).all() as Array<{ accountId: number; folder: string; unread: number }>
+  return rows
 }
 
 /** Find thread messages by a set of Message-IDs via SQL */
@@ -3048,8 +3439,9 @@ const PEM_CERT_END = '-----END CERTIFICATE-----'
  *
  * Returns null for "no certificate supplied" (undefined / null / blank), which
  * callers use to mean "leave whatever is already stored alone". Anything else
- * throws: this value ends up in OpenSSL's `ca` list as a trust anchor, so
- * garbage must not reach the store.
+ * throws: this value ends up in the trust-anchor set handed to
+ * `tls.createSecureContext({ ca })` for pinned connections, so garbage must not
+ * reach the store.
  *
  * Two independent guarantees, deliberately not one:
  *
@@ -3657,6 +4049,10 @@ export function deleteAccountData(accountId: number) {
     // integer `id`. Summaries are derived from email content — leaving them
     // behind would let derived thread text survive account removal.
     db.prepare(`DELETE FROM ai_summaries WHERE account_id=?`).run(String(id))
+    // §3.3 B6 AI Translate cache — same TEXT account_id reasoning as the
+    // summaries above, and the same privacy reason: a stored translation is
+    // derived email content and must not outlive the account it came from.
+    db.prepare(`DELETE FROM ai_translations WHERE account_id=?`).run(String(id))
   })()
 }
 
@@ -3727,6 +4123,23 @@ export type SearchIndexStats = {
   filenamesIndexed: number
 }
 
+type FolderCountRow = { accountId: number; folder: string; c: number }
+
+/**
+ * Folders the user excluded from search (`folder_prefs.index_in_search=0`),
+ * as a set of `accountId:folderPath` keys.
+ *
+ * `folder_prefs` holds one row per folder the user has touched, so this is a
+ * small scan — orders of magnitude cheaper than re-deciding the same question
+ * per message row inside an aggregation.
+ */
+function listSearchExcludedFolderKeys(): Set<string> {
+  const rows = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder FROM folder_prefs WHERE index_in_search=0`,
+  ).all() as Array<{ accountId: number; folder: string }>
+  return new Set(rows.map(r => `${r.accountId}:${r.folder}`))
+}
+
 /**
  * Returns index completeness stats for given accounts (all folders).
  *
@@ -3736,21 +4149,48 @@ export type SearchIndexStats = {
  * (Junk/Spam/Trash) intentionally don't participate in body indexing or
  * FTS, so counting them would falsely inflate the denominator and never
  * reach 100% — resulting in a perpetually-visible "indexing X%" message.
+ *
+ * §2.115 — query shape. The previous single-pass form
+ * (`SUM(CASE WHEN body_text IS NOT NULL ...)` plus a correlated
+ * `NOT EXISTS` against folder_prefs per row) forced a full heap scan of
+ * `messages` *and* one subquery execution per row: ~180-270 ms on a 106k
+ * message corpus. It is now three aggregations that never touch the table
+ * heap:
+ *   - totals per folder      → covering index scan (~10 ms / 106k rows)
+ *   - body backlog per folder→ partial index `idx_messages_body_pending`
+ *   - filename backlog       → partial index `idx_messages_filenames_pending`
+ * `indexed = total - pending`, and the folder-level exclusion filter runs
+ * once per folder in JS instead of once per row in SQL.
  */
 export function getSearchIndexStats(accountIds: number[]): SearchIndexStats {
   if (accountIds.length === 0) return { totalMessages: 0, bodyIndexed: 0, filenamesIndexed: 0 }
   const ph = accountIds.map(() => '?').join(',')
-  const row = db.prepare(`SELECT
-    COUNT(*) as total,
-    SUM(CASE WHEN m.body_text IS NOT NULL THEN 1 ELSE 0 END) as body_indexed,
-    SUM(CASE WHEN m.attachment_filenames IS NOT NULL THEN 1 ELSE 0 END) as filenames_indexed
-  FROM messages m
-  WHERE m.account_id IN (${ph})
-    AND NOT EXISTS (SELECT 1 FROM folder_prefs fp WHERE fp.account_id=m.account_id AND fp.folder_path=m.folder_path AND fp.index_in_search=0)`).get(...accountIds) as { total: number; body_indexed: number; filenames_indexed: number } | undefined
+  const totals = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as c
+       FROM messages WHERE account_id IN (${ph})
+      GROUP BY account_id, folder_path`,
+  ).all(...accountIds) as FolderCountRow[]
+  const bodyPending = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as c
+       FROM messages WHERE account_id IN (${ph}) AND body_text IS NULL
+      GROUP BY account_id, folder_path`,
+  ).all(...accountIds) as FolderCountRow[]
+  const filenamesPending = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as c
+       FROM messages WHERE account_id IN (${ph}) AND attachment_filenames IS NULL
+      GROUP BY account_id, folder_path`,
+  ).all(...accountIds) as FolderCountRow[]
+
+  const excluded = listSearchExcludedFolderKeys()
+  const key = (r: FolderCountRow) => `${r.accountId}:${r.folder}`
+  const sumIncluded = (rows: FolderCountRow[]) =>
+    rows.reduce((acc, r) => (excluded.has(key(r)) ? acc : acc + r.c), 0)
+
+  const totalMessages = sumIncluded(totals)
   return {
-    totalMessages: row?.total ?? 0,
-    bodyIndexed: row?.body_indexed ?? 0,
-    filenamesIndexed: row?.filenames_indexed ?? 0,
+    totalMessages,
+    bodyIndexed: totalMessages - sumIncluded(bodyPending),
+    filenamesIndexed: totalMessages - sumIncluded(filenamesPending),
   }
 }
 
@@ -4113,12 +4553,55 @@ export function getSearchCoverageStats(accountIds: number[]): SearchCoverageStat
   }
 }
 
-/** Returns UIDs where body_text has not been indexed yet (NULL = not attempted). */
+/**
+ * Returns UIDs where body_text has not been indexed yet (NULL = not attempted).
+ *
+ * §2.115: the WHERE clause is written so the partial index
+ * `idx_messages_body_pending` (see the migration block) applies — the literal
+ * `body_text IS NULL` term is what lets SQLite prove the index covers the
+ * query. On a fully indexed folder this is a single seek that returns nothing
+ * instead of a full folder scan. Do not rewrite the predicate (e.g. to
+ * `COALESCE(body_text, ...)`) without re-checking EXPLAIN QUERY PLAN.
+ */
 export function getUidsWithoutBodyText(accountId: number, folder: string, limit = 100): number[] {
   const rows = db.prepare(
     `SELECT uid FROM messages WHERE account_id=? AND folder_path=? AND body_text IS NULL ORDER BY uid DESC LIMIT ?`
   ).all(accountId, folder, limit) as Array<{ uid: number }>
   return rows.map(r => r.uid)
+}
+
+export type PendingBodyFolder = {
+  accountId: number
+  folder: string
+  /** Number of messages in this folder still waiting for a body fetch. */
+  pending: number
+}
+
+/**
+ * Returns the folders that still have un-indexed message bodies, i.e. the
+ * indexer's actual work list, excluding folders the user removed from search
+ * (`folder_prefs.index_in_search=0`).
+ *
+ * §2.115 — this replaces `listIndexedFolders()` as the body indexer's entry
+ * point. The old shape enumerated *every* folder (a `GROUP BY` over the whole
+ * corpus) and then probed each one for work; both halves scaled with mailbox
+ * size and ran on every tick even when the answer was "nothing to do".
+ *
+ * This query only ever touches `idx_messages_body_pending`, whose size is the
+ * backlog itself, not the corpus: on a fully indexed mailbox it returns an
+ * empty list in well under a millisecond regardless of how many messages are
+ * cached. Excluded folders (Spam/Trash) keep `body_text` NULL forever by
+ * design, so they are the one part of the index that never drains — they are
+ * dropped here via `getIndexInSearchCached`, which is memoised per folder.
+ */
+export function listFoldersWithPendingBodies(): PendingBodyFolder[] {
+  const rows = db.prepare(
+    `SELECT account_id as accountId, folder_path as folder, COUNT(*) as pending
+       FROM messages
+      WHERE body_text IS NULL
+      GROUP BY account_id, folder_path`,
+  ).all() as PendingBodyFolder[]
+  return rows.filter(r => getIndexInSearchCached(r.accountId, r.folder))
 }
 
 /**
@@ -5803,7 +6286,8 @@ export type ThreadSummaryRow = {
   oneLine: string
   /** Expandable bullet list (the 5-bullet form), decoded from JSON. */
   bullets: string[]
-  /** Provider that generated the summary, e.g. 'openai-api', 'subscription'. */
+  /** Provider that generated the summary, e.g. 'openai-api'. Opaque string:
+   *  cached rows may name a provider that is no longer selectable. */
   provider: string
   /** Creation time in epoch milliseconds. */
   createdAt: number
@@ -5935,6 +6419,186 @@ export function getThreadSummary(accountId: string, threadHash: string): ThreadS
   return row ? rowToThreadSummary(row) : undefined
 }
 
+// --- AI Translate cache (§3.3 B6) ------------------------------------------
+
+/**
+ * Most cached translations kept per account. The ceiling that replaces a TTL:
+ * time is not what makes a row wrong here (the key pins both the source text and
+ * the contract that produced the answer — see the table's schema note), so the
+ * only failure mode left is unbounded growth, and this is what bounds it. Rows
+ * retired by a contract bump age out through this ceiling rather than through a
+ * sweep.
+ *
+ * Sized for the working set a person actually revisits — a few hundred messages
+ * — not for "keep everything ever translated". Each row is one translated
+ * message body, so the cost of the ceiling is roughly a few megabytes per
+ * account in the worst case, and the cost of exceeding it would be a table that
+ * only ever grows (§2.68).
+ */
+export const AI_TRANSLATIONS_MAX_ROWS_PER_ACCOUNT = 500
+
+/** Decoded cache row for one translated message body. */
+export type AiTranslationRow = {
+  accountId: string
+  /** SHA-256 of the exact source text (see {@link computeTranslationSourceHash}). */
+  sourceHash: string
+  targetLang: string
+  /**
+   * Version of the translation contract (prompt + output handling) that produced
+   * this row. Part of the KEY, not metadata: see the table's schema note.
+   */
+  contractVersion: string
+  /** Advisory source language label, or null when none was determined. */
+  sourceLang: string | null
+  /** PLAIN TEXT. Never markup — the contract has no HTML half (see @mailcopilot/types). */
+  translatedText: string
+  provider: string
+  /** Whether the run that produced this row used inference on the user's machine. */
+  wasLocal: boolean
+  createdAt: number
+}
+
+/** Payload for {@link upsertAiTranslation}. */
+export type AiTranslationInput = {
+  accountId: string
+  sourceHash: string
+  targetLang: string
+  contractVersion: string
+  sourceLang: string | null
+  translatedText: string
+  provider: string
+  wasLocal: boolean
+  /** Optional creation time in epoch ms; defaults to `Date.now()`. */
+  createdAt?: number
+}
+
+/**
+ * Cache key for a piece of source text: lowercase hex SHA-256 of the text
+ * EXACTLY as it was sent to the provider — no trimming, no normalisation.
+ *
+ * "Exactly" is the contract, not an implementation detail: this hash is the
+ * INPUT half of the cache key — "this text, into this language, under this
+ * contract version, has already been translated" — and any normalisation applied
+ * here but not before the provider call would make two different inputs share one
+ * answer. The hash is one-way, so the cache stores no recoverable copy of the
+ * source.
+ *
+ * Throws on empty input — an empty source has nothing to translate, and hashing
+ * the empty string would collapse every such case onto one shared row.
+ */
+export function computeTranslationSourceHash(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) {
+    throw new Error('computeTranslationSourceHash: empty source text')
+  }
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function rowToAiTranslation(r: Record<string, unknown>): AiTranslationRow {
+  return {
+    accountId: r.account_id as string,
+    sourceHash: r.source_hash as string,
+    targetLang: r.target_lang as string,
+    contractVersion: (r.contract_version as string) ?? '',
+    sourceLang: (r.source_lang as string | null) ?? null,
+    translatedText: (r.translated_text as string) ?? '',
+    provider: (r.provider as string) ?? '',
+    wasLocal: Number(r.was_local) === 1,
+    createdAt: Number(r.created_at),
+  }
+}
+
+/**
+ * Return the cached translation of `sourceHash` into `targetLang` produced under
+ * `contractVersion` and OWNED BY `accountId`, or `undefined`.
+ *
+ * Account scoping is enforced in the QUERY, not by the hash: two accounts
+ * holding the same message (a mail CC'd to both) produce the same content hash,
+ * and one account must never read or overwrite the other's row. Same rule, same
+ * reason as `getThreadSummary`.
+ *
+ * `contractVersion` is a required argument rather than an optional filter on
+ * purpose: a caller that omitted it would silently read rows produced by a
+ * contract it is not running, which is the exact defect the column was added to
+ * close.
+ */
+export function getAiTranslation(
+  accountId: string,
+  sourceHash: string,
+  targetLang: string,
+  contractVersion: string,
+): AiTranslationRow | undefined {
+  const row = db.prepare(
+    `SELECT * FROM ai_translations
+      WHERE account_id=? AND source_hash=? AND target_lang=? AND contract_version=?`,
+  ).get(accountId, sourceHash, targetLang, contractVersion) as Record<string, unknown> | undefined
+  return row ? rowToAiTranslation(row) : undefined
+}
+
+/**
+ * Insert or replace one cached translation, then enforce the per-account
+ * ceiling by evicting that account's OLDEST rows.
+ *
+ * Insert and eviction run in ONE transaction so a concurrent reader never sees
+ * the table over its ceiling, and eviction is scoped to the writing account —
+ * one busy account can never evict another's rows. Ordering is by `created_at`
+ * with `rowid` as the tie-break, so two rows written in the same millisecond
+ * still have a total order and the eviction is deterministic.
+ */
+export function upsertAiTranslation(input: AiTranslationInput): AiTranslationRow {
+  const createdAt = input.createdAt ?? Date.now()
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO ai_translations(account_id, source_hash, target_lang, contract_version, source_lang, translated_text, provider, was_local, created_at)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(account_id, source_hash, target_lang, contract_version) DO UPDATE SET
+         source_lang = excluded.source_lang,
+         translated_text = excluded.translated_text,
+         provider = excluded.provider,
+         was_local = excluded.was_local,
+         created_at = excluded.created_at`,
+    ).run(
+      input.accountId,
+      input.sourceHash,
+      input.targetLang,
+      input.contractVersion,
+      input.sourceLang,
+      input.translatedText,
+      input.provider,
+      input.wasLocal ? 1 : 0,
+      createdAt,
+    )
+    db.prepare(
+      `DELETE FROM ai_translations
+        WHERE account_id = ?
+          AND rowid NOT IN (
+            SELECT rowid FROM ai_translations
+             WHERE account_id = ?
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?
+          )`,
+    ).run(input.accountId, input.accountId, AI_TRANSLATIONS_MAX_ROWS_PER_ACCOUNT)
+  })()
+  return {
+    accountId: input.accountId,
+    sourceHash: input.sourceHash,
+    targetLang: input.targetLang,
+    contractVersion: input.contractVersion,
+    sourceLang: input.sourceLang,
+    translatedText: input.translatedText,
+    provider: input.provider,
+    wasLocal: input.wasLocal,
+    createdAt,
+  }
+}
+
+/** Rows currently cached for one account. Test/diagnostics helper — the ceiling
+ *  above is only meaningful if it can be observed. */
+export function countAiTranslations(accountId: string): number {
+  const row = db.prepare(`SELECT COUNT(*) as cnt FROM ai_translations WHERE account_id=?`)
+    .get(accountId) as { cnt?: number } | undefined
+  return row?.cnt ?? 0
+}
+
 // --- Mail Rules (B2.24) ---
 
 export type MailRuleRow = {
@@ -5983,6 +6647,37 @@ export function getMailRule(id: string): MailRuleRow | undefined {
   return row ? rowToMailRule(row) : undefined
 }
 
+/**
+ * §2.162 — refuse to STORE a rule whose firing cannot be justified, or that is
+ * not shaped like a rule at all. Three verdicts, all produced in packages/core
+ * and none of them re-listed here:
+ *   - `malformed_rule` — the stored halves are not decodable arrays of the
+ *     right shape, or name an operator / action type the engine has no branch
+ *     for. Such a rule matches nothing, or reports actions nobody performed.
+ *   - `unsupported_field` — a condition on a field this client cannot answer
+ *     about; `cc` is the live case, since no CC is ever stored (§2.91).
+ *   - `unverifiable_sender` — a destructive action gated on the sender's own
+ *     display name (`from_name`, or the legacy `from`).
+ *
+ * This is the LAST line, not the first one. Both callers that exist today —
+ * the `rules:create` / `rules:update` IPC handlers and the MCP rule tools —
+ * refuse earlier and with a message shaped for their own caller. The check is
+ * repeated here for the same reason `assertAiRuleEnablementAllowed` is: the
+ * guarantee must not depend on every future caller knowing about it, and the
+ * threat model includes a compromised renderer. The decision itself is the pure
+ * `findEncodedMailRuleRefusal` from packages/core — there is no second list of
+ * fields or actions anywhere, and none may be added here.
+ *
+ * The thrown Error's message carries the machine-readable refusal code, so a
+ * caller that lets this one through to the renderer produces exactly the same
+ * refusal the upper layers produce — one decoder (`parseMailRuleRefusal`), one
+ * user-visible outcome.
+ */
+function assertMailRuleAllowed(conditions: string, actions: string): void {
+  const refusal = findEncodedMailRuleRefusal(conditions, actions)
+  if (refusal) throw mailRuleRefusalError(refusal)
+}
+
 export function createMailRule(data: {
   accountId?: string | null
   name: string
@@ -5991,6 +6686,7 @@ export function createMailRule(data: {
   priority?: number
   stopProcessing?: boolean
 }): MailRuleRow {
+  assertMailRuleAllowed(data.conditions, data.actions)
   const id = randomUUID()
   const now = new Date().toISOString()
   db.prepare(`
@@ -6021,6 +6717,21 @@ export function updateMailRule(id: string, patch: {
 }): MailRuleRow | undefined {
   const existing = getMailRule(id)
   if (!existing) return undefined
+  // §2.162 — validate the rule as it will be AFTER the patch, taking the half
+  // the patch omits from the stored row: a patch that only swaps the actions to
+  // `trash` leaves a stored legacy-`from` condition in place, and checking the
+  // submitted half alone would wave that through.
+  //
+  // A patch that touches NEITHER half is deliberately not checked. Renaming,
+  // re-prioritising and above all DISABLING a rule stored before this check
+  // existed must stay possible — otherwise the one action that neutralises such
+  // a rule is the one action the guard blocks.
+  if (patch.conditions !== undefined || patch.actions !== undefined) {
+    assertMailRuleAllowed(
+      patch.conditions ?? existing.conditions,
+      patch.actions ?? existing.actions,
+    )
+  }
   const now = new Date().toISOString()
   const accountId = patch.accountId !== undefined ? patch.accountId : existing.accountId
   const name = patch.name ?? existing.name

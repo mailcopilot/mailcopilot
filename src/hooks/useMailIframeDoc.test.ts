@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, renderHook, waitFor } from '@testing-library/react'
 import { useMailIframeDoc } from './useMailIframeDoc'
-import type { MailSummary, MessageDetails } from '../../packages/net/types'
+import type { AttachmentMeta, MailSummary, MessageDetails } from '../../packages/net/types'
 
 // Mock window.api for IPC calls. Individual tests override mockInvoke
 // behavior — by default it returns `!ok`, which sends the pipeline down
@@ -761,6 +761,281 @@ describe('useMailIframeDoc', () => {
     expect(doc).toContain('<details>')
     // link text preserved inside the collapsed block
     expect(doc).toContain('link')
+  })
+
+  // -------------------------------------------------------------------------
+  // §2.128 — two questions with two different rules.
+  //
+  //  * what the body INLINES: broad, so images keep rendering wherever the
+  //    sender wrote the reference;
+  //  * what LOSES ITS CHIP: only a part that is explicitly `inline`, written in
+  //    an `<img src>` / `<input type=image src>` position, and whose bytes this
+  //    hook actually substituted.
+  //
+  // Every "keeps its chip" case below was a way to make a real file vanish.
+  // -------------------------------------------------------------------------
+
+  /** The parts the hook reports as hidden, by MIME part path. */
+  function hiddenParts(result: { current: { hiddenAttachments: { part: string }[] } }): string[] {
+    return result.current.hiddenAttachments.map(a => a.part)
+  }
+
+  function inlineAttachment(overrides: Partial<AttachmentMeta> = {}): AttachmentMeta {
+    return {
+      part: '1.1',
+      filename: 'logo.png',
+      contentType: 'image/png',
+      size: 10,
+      cid: 'logo@x',
+      disposition: 'inline',
+      ...overrides,
+    } as AttachmentMeta
+  }
+
+  function mockCidFetch(base64 = 'LOGO') {
+    mockInvoke.mockImplementation(async (channel: string) =>
+      channel === 'net:attachmentBase64'
+        ? { ok: true, contentBase64: base64, contentType: 'image/png' }
+        : { ok: false },
+    )
+  }
+
+  it('hides a part that meets all four conditions', async () => {
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails('<p>hi</p><img src="cid:logo@x">', {
+        attachments: [inlineAttachment({ disposition: 'inline; filename="logo.png"' })],
+      }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual(['1.1'])
+    expect(result.current.doc).toContain('data:image/png;base64,LOGO')
+    expect(result.current.doc).not.toContain('cid:logo@x')
+  })
+
+  // A `Content-ID` is text the sender chooses, so it must be treated as data
+  // and never as a property name. In an object literal `__proto__` is an
+  // inherited setter: the write created no own property, the substitution
+  // never happened — and the part was nevertheless counted as substituted, so
+  // its chip disappeared and the file was reachable from nowhere. `constructor`
+  // is the control: it always did become an own key, and must keep working.
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'substitutes and hides a part whose Content-ID is %s',
+    async (cid) => {
+      mockCidFetch()
+      const params = makeParams({
+        details: makeDetails(`<p>hi</p><img src="cid:${cid}">`, {
+          attachments: [inlineAttachment({ cid })],
+        }),
+      })
+      const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+      await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+      // The image is drawn...
+      expect(result.current.doc).toContain('data:image/png;base64,LOGO')
+      expect(result.current.doc).not.toContain(`cid:${cid}`)
+      // ...which is the only thing that permits dropping the chip.
+      expect(hiddenParts(result)).toEqual(['1.1'])
+    },
+  )
+
+  // Condition 4. The bytes never arrived, so the body shows a broken image —
+  // the chip is then the only way left to reach the file.
+  it('keeps the chip when the byte fetch fails', async () => {
+    mockInvoke.mockResolvedValue({ ok: false })
+    const params = makeParams({
+      details: makeDetails('<img src="cid:logo@x">', { attachments: [inlineAttachment()] }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+    expect(result.current.doc).toContain('cid:logo@x')
+  })
+
+  it('keeps the chip when the fetch throws', async () => {
+    mockInvoke.mockImplementation(async (channel: string) => {
+      if (channel === 'net:attachmentBase64') throw new Error('IPC gone')
+      return { ok: false }
+    })
+    const params = makeParams({
+      details: makeDetails('<img src="cid:logo@x">', { attachments: [inlineAttachment()] }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+  })
+
+  // Condition 2 — a part the sender never labelled `inline` may be a file.
+  it('keeps the chip of a part with no disposition, and still draws it', async () => {
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails('<img src="cid:logo@x">', {
+        attachments: [inlineAttachment({ disposition: undefined })],
+      }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+    expect(result.current.doc).toContain('data:image/png;base64,LOGO')
+  })
+
+  // Condition 3 — the iteration-4 narrowing. These positions all survive
+  // sanitization and still get their bytes (rendering is untouched), but none
+  // of them proves the browser drew the part, so the chip stays.
+  it.each([
+    ['a style attribute', '<div style="background:url(cid:logo@x)"></div>'],
+    ['a source element', '<picture><source media="not all" srcset="cid:logo@x"><img src="other.png"></picture>'],
+    ['a srcset candidate', '<img srcset="cid:logo@x 2x" src="other.png">'],
+  ])('inlines but does not hide a part referenced only from %s', async (_label, html) => {
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails(html, { attachments: [inlineAttachment()] }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    // Rendering is untouched by the narrowing: the bytes are still inlined.
+    expect(result.current.doc).toContain('data:image/png;base64,LOGO')
+    expect(hiddenParts(result)).toEqual([])
+  })
+
+  // The same for stylesheet positions. No assertion on the bytes here: jsdom's
+  // DOMPurify drops <style> outright, so the reference does not survive
+  // sanitization in this environment at all. That `selectCidPartsToInline`
+  // still resolves such references (i.e. the browser build keeps drawing them)
+  // is pinned in `packages/core/cidRefs.test.ts`.
+  it.each([
+    ['a CSS background', '<style>.hero{background:url(cid:logo@x)}</style><div class="hero"></div>'],
+    ['a media query that never applies', '<style>@media not all{.h{background:url(cid:logo@x)}}</style>'],
+    ['an unused custom property', '<style>:root{--unused:url(cid:logo@x)}</style>'],
+    ['a CDATA section', '<style><![CDATA[url(cid:logo@x)]]></style>'],
+    ['an escaped @import prelude', '<style>@\\69 mport url(cid:logo@x);</style>'],
+  ])('does not hide a part referenced only from %s', async (_label, html) => {
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails(html, { attachments: [inlineAttachment()] }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+  })
+
+  it('hides only the src of a srcset image, never its candidates', async () => {
+    mockCidFetch()
+    const attachments = [
+      inlineAttachment({ part: '1.1', cid: 'a@x' }),
+      inlineAttachment({ part: '1.2', cid: 'b@x' }),
+      inlineAttachment({ part: '1.3', cid: 'c@x' }),
+    ]
+    const params = makeParams({
+      details: makeDetails('<img srcset="cid:a@x 1x, cid:b@x 2x" src="cid:c@x">', { attachments }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    // All three are inlined — the browser may pick any candidate.
+    expect(mockInvoke).toHaveBeenCalledTimes(3)
+    expect(hiddenParts(result)).toEqual(['1.3'])
+  })
+
+  it('never inlines or hides a part the sender marked as an attachment', async () => {
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails('<img src="cid:logo@x">', {
+        attachments: [inlineAttachment({ disposition: 'attachment; filename="logo.png"' })],
+      }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+    expect(mockInvoke).not.toHaveBeenCalledWith('net:attachmentBase64', expect.anything(), expect.anything(), expect.anything(), expect.anything())
+  })
+
+  it('keeps the chip of a part whose cid only appears where nothing draws', async () => {
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails('<p>see cid:logo@x</p><a href="cid:logo@x">open</a>', {
+        attachments: [inlineAttachment()],
+      }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+  })
+
+  it('keeps the chip of a part referenced only from a position the sanitizer removes', async () => {
+    // DOMPurify drops <video> together with its children, so this <img> is not
+    // in the rendered body at all. The decision runs on the SANITIZED html.
+    mockCidFetch()
+    const params = makeParams({
+      details: makeDetails('<video><img src="cid:logo@x"></video>', {
+        attachments: [inlineAttachment()],
+      }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toEqual([])
+    expect(mockInvoke).not.toHaveBeenCalledWith('net:attachmentBase64', expect.anything(), expect.anything(), expect.anything(), expect.anything())
+  })
+
+  it('stops at the inlining ceiling, so the overflow keeps its chips', async () => {
+    mockCidFetch()
+    const attachments = Array.from({ length: 30 }, (_, i) =>
+      inlineAttachment({ part: `1.${i}`, cid: `img${i}@x` }),
+    )
+    const html = attachments.map(a => `<img src="cid:${a.cid}">`).join('')
+    const params = makeParams({ details: makeDetails(html, { attachments }) })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    expect(hiddenParts(result)).toHaveLength(25)
+    expect(hiddenParts(result)).not.toContain('1.25')
+    // ...and the overflow references really are still un-substituted.
+    expect(result.current.doc).toContain('cid:img25@x')
+    expect(result.current.doc).not.toContain('cid:img24@x')
+    expect(mockInvoke).toHaveBeenCalledTimes(25)
+  })
+
+  it('reports nothing hidden for a message with no html body', () => {
+    const params = makeParams({
+      details: makeDetails(undefined, { attachments: [inlineAttachment()] }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+    expect(result.current.hiddenAttachments).toEqual([])
+  })
+
+  it('reports nothing hidden until the substitution has finished', async () => {
+    // Direction of the only transition: chips start visible and may disappear
+    // once the bytes are in. Never the other way round.
+    let release: (() => void) | undefined
+    const gate = new Promise<void>(resolve => { release = resolve })
+    mockInvoke.mockImplementation(async (channel: string) => {
+      if (channel !== 'net:attachmentBase64') return { ok: false }
+      await gate
+      return { ok: true, contentBase64: 'LOGO', contentType: 'image/png' }
+    })
+
+    const params = makeParams({
+      details: makeDetails('<img src="cid:logo@x">', { attachments: [inlineAttachment()] }),
+    })
+    const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
+
+    expect(result.current.hiddenAttachments).toEqual([])
+    expect(result.current.doc).toBeNull()
+
+    release!()
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    // The chip row and the body land in the same commit.
+    expect(hiddenParts(result)).toEqual(['1.1'])
   })
 
   it('does not crash when details.attachments is undefined (optional field)', async () => {

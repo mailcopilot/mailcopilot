@@ -6,16 +6,24 @@ import { TELEMETRY_CONSENT_VERSION } from '../telemetryConsent'
 // and the Sentry SDK at import time. All four are replaced here so the unit
 // suite stays free of native bindings; the behaviour under test is injected
 // through the deps seam.
-const { handleIpcMock, recordEventMock, captureExceptionMock, setSentryUserEnabledMock, setSentryUserIdMock } =
-  vi.hoisted(() => ({
-    handleIpcMock: vi.fn(),
-    recordEventMock: vi.fn(),
-    captureExceptionMock: vi.fn(),
-    setSentryUserEnabledMock: vi.fn(),
-    setSentryUserIdMock: vi.fn(),
-  }))
+const {
+  handleIpcMock, recordEventMock, captureExceptionMock, setSentryUserEnabledMock, setSentryUserIdMock, logMock,
+} = vi.hoisted(() => ({
+  handleIpcMock: vi.fn(),
+  recordEventMock: vi.fn(),
+  captureExceptionMock: vi.fn(),
+  setSentryUserEnabledMock: vi.fn(),
+  setSentryUserIdMock: vi.fn(),
+  // Captured so the log-hygiene test can assert that nothing from settings, the
+  // payload or the sender reaches any line (CLAUDE.md §8), and so the one
+  // exceptional-outcome warning still has an assertion. The §2.236 diagnostics
+  // whose log lines used to BE the deliverable are gone — see
+  // getTelemetryConsentState in the module under test.
+  logMock: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}))
 
 vi.mock('electron', () => ({ app: { isPackaged: false } }))
+vi.mock('../logger', () => ({ createLogger: () => logMock }))
 vi.mock('../ipc', () => ({ handleIpc: handleIpcMock }))
 vi.mock('../metrics', () => ({ recordEvent: recordEventMock }))
 vi.mock('../sentry', () => ({
@@ -274,6 +282,37 @@ describe('telemetryConsentService', () => {
     })
   })
 
+  describe('initTelemetryConsent composition', () => {
+    it('migrates BEFORE exposing the handlers', async () => {
+      // Restored after the §2.236 removal: a deleted diagnostics test happened
+      // to be the only thing asserting that `initTelemetryConsent` runs the
+      // migration at all. Direct tests of the migration and of the registration
+      // both survive, but nothing tied them together — so dropping the migration
+      // call from the composition would have gone unnoticed.
+      //
+      // The ordering is the part that matters. A legacy opt-out that is seeded
+      // only AFTER the handlers are live leaves a window in which
+      // `telemetry:consentState` answers `needed: true` for a user who has
+      // already refused, and the consent screen asks a question that was
+      // answered years ago.
+      const { initTelemetryConsent } = await import('./telemetryConsentService')
+      const { deps, saveSettings } = makeDeps({ sentryEnabled: false })
+      const order: string[] = []
+      saveSettings.mockImplementation(() => { order.push('migrated') })
+      handleIpcMock.mockImplementation(() => { order.push('handler-registered') })
+
+      initTelemetryConsent(deps)
+
+      expect(order[0]).toBe('migrated')
+      expect(order).toContain('handler-registered')
+      expect(saveSettings.mock.calls[0][0].telemetryConsent).toEqual({
+        granted: false,
+        version: TELEMETRY_CONSENT_VERSION,
+        at: NOW,
+      })
+    })
+  })
+
   describe('migrateTelemetryConsent (AC11)', () => {
     it('seeds a refusal for an install that had already opted out', async () => {
       const { migrateTelemetryConsent } = await import('./telemetryConsentService')
@@ -432,6 +471,47 @@ describe('telemetryConsentService', () => {
           expect(setHandler(event, { granted: true })).toEqual({ ok: false, reason: 'forbidden_sender' })
         }
       })
+    })
+  })
+
+  // CLAUDE.md §8: whatever this module logs, it must carry no user data. The
+  // §2.236 diagnostics that used to be asserted here are gone (see
+  // getTelemetryConsentState for why), but this guard is not about them — it is
+  // about every line the module still emits, and it gets cheaper to satisfy, not
+  // less necessary, as lines are removed.
+  describe('log hygiene', () => {
+    it('puts nothing from settings, payload or sender into any log line', async () => {
+      const { initTelemetryConsent } = await import('./telemetryConsentService')
+      const POISON = 'ivan@example.com'
+      const { deps } = makeDeps({
+        telemetryConsent: { granted: true, version: TELEMETRY_CONSENT_VERSION, at: POISON },
+      } as Partial<Settings>)
+      initTelemetryConsent(deps)
+      const stateHandler = handleIpcMock.mock.calls[0][1] as (e: unknown) => TelemetryConsentStateLike
+      const setHandler = handleIpcMock.mock.calls[1][1] as (e: unknown, p: unknown) => SetConsentResultLike
+      stateHandler({})
+      setHandler({ sender: MAIN_SENDER }, { granted: true, note: POISON })
+
+      const everything = JSON.stringify([
+        logMock.info.mock.calls, logMock.warn.mock.calls, logMock.error.mock.calls,
+      ])
+      expect(everything).not.toContain(POISON)
+      expect(everything).not.toContain('main-window-web-contents')
+    })
+
+    it('still reports an unreadable settings store — the one branch that must stay visible', async () => {
+      // Kept at warn on purpose: in a packaged build the console transport is
+      // warn-level, and "we could not read the answer at all" is the single
+      // consent branch an operator needs to see without debug logging.
+      const { getTelemetryConsentState } = await import('./telemetryConsentService')
+      const { deps } = makeDeps({})
+      const state = getTelemetryConsentState({
+        ...deps,
+        getSettings: () => { throw new Error('unreadable') },
+      })
+      expect(state.needed).toBe(true)
+      expect(logMock.warn.mock.calls.map(c => c[0]))
+        .toContain('consent state: settings unreadable, asking again')
     })
   })
 })

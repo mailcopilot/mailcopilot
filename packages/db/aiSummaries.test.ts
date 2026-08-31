@@ -74,6 +74,10 @@ describe('packages/db ai summaries', () => {
         accountId: 'acc-42',
         oneLine: 'Three-message thread about the quarterly report',
         bullets: ['Point A', 'Point B', 'Point C', 'Point D', 'Point E'],
+        // Deliberately an id that is NO LONGER SELECTABLE (§2.218 removed the
+        // `subscription` provider). Cached rows outlive the enum, so this layer
+        // must round-trip provider as an opaque string and must never validate
+        // stored history against the live provider union.
         provider: 'subscription',
         createdAt: 1_700_000_000_000,
       })

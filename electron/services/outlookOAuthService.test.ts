@@ -54,6 +54,11 @@ vi.mock('../logger', () => ({
   }),
 }))
 
+// §2.165 fix wave 4 — this service now imports the shared "credentials are not
+// configured" error factory from `./accountAuthState`, which pulls the metrics
+// module into the graph. Stubbed so these tests keep exercising OAuth only.
+vi.mock('../metrics', () => ({ recordEvent: vi.fn() }))
+
 // ---------------------------------------------------------------------------
 // Import SUT + mocked modules
 // ---------------------------------------------------------------------------
@@ -65,7 +70,15 @@ import {
   forceRefreshOutlookAccessToken,
   connectOutlookAccount,
   classifyConnectionTestFailure,
+  registerMissingCredentialsReporter,
+  unregisterMissingCredentialsReporter,
 } from './outlookOAuthService'
+import {
+  isImapAuthNotConfiguredError,
+  IMAP_AUTH_NOT_CONFIGURED_CODE,
+  initAccountAuthState,
+  type AccountAuthStatePayload,
+} from './accountAuthState'
 import { getOauthRefreshTokenWithSource } from '../../packages/net/index'
 import { refreshMicrosoftAccessToken, runMicrosoftOAuthFlow, isMicrosoftOAuthBusy } from '../microsoftOAuth'
 import { getAccountMeta, saveAccount, testImapConnection, testSmtpConnection } from '../../packages/net/index'
@@ -85,8 +98,23 @@ const mockTestSmtpConnection = vi.mocked(testSmtpConnection)
 
 const ORIGINAL_ENV = process.env
 
+/**
+ * A stubbed reporter slot (§2.165 fix wave 5 — the slot carries two functions
+ * now: the stamp source and the report). `currentGeneration` answers 0, the
+ * ordinary generation of an id that has never been freed.
+ */
+function makeReporter(generation: number | null = 0) {
+  return {
+    currentGeneration: vi.fn(() => generation),
+    noteMissingCredentials: vi.fn<(accountId: number, accountGeneration: number | null) => void>(),
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  // §2.165 fix wave 4 — the reporter slot is module state; leaving one behind
+  // would make a later test observe another test's spy.
+  unregisterMissingCredentialsReporter()
   clearOutlookTokenCache(1)
   clearOutlookTokenCache(2)
   clearOutlookTokenCache(42)
@@ -95,6 +123,7 @@ beforeEach(() => {
   mockRefreshMicrosoftAccessToken.mockResolvedValue({ accessToken: 'at-refreshed', expiresAt: Date.now() + 3600_000 })
   mockRunMicrosoftOAuthFlow.mockResolvedValue({
     email: 'user@outlook.com',
+    displayName: 'Outlook User',
     accessToken: 'at-fresh',
     expiresAt: Date.now() + 3600_000,
     refreshToken: 'rt-fresh',
@@ -202,6 +231,177 @@ describe('getOutlookAccessToken', () => {
   it('throws when refresh token is not found', async () => {
     mockGetOauthRefreshTokenWithSource.mockResolvedValueOnce(null)
     await expect(getOutlookAccessToken(1)).rejects.toThrow('refresh token for account #1 not found')
+  })
+
+  /**
+   * §2.165 fix wave 4 — the mailbox that could never show the "sign in again"
+   * badge. This rejection happens while BUILDING the config: before
+   * `assertImapAuth` inspects the credentials and before any wrapped IMAP
+   * operation exists, so neither the local precondition report nor the
+   * connection boundary ever saw it and the account just went quiet.
+   */
+  describe('missing refresh token — raising the re-auth flag', () => {
+    it('reports missing credentials for the account, exactly once, before rejecting', async () => {
+      // Mutation that fails this: dropping the `reportMissingCredentials` call,
+      // or moving it after the `throw` (where it never runs).
+      const reporter = makeReporter()
+      registerMissingCredentialsReporter(reporter)
+      mockGetOauthRefreshTokenWithSource.mockResolvedValueOnce(null)
+
+      await expect(getOutlookAccessToken(1)).rejects.toThrow()
+      expect(reporter.noteMissingCredentials).toHaveBeenCalledTimes(1)
+      expect(reporter.noteMissingCredentials).toHaveBeenCalledWith(1, 0)
+    })
+
+    it('throws an error carrying the SHARED discriminator, not a bare Error', async () => {
+      // The code is what makes the copies of this verdict that DO reach the
+      // service through the boundary route to "missing credentials" instead of
+      // being classified by wording (which files them as 'network' and drops
+      // them). Mutation that fails this: `throw new Error(...)`.
+      const reporter = makeReporter()
+      registerMissingCredentialsReporter(reporter)
+      mockGetOauthRefreshTokenWithSource.mockResolvedValueOnce(null)
+
+      const err = await getOutlookAccessToken(1).catch((e: unknown) => e)
+      expect(isImapAuthNotConfiguredError(err)).toBe(true)
+      expect((err as Error & { code?: string }).code).toBe(IMAP_AUTH_NOT_CONFIGURED_CODE)
+      // …and the message still names nothing but the account id.
+      expect((err as Error).message).toBe(
+        'Microsoft refresh token for account #1 not found (re-authorization required)',
+      )
+    })
+
+    it('the Graph-send token path reports the same verdict', async () => {
+      // Same missing token, same conclusion: no login is possible at all,
+      // whichever resource the caller wanted.
+      const reporter = makeReporter()
+      registerMissingCredentialsReporter(reporter)
+      mockGetOauthRefreshTokenWithSource.mockResolvedValueOnce(null)
+
+      const err = await getOutlookGraphSendAccessToken(1).catch((e: unknown) => e)
+      expect(isImapAuthNotConfiguredError(err)).toBe(true)
+      expect(reporter.noteMissingCredentials).toHaveBeenCalledWith(1, 0)
+    })
+
+    it('reports nothing when a refresh token IS stored, even if the refresh fails', async () => {
+      // The negative that keeps this from becoming "any OAuth failure is a
+      // signed-out mailbox": a /token round trip that fails is weather (or a
+      // revoked grant the boundary will classify), not a missing credential.
+      const reporter = makeReporter()
+      registerMissingCredentialsReporter(reporter)
+      mockRefreshMicrosoftAccessToken.mockRejectedValueOnce(new Error('network failure'))
+
+      await expect(getOutlookAccessToken(1)).rejects.toThrow('network failure')
+      expect(reporter.noteMissingCredentials).not.toHaveBeenCalled()
+    })
+
+    it('a throwing reporter changes neither the rejection nor its error', async () => {
+      // Fire-and-forget: the report may not become the user-visible outcome.
+      registerMissingCredentialsReporter({
+        currentGeneration: () => 0,
+        noteMissingCredentials: () => {
+          throw new Error('service exploded')
+        },
+      })
+      mockGetOauthRefreshTokenWithSource.mockResolvedValueOnce(null)
+
+      const err = await getOutlookAccessToken(1).catch((e: unknown) => e)
+      expect(isImapAuthNotConfiguredError(err)).toBe(true)
+      expect((err as Error).message).toContain('refresh token for account #1 not found')
+      expect(captureExceptionMock).toHaveBeenCalled()
+    })
+
+    it('rejects the same way when no reporter is registered at all', async () => {
+      // The slot is empty until main.ts fills it (and in every other test file
+      // that imports this service), so the token path must not depend on it.
+      mockGetOauthRefreshTokenWithSource.mockResolvedValueOnce(null)
+      const err = await getOutlookAccessToken(1).catch((e: unknown) => e)
+      expect(isImapAuthNotConfiguredError(err)).toBe(true)
+    })
+  })
+
+  /**
+   * §2.165 fix wave 5 — the defect the previous wave introduced with its own
+   * fix: the report above is asynchronous, and until now it carried nothing but
+   * an account id.
+   *
+   * The sequence, in real time rather than as an assertion about call
+   * arguments: the token fetch starts, its secret-store lookup is still in
+   * flight when the user deletes the mailbox, the id is handed to the next
+   * account created (ids are "max + 1", so they are reused), and only then does
+   * the lookup answer "no token". The verdict belongs to a mailbox that no
+   * longer exists; the badge must not appear on the one that inherited its id.
+   *
+   * The real state machine is wired in here (not a spy) so the assertion is on
+   * the user-visible thing — the broadcast payload — rather than on the shape
+   * of a call.
+   */
+  describe('a token fetch that outlived its mailbox', () => {
+    /** Deferred stand-in for the secret-store lookup, so the deletion can be
+     *  interleaved between the fetch starting and the lookup answering. */
+    function deferredLookup() {
+      let answer: (value: null) => void = () => {}
+      const promise = new Promise<null>((resolve) => { answer = resolve })
+      mockGetOauthRefreshTokenWithSource.mockReturnValueOnce(promise as never)
+      return { answerWithNoToken: () => answer(null) }
+    }
+
+    function wireRealService() {
+      const broadcast = vi.fn<(channel: 'accounts:authStateChanged', payload: AccountAuthStatePayload) => number>(
+        () => 1,
+      )
+      const svc = initAccountAuthState({
+        classifyError: () => 'auth',
+        broadcast,
+        accountExists: () => true,
+      })
+      registerMissingCredentialsReporter({
+        currentGeneration: (id) => svc.currentGeneration(id),
+        noteMissingCredentials: (id, generation) => svc.noteMissingCredentials(id, generation),
+      })
+      return { svc, broadcast }
+    }
+
+    it.each([
+      ['Exchange', getOutlookAccessToken],
+      ['Graph-send', getOutlookGraphSendAccessToken],
+    ])('%s: a mailbox deleted mid-lookup does not flag the id it left behind', async (_name, fetchToken) => {
+      // Mutation that fails this: reading the generation inside the async body
+      // (after the await) instead of before it — the read would then describe
+      // the NEW mailbox and match. Dropping the stamp argument entirely fails
+      // it too: `null` is a mismatch, but so is passing the id alone, which no
+      // longer compiles.
+      const { svc, broadcast } = wireRealService()
+      const { answerWithNoToken } = deferredLookup()
+
+      const pending = fetchToken(7).catch((e: unknown) => e)
+      // …the user deletes the mailbox while the lookup is in flight, and the id
+      // is issued to a freshly created one.
+      svc.forget(7)
+      answerWithNoToken()
+      const err = await pending
+
+      expect(isImapAuthNotConfiguredError(err)).toBe(true)
+      expect(svc.snapshot().needsReauth).toEqual([])
+      expect(broadcast).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['Exchange', getOutlookAccessToken],
+      ['Graph-send', getOutlookGraphSendAccessToken],
+    ])('%s: the live mailbox is still flagged on the same code path', async (_name, fetchToken) => {
+      // The negative control: without it the test above would also pass on a
+      // service that never raises anything at all.
+      const { svc, broadcast } = wireRealService()
+      const { answerWithNoToken } = deferredLookup()
+
+      const pending = fetchToken(7).catch((e: unknown) => e)
+      answerWithNoToken()
+      await pending
+
+      expect(svc.snapshot().needsReauth).toEqual([7])
+      expect(broadcast).toHaveBeenCalledWith('accounts:authStateChanged', { needsReauth: [7] })
+    })
   })
 
   it('cleans up inflight map when refresh rejects', async () => {
@@ -727,6 +927,108 @@ describe('connectOutlookAccount', () => {
         signature: '<p>Sig</p>',
       }),
     )
+  })
+
+  // §2.94 — a freshly connected account used to be saved with no name at all,
+  // so every account picker fell back to the address (or to `#id`).
+  it('names a brand-new account from the profile', async () => {
+    await connectOutlookAccount(defaultParams())
+
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Outlook User' }),
+    )
+  })
+
+  it('leaves the name unset when the provider returned none', async () => {
+    mockRunMicrosoftOAuthFlow.mockResolvedValueOnce({
+      email: 'user@outlook.com',
+      displayName: '',
+      accessToken: 'at-fresh',
+      expiresAt: Date.now() + 3600_000,
+      refreshToken: 'rt-fresh',
+    })
+
+    await connectOutlookAccount(defaultParams())
+
+    // `undefined`, not an empty string: the account schema requires a
+    // non-empty name when present, and downstream label helpers treat
+    // "absent" as "fall back to the address".
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: undefined }),
+    )
+  })
+
+  // codex-bg-review Medium #5: the read schema accepts `name: ''` while the
+  // write schema requires a non-empty name, so a nullish-only fallback carried
+  // the blank through and made the save fail outright.
+  it('fills in the profile name when the existing record has a blank one', async () => {
+    mockGetAccountMeta.mockReturnValue({
+      id: 10,
+      name: '',
+      authType: 'oauth2',
+      providerId: 'outlook',
+      transportType: 'imap-smtp',
+      imap: { host: 'outlook.office365.com', port: 993, secure: true, user: 'old@outlook.com' },
+      smtp: { host: 'smtp-mail.outlook.com', port: 587, secure: false, user: 'old@outlook.com' },
+      folderRoles: {},
+    } as ReturnType<typeof getAccountMeta>)
+
+    await connectOutlookAccount({ ...defaultParams(), existingAccountId: 10 })
+
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Outlook User' }),
+    )
+  })
+
+  it('treats a whitespace-only existing name as absent', async () => {
+    mockGetAccountMeta.mockReturnValue({
+      id: 10,
+      name: '   ',
+      authType: 'oauth2',
+      providerId: 'outlook',
+      transportType: 'imap-smtp',
+      imap: { host: 'outlook.office365.com', port: 993, secure: true, user: 'old@outlook.com' },
+      smtp: { host: 'smtp-mail.outlook.com', port: 587, secure: false, user: 'old@outlook.com' },
+      folderRoles: {},
+    } as ReturnType<typeof getAccountMeta>)
+
+    await connectOutlookAccount({ ...defaultParams(), existingAccountId: 10 })
+
+    expect(mockSaveAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Outlook User' }),
+    )
+  })
+
+  // §2.94 — the wizard swaps to a waiting step and needs to know how far the
+  // flow has got; without these the step would sit on its seeded first stage
+  // through the long server-probing stretch.
+  it('broadcasts connect progress through the server-probing stages', async () => {
+    const params = defaultParams()
+    await connectOutlookAccount(params)
+
+    const stages = params.broadcast.mock.calls
+      .filter((c: unknown[]) => c[0] === 'oauth:progress')
+      .map((c: unknown[]) => (c[1] as { stage: string }).stage)
+
+    expect(stages).toEqual(['imap', 'smtp', 'saving'])
+    // Payload must stay identity-free — it reaches every open window.
+    for (const call of params.broadcast.mock.calls.filter((c: unknown[]) => c[0] === 'oauth:progress')) {
+      expect(Object.keys(call[1] as object).sort()).toEqual(['provider', 'stage'])
+      expect((call[1] as { provider: string }).provider).toBe('outlook')
+    }
+  })
+
+  it('does not fail the connect flow when a progress listener throws', async () => {
+    const params = {
+      ...defaultParams(),
+      broadcast: vi.fn((channel: string) => {
+        if (channel === 'oauth:progress') throw new Error('listener blew up')
+      }),
+    }
+
+    const result = await connectOutlookAccount(params)
+
+    expect(result.ok).toBe(true)
   })
 
   it('pre-writes refresh token for non-OAuth existing accounts', async () => {

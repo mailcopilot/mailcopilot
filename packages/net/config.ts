@@ -27,9 +27,47 @@ export type Settings = {
    */
   bodyRetentionDays?: number
   language: 'en' | 'ru' | 'fr' | 'de' | 'es' | 'it'
+  /**
+   * Master switch for new-mail desktop notifications. §2.99 moved the decision
+   * and the presentation into the main process, but the switch is unchanged —
+   * there is deliberately no second "background notifications" flag.
+   */
   notificationsEnabled: boolean
   imapIdleEnabled: boolean
   draftSyncEnabled: boolean
+  /**
+   * §2.99 — show the system tray / status-bar icon. Default ON: it is the
+   * surface that makes `closeToTray` recoverable, so it must exist before the
+   * user can opt into closing to it.
+   */
+  trayEnabled?: boolean
+  /**
+   * §2.99 — closing the main window hides it instead of quitting. Default OFF
+   * (opt-in behaviour change) and honoured ONLY while a tray icon actually
+   * exists, so the app can never end up running with no way to bring it back.
+   */
+  closeToTray?: boolean
+  /**
+   * §2.99 — register the app to start on login. Default OFF. Applying it is a
+   * platform capability, not a guarantee: on failure the flag stays as the user
+   * set it and the main process reports the capability so the UI can degrade
+   * honestly instead of throwing.
+   */
+  launchAtLogin?: boolean
+  /**
+   * §2.99 (review H4) — what the last autostart registration attempt actually
+   * achieved.
+   *
+   * Main-only writable (`MAIN_ONLY_SETTINGS_FIELDS`), written by
+   * `setLaunchAtLoginStatus` from `applyLaunchAtLoginSetting`. It exists
+   * because `launchAtLogin` is a WISH and this is the OUTCOME: an unpackaged
+   * build, a platform without the capability, or an unwritable autostart
+   * directory all leave the wish standing while nothing was registered, and a
+   * UI that shows only the wish is lying. `requested` is the state the attempt
+   * tried to reach, so a stale record cannot be misread as describing the
+   * current toggle.
+   */
+  launchAtLoginStatus?: { supported: boolean; applied: boolean; requested: boolean; at: string }
   /** Hotkeys preset: Gmail (default) or Outlook (Ctrl-like shortcuts). */
   hotkeysPreset?: 'gmail' | 'outlook'
   /** Send delay (Undo Send), seconds. 0 = disabled. */
@@ -60,8 +98,12 @@ export type Settings = {
   offlineMaxTotalMB?: number
   /** @deprecated Use per-folder offlineMode in folder_prefs instead */
   offlineFolders?: string[]
-  /** AI provider */
-  aiProvider?: 'subscription' | 'anthropic-api' | 'openai-api' | 'gemini-api'
+  /**
+   * AI provider. Mirrors `AiProvider` in electron/services/ai.ts — kept as a
+   * literal so packages/net stays free of an electron import. All members are
+   * key-based (BYOK); §2.218 removed the consumer-subscription member.
+   */
+  aiProvider?: 'anthropic-api' | 'openai-api' | 'gemini-api'
   /** AI model (default: sonnet) */
   aiModel?: string
   /** User has consented to sending data to the AI provider */
@@ -88,6 +130,30 @@ export type Settings = {
   aiMaxTurns?: number
   /** Max budget per single AI request (USD), API providers only */
   aiMaxBudgetPerRequest?: number
+  /**
+   * §2.122 — per-provider "an API key for this provider was saved at some
+   * point" marker. NEVER the key itself, never a fragment or a hash of it:
+   * a boolean and nothing more.
+   *
+   * OBSERVABILITY, NOT ENFORCEMENT (CLAUDE.md §5 "Кто владеет правдой"). The
+   * OS secret store owns the truth about whether a key exists; this flag is
+   * our own recollection of having written one. It is allowed to influence
+   * exactly two things: the wording of the message the user sees, and
+   * telemetry. It MUST NOT gate saving, gate the assistant, trigger a delete
+   * or a re-auth, or stand in for a real key read. A disagreement
+   * (`flag = true`, store empty) turns "no key" into "there was one and it is
+   * gone — enter it again", and forbids nothing.
+   *
+   * Main-only writable (`MAIN_ONLY_SETTINGS_FIELDS`): written by
+   * `setAiApiKeySavedFlag` from the main-process save/delete paths in
+   * electron/services/ai.ts, deliberately absent from
+   * `rendererWritableSettingsSchema`.
+   */
+  aiApiKeySaved?: {
+    'anthropic-api'?: boolean
+    'openai-api'?: boolean
+    'gemini-api'?: boolean
+  }
   /** Global offline mode — disables all network access */
   workOffline?: boolean
   /** Extended debug logging in main/electron-log */
@@ -130,7 +196,12 @@ export type Settings = {
   mcpExportEnabled?: boolean
   /** MCP export server port */
   mcpExportPort?: number
-  /** Whitelist of tool names to export (default: read-only tools) */
+  /**
+   * Whitelist of tool names to export (default: `DEFAULT_EXPORT_WHITELIST`,
+   * read-only tools). §2.158: values outside `EXPORTABLE_MCP_TOOLS` are
+   * rejected on the renderer-writable path and dropped at server start —
+   * this field can narrow the exported surface, never widen it.
+   */
   mcpExportWhitelist?: string[]
   /**
    * Allow stdio MCP transport (spawning local processes).
@@ -212,6 +283,105 @@ export type Settings = {
    * actions have no separate opt-in — they run under the normal AI gate.)
    */
   aiInstantReplyEnabled?: Record<string, boolean>
+  /**
+   * §3.3 B7 — per-account AI Proofread opt-in map (accountId → enabled). An
+   * explicit entry of `true` opts that account in; a missing/`false` entry means
+   * the feature is OFF for the account. Default OFF everywhere. The `ai.ts`
+   * seam gates on this map before any provider call and refuses with its own
+   * `not_enabled` reason (never `no_provider` — the actionable fix is a toggle,
+   * not a provider key). Renderer-writable, like the other two AI opt-ins: a
+   * plain UX preference, not a security-sensitive flag. The toggle cannot
+   * enable anything on its own — the path it unblocks still needs a configured
+   * provider and available budget.
+   */
+  aiProofreadEnabled?: Record<string, boolean>
+  /**
+   * §3.3 B6 — per-account AI Translate opt-in map (accountId → enabled). An
+   * explicit entry of `true` opts that account in; a missing/`false` entry means
+   * the feature is OFF for the account. Default OFF everywhere. The main-side
+   * translate generator gates on this map before any provider call and refuses
+   * with its own `opt_out` reason (never `no_provider` — the actionable fix is a
+   * toggle, not a provider key, §3.3.B4.f3(a)). Renderer-writable, like the
+   * other AI opt-ins: a plain UX preference, not a security-sensitive flag. The
+   * toggle cannot enable anything on its own — the path it unblocks still needs
+   * a configured provider and available budget, and translation is never
+   * automatic: it happens only on an explicit user action.
+   */
+  aiTranslateEnabled?: Record<string, boolean>
+  /**
+   * §2.103 — spell checking, master switch. Default OFF, and the default is
+   * the point.
+   *
+   * Chromium's own default is the opposite: `webPreferences.spellcheck` is
+   * `true`, and an empty language list makes Electron populate it from the OS
+   * locale on launch and FETCH that hunspell dictionary from Google's CDN (see
+   * `DICTIONARY_DOWNLOAD_ORIGIN` in electron/services/spellcheck.ts). That is a
+   * silent request to a third party on first launch, which this product's
+   * stated posture (`aiEgressPolicy: 'default-deny'`) does not permit. So the
+   * spellchecker is armed only by an explicit user action, and on the
+   * downloading platforms only after the per-language consent below.
+   *
+   * Renderer-writable: it is a plain preference. The flag by itself cannot
+   * BYPASS a recorded consent — `spellcheckLanguages` is what selects
+   * dictionaries, and main filters that list against
+   * `spellcheckDictionaryConsent` before it reaches a session. (It is not
+   * "cannot cause a download": flipping this on re-activates a list the user
+   * already chose and already consented to, which may well fetch. That is the
+   * consent working, not a hole in it.)
+   */
+  spellcheckEnabled?: boolean
+  /**
+   * §2.103 — dictionaries the spellchecker is enabled for, as Chromium
+   * language codes (`en-US`, `ru-RU`, …). Several at once: mixed-language
+   * mail is the normal case.
+   *
+   * The value domain is owned by Chromium (`availableSpellCheckerLanguages`),
+   * not by us — a hardcoded mirror of someone else's set drifts (§2.167). Main
+   * intersects this list with the live availability list before it reaches the
+   * session, so an entry an older build persisted is inert rather than fatal.
+   *
+   * Renderer-writable, but NOT sufficient on its own: a language whose
+   * dictionary would have to be downloaded is dropped by `settings:save` unless
+   * `spellcheckDictionaryConsent` already carries it, or the user accepts the
+   * native prompt during that save.
+   */
+  spellcheckLanguages?: string[]
+  /**
+   * §2.103 — the languages whose dictionary DOWNLOAD the user has agreed to,
+   * and when they last agreed.
+   *
+   * Main-only writable (`MAIN_ONLY_SETTINGS_FIELDS`). This is the record of a
+   * human answering a native dialog drawn by main; a renderer able to write it
+   * could grant itself the download it was supposed to ask about, which is the
+   * whole of the protection. Same reasoning as `telemetryConsent` and
+   * `stdioApproved`.
+   *
+   * Absent means "never asked" — not "refused". A refusal is not persisted:
+   * declining leaves the language unselected, and the user has to pick it again
+   * to be asked again (electron/services/spellcheck.ts).
+   */
+  spellcheckDictionaryConsent?: { granted: string[]; at: string }
+  /**
+   * §2.103 — main's report of what the platform's spellchecker actually
+   * offers. Main-only writable, refreshed on every launch.
+   *
+   * It exists so the Settings window can render the picker from the REAL list
+   * (`session.availableSpellCheckerLanguages`) without a new IPC channel and
+   * without a second, drifting copy of Chromium's language set in the renderer
+   * — the same "main reports, renderer displays" shape as `launchAtLoginStatus`.
+   *
+   * `platformOwned` is true on macOS, where the OS spellchecker owns the
+   * language list and `setSpellCheckerLanguages` is a documented no-op. There
+   * the picker is not shown at all: offering a control that changes nothing is
+   * the failure mode CLAUDE.md §5 "Кто владеет правдой" describes.
+   *
+   * `max` carries {@link SPELLCHECK_MAX_LANGUAGES} for the same reason the
+   * language list is carried: the renderer cannot import this module (it pulls
+   * electron-store, keytar and packages/db), and a hand-copied constant on the
+   * other side is a drifting mirror of a bound main enforces. Reported, not
+   * duplicated.
+   */
+  spellcheckAvailable?: { languages: string[]; platformOwned: boolean; max: number; at: string }
 }
 
 export type McpConnectionConfig = {
@@ -898,6 +1068,116 @@ export const folderRolesSchema = z.object({
 export const BODY_RETENTION_DAYS_VALUES = [30, 90, 180, 365, -1] as const
 export const DEFAULT_BODY_RETENTION_DAYS = 365
 
+/**
+ * §2.158 — the CEILING of what the MCP export server may ever expose to an
+ * external client, and the value domain of `Settings.mcpExportWhitelist`.
+ *
+ * Canonical source of truth. `electron/services/mcpExport.ts` re-exports it as
+ * `ALL_EXPORTABLE_TOOLS` (the name CLAUDE.md §4 refers to) and intersects every
+ * incoming whitelist with it before registering tools. It lives HERE rather
+ * than in the service because the settings schema below needs it to bound the
+ * field, and `packages/net` must not import from `electron/` — a second copy
+ * would drift, which is exactly the failure this task fixes.
+ *
+ * §3.10 P0 shape: every DESTRUCTIVE MAIL operation appears only as a
+ * `preview_*` / `apply_*` pair. The direct variants (`snooze_email`,
+ * `flag_email`, `add_followup`, `dismiss_followup`, `mark_read_later`,
+ * `create_mail_rule`, `update_mail_rule`, `delete_mail_rule`, `mail_action`,
+ * `unsubscribe`, `send_email`, `move_email`) are deliberately absent: an
+ * external MCP client has no renderer-issued confirmation token, so exposing
+ * them would be a confused-deputy escalation path.
+ *
+ * The pair rule covers destructive mail operations, NOT "every tool that
+ * mutates something". One mutating tool below is unpaired on purpose — read
+ * this as an accepted exception, not as a gap in the rule:
+ *   - `create_draft` only writes a draft and opens Compose. It cannot put mail
+ *     on the wire (no-send-ever is a separate invariant), and the user reads
+ *     the draft before anything can be sent.
+ *
+ * DELIBERATELY ABSENT — do not re-add without the preview/apply pair:
+ *   - `update_memory`. It overwrites persisted AI memory in place, with no
+ *     preview and no confirmation token. The rationale that keeps it unpaired
+ *     on the CHAT path ("the model writes memory from text the user typed")
+ *     is a prompt-level policy, not an enforced property — nothing in the tool
+ *     checks where the text came from — and on THIS path it is void outright:
+ *     an external MCP client authors the call itself, so there is no user
+ *     turn behind it at all. `wrapUntrusted()` bounds the damage when memory
+ *     is substituted back into prompts, but it neither authorises the write
+ *     nor undoes long-lived memory poisoning, which then leaks into every
+ *     later answer, summary and suggestion. Removed from the ceiling as the
+ *     cheap half of the fix; the expensive half — a real preview/apply pair
+ *     for memory writes — is tracked in BACKLOG. Until that pair exists, this
+ *     tool stays chat-only. Do not put it back "for symmetry" with
+ *     `create_draft`: a draft is inert until a human sends it, memory is not.
+ *   - `list_external_tools` / `call_external_tool`. The external-MCP bridge is
+ *     an egress surface; it belongs to the chat path where a human is present
+ *     to answer the §3.10 P2 consent prompt.
+ */
+export const EXPORTABLE_MCP_TOOLS = [
+  // Read-only
+  'get_email', 'list_emails', 'search_emails',
+  'list_folders', 'get_thread', 'get_contacts',
+  'get_account_info', 'count_unread', 'query_db',
+  'list_attachments', 'read_attachment', 'get_attachment_hash',
+  'get_current_context',
+  'list_mail_rules', 'get_rule_log',
+  // Destructive — preview/apply pairs (disabled by default).
+  // External clients calling apply_* without a renderer-issued
+  // confirmation_token will be rejected at the validation gate.
+  'preview_mail_action', 'apply_mail_action',
+  'preview_unsubscribe', 'apply_unsubscribe',
+  'send_email_preview', 'send_email_apply',
+  'move_email_preview', 'move_email_apply',
+  'preview_snooze_email', 'apply_snooze_email',
+  'preview_unsnooze_email', 'apply_unsnooze_email',
+  'preview_flag_email', 'apply_flag_email',
+  'preview_mark_read_later', 'apply_mark_read_later',
+  'preview_add_followup', 'apply_add_followup',
+  'preview_dismiss_followup', 'apply_dismiss_followup',
+  'preview_create_mail_rule', 'apply_create_mail_rule',
+  'preview_update_mail_rule', 'apply_update_mail_rule',
+  'preview_delete_mail_rule', 'apply_delete_mail_rule',
+  // Compose (no-send). `update_memory` is NOT here — see the header above.
+  'create_draft',
+] as const
+
+export type ExportableMcpTool = typeof EXPORTABLE_MCP_TOOLS[number]
+
+/** Membership test for `EXPORTABLE_MCP_TOOLS`, narrowing to the union type. */
+export function isExportableMcpTool(name: string): name is ExportableMcpTool {
+  return (EXPORTABLE_MCP_TOOLS as readonly string[]).includes(name)
+}
+
+/**
+ * §2.103 — upper bound on how many dictionaries may be enabled at once.
+ *
+ * Not a UX preference: every enabled language is a hunspell dictionary
+ * Chromium loads into memory and, on first use, a separate file downloaded
+ * from a third-party CDN. The bound keeps a compromised or stale renderer from
+ * turning one `settings:save` into an arbitrary number of outbound requests.
+ * Generous against the real case — Thunderbird users routinely run two or
+ * three, and eight covers every realistic multilingual mailbox.
+ */
+export const SPELLCHECK_MAX_LANGUAGES = 8
+
+/**
+ * §2.103 — shape of a Chromium spellchecker language code (`en`, `en-US`,
+ * `sr-Cyrl`).
+ *
+ * This is a SHAPE check, not a membership check, and the distinction matters:
+ * the authoritative set is `session.availableSpellCheckerLanguages`, which
+ * belongs to Chromium and changes between versions. Mirroring it here would be
+ * the drifting copy §2.167 forbids. What this bound does is keep the payload
+ * to something that can only ever be a language tag — the value is later
+ * intersected with the live set in main, and an entry outside it never reaches
+ * the session.
+ */
+export const spellcheckLanguageCodeSchema = z.string()
+  .trim()
+  .min(2)
+  .max(20)
+  .regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/)
+
 export const settingsSchema = z.object({
   theme: z.enum(['light', 'dark']),
   /**
@@ -920,6 +1200,18 @@ export const settingsSchema = z.object({
   notificationsEnabled: z.boolean().default(true),
   imapIdleEnabled: z.boolean().default(true),
   draftSyncEnabled: z.boolean().default(true),
+  // §2.99 — tray on by default; the two behaviour changes it enables are opt-in.
+  trayEnabled: z.boolean().default(true),
+  closeToTray: z.boolean().default(false),
+  launchAtLogin: z.boolean().default(false),
+  // Main-only report of the last registration attempt (review H4). Absent means
+  // "never attempted", which is not the same as "failed".
+  launchAtLoginStatus: z.object({
+    supported: z.boolean(),
+    applied: z.boolean(),
+    requested: z.boolean(),
+    at: z.string(),
+  }).optional(),
   hotkeysPreset: z.enum(['gmail', 'outlook']).default('gmail'),
   sendDelaySeconds: z.number().int().min(0).max(60).default(0),
   alwaysLoadImages: z.boolean().default(false),
@@ -935,12 +1227,43 @@ export const settingsSchema = z.object({
   offlineMaxSizeKB: z.number().int().min(0).default(0),
   offlineMaxTotalMB: z.number().int().min(0).default(0),
   offlineFolders: z.array(z.string()).default(['INBOX']),
-  aiProvider: z.enum(['subscription', 'anthropic-api', 'openai-api', 'gemini-api']).optional(),
+  /**
+   * §2.218 — `.catch(undefined)` is the SILENT-RESET MIGRATION for the removed
+   * `subscription` provider, and it is load-bearing rather than defensive
+   * tidiness.
+   *
+   * This is the PERSISTED schema, and `getSettings()` is not lenient about it:
+   * a `safeParse` failure that is not the mcpConnections-env case falls through
+   * to a terminal `settingsSchema.parse(raw)` that THROWS, whereupon callers
+   * fall back to fresh defaults — i.e. one stale enum member on disk would have
+   * discarded the user's ENTIRE settings record on every read. Dropping just
+   * the offending field instead leaves the rest of the record intact and leaves
+   * `aiProvider` unset, which every consumer already handles as "not
+   * configured" (the AI panel shows its existing onboarding state). No
+   * notification, no migration UI.
+   *
+   * The scope is deliberately this one field: `.catch` here cannot mask a
+   * malformed value on the SAVE path, because `settings:save` validates the
+   * incoming payload against the strict `settingsSaveSchema` below first.
+   */
+  aiProvider: z.enum(['anthropic-api', 'openai-api', 'gemini-api']).optional().catch(undefined),
   aiModel: z.string().optional(),
   aiPrivacyConsent: z.boolean().default(false),
   aiPanelOpen: z.boolean().default(false),
   aiPanelWidth: z.number().int().min(280).max(600).default(350),
   aiSendOnEnter: z.boolean().default(true),
+  /**
+   * §2.119 — the address AI requests are delivered to, and the proxy in front
+   * of it. Both are renderer-writable ON PURPOSE (a self-hosted endpoint and a
+   * corporate proxy are wanted capabilities), and both are the destination of
+   * a request carrying the user's API key — so a CHANGE to either is gated on
+   * a native confirmation in main: electron/services/aiDestinationGuard.ts.
+   *
+   * The schema cannot express that gate, which is why it is written here: a
+   * new write path to these two fields is a new exfiltration route unless it
+   * goes through the guard too. Today there are exactly two, `settings:save`
+   * and the `ai:checkAuth` overrides.
+   */
   aiOpenAiBaseUrl: z.string().trim().optional(),
   aiProxyUrl: z.string().trim().optional(),
   aiLocale: z.enum(['auto', 'ru', 'en']).default('auto'),
@@ -949,6 +1272,21 @@ export const settingsSchema = z.object({
   aiMonthlyBudgetUsd: z.number().min(0).max(100000).default(100),
   aiMaxTurns: z.number().int().min(1).max(200).default(30),
   aiMaxBudgetPerRequest: z.number().min(0).max(100).default(2),
+  /**
+   * §2.122 — per-provider "a key was saved at some point" marker. See the
+   * `Settings.aiApiKeySaved` JSDoc for the full contract (observability, never
+   * enforcement; never the key material). Main-only writable — deliberately
+   * NOT in `rendererWritableSettingsSchema`.
+   *
+   * Optional rather than `.default({})`: an absent record must stay
+   * distinguishable from "we looked and this provider was never saved", the
+   * same distinction `getRawPersistedSettings` protects for `sentryEnabled`.
+   */
+  aiApiKeySaved: z.object({
+    'anthropic-api': z.boolean().optional(),
+    'openai-api': z.boolean().optional(),
+    'gemini-api': z.boolean().optional(),
+  }).optional(),
   workOffline: z.boolean().default(false),
   debugLogging: z.boolean().default(false),
   sentryEnabled: z.boolean().default(true),
@@ -968,6 +1306,15 @@ export const settingsSchema = z.object({
   darkModeEmails: z.boolean().default(true),
   mcpExportEnabled: z.boolean().default(false),
   mcpExportPort: z.number().int().min(1024).max(65535).default(23847),
+  /**
+   * §2.158 — deliberately NOT narrowed to `z.enum(EXPORTABLE_MCP_TOOLS)`,
+   * unlike its `rendererWritableSettingsSchema` twin. This is the PERSISTED
+   * schema: a config written by an older build (or hand-edited) may hold a
+   * tool name that has since left the ceiling, and rejecting it here would
+   * fail the whole settings load, not just this field. Out-of-ceiling entries
+   * are inert anyway — `McpExportServer.start()` intersects with
+   * `EXPORTABLE_MCP_TOOLS` before any tool is registered.
+   */
   mcpExportWhitelist: z.array(z.string()).optional(),
   mcpEnableStdio: z.boolean().default(false),
   /**
@@ -1004,6 +1351,50 @@ export const settingsSchema = z.object({
    * (electron-store JSON object keys), values are booleans.
    */
   aiInstantReplyEnabled: z.record(z.string(), z.boolean()).default({}),
+  /**
+   * §3.3 B7 — per-account AI Proofread opt-in map (accountId → enabled).
+   * Default empty (feature OFF for every account).
+   */
+  aiProofreadEnabled: z.record(z.string(), z.boolean()).default({}),
+  /**
+   * §3.3 B6 — per-account AI Translate opt-in map (accountId → enabled).
+   * Default empty (feature OFF for every account).
+   */
+  aiTranslateEnabled: z.record(z.string(), z.boolean()).default({}),
+  // §2.103 — see the `Settings.spellcheck*` JSDoc for the contract. Default
+  // OFF: Chromium's default would otherwise fetch the OS-locale dictionary
+  // from a third-party CDN with nothing asked.
+  spellcheckEnabled: z.boolean().default(false),
+  /**
+   * §2.103 — deliberately NOT narrowed to the code shape enforced on the
+   * renderer-writable twin, for the reason spelled out on `mcpExportWhitelist`
+   * above: this is the PERSISTED schema, and rejecting a value written by an
+   * older build (or by Chromium's own language set changing under us) would
+   * fail the ENTIRE settings load rather than this one field. Out-of-domain
+   * entries are inert — `resolveSpellcheckSession` in
+   * electron/services/spellcheck.ts intersects with the live availability list
+   * before anything reaches the session.
+   */
+  spellcheckLanguages: z.array(z.string()).optional(),
+  /**
+   * §2.103 — main-only consent record for dictionary downloads. `.optional()`
+   * with no default, like `telemetryConsent`: "no record" is a meaningful state
+   * (never asked) and a default would erase the distinction.
+   */
+  spellcheckDictionaryConsent: z.object({
+    granted: z.array(z.string()),
+    at: z.string().min(1),
+  }).optional(),
+  /** §2.103 — main's report of the platform spellchecker's language set. */
+  spellcheckAvailable: z.object({
+    languages: z.array(z.string()),
+    platformOwned: z.boolean(),
+    // `.default` rather than required: a record written before this field
+    // existed must still parse — the persisted schema failing would discard
+    // the whole settings object, not just this report.
+    max: z.number().int().positive().default(SPELLCHECK_MAX_LANGUAGES),
+    at: z.string().min(1),
+  }).optional(),
 })
 
 /**
@@ -1020,7 +1411,11 @@ export const settingsSchema = z.object({
  * makes the rejection explicit so the IPC handler can return
  * `{ ok: false, reason: 'forbidden_field' }` and we can log an audit row.
  *
- * Fields intentionally left off (main-only):
+ * THE LIST of main-only fields is `MAIN_ONLY_SETTINGS_FIELDS` below — that
+ * array is the source of truth, and a prose enumeration here would drift out of
+ * date the first time a field is added (it already had: the §2.103 spellcheck
+ * records were missing from it). What follows is not the list but the REASONING
+ * for the non-obvious entries — read it for "why", read the array for "what":
  *   - `mcpEnableStdio` — renderer-to-local-RCE gate, main writes only via
  *     native-confirm path.
  *   - `stdioApproved` — proof record of the native-confirm, written only by
@@ -1033,6 +1428,10 @@ export const settingsSchema = z.object({
  *     consent screen. Written only by the `telemetry:setConsent` handler,
  *     which stamps `version` and `at` itself. A renderer able to write it
  *     could fabricate consent that was never given.
+ *   - `aiApiKeySaved` (§2.122) — main's own record of having written an AI
+ *     key to the OS secret store. It exists to make a lost key legible
+ *     ("there was one and it is gone"), so a renderer that could set or
+ *     clear it would be editing the evidence about its own storage.
  */
 export const rendererWritableSettingsSchema = z.object({
   theme: z.enum(['light', 'dark']).optional(),
@@ -1050,6 +1449,11 @@ export const rendererWritableSettingsSchema = z.object({
   notificationsEnabled: z.boolean().optional(),
   imapIdleEnabled: z.boolean().optional(),
   draftSyncEnabled: z.boolean().optional(),
+  // §2.99 — user-facing switches, so renderer-writable (NOT main-only): the
+  // Settings window is the only place that flips them.
+  trayEnabled: z.boolean().optional(),
+  closeToTray: z.boolean().optional(),
+  launchAtLogin: z.boolean().optional(),
   hotkeysPreset: z.enum(['gmail', 'outlook']).optional(),
   sendDelaySeconds: z.number().int().min(0).max(60).optional(),
   alwaysLoadImages: z.boolean().optional(),
@@ -1065,12 +1469,25 @@ export const rendererWritableSettingsSchema = z.object({
   offlineMaxSizeKB: z.number().int().min(0).optional(),
   offlineMaxTotalMB: z.number().int().min(0).optional(),
   offlineFolders: z.array(z.string()).optional(),
-  aiProvider: z.enum(['subscription', 'anthropic-api', 'openai-api', 'gemini-api']).optional(),
+  /**
+   * STRICT on purpose — no `.catch` twin of the persisted schema above. A
+   * renderer that submits an unknown provider (a stale Settings window, or a
+   * compromised one trying to name a provider the registry does not carry) must
+   * be REFUSED, not silently normalised to "unset". Leniency belongs to reading
+   * our own disk, never to accepting a payload.
+   */
+  aiProvider: z.enum(['anthropic-api', 'openai-api', 'gemini-api']).optional(),
   aiModel: z.string().optional(),
   aiPrivacyConsent: z.boolean().optional(),
   aiPanelOpen: z.boolean().optional(),
   aiPanelWidth: z.number().int().min(280).max(600).optional(),
   aiSendOnEnter: z.boolean().optional(),
+  /**
+   * §2.119 — writable, but a CHANGE needs a human: see the JSDoc on the same
+   * two fields in `settingsSchema` above, and
+   * electron/services/aiDestinationGuard.ts. Membership here is what makes the
+   * guard necessary, not a statement that the fields are harmless.
+   */
   aiOpenAiBaseUrl: z.string().trim().optional(),
   aiProxyUrl: z.string().trim().optional(),
   aiLocale: z.enum(['auto', 'ru', 'en']).optional(),
@@ -1087,7 +1504,26 @@ export const rendererWritableSettingsSchema = z.object({
   darkModeEmails: z.boolean().optional(),
   mcpExportEnabled: z.boolean().optional(),
   mcpExportPort: z.number().int().min(1024).max(65535).optional(),
-  mcpExportWhitelist: z.array(z.string()).optional(),
+  /**
+   * §2.158 — bounded by the export ceiling, same pattern as `aiEgressPolicy`
+   * below: a compromised renderer cannot widen the exported tool surface by
+   * writing an arbitrary tool name into settings.
+   *
+   * §2.167 — what an out-of-domain value costs is decided by the HANDLER, not
+   * by this schema: `settings:save` refuses THIS FIELD (the persisted value
+   * stays, the submitted one is not written) and applies the rest of the save,
+   * reporting `{ field, code: 'unknown_export_tool' }` back. Before that the
+   * failure had no verdict of its own — the handler only acted on the
+   * main-only-field case, so the value fell through to the lax PERSISTED
+   * schema above and was stored verbatim, unreported. See
+   * electron/settingsSaveRefusal.ts.
+   *
+   * This is the SECOND layer, not the only one: `McpExportServer.start()`
+   * intersects whatever it is handed with `EXPORTABLE_MCP_TOOLS`, which also
+   * covers the main-side `mcpExport:start` IPC path and legacy persisted
+   * values that never pass through this schema.
+   */
+  mcpExportWhitelist: z.array(z.enum(EXPORTABLE_MCP_TOOLS)).optional(),
   // §3.10 P1: renderer-writable so users can flip the policy from Settings.
   // The field is bounded by the enum — a compromised renderer cannot expand
   // the surface beyond the three known values.
@@ -1107,6 +1543,33 @@ export const rendererWritableSettingsSchema = z.object({
   // gate, so it is renderer-writable (unlike stdio MCP). strict() still bounds
   // the value shape to a string→boolean record.
   aiInstantReplyEnabled: z.record(z.string(), z.boolean()).optional(),
+  // §3.3 B7: renderer Settings toggle writes the per-account AI Proofread
+  // opt-in map here (accountId → enabled). A plain UX opt-in, not a security
+  // gate, so it is renderer-writable. strict() still bounds the value shape to
+  // a string→boolean record.
+  aiProofreadEnabled: z.record(z.string(), z.boolean()).optional(),
+  // §3.3 B6: renderer Settings toggle writes the per-account AI Translate
+  // opt-in map here (accountId → enabled). A plain UX opt-in, not a security
+  // gate, so it is renderer-writable. strict() still bounds the value shape to
+  // a string→boolean record.
+  aiTranslateEnabled: z.record(z.string(), z.boolean()).optional(),
+  // §2.103 — a plain preference, so renderer-writable. The flag by itself
+  // cannot bypass the consent record: the language list below is what selects
+  // dictionaries, and main filters that against the record before applying it.
+  spellcheckEnabled: z.boolean().optional(),
+  /**
+   * §2.103 — STRICT on the payload path (unlike its persisted twin above):
+   * bounded in count and in shape, so a compromised renderer cannot turn one
+   * save into an unbounded set of dictionary fetches or push a non-language
+   * string into a Chromium session API that THROWS on an unknown code.
+   *
+   * This is the first of three layers, and the only one this schema can
+   * express. The second is `settings:save`, which drops any language whose
+   * dictionary would have to be downloaded without a recorded human consent
+   * (electron/services/spellcheck.ts). The third is the intersection with the
+   * live availability list before the session is touched.
+   */
+  spellcheckLanguages: z.array(spellcheckLanguageCodeSchema).max(SPELLCHECK_MAX_LANGUAGES).optional(),
 }).strict()
 
 export type RendererWritableSettings = z.infer<typeof rendererWritableSettingsSchema>
@@ -1123,6 +1586,22 @@ export const MAIN_ONLY_SETTINGS_FIELDS = [
   // §2.82 — consent record. Renderer signals its click through
   // `telemetry:setConsent`; main stamps the version and timestamp.
   'telemetryConsent',
+  // §2.122 — main's record of having saved an AI key. Written only by
+  // `setAiApiKeySavedFlag` from the main-side save/delete paths.
+  'aiApiKeySaved',
+  // §2.99 (review H4) — main's report of the last autostart registration
+  // attempt. A renderer that could write it would be able to claim a
+  // registration the OS never accepted.
+  'launchAtLoginStatus',
+  // §2.103 — the record of a human accepting a dictionary DOWNLOAD in a native
+  // dialog main drew. A renderer able to write it would grant itself the
+  // outbound request the dialog exists to authorise (same shape as
+  // `telemetryConsent` and `stdioApproved`).
+  'spellcheckDictionaryConsent',
+  // §2.103 — main's report of what the platform spellchecker offers. A renderer
+  // able to write it could claim availability the platform never reported and
+  // steer the language list past the intersection that bounds it.
+  'spellcheckAvailable',
 ] as const
 
 export type MainOnlySettingsField = typeof MAIN_ONLY_SETTINGS_FIELDS[number]
@@ -1178,10 +1657,40 @@ export interface SecretBackend {
  * (matching pre-§2.33 semantics). `keytar.deletePassword` resolves to a
  * boolean; we normalize it to void so the SecretBackend contract is uniform.
  */
+/**
+ * §2.132 — under `MAILCOPILOT_E2E=1` this path must never run.
+ *
+ * In the real app `electron/main.ts` injects the secretStore-backed
+ * implementation, which serves e2e runs from the per-data-dir encrypted disk
+ * fallback and never contacts the keychain. This default is what remains if
+ * that wiring is ever missed — and `service`/`imap:<id>`/`smtp:<id>` address a
+ * PER-USER keychain, not the throwaway `MAILCOPILOT_DATA_DIR`, so silently
+ * falling through here means a test overwrites or deletes the developer's own
+ * credentials (that is exactly how §2.132 was found: an e2e run replaced a live
+ * AI key with a test string).
+ *
+ * What the throw guarantees is that no keychain call happens — NOT that a test
+ * turns red. Several call sites here swallow secret-backend failures on purpose
+ * (a keychain fault must not break a save flow), so under a missing wiring the
+ * refusal can surface as a clean null or a dropped write instead of an
+ * exception. That is the intended trade: the user's credentials stay untouched,
+ * and the e2e run simply has no secret to read.
+ *
+ * Unit tests are unaffected: they mock the `keytar` module and do not set
+ * `MAILCOPILOT_E2E`.
+ */
+function assertKeychainAllowed(): void {
+  if (process.env.MAILCOPILOT_E2E === '1') {
+    throw new Error(
+      'secret backend: OS keychain access is disabled under MAILCOPILOT_E2E (setSecretBackend was not wired)',
+    )
+  }
+}
+
 const defaultSecretBackend: SecretBackend = {
-  get: (key) => keytar.getPassword(service, key),
-  set: (key, value) => keytar.setPassword(service, key, value),
-  delete: async (key) => { await keytar.deletePassword(service, key) },
+  get: async (key) => { assertKeychainAllowed(); return keytar.getPassword(service, key) },
+  set: async (key, value) => { assertKeychainAllowed(); return keytar.setPassword(service, key, value) },
+  delete: async (key) => { assertKeychainAllowed(); await keytar.deletePassword(service, key) },
 }
 
 let secretBackend: SecretBackend = defaultSecretBackend
@@ -2264,4 +2773,43 @@ export function __resetMcpEnvSanitizationAuditFlagForTest(): void {
 export function saveSettings(s: Settings) {
   const parsed = settingsSchema.parse(s)
   store.set('settings', parsed)
+}
+
+/** Providers whose AI key can be stored. Mirrors `ApiKeyProvider` in
+ * electron/services/ai.ts; kept as a literal here so packages/net stays free of
+ * an electron import. Every provider is key-based since §2.218. */
+export type AiKeyProviderId = 'anthropic-api' | 'openai-api' | 'gemini-api'
+
+/**
+ * §2.122 — record (or clear) the non-secret "a key for this provider was
+ * saved" marker. MAIN-PROCESS ONLY: the sole call sites are `saveApiKey` /
+ * `deleteApiKey` in electron/services/ai.ts, and the field is absent from
+ * `rendererWritableSettingsSchema` so `settings:save` rejects it outright.
+ *
+ * The value is a boolean and only a boolean — no key material, no fragment,
+ * no hash. See the `Settings.aiApiKeySaved` JSDoc for why this may never
+ * become an enforcement input.
+ */
+export function setAiApiKeySavedFlag(provider: AiKeyProviderId, saved: boolean): void {
+  const current = getSettings()
+  const next = { ...(current.aiApiKeySaved ?? {}), [provider]: saved }
+  saveSettings({ ...current, aiApiKeySaved: next })
+}
+
+/**
+ * §2.99 (review H4) — record the outcome of an autostart registration attempt.
+ *
+ * Main-only, same shape of writer as `setAiApiKeySavedFlag`: the renderer reads
+ * it through the settings it already fetches and never writes it. The user's
+ * own `launchAtLogin` preference is deliberately NOT touched here — a failed
+ * registration must not silently un-choose what the user chose.
+ */
+export function setLaunchAtLoginStatus(status: {
+  supported: boolean
+  applied: boolean
+  requested: boolean
+  at: string
+}): void {
+  const current = getSettings()
+  saveSettings({ ...current, launchAtLoginStatus: status })
 }

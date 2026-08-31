@@ -78,10 +78,17 @@
 //      pipeline, and before every watermark write. A concurrent sync can bump
 //      UIDVALIDITY mid-pass, and acting on a reused UID with a stale decision
 //      is the one failure mode here that destroys mail.
+//   7. A rule the core decision refuses (§2.162 — `findMailRuleRefusal`) is
+//      dropped before evaluation and the skip is logged. Save-time validation
+//      cannot cover rules stored before it existed, so execution refuses them
+//      too rather than migrating the table.
 // ──────────────────────────────────────────────────────────────────────
 
 import {
   matchRule,
+  findMailRuleRefusal,
+  formatMailRuleRefusal,
+  parseMailRuleParts,
   type MailRule,
   type MailContext,
   type RuleAction,
@@ -235,21 +242,30 @@ const SKIPPED_PASS: MailRulesPassResult = {
   evaluated: 0, matched: 0, baselined: false, skipped: true, aborted: false,
 }
 
-/** Parse the stored JSON of a rule row; returns null when either side is malformed. */
+/**
+ * Parse the stored JSON of a rule row; returns null when either side is
+ * malformed.
+ *
+ * "Malformed" means STRUCTURALLY malformed, not merely undecodable: the old cut
+ * only caught a JSON syntax error and cast whatever else came back, so a row
+ * holding `{}` or `[42]` — writable through the MCP tools, which take the shape
+ * from a model — reached `matchRule` and threw there. Inside the per-message
+ * `try` below that reads as a failed action: retried, counted, and finally
+ * abandoned with a Sentry report. `parseMailRuleParts` decides the shape once,
+ * in packages/core, and this module keeps no opinion of its own about it.
+ */
 function parseRule(row: MailRulesRunnerRule): MailRule | null {
-  try {
-    return {
-      id: row.id,
-      accountId: row.accountId,
-      name: row.name,
-      enabled: true,
-      priority: row.priority,
-      conditions: JSON.parse(row.conditions) as MailRule['conditions'],
-      actions: JSON.parse(row.actions) as MailRule['actions'],
-      stopProcessing: row.stopProcessing,
-    }
-  } catch {
-    return null
+  const parts = parseMailRuleParts(row.conditions, row.actions)
+  if (!parts) return null
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    name: row.name,
+    enabled: true,
+    priority: row.priority,
+    conditions: parts.conditions,
+    actions: parts.actions,
+    stopProcessing: row.stopProcessing,
   }
 }
 
@@ -400,8 +416,34 @@ async function runOnePass(
   // rule, and priority order is fixed up front.
   const rules = deps.listMailRules(String(accountId))
     .filter(r => r.enabled)
-    .map(parseRule)
+    .map(row => {
+      const rule = parseRule(row)
+      if (!rule) {
+        // Same principle as the refusal below: a rule the user configured that
+        // this pass will not run is recorded. Row id only — the stored JSON is
+        // user- or model-authored text.
+        deps.log.warn(`Rule ${row.id} not executed: stored definition is malformed`)
+      }
+      return rule
+    })
     .filter((r): r is MailRule => r !== null)
+    // §2.162 — a rule already stored before the save-time check existed can
+    // still be one whose firing cannot be justified (a destructive action gated
+    // on the legacy `from`, which the sender writes about themselves; a
+    // condition on `cc`, which this client does not store). The same core
+    // decision that refuses such a rule at save refuses to EXECUTE it here, so
+    // no migration is needed and nothing acts on mail on a premise we cannot
+    // support. The skip is recorded — silently doing nothing to a rule the user
+    // configured is exactly the failure mode §2.86 was about.
+    .filter(r => {
+      const refusal = findMailRuleRefusal(r.conditions, r.actions)
+      if (!refusal) return true
+      // Rule id and the machine code only: the rule NAME is user-authored text
+      // and condition values carry addresses. The code already carries the
+      // reason, the offending field and the action that forced the refusal.
+      deps.log.warn(`Rule ${r.id} not executed: ${formatMailRuleRefusal(refusal)}`)
+      return false
+    })
     .sort((a, b) => a.priority - b.priority)
 
   let evaluated = 0

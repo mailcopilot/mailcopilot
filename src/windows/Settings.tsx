@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Save, Loader2, X, Settings as SettingsIcon, Gauge, Folder, FileText, LayoutTemplate, Download, Users, Plus, Trash2, Pencil, CheckCircle, Sparkles, Shield, Info, ExternalLink, MessageSquare, Send, Palette, Type, Image, Globe, Filter, UserCircle } from 'lucide-react'
-import { AI_RULE_MAX_ENABLED_PER_ACCOUNT } from '@mailcopilot/core'
+import { Save, Loader2, Settings as SettingsIcon, Gauge, Folder, FileText, LayoutTemplate, Download, Users, Plus, Trash2, Pencil, CheckCircle, Sparkles, Shield, Info, ExternalLink, MessageSquare, Send, Palette, Type, Image, Globe, Filter, UserCircle } from 'lucide-react'
+import {
+  AI_RULE_MAX_ENABLED_PER_ACCOUNT,
+  ERROR_PRESENTATION_I18N_KEYS,
+  decodeErrorPresentation,
+  stripErrorPresentation,
+  type MailRuleRefusal,
+} from '@mailcopilot/core'
 import { useTranslation } from 'react-i18next'
 import i18n, { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, type Language } from '../i18n'
 import { sendFeedback, captureException } from '../sentry'
@@ -9,21 +15,74 @@ import { formatBytes, getFolderRole, getInitials, AVATAR_COLORS } from '../utils
 import AccountAvatar from '../components/AccountAvatar'
 import Select from '../components/Select'
 import IdentitiesTab, { type IdentityDraft } from '../components/IdentitiesTab'
+import RuleConditionRow from '../components/RuleConditionRow'
+import { DEFAULT_RULE_CONDITION_FIELD } from '../components/ruleFields'
+import {
+  collectRuleRowRefusals,
+  ruleApplyRefusalText,
+  ruleRefusalReasonText,
+  ruleSaveErrorText,
+} from '../components/ruleRefusalText'
+import RuleActionRow from '../components/RuleActionRow'
+import { hasMoveMissingFolder, toMailRuleDrafts, type MailRuleDraft } from '../components/mailRuleDrafts'
 import SystemInfo from '../components/Settings/SystemInfo'
 import AiPrivacyPanel from '../components/Settings/AiPrivacyPanel'
+import AiDestinationRejectionNotice from '../components/Settings/AiDestinationRejectionNotice'
+import SettingsSaveRefusalNotice from '../components/Settings/SettingsSaveRefusalNotice'
+import TraySection from '../components/Settings/TraySection'
+import { useAiDestinationRejection } from '../hooks/useAiDestinationRejection'
+import {
+  buildExportWhitelistPayload,
+  isExportWhitelistConfigured,
+  parseSettingsFieldRefusals,
+  repairExportWhitelist,
+  useSettingsSaveRefusal,
+} from '../hooks/useSettingsSaveRefusal'
 import { buildAccountSavePayloadPatch, buildAvatarSavePayloadPatch } from '../utils/accountSavePayload'
 import WindowTitlebar from '../components/WindowTitlebar'
 import { useTelemetryConsentNeeded } from '../hooks/useTelemetryConsent'
 import { AVATAR_ICONS, getAvatarIcon } from '../utils/avatarIcons'
 import { parseShellArgs } from '../utils/parseShellArgs'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
+import {
+  deleteAiApiKeyForProvider,
+  isAiKeyFieldMasked,
+  type ApiKeyProviderId,
+} from '../utils/aiApiKey'
 import type { SortMode } from '../hooks/useMailListView'
 
-type AiProviderId = 'subscription' | 'anthropic-api' | 'openai-api' | 'gemini-api'
-type VisibleAiProviderId = 'subscription' | 'anthropic-api' | 'openai-api' | 'gemini-api'
+/**
+ * The AI providers this window can hold in state. Mirrors `AiProvider` in
+ * electron/services/ai.ts; §2.218 removed the consumer-subscription member, so
+ * every id here is key-based (BYOK).
+ */
+type AiProviderId = 'anthropic-api' | 'openai-api' | 'gemini-api'
+/** The subset the picker actually offers. Identical to {@link AiProviderId}
+ *  today; kept distinct so a provider can be supported but not offered. */
+type VisibleAiProviderId = AiProviderId
 
+/**
+ * Guard for a persisted `aiProvider` value. A stored id that is no longer
+ * offered (e.g. the removed `subscription`) fails here and the window falls
+ * back to the "no provider chosen" state — the renderer half of the silent
+ * reset whose persistent half lives in `settingsSchema` (packages/net/config.ts).
+ */
 function isVisibleAiProvider(value: unknown): value is VisibleAiProviderId {
-  return value === 'subscription' || value === 'anthropic-api' || value === 'openai-api' || value === 'gemini-api'
+  return value === 'anthropic-api' || value === 'openai-api' || value === 'gemini-api'
+}
+
+/**
+ * §2.122 — "Check connection" used to print the raw machine verdict
+ * (`invalid_key`) into the UI, and the two new verdicts (`no_key`,
+ * `store_unavailable`) would have leaked the same way. Known verdicts get the
+ * same sentence the assistant panel shows; anything unknown still falls back to
+ * the adapter's own message.
+ */
+const AI_AUTH_STATUS_MESSAGE_KEYS: Record<string, string> = {
+  not_configured: 'ai.errors.notConfigured',
+  no_key: 'ai.errors.noKey',
+  store_unavailable: 'ai.errors.storeUnavailable',
+  invalid_key: 'ai.errors.invalidKey',
 }
 
 /** Badge in the TLS pin list telling a full trust anchor apart from a
@@ -57,6 +116,17 @@ type SettingsData = {
   bodyRetentionDays?: number
   language?: Language
   notificationsEnabled?: boolean
+  /** §2.99 — tray icon, close-to-tray and autostart. */
+  trayEnabled?: boolean
+  closeToTray?: boolean
+  launchAtLogin?: boolean
+  /**
+   * §2.99 (review H4) — what the last autostart attempt ACHIEVED, as opposed to
+   * `launchAtLogin`, which is only what the user wished for. Main-only writable
+   * (`MAIN_ONLY_SETTINGS_FIELDS`): read here, never sent back. Absent means
+   * "never attempted", which is not the same as "failed".
+   */
+  launchAtLoginStatus?: { supported: boolean; applied: boolean; requested: boolean; at: string }
   imapIdleEnabled?: boolean
   syncIntervalMinutes?: number
   periodicSyncIntervalMin?: number
@@ -73,6 +143,13 @@ type SettingsData = {
   sendDelaySeconds?: number
   offlineMaxSizeKB?: number
   aiProvider?: AiProviderId
+  /**
+   * §2.122 — main-process record of "we wrote a key for this provider". Read
+   * only: it is absent from `rendererWritableSettingsSchema`, and it is used
+   * here for presentation (whether the key field starts masked) — never as a
+   * substitute for reading the store, and never to block or trigger anything.
+   */
+  aiApiKeySaved?: Partial<Record<ApiKeyProviderId, boolean>>
   aiModel?: string
   aiPrivacyConsent?: boolean
   aiSendOnEnter?: boolean
@@ -95,6 +172,28 @@ type SettingsData = {
    * Default OFF (missing/false). Renderer-writable via settings:save.
    */
   aiInstantReplyEnabled?: Record<string, boolean>
+  /**
+   * §3.3 B7 AI Proofread — per-account opt-in, keyed by stringified accountId.
+   * Default OFF (missing/false). Renderer-writable via settings:save.
+   */
+  aiProofreadEnabled?: Record<string, boolean>
+  /**
+   * §3.3 B6 AI Translate — per-account opt-in, keyed by stringified accountId.
+   * Default OFF (missing/false). Renderer-writable via settings:save.
+   */
+  aiTranslateEnabled?: Record<string, boolean>
+  /** §2.103 — spell checking: the switch and the chosen dictionaries. */
+  spellcheckEnabled?: boolean
+  spellcheckLanguages?: string[]
+  /**
+   * §2.103 — main's report of what the platform spellchecker offers, and of
+   * the bound main enforces on the list. Main-only writable
+   * (`MAIN_ONLY_SETTINGS_FIELDS`): read here to render the picker, never sent
+   * back. This window holds NEITHER a list of language codes NOR a copy of the
+   * cap — either would drift from what main enforces, which is the same failure
+   * §2.167 records for the MCP export ceiling.
+   */
+  spellcheckAvailable?: { languages: string[]; platformOwned: boolean; max: number; at: string }
   debugLogging?: boolean
   sentryEnabled?: boolean
   /** §2.19 — opt-in auto-download for updates. Default false. */
@@ -128,6 +227,28 @@ type McpConnectionConfig = {
 }
 type MailboxesAndRoles = { mailboxes: Mailbox[]; detected: FolderRoles; roles: FolderRoles; prefs?: Record<string, FolderPreference> }
 type Tab = 'accounts' | 'general' | 'productivity' | 'folders' | 'identities' | 'signature' | 'templates' | 'rules' | 'ai' | 'about'
+
+/**
+ * §2.103 — a readable name for a spellchecker language code.
+ *
+ * `Intl.DisplayNames` is the platform's own translation table, so no list of
+ * language names is added to the locale files (six copies of ~50 names that
+ * would then have to be maintained). The CODE is kept alongside the name, not
+ * replaced by it: the code is what the native consent dialog names and what
+ * gets requested from the dictionary server, so the two screens have to be
+ * talking about visibly the same thing.
+ *
+ * Falls back to the bare code — an engine or a locale without the table must
+ * degrade to something true rather than to an empty label.
+ */
+function spellcheckLanguageLabel(code: string, uiLanguage: string): string {
+  try {
+    const name = new Intl.DisplayNames([uiLanguage], { type: 'language' }).of(code)
+    return name && name !== code ? `${name} (${code})` : code
+  } catch {
+    return code
+  }
+}
 
 const ROLE_LABELS: { key: keyof FolderRoles; labelKey: string }[] = [
   { key: 'archive', labelKey: 'folders.archive' },
@@ -188,6 +309,12 @@ function defaultFolderPref(role: string | null): Pick<FolderPreference, 'visible
 
 export default function Settings() {
   const { t } = useTranslation()
+  // `t` gets a new identity on every language change. Callbacks that only need
+  // it inside a catch block read it through this ref so switching the UI
+  // language does not invalidate them — `refreshFolders` in particular sits in
+  // an effect dependency list and would re-hit IMAP for the folder list.
+  const tRef = useRef(t)
+  tRef.current = t
   const [tab, setTab] = useState<Tab>('general')
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [language, setLanguage] = useState<Language>(DEFAULT_LANGUAGE)
@@ -202,6 +329,23 @@ export default function Settings() {
   // switching to "forever") never delete data, so they save without prompt.
   const prevBodyRetentionRef = useRef<number | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(true)
+  const [trayEnabled, setTrayEnabled] = useState(true)
+  const [closeToTray, setCloseToTray] = useState(false)
+  const [launchAtLogin, setLaunchAtLogin] = useState(false)
+  // Read-only mirror of main's report. Deliberately NOT part of
+  // `settingsSnapshot`: it is not an edit, so it must never mark the form dirty.
+  const [launchAtLoginStatus, setLaunchAtLoginStatus] =
+    useState<SettingsData['launchAtLoginStatus']>(undefined)
+  // §2.103 — spell checking. `spellcheckAvailable` is main's report, so it is
+  // deliberately NOT part of `settingsSnapshot`: reading it is not an edit and
+  // must never mark the form dirty (same rule as `launchAtLoginStatus`).
+  const [spellcheckEnabled, setSpellcheckEnabled] = useState(false)
+  const [spellcheckLanguages, setSpellcheckLanguages] = useState<string[]>([])
+  const [spellcheckAvailable, setSpellcheckAvailable] =
+    useState<SettingsData['spellcheckAvailable']>(undefined)
+  // The notice main returns when it refused to download a dictionary. Already
+  // localized by main (it reads the same locale resources this window does).
+  const [spellcheckDeclined, setSpellcheckDeclined] = useState('')
   const [imapIdleEnabled, setImapIdleEnabled] = useState(true)
   const [syncIntervalMinutes, setSyncIntervalMinutes] = useState(1)
   const [periodicSyncIntervalMin, setPeriodicSyncIntervalMin] = useState(5)
@@ -272,6 +416,14 @@ export default function Settings() {
   // Thread Summary opt-in above; the main-side generate handler refuses when an
   // account's entry is not `true`.
   const [aiInstantReplyEnabled, setAiInstantReplyEnabled] = useState<Record<string, boolean>>({})
+  // §3.3 B7 AI Proofread — per-account opt-in, same shape/semantics as the two
+  // opt-ins above; the main-side check handler refuses with `not_enabled` when
+  // an account's entry is not `true`.
+  const [aiProofreadEnabled, setAiProofreadEnabled] = useState<Record<string, boolean>>({})
+  // §3.3 B6 AI Translate — per-account opt-in, same shape/semantics as the
+  // opt-ins above; the main-side translate handler refuses with `opt_out` when
+  // an account's entry is not `true`.
+  const [aiTranslateEnabled, setAiTranslateEnabled] = useState<Record<string, boolean>>({})
   const [sentryEnabled, setSentryEnabled] = useState(true)
   // §2.82 — while no consent record exists, main clamps `sentryEnabled` to
   // false on save (applyAboutToggle), so an enabled switch here would silently
@@ -291,6 +443,24 @@ export default function Settings() {
   const [aiKeyMasked, setAiKeyMasked] = useState(false)
   const [aiMemory, setAiMemory] = useState('')
   const [aiMemoryDirty, setAiMemoryDirty] = useState(false)
+  // §2.119 — a `settings:save` whose AI-destination change main refused comes
+  // back `{ ok: true }` with the refusal attached. The window must not close on
+  // one: closing is this window's only "saved" signal.
+  const { aiDestinationRejection, recordSettingsSaveResult } = useAiDestinationRejection()
+  // §2.167 — the same save can also lose a single FIELD (currently
+  // `mcpExportWhitelist`, when it carries a tool name outside the export
+  // ceiling). Main names the offending entries in the reply, this window takes
+  // exactly those out of its state, and one notice reports both.
+  const { settingsSaveRefusal, recordSettingsSaveOutcome } = useSettingsSaveRefusal()
+  // Fields main refused and this window could NOT repair from the reply. A ref,
+  // not state: it changes what the NEXT save sends and nothing that is
+  // rendered. A repaired field is deliberately not in here — see the save path.
+  const refusedSettingsFieldsRef = useRef<Set<string>>(new Set())
+  // Whether the persisted settings carried an EXPLICIT `mcpExportWhitelist` —
+  // an empty array counts, only the absent key does not. Read by both consumers
+  // of the list (Save and Start): it is what keeps a configured-but-empty list
+  // meaning "export nothing" instead of decaying into "use the default set".
+  const exportWhitelistConfiguredRef = useRef(false)
 
   // MCP Export
   const [mcpExportEnabled, setMcpExportEnabled] = useState(false)
@@ -326,18 +496,17 @@ export default function Settings() {
   const [editingTemplate, setEditingTemplate] = useState<TemplateItem | null>(null)
   const [templateForm, setTemplateForm] = useState({ name: '', subject: '', body: '', shortcut: '' })
 
-  // Mail rules
-  type MailRuleUI = {
-    id: string
-    accountId: string | null
-    name: string
-    enabled: boolean
-    priority: number
-    conditions: Array<{ field: string; op: string; value: string }>
-    actions: Array<{ type: string; folder?: string }>
-    stopProcessing: boolean
-  }
+  // Mail rules. The row shape and its normalisation live in
+  // ../components/mailRuleDrafts — a row whose stored halves are not a rule
+  // must stay listable, disableable and deletable rather than crash the tab.
+  type MailRuleUI = MailRuleDraft
   const [mailRules, setMailRules] = useState<MailRuleUI[]>([])
+  // §2.202 — the policy verdict per stored rule, keyed by rule id. Kept beside
+  // the drafts rather than inside them: the verdict is read from the raw
+  // `rules:list` halves (see `collectRuleRowRefusals`), which the draft no
+  // longer carries. A `Map` because the keys are ids that crossed IPC: a plain
+  // object would hand back an inherited member for an id like `toString`.
+  const [mailRuleRefusals, setMailRuleRefusals] = useState<Map<string, MailRuleRefusal>>(new Map())
   const [editingRule, setEditingRule] = useState<MailRuleUI | null>(null)
   const [testResults, setTestResults] = useState<Array<{ uid: number; subject: string; from: string }> | null>(null)
   const [applyToExisting, setApplyToExisting] = useState(false)
@@ -398,17 +567,11 @@ export default function Settings() {
 
   const loadMailRules = useCallback(async () => {
     try {
-      const raw = await window.api.invoke('rules:list') as Array<Record<string, unknown>>
-      setMailRules((Array.isArray(raw) ? raw : []).map(r => ({
-        id: typeof r.id === 'string' ? r.id : '',
-        accountId: typeof r.accountId === 'string' ? r.accountId : null,
-        name: typeof r.name === 'string' ? r.name : '',
-        enabled: r.enabled === true,
-        priority: typeof r.priority === 'number' ? r.priority : 0,
-        conditions: (() => { try { return JSON.parse(typeof r.conditions === 'string' ? r.conditions : '[]') } catch { return [] } })(),
-        actions: (() => { try { return JSON.parse(typeof r.actions === 'string' ? r.actions : '[]') } catch { return [] } })(),
-        stopProcessing: r.stopProcessing === true,
-      })))
+      const raw = await window.api.invoke('rules:list')
+      setMailRules(toMailRuleDrafts(raw))
+      // Same reply, read twice on purpose: the drafts for editing, the verdicts
+      // from the untouched JSON halves the policy actually judges.
+      setMailRuleRefusals(collectRuleRowRefusals(raw))
     } catch (err) {
       captureException(err, { source: 'Settings.loadMailRules' })
     }
@@ -498,7 +661,7 @@ export default function Settings() {
     setAiConnectionStatus('checking')
     setAiConnectionError('')
     try {
-      if (aiProvider !== 'subscription' && aiApiKey && !aiKeyMasked) {
+      if (aiApiKey && !aiKeyMasked) {
         await window.api.invoke('ai:saveApiKey', aiApiKey, aiProvider)
       }
       // Pass current (not yet saved) proxy and aiOpenAiBaseUrl values
@@ -517,13 +680,18 @@ export default function Settings() {
         setAiConnectionStatus('ok')
       } else {
         setAiConnectionStatus('error')
-        setAiConnectionError(result.message || result.status)
+        const messageKey = AI_AUTH_STATUS_MESSAGE_KEYS[result.status]
+        setAiConnectionError(messageKey ? t(messageKey) : (result.message || result.status))
       }
     } catch (e) {
       setAiConnectionStatus('error')
-      setAiConnectionError(String(e))
+      // Connection *test*: the provider's own words ("401 Unauthorized",
+      // "model not found") are the point of pressing the button, so the text
+      // stays — only the machine tag the IPC funnel prepends is removed
+      // (§2.127).
+      setAiConnectionError(stripErrorPresentation(String(e)))
     }
-  }, [aiApiKey, aiKeyMasked, aiProvider, aiProxyUrl, aiOpenAiBaseUrl])
+  }, [aiApiKey, aiKeyMasked, aiProvider, aiProxyUrl, aiOpenAiBaseUrl, t])
 
   const refreshFolders = useCallback(async (id: number) => {
     setLoadingFolders(true)
@@ -534,7 +702,11 @@ export default function Settings() {
       setAutoRoles(res.detected)
       setFolderPrefs(res.prefs ?? {})
     } catch (e) {
-      setFoldersError(String(e))
+      // Listing mailboxes fails for exactly the reasons the vocabulary covers
+      // (no connection / timeout / rejected credentials); the raw text was
+      // "Error invoking remote method 'net:mailboxesAndRoles': …" and told the
+      // user nothing. §2.127.
+      setFoldersError(tRef.current(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
     } finally {
       setLoadingFolders(false)
     }
@@ -557,6 +729,17 @@ export default function Settings() {
           prevBodyRetentionRef.current = retention
           setLanguage((SUPPORTED_LANGUAGES as readonly string[]).includes(s.language ?? '') ? s.language as Language : DEFAULT_LANGUAGE)
           setNotificationsEnabled(s.notificationsEnabled ?? true)
+          // Mirrors the persistent schema defaults in packages/net/config.ts.
+          setTrayEnabled(s.trayEnabled ?? true)
+          setCloseToTray(s.closeToTray ?? false)
+          setLaunchAtLogin(s.launchAtLogin ?? false)
+          setLaunchAtLoginStatus(s.launchAtLoginStatus)
+          // §2.103 — default OFF with no dictionaries, mirroring the persisted
+          // schema. The picker's options come from main's report, never from a
+          // list held here.
+          setSpellcheckEnabled(s.spellcheckEnabled ?? false)
+          setSpellcheckLanguages(Array.isArray(s.spellcheckLanguages) ? s.spellcheckLanguages : [])
+          setSpellcheckAvailable(s.spellcheckAvailable)
           setImapIdleEnabled(s.imapIdleEnabled ?? true)
           setSyncIntervalMinutes(typeof s.syncIntervalMinutes === 'number' ? s.syncIntervalMinutes : 1)
           setPeriodicSyncIntervalMin(typeof s.periodicSyncIntervalMin === 'number' ? s.periodicSyncIntervalMin : 5)
@@ -616,13 +799,44 @@ export default function Settings() {
           } else {
             setAiInstantReplyEnabled({})
           }
-          setAiKeyMasked(s.aiProvider === 'anthropic-api' || s.aiProvider === 'openai-api')
+          // §3.3 B7: same normalization for the AI Proofread per-account opt-in.
+          if (s.aiProofreadEnabled && typeof s.aiProofreadEnabled === 'object') {
+            const raw = s.aiProofreadEnabled as Record<string, unknown>
+            const next: Record<string, boolean> = {}
+            for (const [k, v] of Object.entries(raw)) next[k] = v === true
+            setAiProofreadEnabled(next)
+          } else {
+            setAiProofreadEnabled({})
+          }
+          // §3.3 B6: same normalization for the AI Translate per-account opt-in.
+          if (s.aiTranslateEnabled && typeof s.aiTranslateEnabled === 'object') {
+            const raw = s.aiTranslateEnabled as Record<string, unknown>
+            const next: Record<string, boolean> = {}
+            for (const [k, v] of Object.entries(raw)) next[k] = v === true
+            setAiTranslateEnabled(next)
+          } else {
+            setAiTranslateEnabled({})
+          }
+          // §2.122 — mask on the fact that a key exists, not on the provider's
+          // name. The old condition listed two providers by hand, so a stored
+          // Gemini key was never masked at all, and a provider with no key
+          // still showed dots. `aiApiKeySaved` is the main process's own record
+          // of having written one — presentation only: the field unmasks on
+          // focus, so a stale marker can never stop anyone entering a key, and
+          // nothing here is treated as proof that the store holds it.
+          setAiKeyMasked(isAiKeyFieldMasked(s.aiProvider, s.aiApiKeySaved))
           setSentryEnabled(s.sentryEnabled ?? true)
           setDebugLogging(s.debugLogging ?? false)
           setAutoUpdateEnabled(s.autoUpdateEnabled === true)
           setMcpExportEnabled(s.mcpExportEnabled ?? false)
           setMcpExportPort(typeof s.mcpExportPort === 'number' ? s.mcpExportPort : 23847)
           setMcpExportWhitelist(Array.isArray(s.mcpExportWhitelist) ? s.mcpExportWhitelist : [])
+          // §2.167 — remember that a list WAS configured. Only the ABSENCE of
+          // the key means "no explicit whitelist"; an empty array on disk is a
+          // configured "export nothing". `[]` must not decay into `undefined`
+          // ("use the default set") on the save that follows, nor on Start —
+          // see `buildExportWhitelistPayload`.
+          exportWhitelistConfiguredRef.current = isExportWhitelistConfigured(s.mcpExportWhitelist)
           setMcpEnableStdio(s.mcpEnableStdio ?? false)
           setMcpConnections(Array.isArray(s.mcpConnections) ? s.mcpConnections : [])
           setTrustedDomains(typeof s.trustedDomains === 'string' ? s.trustedDomains : '')
@@ -798,15 +1012,18 @@ export default function Settings() {
 
   // Snapshot of current settings for detecting unsaved changes
   const settingsSnapshot = JSON.stringify({
-    theme, language, bodyRetentionDays, notificationsEnabled, imapIdleEnabled,
+    theme, language, bodyRetentionDays, notificationsEnabled, trayEnabled, closeToTray, launchAtLogin, imapIdleEnabled,
     syncIntervalMinutes, periodicSyncIntervalMin, draftSyncEnabled, defaultMailApp, darkModeEmails, alwaysLoadImages, gravatarInMail,
     groupConversations, sortMode, autoAdvance, conversationOrder, hotkeysPreset, sendDelaySeconds, hiddenUnreadFolders,
     offlineMaxSizeKB,
     aiProvider, aiModel, aiSendOnEnter, aiOpenAiBaseUrl, aiProxyUrl, aiLocale,
     aiShowSources, aiDailyBudgetUsd, aiMonthlyBudgetUsd, aiMaxTurns,
-    aiMaxBudgetPerRequest, aiEgressPolicy, aiThreadSummaryEnabled, aiInstantReplyEnabled, sentryEnabled, debugLogging, autoUpdateEnabled,
+    aiMaxBudgetPerRequest, aiEgressPolicy, aiThreadSummaryEnabled, aiInstantReplyEnabled, aiProofreadEnabled, aiTranslateEnabled, sentryEnabled, debugLogging, autoUpdateEnabled,
     mcpExportEnabled, mcpExportPort, mcpExportWhitelist, mcpEnableStdio,
     trustedDomains,
+    // §2.103 — the two editable spellcheck fields. `spellcheckAvailable` is
+    // main's report, not an edit, so it is absent here on purpose.
+    spellcheckEnabled, spellcheckLanguages,
   })
 
   // Capture initial snapshot exactly once after settings are loaded into state.
@@ -902,7 +1119,10 @@ export default function Settings() {
       await refreshFolders(accountId)
       setRole(role, path)
     } catch (e) {
-      setFoldersError(String(e))
+      // Unlike the folder listing above, CREATE fails for reasons only the
+      // server can explain ("Mailbox already exists", namespace/quota
+      // refusals), so the text is kept and only the §2.127 tag is stripped.
+      setFoldersError(stripErrorPresentation(String(e)))
     } finally {
       setCreatingRole(null)
       setCreateFolderDialog(null)
@@ -1044,7 +1264,12 @@ export default function Settings() {
         setIdentitiesSaveError('')
       }
     } catch (e) {
-      console.error('saveAvatarSettings failed:', e)
+      // Verdict, never the value: renderer console output is a Sentry
+      // breadcrumb source (default integrations, src/sentry.ts), and the text
+      // after `[mcerr:*]` is third-party prose left raw on purpose. See the
+      // note in src/utils/errorPresentation.ts. `accounts:save` reaches IMAP
+      // validation, so this catch does see server text.
+      console.error('saveAvatarSettings failed:', decodeErrorPresentation(e))
     }
   }, [accountId, accounts, identities, identitiesDirty, signature])
 
@@ -1098,11 +1323,48 @@ export default function Settings() {
       }
     }
 
-    await window.api.invoke('settings:save', {
+    // §2.167 — the whitelist is sent exactly as this window holds it. Deciding
+    // here which names are exportable would mean a second copy of a domain main
+    // owns; main refuses the field and names the entries it disliked, and the
+    // repair happens below, from that answer.
+    //
+    // The one case the reply cannot repair — main refused the field but named
+    // nothing this window holds (every offender was past main's naming caps) —
+    // is answered by withholding the field from every later save of this
+    // window. Otherwise Save would refuse, refuse, refuse, and the window could
+    // never be closed through the button that opened it. Withholding is
+    // harmless: the persisted whitelist stays exactly as it is, and no control
+    // on this screen edits it. The day one does, its onChange must clear this
+    // ref — the value would then be the user's, not disk's.
+    const exportWhitelistWithheld = refusedSettingsFieldsRef.current.has('mcpExportWhitelist')
+    // A CONFIGURED list is sent as-is even when a repair emptied it: `[]` means
+    // "export nothing", which is what a list of only-unexportable names already
+    // meant, whereas an absent field would hand the export server its default
+    // set (`resolveExportWhitelist` in electron/services/mcpExport.ts falls back
+    // to the default only on a nullish value) AND would leave the refused name
+    // on disk, where a later build could start exporting it again. The Start
+    // button normalizes through the same helper — one rule, both consumers.
+    //
+    // "Leave the persisted value alone" is said by OMITTING THE KEY, never by
+    // sending `undefined` under it: main's save merges the payload it is given,
+    // so a present-but-undefined `mcpExportWhitelist` erases the stored list
+    // from disk and silently drops the export server back to its default set —
+    // exactly the widening the rest of this code exists to prevent. Both
+    // "leave it alone" cases therefore contribute no key at all: a
+    // never-configured list (`buildExportWhitelistPayload` returns `undefined`)
+    // and a withheld field (a refusal this window could not repair).
+    const exportWhitelistPayload = exportWhitelistWithheld
+      ? undefined
+      : buildExportWhitelistPayload(mcpExportWhitelist, exportWhitelistConfiguredRef.current)
+
+    const saveResult = await window.api.invoke('settings:save', {
       theme,
       bodyRetentionDays,
       language,
       notificationsEnabled,
+      trayEnabled,
+      closeToTray,
+      launchAtLogin,
       imapIdleEnabled,
       syncIntervalMinutes,
       periodicSyncIntervalMin,
@@ -1133,20 +1395,102 @@ export default function Settings() {
       aiEgressPolicy,
       aiThreadSummaryEnabled,
       aiInstantReplyEnabled,
+      aiProofreadEnabled,
+      aiTranslateEnabled,
       sentryEnabled,
       debugLogging,
       autoUpdateEnabled,
       mcpExportEnabled,
       mcpExportPort,
-      mcpExportWhitelist: mcpExportWhitelist.length > 0 ? mcpExportWhitelist : undefined,
+      // Present ONLY as an array — see the comment on `exportWhitelistPayload`.
+      ...(Array.isArray(exportWhitelistPayload) ? { mcpExportWhitelist: exportWhitelistPayload } : {}),
       // §3.10 P0: mcpEnableStdio is main-only — the settings:save payload
       // must not carry it. Renderer flips stdio on via the separate
       // `mcp:requestStdioEnable` IPC, which pops a native confirm dialog.
       // Including it here would be rejected with `{ ok: false, reason: 'forbidden_field' }`.
+      // §2.99 (review H4): `launchAtLoginStatus` is main-only for the same
+      // reason and is likewise absent — a renderer able to write it could claim
+      // a registration the OS never accepted. It is displayed, never sent.
       trustedDomains: trustedDomains || undefined,
+      // §2.103 — always an ARRAY, never an absent key or `undefined`: an empty
+      // list means "check nothing", and main distinguishes the two (an absent
+      // key leaves the persisted list alone). `spellcheckAvailable` and
+      // `spellcheckDictionaryConsent` are main-only and are never sent — a
+      // payload carrying either is refused whole.
+      spellcheckEnabled,
+      spellcheckLanguages,
     })
-    // Save the API key via keytar for API providers.
-    if (aiProvider && aiProvider !== 'subscription' && aiApiKey && !aiKeyMasked) {
+    // §2.119 — read the reply BEFORE the rest of the save runs, but act on it
+    // at the very end. Main applies every non-destination edit even when it
+    // refuses the address, so the remaining steps below (API key, folder roles,
+    // identities) must still run: the person changed several things and only
+    // one of them was held back. What the refusal costs is the CLOSE, nothing
+    // else.
+    const aiDestinationApplied = recordSettingsSaveResult(saveResult)
+    // §2.103 — main declined to download a dictionary, so that language is not
+    // on. Read the reply now, act at the end, exactly like the two notices
+    // around it. The message is main's own localized sentence; this window adds
+    // no wording of its own, so the two cannot drift.
+    const spellcheckDecline = (saveResult as { spellcheckDeclined?: { count?: number; message?: unknown } } | undefined)
+      ?.spellcheckDeclined
+    const spellcheckDeclineMessage = typeof spellcheckDecline?.message === 'string'
+      ? spellcheckDecline.message
+      : ''
+    setSpellcheckDeclined(spellcheckDeclineMessage)
+    // §2.99 (review H4) — refresh main's autostart report. It has to be a fresh
+    // read rather than the `settings:changed` broadcast: main broadcasts BEFORE
+    // it applies the autostart change, so the broadcast still carries the
+    // previous status. The save reply, by contrast, is sent after the attempt,
+    // so by now the store holds its outcome. Fire-and-forget — this only feeds
+    // an explanatory note and must never fail the save.
+    void (async () => {
+      try {
+        const fresh = await window.api.invoke('settings:get') as SettingsData | undefined
+        setLaunchAtLoginStatus(fresh?.launchAtLoginStatus)
+        // §2.103 — REACTIVE REPAIR for a declined dictionary. Main answers with
+        // a COUNT, not with the language codes (they stay out of the reply for
+        // the same reason they stay out of telemetry), so the repair is to
+        // re-read what was actually persisted rather than to guess which entry
+        // was dropped. Without it the refused language sits in this window's
+        // state and is re-submitted — and re-refused — on every later save.
+        if (spellcheckDeclineMessage && fresh) {
+          setSpellcheckLanguages(Array.isArray(fresh.spellcheckLanguages) ? fresh.spellcheckLanguages : [])
+          setSpellcheckEnabled(fresh.spellcheckEnabled ?? false)
+        }
+      } catch { /* the note simply stays as it was */ }
+    })()
+    // §2.167 — REACTIVE REPAIR. Main refused `mcpExportWhitelist` and said which
+    // entries it refused it for; take exactly those (plus any non-string member,
+    // which main cannot name and which no domain knowledge is needed to reject)
+    // out of the state that produced them. Without this the stale entry is
+    // re-submitted on every save and refused every time, taking every later edit
+    // of the field with it, for the rest of the installation's life.
+    const refusedFields = parseSettingsFieldRefusals(saveResult)
+    const whitelistRefusal = refusedFields.find(r => r.field === 'mcpExportWhitelist')
+    // A withheld field was never submitted, so a refusal of it cannot describe
+    // anything this window sent — repairing state from it would be guesswork.
+    const whitelistRepair = whitelistRefusal && !exportWhitelistWithheld
+      ? repairExportWhitelist(mcpExportWhitelist, whitelistRefusal.values)
+      : null
+    if (whitelistRepair?.changed) setMcpExportWhitelist(whitelistRepair.next)
+    for (const refused of refusedFields) {
+      // A repaired field is NOT withheld: the next save carries the corrected
+      // list and can store it. Withholding is only for a refusal this window
+      // cannot act on — otherwise one bad entry would cost the field forever,
+      // which is the loop the repair exists to break.
+      if (refused.field === 'mcpExportWhitelist' && whitelistRepair?.changed) {
+        refusedSettingsFieldsRef.current.delete(refused.field)
+      } else {
+        refusedSettingsFieldsRef.current.add(refused.field)
+      }
+    }
+    // Same timing as §2.119 above: read now, act at the end.
+    const saveRefusalNotice = recordSettingsSaveOutcome({
+      result: saveResult,
+      repairedExportTools: whitelistRepair?.removed ?? [],
+    })
+    // Save the API key via keytar. Every provider is key-based since §2.218.
+    if (aiProvider && aiApiKey && !aiKeyMasked) {
       await window.api.invoke('ai:saveApiKey', aiApiKey, aiProvider)
     }
     if (typeof accountId === 'number') {
@@ -1178,7 +1522,9 @@ export default function Settings() {
           setIdentitiesDirty(false)
           setIdentitiesSaveError('')
         } catch (e) {
-          setIdentitiesSaveError(e instanceof Error ? e.message : String(e))
+          // A failed `accounts:save` has no server-side story to tell — the
+          // old text was the raw IPC wrapper. §2.127 vocabulary instead.
+          setIdentitiesSaveError(t(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
           return
         }
       }
@@ -1187,13 +1533,36 @@ export default function Settings() {
     // is enforced by the periodic pruneOldEmls() task in main, which the
     // settings:save handler kicks immediately on shrink.
     prevBodyRetentionRef.current = bodyRetentionDays
+    // §2.119 — the address the user asked for is not the one in use. Leave the
+    // window open with the notice `recordSettingsSaveResult` just raised, and
+    // leave `savedRef` alone so the unsaved-changes guard still fires on close:
+    // there IS an unsaved change, namely the field on screen.
+    if (!aiDestinationApplied) return
+    // §2.167 — a refused field has to be READ, and closing is the only thing
+    // that would stop that. `savedRef` is left alone on purpose: what is on
+    // screen (the repaired list, or the value main would not take) is genuinely
+    // unsaved, so the unsaved-changes guard must still fire on close — same
+    // reasoning as §2.119 above.
+    //
+    // NO AUTOMATIC RETRY after a repair, deliberately. Re-sending the corrected
+    // list from here would succeed and therefore CLOSE the window, and closing
+    // is this window's only "saved" signal — the notice naming what was taken
+    // out of the person's list would flash past unread. The person presses Save
+    // again, which is one click and leaves them in control of an edit they did
+    // not ask for. It is also the simpler flow: no second in-flight save to
+    // reconcile with the account/keytar steps this path already runs.
+    if (saveRefusalNotice) return
+    // §2.103 — same rule, same reason as the two above: a person who picked a
+    // language and was told it is not on has to be able to READ that, and
+    // closing the window is the only thing that would stop them.
+    if (spellcheckDeclineMessage) return
     savedRef.current = true
     window.close()
     // Note: `mcpEnableStdio` intentionally not in the dep array — it's no
     // longer emitted through this settings:save path (§3.10 P0). The state
     // still mirrors the main-side flag for UI rendering, but flipping it
     // goes through `mcp:requestStdioEnable` which has its own side-effect path.
-  }, [accountId, aiApiKey, aiConnectionStatus, aiDailyBudgetUsd, aiEgressPolicy, aiKeyMasked, aiLocale, aiMaxBudgetPerRequest, aiMaxTurns, aiModel, aiMonthlyBudgetUsd, aiOpenAiBaseUrl, aiProvider, aiProxyUrl, aiSendOnEnter, aiShowSources, aiThreadSummaryEnabled, aiInstantReplyEnabled, alwaysLoadImages, autoAdvance, autoUpdateEnabled, bodyRetentionDays, conversationOrder, darkModeEmails, debugLogging, defaultMailApp, draftSyncEnabled, folderRoles, gravatarInMail, groupConversations, hiddenUnreadFolders, hotkeysPreset, identities, identitiesDirty, imapIdleEnabled, language, mcpExportEnabled, mcpExportPort, mcpExportWhitelist, notificationsEnabled, offlineMaxSizeKB, periodicSyncIntervalMin, savedAiProvider, sendDelaySeconds, sentryEnabled, signature, sortMode, syncIntervalMinutes, t, theme, trustedDomains])
+  }, [accountId, aiApiKey, aiConnectionStatus, aiDailyBudgetUsd, aiEgressPolicy, aiKeyMasked, aiLocale, aiMaxBudgetPerRequest, aiMaxTurns, aiModel, aiMonthlyBudgetUsd, aiOpenAiBaseUrl, aiProvider, aiProxyUrl, aiSendOnEnter, aiShowSources, aiThreadSummaryEnabled, aiInstantReplyEnabled, aiProofreadEnabled, aiTranslateEnabled, alwaysLoadImages, autoAdvance, autoUpdateEnabled, bodyRetentionDays, conversationOrder, darkModeEmails, debugLogging, defaultMailApp, draftSyncEnabled, folderRoles, gravatarInMail, groupConversations, hiddenUnreadFolders, hotkeysPreset, identities, identitiesDirty, imapIdleEnabled, language, mcpExportEnabled, mcpExportPort, mcpExportWhitelist, notificationsEnabled, trayEnabled, closeToTray, launchAtLogin, offlineMaxSizeKB, periodicSyncIntervalMin, recordSettingsSaveOutcome, recordSettingsSaveResult, savedAiProvider, sendDelaySeconds, sentryEnabled, signature, sortMode, spellcheckEnabled, spellcheckLanguages, syncIntervalMinutes, t, theme, trustedDomains])
 
   // Account selector — shared across Folders and Signature tabs
   const accountSelector = accounts.length > 1 && (
@@ -1561,7 +1930,10 @@ export default function Settings() {
                           setShowTlsPinDialog(false)
                         }
                       } catch (e) {
-                        setTlsFetchError(t('account.tls.fetchError', { error: String(e) }))
+                        // Certificate probe: the transport-level reason
+                        // ("self signed certificate", ENOTFOUND) is what the
+                        // user came here to see. Keep it, drop the tag.
+                        setTlsFetchError(t('account.tls.fetchError', { error: stripErrorPresentation(String(e)) }))
                       } finally {
                         setTlsFetching(false)
                       }
@@ -1650,6 +2022,107 @@ export default function Settings() {
               {t('settings.general.defaultMailApp')}
             </label>
             <span className="hint">{t('settings.general.defaultMailAppHint')}</span>
+
+            {/* §2.103 — spell checking. Two honest shapes, chosen by who owns
+                the language list: on macOS the OS owns it and there is nothing
+                to pick, so the picker is not drawn at all (CLAUDE.md §5 "Кто
+                владеет правдой"); elsewhere the options come from main's report
+                of `session.availableSpellCheckerLanguages` — this window holds
+                no list of its own. The hint states the download plainly,
+                because the native prompt that follows is not the first time a
+                person should hear about it. */}
+            <label className="setting-row setting-row-start">
+              <input
+                type="checkbox"
+                data-testid="settings-spellcheck-enabled"
+                checked={spellcheckEnabled}
+                onChange={e => setSpellcheckEnabled(e.target.checked)}
+              />
+              {t('settings.spellcheck.enabled')}
+            </label>
+            <span className="hint">{t('settings.spellcheck.hint')}</span>
+
+            {spellcheckAvailable?.platformOwned ? (
+              <span className="hint" data-testid="settings-spellcheck-platform-owned">
+                {t('settings.spellcheck.macOwned')}
+              </span>
+            ) : (
+              <>
+                <div className="setting-row">
+                  <label>{t('settings.spellcheck.languagesLabel')}:</label>
+                  <Select
+                    testId="settings-spellcheck-add-language"
+                    value=""
+                    onChange={v => {
+                      if (!v || spellcheckLanguages.includes(v)) return
+                      // The bound is MAIN's (`SPELLCHECK_MAX_LANGUAGES`),
+                      // reported in `spellcheckAvailable.max`. This window
+                      // keeps no copy of it — see the field's JSDoc.
+                      const max = spellcheckAvailable?.max ?? 0
+                      if (max > 0 && spellcheckLanguages.length >= max) return
+                      setSpellcheckLanguages([...spellcheckLanguages, v])
+                    }}
+                    // The accessible name is "Dictionaries", NOT "Add a
+                    // language…": accessible-name matching is substring-based,
+                    // and a control whose name contains the word "language"
+                    // becomes a second match for every "Language" lookup on
+                    // this screen — including the UI-language dropdown three
+                    // rows up, which is what several specs drive.
+                    ariaLabel={t('settings.spellcheck.languagesLabel')}
+                    options={[
+                      { value: '', label: t('settings.spellcheck.addLanguage') },
+                      ...(spellcheckAvailable?.languages ?? [])
+                        .filter(code => !spellcheckLanguages.includes(code))
+                        .map(code => ({ value: code, label: spellcheckLanguageLabel(code, language) })),
+                    ]}
+                  />
+                </div>
+                {/* Also covers the not-yet-reported case (`spellcheckAvailable`
+                    absent): an empty picker with no explanation would read as a
+                    broken screen rather than as "this build offers none". */}
+                {(spellcheckAvailable?.languages.length ?? 0) === 0 && (
+                  <span className="hint" data-testid="settings-spellcheck-unavailable">
+                    {t('settings.spellcheck.unavailable')}
+                  </span>
+                )}
+                {spellcheckLanguages.length === 0 ? (
+                  <span className="hint" data-testid="settings-spellcheck-none">
+                    {t('settings.spellcheck.none')}
+                  </span>
+                ) : (
+                  <ul className="settings-spellcheck-languages" data-testid="settings-spellcheck-languages">
+                    {spellcheckLanguages.map(code => (
+                      <li key={code} className="setting-row setting-row-start" data-language={code}>
+                        <span>{spellcheckLanguageLabel(code, language)}</span>
+                        <button
+                          type="button"
+                          className="btn-link"
+                          aria-label={`${t('settings.spellcheck.remove')} ${code}`}
+                          onClick={() => setSpellcheckLanguages(spellcheckLanguages.filter(l => l !== code))}
+                        >
+                          {t('settings.spellcheck.remove')}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {(spellcheckAvailable?.max ?? 0) > 0 && (
+                  <span className="hint">
+                    {t('settings.spellcheck.limit', { count: spellcheckAvailable?.max })}
+                  </span>
+                )}
+              </>
+            )}
+
+            <TraySection
+              trayEnabled={trayEnabled}
+              onTrayEnabledChange={setTrayEnabled}
+              closeToTray={closeToTray}
+              onCloseToTrayChange={setCloseToTray}
+              launchAtLogin={launchAtLogin}
+              onLaunchAtLoginChange={setLaunchAtLogin}
+              launchAtLoginStatus={launchAtLoginStatus}
+            />
           </section>
         )}
 
@@ -1662,6 +2135,7 @@ export default function Settings() {
               <label className="setting-row setting-row-start">
                 <input
                   type="checkbox"
+                  data-testid="settings-notifications-enabled"
                   checked={notificationsEnabled}
                   onChange={e => setNotificationsEnabled(e.target.checked)}
                 />
@@ -2158,38 +2632,6 @@ export default function Settings() {
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={async () => {
-                      setAiConnectionStatus('checking')
-                      setAiConnectionError('')
-                      try {
-                        // User click — bypass cache but join in-flight.
-                        const result = await singleFlightInvoke<{ status: string; message?: string }>(
-                          'ai:checkAuth',
-                          ['subscription'],
-                          { source: 'user' },
-                        )
-                        if (result.status === 'error') {
-                          setAiConnectionStatus('error')
-                          setAiConnectionError(result.message || 'CLI not found')
-                          return
-                        }
-                      } catch (e) {
-                        setAiConnectionStatus('error')
-                        setAiConnectionError(String(e))
-                        return
-                      }
-                      setAiProvider('subscription')
-                      setAiModel('claude-sonnet-4-5-20250929')
-                      setAiConnectionStatus('')
-                      setAiConnectionError('')
-                    }}
-                  >
-                    <Sparkles size={14} style={{ marginRight: 4, verticalAlign: -2 }} />
-                    {t('ai.settings.providerSubscription')}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
                     onClick={() => {
                       setAiProvider('anthropic-api')
                       setAiModel('claude-sonnet-4-5-20250929')
@@ -2242,8 +2684,7 @@ export default function Settings() {
                 <div className="setting-row">
                   <label>{t('ai.settings.provider')}:</label>
                   <span className="ai-provider-label">
-                    {aiProvider === 'subscription' ? t('ai.settings.providerSubscription')
-                      : aiProvider === 'openai-api' ? t('ai.settings.providerOpenAI')
+                    {aiProvider === 'openai-api' ? t('ai.settings.providerOpenAI')
                       : aiProvider === 'gemini-api' ? t('ai.settings.providerGemini')
                       : t('ai.settings.providerApi')}
                   </span>
@@ -2345,8 +2786,7 @@ export default function Settings() {
                 <div className="setting-row">
                   <label>{t('ai.settings.provider')}:</label>
                   <span className="ai-provider-label">
-                    {savedAiProvider === 'subscription' ? t('ai.settings.providerSubscription')
-                      : savedAiProvider === 'openai-api' ? t('ai.settings.providerOpenAI')
+                    {savedAiProvider === 'openai-api' ? t('ai.settings.providerOpenAI')
                       : savedAiProvider === 'gemini-api' ? t('ai.settings.providerGemini')
                       : t('ai.settings.providerApi')}
                   </span>
@@ -2356,7 +2796,13 @@ export default function Settings() {
                     onClick={async () => {
                       if (!window.confirm(t('ai.settings.resetConfirm'))) return
                       try {
-                        await window.api.invoke('ai:deleteApiKey')
+                        // §2.122 — the delete is ADDRESSED: it names the
+                        // provider being reset, and it happens only for a
+                        // provider that actually has a stored key. Calling the
+                        // channel bare used to mean "delete all three"; it now
+                        // fails zod validation in main, which is exactly why
+                        // the argument cannot be left to chance here.
+                        await deleteAiApiKeyForProvider(window.api.invoke, savedAiProvider)
                         // settings:save merges the payload into current settings
                         // server-side, so send ONLY the field we clear. Do NOT
                         // spread settings:get() — it carries main-only fields
@@ -2378,7 +2824,10 @@ export default function Settings() {
                         setAiConnectionError('')
                       } catch (e) {
                         setAiConnectionStatus('error')
-                        setAiConnectionError(String(e))
+                        // "Reset provider" is a local settings write, not a
+                        // probe — there is no diagnostic text worth showing,
+                        // so this one takes the §2.127 vocabulary.
+                        setAiConnectionError(t(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
                       }
                     }}
                   >
@@ -2645,6 +3094,61 @@ export default function Settings() {
             </div>
           </section>
 
+          {/* §3.3 B7 AI Proofread — per-account opt-in. Default OFF. Same
+              account-scoped Record pattern as the two toggles above. The help
+              text is deliberately honest about scope: the check looks at the
+              text the user wrote, and the own/quote boundary behind that is an
+              estimate over flat text (§2.173), not a guarantee. */}
+          <section className="form-section" data-testid="settings-ai-proofread">
+            <h3>{t('ai.settings.proofread.title')}</h3>
+            <p className="section-hint">{t('ai.settings.proofread.help')}</p>
+            {accountSelector}
+            <div className="setting-row setting-row-checkbox">
+              <label>
+                <input
+                  type="checkbox"
+                  data-testid="settings-ai-proofread-toggle"
+                  disabled={typeof accountId !== 'number'}
+                  checked={typeof accountId === 'number' && aiProofreadEnabled[String(accountId)] === true}
+                  onChange={e => {
+                    if (typeof accountId !== 'number') return
+                    const key = String(accountId)
+                    const next = e.target.checked
+                    setAiProofreadEnabled(prev => ({ ...prev, [key]: next }))
+                  }}
+                />{' '}
+                {t('ai.settings.proofread.label')}
+              </label>
+            </div>
+          </section>
+
+          {/* §3.3 B6 AI Translate — per-account opt-in. Default OFF. Same
+              account-scoped Record pattern as the toggles above. The help text
+              names the two things a reader has to know before turning it on:
+              it costs a provider call, and it only ever runs when they ask. */}
+          <section className="form-section" data-testid="settings-ai-translate">
+            <h3>{t('ai.settings.translate.title')}</h3>
+            <p className="section-hint">{t('ai.settings.translate.help')}</p>
+            {accountSelector}
+            <div className="setting-row setting-row-checkbox">
+              <label>
+                <input
+                  type="checkbox"
+                  data-testid="settings-ai-translate-toggle"
+                  disabled={typeof accountId !== 'number'}
+                  checked={typeof accountId === 'number' && aiTranslateEnabled[String(accountId)] === true}
+                  onChange={e => {
+                    if (typeof accountId !== 'number') return
+                    const key = String(accountId)
+                    const next = e.target.checked
+                    setAiTranslateEnabled(prev => ({ ...prev, [key]: next }))
+                  }}
+                />{' '}
+                {t('ai.settings.translate.label')}
+              </label>
+            </div>
+          </section>
+
           <section className="form-section">
             <h3>{t('ai.settings.memory.title')}</h3>
             <p className="section-hint">{t('ai.settings.memory.hint')}</p>
@@ -2723,6 +3227,7 @@ export default function Settings() {
                   <button
                     type="button"
                     className="btn-primary"
+                    data-testid="mcp-export-toggle"
                     onClick={async () => {
                       try {
                         if (mcpExportStatus === 'running') {
@@ -2730,7 +3235,20 @@ export default function Settings() {
                           setMcpExportStatus('stopped')
                           setMcpExportToken('')
                         } else {
-                          const res = await window.api.invoke('mcpExport:start', mcpExportPort, mcpExportWhitelist.length > 0 ? mcpExportWhitelist : undefined) as { token?: string }
+                          // §2.167 — NEVER WIDEN ON START EITHER. The old
+                          // `length > 0 ? list : undefined` here sent a
+                          // configured-but-empty list (persisted `[]`, or one a
+                          // refusal repair just emptied) as `undefined`, and
+                          // `resolveExportWhitelist` reads nullish as "no
+                          // preference" and registers DEFAULT_EXPORT_WHITELIST.
+                          // Starting the server was therefore able to export
+                          // tools the person's list said to export nothing of.
+                          // Same helper as the save path, one rule.
+                          const whitelistArg = buildExportWhitelistPayload(
+                            mcpExportWhitelist,
+                            exportWhitelistConfiguredRef.current,
+                          )
+                          const res = await window.api.invoke('mcpExport:start', mcpExportPort, whitelistArg) as { token?: string }
                           setMcpExportStatus('running')
                           if (res?.token) setMcpExportToken(res.token)
                         }
@@ -3020,7 +3538,11 @@ export default function Settings() {
                           setMcpTestResult({ message: formatMcpTestError(res.reason), success: false })
                         }
                       } catch (err) {
-                        setMcpTestResult({ message: err instanceof Error ? err.message : String(err), success: false })
+                        // Connection test: `persistMcpConnection` throws an
+                        // already-localized message, and an MCP server's own
+                        // refusal is the diagnostic the button exists for.
+                        // Keep both; strip only the §2.127 tag.
+                        setMcpTestResult({ message: stripErrorPresentation(err instanceof Error ? err.message : String(err)), success: false })
                       }
                       setMcpTesting(false)
                     }}
@@ -3043,7 +3565,10 @@ export default function Settings() {
                         // (e.g. forbidden_env_key). Prior to the fix the
                         // `await` resolved with `{ ok: false }` and the
                         // UI optimistically added a phantom connection.
-                        setMcpTestResult({ message: err instanceof Error ? err.message : String(err), success: false })
+                        // That localized message must survive verbatim, so this
+                        // site strips the §2.127 tag rather than replacing the
+                        // text with the vocabulary.
+                        setMcpTestResult({ message: stripErrorPresentation(err instanceof Error ? err.message : String(err)), success: false })
                       }
                     }}
                   >
@@ -3206,16 +3731,53 @@ export default function Settings() {
 
               {/* Rule list */}
               {mailRules.length === 0 && <p className="hint">{t('settings.rules.empty')}</p>}
-              {mailRules.map(rule => (
+              {mailRules.map(rule => {
+                // §2.202 — a rule the client refuses to run is marked here, not
+                // only inside the editor: it is silently inert otherwise, and
+                // "my rule stopped working" is not a question the list answered.
+                // Malformed wins when both apply — that verdict is about the
+                // whole row and the editor cannot even show what to fix.
+                const refusal = rule.malformed ? null : mailRuleRefusals.get(rule.id)
+                const refusalReason = refusal ? ruleRefusalReasonText(t, refusal) : ''
+                return (
                 <div key={rule.id} className="rule-item" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--mailcopilot-border)' }}>
                   <input type="checkbox" checked={rule.enabled} onChange={async () => {
                     await window.api.invoke('rules:update', rule.id, { enabled: !rule.enabled })
                     void loadMailRules()
                   }} />
                   <span style={{ flex: 1 }}>{rule.name}</span>
-                  <span style={{ color: 'var(--muted)', fontSize: 12 }}>
-                    {rule.conditions.length} {t('settings.rules.conditions').toLowerCase()}, {rule.actions.length} {t('settings.rules.actions').toLowerCase()}
-                  </span>
+                  {rule.malformed ? (
+                    // Not the condition/action counts: they are zero because the
+                    // rule could not be read, not because it has none.
+                    <span
+                      data-testid="rule-malformed-badge"
+                      title={t('settings.rules.refusal.malformedRule')}
+                      style={{ color: 'var(--danger, #ef4444)', fontSize: 12 }}
+                    >
+                      {t('settings.rules.malformedBadge')}
+                    </span>
+                  ) : refusal ? (
+                    // A button, not a label: the badge says something is wrong,
+                    // and the only place to act on it is the editor — so the
+                    // badge itself is the way in. The reason rides along in the
+                    // accessible name as well as the tooltip, since a title is
+                    // not reachable without a pointer.
+                    <button
+                      type="button"
+                      className="btn-link"
+                      data-testid="rule-refused-badge"
+                      title={refusalReason}
+                      onClick={() => setEditingRule(rule)}
+                      style={{ color: 'var(--danger, #ef4444)', fontSize: 12, padding: 0, textDecoration: 'underline' }}
+                    >
+                      {t('settings.rules.refusedBadge')}
+                      <span className="sr-only">{refusalReason}</span>
+                    </button>
+                  ) : (
+                    <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+                      {rule.conditions.length} {t('settings.rules.conditions').toLowerCase()}, {rule.actions.length} {t('settings.rules.actions').toLowerCase()}
+                    </span>
+                  )}
                   <button className="btn-icon" title="Edit" onClick={() => setEditingRule(rule)}>
                     <Pencil size={14} />
                   </button>
@@ -3228,7 +3790,8 @@ export default function Settings() {
                     <Trash2 size={14} />
                   </button>
                 </div>
-              ))}
+                )
+              })}
 
               <button className="btn" style={{ marginTop: 12 }} onClick={() => setEditingRule({
                 id: '',
@@ -3236,9 +3799,10 @@ export default function Settings() {
                 name: '',
                 enabled: true,
                 priority: mailRules.length,
-                conditions: [{ field: 'from', op: 'contains', value: '' }],
+                conditions: [{ field: DEFAULT_RULE_CONDITION_FIELD, op: 'contains', value: '' }],
                 actions: [{ type: 'archive' }],
                 stopProcessing: false,
+                malformed: false,
               })}>
                 + {t('settings.rules.add')}
               </button>
@@ -3250,6 +3814,19 @@ export default function Settings() {
                 <div className="modal-dialog" style={{ maxWidth: 560, padding: 0, overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
                 <div style={{ maxHeight: '80vh', overflowY: 'auto', padding: 24 }}>
                   <h3>{editingRule.id ? editingRule.name : t('settings.rules.add')}</h3>
+
+                  {editingRule.malformed && (
+                    // The halves could not be read, so the editor opens empty:
+                    // say so before the user saves it and rebuilds the rule.
+                    <p
+                      className="hint"
+                      role="alert"
+                      data-testid="rule-malformed-notice"
+                      style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--danger, #ef4444)' }}
+                    >
+                      {t('settings.rules.refusal.malformedRule')}
+                    </p>
+                  )}
 
                   <label className="setting-row">
                     {t('settings.rules.name')}:
@@ -3272,52 +3849,27 @@ export default function Settings() {
 
                   <h4 style={{ marginTop: 16 }}>{t('settings.rules.conditions')}</h4>
                   {editingRule.conditions.map((cond, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4, alignItems: 'center' }}>
-                      <Select
-                        value={cond.field}
-                        onChange={v => {
-                          const c = [...editingRule.conditions]
-                          c[i] = { ...c[i]!, field: v }
-                          setEditingRule({ ...editingRule, conditions: c })
-                          setTestResults(null)
-                        }}
-                        ariaLabel={t('settings.rules.conditionField')}
-                        options={['from', 'to', 'cc', 'subject', 'has_attachment'].map(f => ({ value: f, label: t(`settings.rules.field.${f}`) }))}
-                      />
-                      {cond.field !== 'has_attachment' && (
-                        <>
-                          <Select
-                            value={cond.op}
-                            onChange={v => {
-                              const c = [...editingRule.conditions]
-                              c[i] = { ...c[i]!, op: v }
-                              setEditingRule({ ...editingRule, conditions: c })
-                              setTestResults(null)
-                            }}
-                            ariaLabel={t('settings.rules.conditionOp')}
-                            options={['contains', 'not_contains', 'equals', 'starts_with', 'ends_with', 'matches_regex'].map(o => ({ value: o, label: t(`settings.rules.op.${o}`) }))}
-                          />
-                          <input type="text" value={cond.value} onChange={e => {
-                            const c = [...editingRule.conditions]
-                            c[i] = { ...c[i]!, value: e.target.value }
-                            setEditingRule({ ...editingRule, conditions: c })
-                            setTestResults(null)
-                          }} style={{ flex: 1 }} />
-                        </>
-                      )}
-                      <button className="btn-icon" onClick={() => {
+                    <RuleConditionRow
+                      key={i}
+                      condition={cond}
+                      actions={editingRule.actions}
+                      onChange={next => {
+                        const c = [...editingRule.conditions]
+                        c[i] = next
+                        setEditingRule({ ...editingRule, conditions: c })
+                        setTestResults(null)
+                      }}
+                      onRemove={() => {
                         const c = editingRule.conditions.filter((_, j) => j !== i)
                         setEditingRule({ ...editingRule, conditions: c })
                         setTestResults(null)
-                      }}>
-                        <X size={14} />
-                      </button>
-                    </div>
+                      }}
+                    />
                   ))}
                   <button className="btn-sm" onClick={() => {
                     setEditingRule({
                       ...editingRule,
-                      conditions: [...editingRule.conditions, { field: 'from', op: 'contains', value: '' }],
+                      conditions: [...editingRule.conditions, { field: DEFAULT_RULE_CONDITION_FIELD, op: 'contains', value: '' }],
                     })
                     setTestResults(null)
                   }}>+ {t('settings.rules.addCondition')}</button>
@@ -3327,31 +3879,19 @@ export default function Settings() {
 
                   <h4 style={{ marginTop: 16 }}>{t('settings.rules.actions')}</h4>
                   {editingRule.actions.map((act, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4, alignItems: 'center' }}>
-                      <Select
-                        value={act.type}
-                        onChange={v => {
-                          const a = [...editingRule.actions]
-                          a[i] = { type: v }
-                          setEditingRule({ ...editingRule, actions: a })
-                        }}
-                        ariaLabel={t('settings.rules.actionType')}
-                        options={['move', 'archive', 'trash', 'mark_read', 'mark_starred', 'mark_spam'].map(t2 => ({ value: t2, label: t(`settings.rules.action.${t2}`) }))}
-                      />
-                      {act.type === 'move' && (
-                        <input type="text" placeholder={t('settings.rules.folderPlaceholder')} value={act.folder || ''} onChange={e => {
-                          const a = [...editingRule.actions]
-                          a[i] = { ...a[i]!, folder: e.target.value }
-                          setEditingRule({ ...editingRule, actions: a })
-                        }} style={{ flex: 1 }} />
-                      )}
-                      <button className="btn-icon" onClick={() => {
+                    <RuleActionRow
+                      key={i}
+                      action={act}
+                      onChange={next => {
+                        const a = [...editingRule.actions]
+                        a[i] = next
+                        setEditingRule({ ...editingRule, actions: a })
+                      }}
+                      onRemove={() => {
                         const a = editingRule.actions.filter((_, j) => j !== i)
                         setEditingRule({ ...editingRule, actions: a })
-                      }}>
-                        <X size={14} />
-                      </button>
-                    </div>
+                      }}
+                    />
                   ))}
                   <button className="btn-sm" onClick={() => setEditingRule({
                     ...editingRule,
@@ -3399,17 +3939,32 @@ export default function Settings() {
                           if (created?.id) savedId = created.id
                         }
                         if (applyToExisting && savedId) {
-                          await window.api.invoke('rules:applyToFolder', savedId)
+                          // Additive reply shape: `refused` is present when the
+                          // rule may not run at all, and reporting it matters —
+                          // the silent alternative is "applied: 0", which reads
+                          // like "nothing matched".
+                          const outcome = await window.api.invoke('rules:applyToFolder', savedId) as
+                            { applied?: number; refused?: unknown } | undefined
+                          if (outcome?.refused) {
+                            window.alert(ruleApplyRefusalText(t, outcome.refused))
+                          }
                         }
                         setEditingRule(null)
                         setTestResults(null)
                         setApplyToExisting(false)
                         void loadMailRules()
                       } catch (err) {
-                        console.error('Failed to save rule:', err)
-                        window.alert(t('settings.rules.saveFailed'))
+                        // Verdict, never the value — same reason as
+                        // `saveAvatarSettings` above. `rules:applyToFolder`
+                        // runs the rule against a live mailbox, so a failure
+                        // here can carry the server's own words.
+                        console.error('Failed to save rule:', decodeErrorPresentation(err))
+                        // A refusal carries a machine code naming the offending
+                        // field, so the user is told which condition to change;
+                        // anything else keeps the generic wording.
+                        window.alert(ruleSaveErrorText(t, err))
                       }
-                    }} disabled={!editingRule.name.trim()}>
+                    }} data-testid="rule-editor-save" disabled={!editingRule.name.trim() || hasMoveMissingFolder(editingRule.actions)}>
                       {t('common.save')}
                     </button>
                   </div>
@@ -3749,6 +4304,37 @@ export default function Settings() {
               </div>
             )}
           </section>
+        )}
+
+        {/* §2.119 — sits directly above Save, not inside the AI tab: the save
+            is window-wide, so the answer to "did my save go through?" has to be
+            where the person pressed the button, whatever tab they are on. */}
+        <AiDestinationRejectionNotice
+          rejection={aiDestinationRejection}
+          onRetry={() => void save()}
+        />
+
+        {/* §2.167 — a field of the last save that main refused, or an export
+            tool name this window healed out of the payload. Same placement and
+            the same reason as the notice above: the save is window-wide, so its
+            answer has to be where the button is, not on the tab that happens to
+            host the setting. */}
+        <SettingsSaveRefusalNotice notice={settingsSaveRefusal} />
+
+        {/* §2.103 — the dictionary download was declined, so the language is
+            not on. Same placement and the same reason as the two notices above.
+            The sentence is main's: it drew the dialog, it says what came of it,
+            and this window adds no second wording that could drift from it. */}
+        {spellcheckDeclined && (
+          <div
+            className="privacy-banner"
+            role="status"
+            data-testid="settings-spellcheck-declined"
+            style={{ alignItems: 'flex-start', marginTop: 16 }}
+          >
+            <Info size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+            <div>{spellcheckDeclined}</div>
+          </div>
         )}
 
         <button data-testid="settings-save" className="btn-primary settings-save-btn" onClick={() => void save()}>

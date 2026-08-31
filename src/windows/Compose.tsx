@@ -3,6 +3,22 @@ import { Send, Loader2, Paperclip, X, FileText, Bell, Archive, ChevronDown, Cloc
 import { useTranslation } from 'react-i18next'
 import type { AccountMeta, ComposeAttachment, ComposeInit, FolderRoles, Identity } from '../../packages/net/types'
 import { formatBytes } from '../utils/mail'
+// §2.127 — `presentedError` lives in src/utils/errorPresentation.ts. Compose
+// also relies on the renderer-side fallback: attachment reading throws locally
+// and never reaches main, so it is classified by the same closed vocabulary.
+import { presentedError } from '../utils/errorPresentation'
+// The three swallowed failures below (contact upsert, contact search, draft
+// sync) print a DIAGNOSTIC line instead of showing copy, so they never reach
+// `presentedError` — but the console is not a private sink. The renderer keeps
+// Sentry's default integrations (src/sentry.ts), and console output is one of
+// them: every argument becomes a breadcrumb that ships with the next event
+// passing `beforeSend`. The text after `[mcerr:*]` is deliberately left raw for
+// two substring consumers, so printing the error object handed a hostile
+// IMAP/SMTP server a writable field in our telemetry — the free third-party
+// text CLAUDE.md §8 forbids. `decodeErrorPresentation` collapses the value into
+// one of ERROR_PRESENTATION_KEYS, which is all a breadcrumb needs to say; the
+// raw tree stays in the main-process log via `describeErrorForLog`.
+import { decodeErrorPresentation } from '@mailcopilot/core'
 import { resolveFromEmailFromMeta } from '../utils/composeFromEmail'
 import WindowTitlebar from '../components/WindowTitlebar'
 import { useIdentitySelection } from '../hooks/useIdentitySelection'
@@ -10,6 +26,11 @@ import { useIdentityDefaultBcc } from '../hooks/useIdentityDefaultBcc'
 import IdentityPicker from '../components/IdentityPicker'
 import Select from '../components/Select'
 import { ComposeQuickActions } from '../components/ComposeQuickActions'
+import { isAiFeatureEnabledForAccount } from '../utils/aiAccountGate'
+// By path, not through the `@mailcopilot/core` barrel — see the note in
+// `useMailTranslation.ts`. Only the type guard is used; nothing detects here.
+import { isTranslateLanguageCode } from '../../packages/core/language'
+import type { TranslateLanguageCode } from '@mailcopilot/types'
 import {
   defaultCustomScheduleValue,
   mondayMorning,
@@ -364,6 +385,18 @@ export default function Compose() {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([])
   const [sending, setSending] = useState(false)
+  // §3.3 B7 — per-account AI Proofread opt-in map (accountId → enabled), read
+  // from settings on mount. Default OFF everywhere; the toolbar resolves the
+  // entry for the account currently authoring the draft.
+  const [aiProofreadEnabled, setAiProofreadEnabled] = useState<Record<string, boolean>>({})
+  // §3.3 B6 (draft side) — per-account AI Translate opt-in map, the SAME
+  // setting the reading pane uses. Default OFF everywhere.
+  const [aiTranslateEnabled, setAiTranslateEnabled] = useState<Record<string, boolean>>({})
+  // §3.3 B6 — target-language SUGGESTION for this draft, minted by main from
+  // the message being replied to. Validated on arrival because it crosses a
+  // channel this window does not own; anything outside the closed sixteen-code
+  // set reads as "no suggestion" rather than being carried into a request.
+  const [suggestedTargetLang, setSuggestedTargetLang] = useState<TranslateLanguageCode | null>(null)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [showCcBcc, setShowCcBcc] = useState(false)
@@ -389,6 +422,22 @@ export default function Compose() {
   const rememberAsLastDraftRef = useRef(false)
   const lastRemoteDraftKeyRef = useRef<string>('')
   const initEpochRef = useRef(0)
+  // §3.3 B6.f-renderer: the reset key handed to the AI toolbar. It counts
+  // `compose:init` events — "this form was re-initialized for another message"
+  // — and NOTHING else.
+  //
+  // It is deliberately NOT `draftId`. `draftId` is the identity of the STORAGE
+  // slot, and it resolves asynchronously: the mount-time effect sets
+  // `accountId` (~line 830, from which point the translate control is already
+  // interactive) and only reaches `setDraftId` (~line 980) after `accounts:get`,
+  // `net:mailboxesAndRoles` and `drafts:wasSent`. Keying the reset on it meant
+  // a language pick — or a paid request — made inside that window was wiped by
+  // the later `'' → real id` transition. A generation counter is stable from
+  // the first paint and advances synchronously in the `compose:init` handler,
+  // so the reset depends on the EVENT "the form was re-initialized", not on
+  // when an identifier happens to arrive. It mirrors `initEpochRef`, but as
+  // state, because a ref cannot drive a re-render.
+  const [composeGeneration, setComposeGeneration] = useState(0)
   const closeSuggestTimerRef = useRef<number | null>(null)
   const contactSearchTimerRef = useRef<number | null>(null)
 
@@ -477,7 +526,8 @@ export default function Compose() {
       }
       clearInput()
       void window.api.invoke('contacts:upsert', token.email.trim(), (token.name || '').trim() || undefined).catch((e: unknown) => {
-        console.warn('[Compose] Failed to save contact:', e)
+        // Verdict, never the value — see the note on the import above.
+        console.warn('[Compose] contact save failed:', decodeErrorPresentation(e))
       })
     }
 
@@ -538,7 +588,8 @@ export default function Compose() {
           const list = await window.api.invoke('contacts:search', query, 8) as ContactSuggestion[]
           setContactSuggestions(Array.isArray(list) ? list : [])
         } catch (e) {
-          console.warn('[Compose] Contact search error:', e)
+          // Verdict, never the value — see the note on the import above.
+          console.warn('[Compose] contact search failed:', decodeErrorPresentation(e))
           setContactSuggestions([])
         }
       })()
@@ -561,6 +612,10 @@ export default function Compose() {
       composeOpenedEmittedRef.current = false
       const nextAccountId = (data && typeof data === 'object' && typeof data.accountId === 'number') ? data.accountId : null
       initEpochRef.current += 1
+      // Same event, same moment: the AI toolbar's per-draft memory (the picked
+      // translation target, an open review panel) belongs to the message this
+      // form was showing, and the form is now showing another one.
+      setComposeGeneration(g => g + 1)
       setStatus('')
       setError('')
       setAttachments([])
@@ -628,6 +683,11 @@ export default function Compose() {
       if (typeof init?.subject === 'string') setSubject(init.subject); else setSubject('')
       if (typeof init?.text === 'string') setText(init.text); else setText('')
       if (Array.isArray(init?.attachments)) setAttachments(init.attachments); else setAttachments([])
+      // Cleared on EVERY init, not only when one arrives: a reused window must
+      // not carry the previous message's suggestion into a fresh compose.
+      setSuggestedTargetLang(
+        isTranslateLanguageCode(init?.suggestedTargetLang) ? init.suggestedTargetLang : null,
+      )
       // "Compose" (no init data): clear the legacy "last draft" pointer so
       // drafts are not restored. The per-account variant is consulted via
       // window.api 'drafts:wasSent' inside the compose:getInit branch below
@@ -690,11 +750,37 @@ export default function Compose() {
     void (async () => {
       const startEpoch = initEpochRef.current
       try {
-        const s = await window.api.invoke('settings:get') as { draftSyncEnabled?: boolean; sendDelaySeconds?: number; trustedDomains?: string } | undefined
+        const s = await window.api.invoke('settings:get') as {
+          draftSyncEnabled?: boolean
+          sendDelaySeconds?: number
+          trustedDomains?: string
+          aiProofreadEnabled?: unknown
+          aiTranslateEnabled?: unknown
+        } | undefined
         setDraftSyncEnabled(s?.draftSyncEnabled ?? true)
         setSendDelaySeconds(typeof s?.sendDelaySeconds === 'number' ? Math.max(0, s.sendDelaySeconds) : 0)
         if (typeof s?.trustedDomains === 'string') {
           setTrustedDomains(s.trustedDomains.split('\n').map(d => d.trim()).filter(Boolean))
+        }
+        // §3.3 B7: per-account AI Proofread opt-in. Normalized defensively —
+        // only a strictly-true entry counts, so a malformed store reads as OFF
+        // for every account (the feature's default and the safe direction).
+        if (s?.aiProofreadEnabled && typeof s.aiProofreadEnabled === 'object') {
+          const raw = s.aiProofreadEnabled as Record<string, unknown>
+          const next: Record<string, boolean> = {}
+          for (const [k, v] of Object.entries(raw)) next[k] = v === true
+          setAiProofreadEnabled(next)
+        } else {
+          setAiProofreadEnabled({})
+        }
+        // §3.3 B6: same defensive normalization, same OFF default.
+        if (s?.aiTranslateEnabled && typeof s.aiTranslateEnabled === 'object') {
+          const raw = s.aiTranslateEnabled as Record<string, unknown>
+          const next: Record<string, boolean> = {}
+          for (const [k, v] of Object.entries(raw)) next[k] = v === true
+          setAiTranslateEnabled(next)
+        } else {
+          setAiTranslateEnabled({})
         }
 
         const ctx = await window.api.invoke('compose:getInit') as { accountId: number; init: ComposeInit | null } | null
@@ -723,6 +809,9 @@ export default function Compose() {
           if (typeof ctxInit.subject === 'string') setSubject(ctxInit.subject)
           if (typeof ctxInit.text === 'string') setText(ctxInit.text)
           if (Array.isArray(ctxInit.attachments)) setAttachments(ctxInit.attachments)
+          setSuggestedTargetLang(
+            isTranslateLanguageCode(ctxInit.suggestedTargetLang) ? ctxInit.suggestedTargetLang : null,
+          )
           if (ctxInit.replyRef) setReplyRef(ctxInit.replyRef)
           if (Array.isArray(ctxInit.originalRecipients)) {
             setOriginalRecipients(ctxInit.originalRecipients)
@@ -758,12 +847,47 @@ export default function Compose() {
         })()
 
         const pickedAccountId = ctxAccountId ?? fallbackAccountId
+        // Same epoch guard as the early field initialization above and as the
+        // `accounts:get` continuation in the `compose:init` handler. Everything
+        // from here down is the continuation of an await chain (`accounts:list`,
+        // `accounts:getCurrent`), so a `compose:init` for ANOTHER message may
+        // have landed meanwhile — and it has already written that message's
+        // account, recipients and body. Writing the sender resolved for the OLD
+        // context over them is how the form ends up showing B's recipients above
+        // A's From line, with A's identities, signature and Drafts mailbox
+        // following from it. The single check further down (before the draft-id
+        // decision) does not cover this: it runs AFTER these writes.
+        if (initEpochRef.current !== startEpoch) return
         if (typeof pickedAccountId === 'number') setAccountId(pickedAccountId)
 
         let accountSignature = ''
         if (typeof pickedAccountId === 'number') {
           try {
             const meta = await window.api.invoke('accounts:get', pickedAccountId) as AccountMeta | undefined
+            // One guard per await, not one guard before the chain: the
+            // event we are guarding against can land during ANY of them, and
+            // every continuation writes state. This one resolves the From
+            // line itself.
+            //
+            // The rule is per-await for every continuation that writes DRAFT
+            // state — `net:mailboxesAndRoles`, its `cache:folderRoles`
+            // fallback and `drafts:wasSent` each carry their own copy of this
+            // line. Adding such an await without one is the §3.3 B6.f3 defect:
+            // the `drafts:wasSent` continuation was unguarded, so it restored
+            // the PREVIOUS account's local draft (recipients, subject, body)
+            // into a form whose `accountId` and Drafts mailbox already belonged
+            // to the message the window had been reused for, and autosave then
+            // appended A's text to B's Drafts on another provider.
+            //
+            // Two awaits in this chain are deliberately NOT guarded, and
+            // "completing the rule" by adding guards there would introduce a
+            // defect rather than remove one: `settings:get` and `accounts:list`
+            // write WINDOW state, not draft state. Settings do not depend on
+            // which message is being written, and an early return would leave
+            // the window without `aiTranslateEnabled`, `trustedDomains` and the
+            // send delay for its whole life; the account list is identical in
+            // every epoch. Count the writes, not the awaits.
+            if (initEpochRef.current !== startEpoch) return
             if (meta) {
               setFromEmail(resolveFromEmailFromMeta(meta))
               // 2.3-B: surface identities to the picker. The server-side
@@ -788,12 +912,14 @@ export default function Compose() {
 
           try {
             const res = await window.api.invoke('net:mailboxesAndRoles', pickedAccountId) as { roles: FolderRoles }
+            if (initEpochRef.current !== startEpoch) return
             if (s?.draftSyncEnabled ?? true) setDraftsMailbox(res?.roles?.drafts || null)
             setArchiveFolder(res?.roles?.archive || null)
           } catch {
             // Fallback to cached roles when IMAP is unavailable
             try {
               const allCached = await window.api.invoke('cache:folderRoles') as Record<number, Record<string, string | undefined>> | null
+              if (initEpochRef.current !== startEpoch) return
               const cached = allCached?.[pickedAccountId]
               if (cached) {
                 if (s?.draftSyncEnabled ?? true) setDraftsMailbox(cached.drafts || null)
@@ -867,6 +993,25 @@ export default function Compose() {
                   // than reusing a potentially-finalized id.
                   wasSent = true
                 }
+                // Fifth await of this chain, fifth guard (§3.3 B6.f3). Placed
+                // after the try/catch so BOTH outcomes are covered, and before
+                // the first write: everything below — `setDraftId`, the
+                // per-account "last draft" pointer, and on the restore branch
+                // the recipients, subject and body read out of the PREVIOUS
+                // account's local draft — would otherwise land in a form that
+                // already shows another message, on another account, with
+                // another Drafts mailbox. Autosave would then push that text
+                // to a different provider's server.
+                //
+                // Returning early is safe rather than merely plausible: the
+                // only writer of `initEpochRef` is the `compose:init` handler
+                // above, and everything this continuation would have set it
+                // sets synchronously before it returns — `setDraftId` and the
+                // `rememberAsLastDraftRef` decision unconditionally, the
+                // account and sender list when the event carries an account —
+                // while the Drafts/Archive roles are re-resolved by the
+                // `accountId` effect below.
+                if (initEpochRef.current !== startEpoch) return
                 if (!wasSent) lastDraftId = candidate
                 else {
                   // Pointer is stale — clean up.
@@ -964,7 +1109,7 @@ export default function Compose() {
           setText(prev => (prev.trim() ? prev : `\n\n--\n${accountSignature}`))
         }
       } catch (e) {
-        setError(String(e))
+        setError(presentedError(tRef.current, e))
       }
     })()
   }, [])
@@ -1066,7 +1211,11 @@ export default function Compose() {
           setStatus(prev => prev || t('compose.status.draftSynced'))
         } catch (e) {
           // Do not break compose with frequent sync errors (server/folder may not be supported).
-          console.warn('draft sync failed:', e)
+          // Verdict, never the value — see the note on the import above. This
+          // is the site with the widest exposure of the three: an unsupported
+          // Drafts folder makes the server answer with its own prose every
+          // 1.5 s of typing.
+          console.warn('[Compose] draft sync failed:', decodeErrorPresentation(e))
         }
       })()
     }, 1500)
@@ -1195,7 +1344,7 @@ export default function Compose() {
       await maybeCreateFollowUp()
       await finalizeAfterDispatch(t('compose.status.sent'))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1227,7 +1376,7 @@ export default function Compose() {
       await maybeCreateFollowUp()
       await finalizeAfterDispatch(t('compose.status.sentAndArchived'))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1252,7 +1401,7 @@ export default function Compose() {
       await maybeCreateFollowUp(Date.now() + delayMs)
       await finalizeAfterDispatch(t('compose.status.scheduled', { seconds: Math.max(1, Math.round(delayMs / 1000)) }))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1282,7 +1431,7 @@ export default function Compose() {
       await maybeCreateFollowUp(sendAt.getTime())
       await finalizeAfterDispatch(t('compose.status.scheduledAt', { at: at.toLocaleString() }))
     } catch (e) {
-      setError(t('compose.errors.sendFailed', { error: String(e) }))
+      setError(t('compose.errors.sendFailed', { error: presentedError(t, e) }))
     } finally {
       setSending(false)
     }
@@ -1414,7 +1563,9 @@ export default function Compose() {
       const atts = await filesToAttachments(files)
       setAttachments(prev => [...prev, ...atts])
     } catch (e) {
-      setError(String(e))
+      // Renderer-side failure (FileReader / oversized selection): never tagged,
+      // and its text is a DOMException the user cannot act on either.
+      setError(presentedError(t, e))
     } finally {
       // Reset value so re-selecting the same files also triggers the handler
       if (fileRef.current) fileRef.current.value = ''
@@ -1560,11 +1711,21 @@ export default function Compose() {
         {/* B4: AI quick-action toolbar (Improve / Shorter / Formal / Grammar).
             All rewrite logic lives in useQuickActions; the diff preview only
             mutates the body via the explicit Replace/Insert callbacks below —
-            never auto-substitutes (no-auto-send / no-auto-edit invariant). */}
+            never auto-substitutes (no-auto-send / no-auto-edit invariant).
+            §2.78: the whole body goes IN, but the hook splits it and only the
+            part classified as the user's own reaches the model; `next` here
+            already carries the RECOGNIZED quoted original / forwarded message /
+            signature back verbatim. §2.173: that split is a best-effort read of
+            flat text — a quoting style `splitComposeBody()` does not recognize
+            counts as own text and MAY be sent and rewritten. */}
         <ComposeQuickActions
           accountId={accountId}
           text={text}
           disabled={sending}
+          proofreadEnabled={isAiFeatureEnabledForAccount(aiProofreadEnabled, accountId)}
+          translateEnabled={isAiFeatureEnabledForAccount(aiTranslateEnabled, accountId)}
+          suggestedTargetLang={suggestedTargetLang}
+          composeGeneration={composeGeneration}
           getCaret={() => bodyRef.current?.selectionStart ?? text.length}
           onReplace={next => setText(next)}
           onInsert={(next, caret) => {

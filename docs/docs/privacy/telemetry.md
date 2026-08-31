@@ -5,6 +5,23 @@ sidebar_position: 2
 
 # Telemetry
 
+{/*
+  MAINTAINED BY HAND. There is no generator for this page.
+
+  A script used to claim that role (scripts/gen-telemetry-docs.mjs). It knew
+  14 of the 29 event domains, silently dropped 57 of 95 events, rewrote the
+  file by full overwrite, and still exited 0 reporting the full count. It has
+  been deleted (BACKLOG.md 2.130). Edit this page, and its five translations,
+  by hand.
+
+  Completeness is enforced from the other side instead:
+  scripts/check-telemetry-docs.mjs requires every telemetry name registered in
+  electron/metricsSchema.ts to appear in this page AND in all five
+  translations. It runs in CI as part of npm run check:telemetry, and fails
+  closed — a name it cannot find, a schema block it cannot parse, or a
+  disclosure file it cannot read all turn the build red.
+*/}
+
 MailCopilot can send a small amount of diagnostic and usage data — but only after you actively agree to it. It never contains the content of your mail, but it does include a random identifier for this installation, so the data is **not fully anonymous**: see [Install identifier](#install-identifier) below for exactly what that identifier does and does not let us learn. This page documents exactly what is collected, and — just as importantly — what is never collected.
 
 ## First-run consent
@@ -27,6 +44,7 @@ If you allow it, MailCopilot sends:
 - **Versions** — the MailCopilot version, your operating system and its version.
 - **Performance** — how long operations took, such as mail synchronization, search, sending, and AI requests.
 - **Feature usage** — which features you used in a session and how often (search, composing mail, AI, rules, templates, snoozing, and more), plus, when you use the AI assistant, which provider and model handled the request and the estimated cost of that request. See [AI usage log](#ai-usage-log) below for the AI-specific fields.
+- **AI key store activity** — actions on the store where your AI API keys are kept: which provider, whether the key was being read, saved, or removed, and how it went, including whether a key was found there. The key's value itself is never sent — not as text, not as a length, not as a hash.
 - **Setup context** — how many accounts you have connected, the kind of mail service each one uses (for example Gmail or Outlook), how you signed in (OAuth vs. password), your interface language, and your theme.
 - **Install identifier** — a random identifier created on first run, described in detail below. It links the data from your different sessions together, which is exactly why the data is not fully anonymous.
 
@@ -69,7 +87,7 @@ Two shape-based filters run on every outgoing event and structured log, in both 
 
 ### AI usage log
 
-Each time you send a message to the AI assistant, MailCopilot records one structured log entry once the request finishes, in addition to the usage-summary boolean covered above. That entry carries: the **AI provider** (for example your API key's provider, or "subscription"), the **model** that handled the request, the **total number of tool calls** and the **names of the tools called** (for example `send_email` or `mail_action`, never the arguments passed to them), whether the request was aborted or errored, and the **estimated cost** of the request in USD when the provider exposes pricing. None of this includes the text of your prompt, the AI's reply, or any email content — see [AI Data & Audit Log](./ai-data) for the full breakdown of what the AI assistant itself sends to providers, which is a separate, much larger topic from this structured log entry. Related latency measurements for individual AI features carry their own aggregate fields (conversation context type, whether history was present, token counts, the rewrite preset used, the number of draft replies generated, and similar) — see [Performance spans](#performance-spans) below.
+Each time you send a message to the AI assistant, MailCopilot records one structured log entry once the request finishes, in addition to the usage-summary boolean covered above. That entry carries: the **AI provider** (your API key's provider), the **model** that handled the request, the **total number of tool calls** and the **names of the tools called** (for example `send_email` or `mail_action`, never the arguments passed to them), whether the request was aborted or errored, and the **estimated cost** of the request in USD when the provider exposes pricing. None of this includes the text of your prompt, the AI's reply, or any email content — see [AI Data & Audit Log](./ai-data) for the full breakdown of what the AI assistant itself sends to providers, which is a separate, much larger topic from this structured log entry. Related latency measurements for individual AI features carry their own aggregate fields (conversation context type, whether history was present, token counts, the rewrite preset used, the number of draft replies generated, and similar) — see [Performance spans](#performance-spans) below.
 
 ## Events
 
@@ -82,6 +100,12 @@ Each time you send a message to the AI assistant, MailCopilot records one struct
 | `app.updated` | event | no | `from_version`, `to_version` | Fired once after an auto-update installs a new version. |
 | `app.startup_ms` | histogram | no | `accounts_count` | Time from app.whenReady to the first visible BrowserWindow. |
 | `window.rescued` | event | no | `windows_moved`, `pass` | A rescue pass moved at least one off-screen window back into view after a display-configuration change (monitor hotplug, resolution change, resume). |
+| `tray.created` | event | no | `outcome`, `platform` | Outcome of an attempt to create the tray icon object (startup or re-enabling the tray in Settings) — `outcome` is `created` or `failed`. A `failed` outcome is a failure on our side (an empty or unreadable icon image, an error while constructing it) and says nothing about your desktop — MailCopilot does not check whether the desktop actually shows the icon. The reason for a failure is not distinguished. |
+| `tray.menu_action` | event | no | `action` | Which tray menu entry was invoked (open / new message / check mail / quit) — a direct click on the tray icon on Linux and Windows is also recorded as `open` (macOS does not register a click handler for the icon, since clicking it opens the menu itself). |
+| `notification.shown` | event | yes (10s window) | `batched` | A new-mail notification was shown; `batched` says whether one notification covered several messages. No account, folder, subject or sender. |
+| `notification.suppressed` | event | yes (10s window) | `reason` | A new-mail notification was decided upon but not shown, because you were already looking at the app. |
+| `notification.clicked` | event | yes (10s window) | — | A new-mail notification was clicked. No identifiers. |
+| `badge.updated` | event | yes (10s window) | `has_unread` | The unread badge / tray tooltip total changed. Only whether anything is unread — never the count. |
 
 ### Telemetry consent
 
@@ -147,7 +171,7 @@ Each time you send a message to the AI assistant, MailCopilot records one struct
 
 | Event | Kind | Aggregated | Tags | Purpose |
 | --- | --- | --- | --- | --- |
-| `search.duration_ms` | histogram | no | `scope`, `folder_role`, `account_count`, `sort`, `pagination`, `len_bucket`, `token_count`, `result_bucket`, `duration_bucket`, `zero_results` | End-to-end FTS search latency (main-side, pre-remote-merge). Will be replaced by search.completed in PR 2. |
+| `search.duration_ms` | histogram | no | `scope`, `folder_role`, `account_count`, `sort`, `pagination`, `len_bucket`, `token_count`, `result_bucket`, `duration_bucket`, `zero_results` | How long a search over the messages stored on this device took, not counting results fetched from the mail server afterwards. |
 | `search.error` | event | no | `scope`, `kind` | Search handler threw — either user cancelled or a real failure. |
 
 ### Body indexer
@@ -163,8 +187,8 @@ Each time you send a message to the AI assistant, MailCopilot records one struct
 
 | Event | Kind | Aggregated | Tags | Purpose |
 | --- | --- | --- | --- | --- |
-| `fts.optimize.duration_ms` | histogram | no | `segments_before`, `segments_after`, `reduction` | FTS5 optimize pass: time and segment count before/after. |
-| `fts.optimize.failed` | event | no | `reason` | FTS5 optimize threw an error. |
+| `fts.merge.work_ms` | histogram | no | `outcome`, `steps`, `max_step_ms`, `segments_before`, `segments_after` | FTS5 incremental merge cycle: total synchronous merge time, longest single step, segment count before/after. |
+| `fts.merge.failed` | event | no | `reason` | FTS5 incremental merge threw an error. |
 
 ### Header sync
 
@@ -180,6 +204,19 @@ Each time you send a message to the AI assistant, MailCopilot records one struct
 | `mail.open` | histogram | no | `cache_hit_level`, `body_size_bucket`, `attachments_count` | End-to-end mail-open latency as observed from the renderer (open click to details rendered). The `cache_hit_level` tag encodes which cache tier served the body: `memory`, `db`, `eml`, `imap`, or `imap_timeout`. |
 | `net.message_details.wall_ms` | histogram | no | `cache_hit_level` | Main-process wall time of the `net:messageDetails` IPC handler. Isolates the server-side latency from renderer-to-main round-trip noise. One sample per terminal branch (`memory`, `db`, `eml`, `imap`, `imap_timeout`). |
 | `imap.pool_queue_wait_ms` | event | no | `requester`, `wait_ms_bucket` | Time spent waiting to acquire an IMAP connection from the per-account pool. Emitted only when the wait exceeds 500 ms, so dashboards capture the long tail without noise from fast acquisitions. |
+
+### EML parsing
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `eml.parse_dispatch` | event | no | `path`, `size_bucket` | One EML parse, tagged with which path it took: `worker` (parsed off the main thread), `worker_failed` (the worker was available but this particular parse failed), `worker_aborted` (you closed the message before the worker finished), `inline_below_threshold` (small enough to parse on the main thread by design), or `inline_unavailable` (parsed on the main thread because the worker itself is unusable this session). |
+| `eml.parse_worker_unavailable` | event | no | `reason` | Fired at most once per session, the moment off-thread EML parsing turns out to be impossible for the rest of that session — every later parse will fall back to `inline_unavailable` above. `reason` is `script_missing`, `spawn_failed`, `startup_failed`, or `not_main_thread`. |
+| `eml.parse_cap_hard` | event | no | `size_bucket` | A message whose raw size was above the hard parse cap, so its body and attachments were never read. Most of the time this means the message opened as a header-only placeholder in the reading pane, but the event also fires when a background offline-sync download is refused partway through for being oversized -- nothing was opened and no placeholder was shown in that case, since there was no read to answer. Carries only the coarse size band described above — nothing about the message itself. Tells us whether anyone in the field actually receives mail that large, i.e. whether the cap sits in the right place. |
+| `eml.parse_cap_soft` | event | no | `size_bucket`, `tier` | A decoded message body that was cut at the soft cap. Most of the time this means a banner appeared in the reading pane noting that only the beginning is shown, but the event also fires when the AI assistant's attachment-listing tool parses a locally-stored message in the background -- no banner is shown in that case, since there is no reading-pane view to show it in. `tier` is `default` for the limit every message opens at, or `full` when even the raised limit you asked for by clicking "Show full message" was not enough. No text, no length in bytes, no subject — only the band and which of the two limits was in force. |
+
+None of these four events is aggregated: each is recorded individually rather than being collapsed with others from the same burst, because the field a maintainer needs — which path a parse took, why the worker died, or whether a cap actually tripped — would otherwise be buried in the count. `eml.parse_dispatch` and `eml.parse_worker_unavailable` describe how a parse ran; `eml.parse_cap_hard` and `eml.parse_cap_soft` record that a size cap was crossed — for the soft cap, during an actual parse; for the hard cap, possibly before any parse begins — and they are not emitted in lockstep with the dispatch event: a message over the hard cap is never handed to a parser at all, so it produces `eml.parse_cap_hard` and no `eml.parse_dispatch`; a message that only trips the soft cap does get parsed, so it produces its ordinary `eml.parse_dispatch` plus `eml.parse_cap_soft` alongside it.
+
+What is guaranteed is one `eml.parse_dispatch` event per EML file MailCopilot actually hands to a parser — not one event per message you open, and, as above, none at all for a message stopped by the hard cap before parsing starts. Opening a message that is already sitting in the in-memory or on-disk details cache (the `memory` and `db` levels of `cache_hit_level`, described under [Mail open instrumentation](#mail-open-instrumentation) above) never parses an `.eml` file, so none of these four events fires for that open. Beyond that cache-hit exception, `eml.parse_dispatch`, `eml.parse_worker_unavailable`, and `eml.parse_cap_soft` fire only when a message is read from a locally-stored `.eml` file or freshly downloaded and has to be parsed -- this includes the AI assistant's background attachment lookups, which read a locally-stored `.eml` file the same way an ordinary open does. `eml.parse_cap_hard` fires in those same cases, plus one more that never touches an `.eml` file at all: a background offline-sync download refused partway through for being oversized, before anything is saved to disk. Each `eml.parse_dispatch` event carries that one parse's `path` and that one message's `size_bucket`; each `eml.parse_cap_hard` or `eml.parse_cap_soft` event carries the `size_bucket` of the message that tripped it — and, like every other event this app sends, the install identifier described in [Install identifier](#install-identifier), which ties it to the rest of your session's events. The `size_bucket` tag uses the same coarse-band treatment already applied to message size elsewhere on this page (see `body_size_bucket` under [Send queue](#send-queue) and [Mail open instrumentation](#mail-open-instrumentation)): one of five bands — `<1KB`, `1-10KB`, `10-100KB`, `100KB-1MB`, `1MB+` — not an exact byte count, not a size in any finer resolution, and never a subject, sender, filename, or message identifier.
 
 ### Calendar invites
 
@@ -210,6 +247,16 @@ Each time you send a message to the AI assistant, MailCopilot records one struct
 
 None of these tags ever carry the hostname, certificate fingerprint, issuer name, or raw error text — only the enumerated `provider` classification and closed reason codes.
 
+### Account re-authentication badge
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `account.reauth_flagged` | event | no | `flagged_accounts_bucket` | A mailbox crossed the consecutive-auth-failure threshold and is now shown the "Sign in again" badge. Fired once when the badge appears, never per failed sync attempt, so this counts broken credentials rather than ordinary network flaps. |
+| `account.reauth_badge_clicked` | event | no | — | You clicked "Sign in again" on the badge. Recorded on the click itself, not on the result: the record stays even if the account editor then fails to open. |
+| `account.reauth_cleared` | event | no | `reason`, `flag_duration` | The badge for a mailbox stopped being shown — tagged with why (`signed_in`, meaning the mailbox started authenticating again, or `account_removed`, meaning you deleted the account instead) and how long the badge had been showing (`flag_duration`: `<1min`, `1-10min`, `10-60min`, `1-6h`, `6-24h`, `24h+`, or `unknown` for the rare case where no start time was recorded). |
+
+None of these three carry an account id, email address, mail provider, or server text. `flagged_accounts_bucket` is a coarse bucket of how many mailboxes are flagged at once across the whole install, not which ones.
+
 ### Cache retention
 
 | Event | Kind | Aggregated | Tags | Purpose |
@@ -223,6 +270,7 @@ None of these tags ever carry the hostname, certificate fingerprint, issuer name
 | --- | --- | --- | --- | --- |
 | `db.mass_delete_messages` | event | no | `folder_role`, `reason`, `deleted_count_bucket`, `watermark_preserved` | Folder-wide DELETE FROM messages emitted. Every call site provides a reason so a regression that wipes healthy caches is distinguishable from a legitimate UIDVALIDITY bump. |
 | `imap.stale_wipe_guard_tripped` | event | no | `folder_role`, `provider` | The mass-delete guard refused to purge the local folder cache because `mailbox.exists` came back non-numeric. A spike here points to a provider/connection issue, not user data loss. |
+| `imap.header_response_unaddressable` | event | no | `folder_role`, `provider` | A header FETCH response carried no usable UID, so the message could not be stored and the sync run reported itself incomplete. Counts runs, not messages; names the provider whose FETCH stream drops UIDs. |
 | `db.shutdown_wal_checkpoint_ms` | histogram | no | `busy`, `reclaimed_kb_bucket`, `ok` | Wall-clock duration of the `PRAGMA wal_checkpoint(TRUNCATE)` we run before quit so committed-but-not-checkpointed writes survive across sessions. |
 
 ### AI spending limits
@@ -252,6 +300,7 @@ None of these tags ever carry the hostname, certificate fingerprint, issuer name
 | `ai.action.apply_duration_ms` | histogram | no | `kind` | Wall-clock duration of a successful apply — how long the underlying DB / IMAP / SMTP mutation took. |
 | `ai.action.preview_skipped` | event | no | `kind`, `reason` | A `*_preview` MCP tool refused to register a pending action because the resolved target set was empty (no matches after query resolution). |
 | `ai.action.batch_size` | event | no | `kind`, `accounts_count_bucket`, `emails_count_bucket`, `folders_count_bucket` | Recorded when a preview registration spans a batch of messages. All three counts are coarse buckets, never raw integers. |
+| `ai.turn.action_not_prepared` | event | no | `role`, `search_calls_bucket` | One AI chat turn used the destructive tool machinery (a preview or apply call) but ended without registering a new pending action and without successfully claiming one you had already confirmed (a valid confirmation token accepted by MailCopilot — a stale or invalid confirmation does not count, while a successful claim excludes this event even if the action itself then fails to run), so no confirmation button appeared and nothing was changed. The panel tells you the same thing in words. `role` says which half of the pair was called — `preview` or `apply`. `search_calls_bucket` is a coarse band for how many searches ran in that turn. Neither your request, nor the assistant's reply, nor any search query is included — the detection is based purely on which tools ran. |
 
 ### AI outbound egress gate
 
@@ -274,6 +323,14 @@ None of these tags ever carry the hostname, certificate fingerprint, issuer name
 | --- | --- | --- | --- | --- |
 | `ai.rule.applied` | event | no | `action` | The background AI rules pipeline auto-applied a reversible action (archive, move, mark read, or mark starred) to a message. |
 | `ai.rule.destructive_preview` | event | no | `action` | The background AI rules pipeline proposed a destructive action (trash or mark as spam) but recorded it as a pending preview instead of applying it automatically. |
+
+### Compose quick actions
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `ai.quick_action.input_too_long` | event | no | `preset`, `length_bucket` | A quick action (Improve / Shorter / Formal / Fix grammar) refused your draft because it was longer than the limit the feature accepts, so nothing was sent to the AI provider. `preset` is which of the four buttons you pressed. `length_bucket` is a coarse size band — `<=8k`, `8k-12k`, `12k-20k`, `20k-50k`, `50k-100k` or `100k+` characters — never the exact length, and never a single character of the draft itself. It exists so we can tell whether the limit is too tight for ordinary long emails. The `<=8k` value is declared for completeness but is not reachable today: this event only fires above the 8,000-character quick-action limit, so it exists only so that lowering the limit in the future cannot produce a value outside the declared set. |
+| `ai.proofread.input_too_long` | event | no | `length_bucket` | The proofreading check refused your draft because it was longer than the limit the feature accepts, so nothing was sent to the AI provider. `length_bucket` is the same coarse size band as above — never the exact length, and never a single character of the draft. It exists so we can tell whether the limit is too tight for ordinary long emails. |
+| `ai.quick_action.preview_outcome` | event | no | `preset`, `outcome` | What you did with a quick-action rewrite you were shown in the review panel. `preset` is which of the four buttons you pressed. `outcome` is one of exactly three values — `replaced`, `inserted` or `cancelled`. Nothing about the text is included: not the draft, not the rewrite, not their length, not how many edits the panel found. It exists so we can tell whether the rewrites are worth taking or whether people dismiss them. A panel that goes away without a choice (you closed the window, or started another preset over it) records nothing at all. |
 
 ### Auto-updates
 
@@ -300,6 +357,24 @@ None of these carry the version string of the release involved — only the buck
 | --- | --- | --- | --- | --- |
 | `secret_store.fallback_active` | event | no | `surface`, `platform` | A read from your operating system's secret store (keytar / libsecret / Secret Service) failed, meaning this install is running without an accessible keychain. `surface` identifies which kind of credential read failed, never the credential, the account, or the account's email address. |
 
+### AI API key storage
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `ai.api_key_store_op` | event | yes (10s window) | `op`, `provider`, `outcome` | A stored AI API key was read from, written to, or deleted from your operating system's secret store. `op` is `read`, `write`, or `delete`. `provider` is `anthropic-api`, `openai-api`, or `gemini-api`. `outcome` is `found` or `absent` for a read (there is a key vs. there is none right now), `ok` for a successful write or delete, or `store_error` when the secret store itself could not be reached. The key's value never appears — not as text, not as a length, not as a hash. |
+
+### AI destination confirmation
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `ai.destination_confirm` | event | no | `field`, `outcome` | The outcome of the destination-confirmation gate that guards a change to the AI endpoint or proxy address (see [Confirming a New AI Destination](../ai-assistant#confirming-a-new-ai-destination)). `field` is `endpoint` or `proxy`. `outcome` is `accepted`, `declined` (the change was not approved — you clicked Cancel or pressed Escape, the confirmation window closed before you answered, or the dialog itself failed to open), `blocked_invalid` (the new address was not a usable http(s) URL, refused with no dialog shown), or `blocked_busy` (the change arrived while another confirmation was already open — only one dialog can be in flight for the whole app, so this can happen even for the same field). A `declined` count is not a count of deliberate refusals only — it also covers a dialog that could not be shown at all. Neither the address nor the host is ever included. |
+
+### Settings save
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `settings.field_refused` | event | yes (10s window) | `field`, `code` | A settings save was stored with one field left out, because the value sent for it was outside what this version accepts. Every other accepted field of the same save was applied, and the skipped field kept the value it already had. `field` is the name of the skipped field (`mcpExportWhitelist`). `code` is the machine-readable reason (`unknown_export_tool` — the list contained an MCP tool name this version does not export, usually one left over from an older version). The value that was skipped is never included. |
+
 ### IPC performance
 
 | Event | Kind | Aggregated | Tags | Purpose |
@@ -310,8 +385,23 @@ None of these carry the version string of the release involved — only the buck
 
 | Event | Kind | Aggregated | Tags | Purpose |
 | --- | --- | --- | --- | --- |
-| `ui.freeze.renderer_ms` | histogram | yes (10s window) | `duration_bucket`, `inflight_count`, `top_inflight` | Renderer event loop was blocked longer than the freeze threshold. |
-| `ui.freeze.main_ms` | histogram | yes (10s window) | `duration_bucket`, `inflight_count`, `top_inflight` | Main process event loop was blocked (perf_hooks delay). |
+| `ui.freeze.renderer_ms` | histogram | yes (10s window) | `duration_bucket`, `inflight_count`, `oldest_inflight` | Renderer event loop was blocked longer than the freeze threshold. |
+| `ui.freeze.main_ms` | histogram | yes (10s window) | `duration_bucket`, `inflight_count`, `oldest_inflight`, `top_sql`, `sql_ms` | Main process event loop was blocked (perf_hooks delay). The `top_sql` tag is a `<verb> <table>` digest of the slowest SQL statement measured in that window — statement shape only, never bind values. |
+
+### Context menu
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `ui.context_menu_shown` | event | yes (10s window) | `context` | The native right-click context menu was shown. `context` records which section it offered: `link`, `editable` (a text field), or `selection` (non-editable selected text). |
+| `ui.context_menu_link_action` | event | yes (10s window) | `action` | You activated one of the two link items in the context menu. `action` is `open` (Open Link in Browser) or `copy_address` (Copy Link Address). Neither the link's URL nor its visible text is ever included. |
+| `ui.context_menu_spell_action` | event | yes (10s window) | `action` | You used a spelling item in the context menu. `action` is `replace` (a suggested spelling was applied) or `add_to_dictionary` (a word was added to your personal dictionary). Neither the word nor the replacement is ever included. |
+
+### Spell checking
+
+| Event | Kind | Aggregated | Tags | Purpose |
+| --- | --- | --- | --- | --- |
+| `spellcheck.configured` | event | yes (10s window) | `enabled`, `language_count`, `platform_owned` | The spell checking state applied to the app, at launch and after each settings save: whether it is on, HOW MANY dictionaries are enabled, and whether the operating system owns the language list (macOS). Which languages you chose is never included — only the count. |
+| `spellcheck.dictionary_consent` | event | no | `outcome`, `language_count` | How the prompt asking to download a dictionary ended: `accepted`, `declined`, `blocked_busy` (another prompt was already open), `failed` (the prompt could not be shown) or `unconsented_download` (a download started without a recorded answer — a bug we want to hear about). The language names are never included. |
 
 ## Performance spans
 
@@ -342,6 +432,11 @@ Beyond the discrete events and histograms above, MailCopilot times a fixed set o
 | `ai.thread_summary.generate` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class` | One Thread AI Summary generation. Only fires on an actual provider call, never on a cache hit. |
 | `ai.quick_action.rewrite` | span | no | `preset`, `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class` | One Compose Quick Actions rewrite. `preset` records which of Improve / Shorter / Formal / Fix grammar you picked, never your draft text. |
 | `ai.instant_reply.generate` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `draft_count` | One Instant Reply drafting call. `draft_count` is how many reply options were generated, never their text. |
+| `ai.proofread.check` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `edit_count`, `dropped_count` | One proofreading check of a draft. `edit_count` is how many suggestions you were offered; `dropped_count` is how many suggestions the model returned that could not be matched to your text and were discarded. Both are counts only — never a suggestion, never a fragment of the draft, never the explanation shown next to a suggestion. |
+| `ai.translate.message` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `source_labeled`, `target_lang`, `cache_hit` | One message translation. Emitted for cache hits too — `cache_hit` distinguishes them, and a cache hit carries no tokens or cost; an opt-out, empty-input, too-long, no-provider, or budget refusal emits no span. `target_lang` is a language code from the closed sixteen-value list offered in the target-language picker. `source_labeled` is a boolean recording only whether local detection (or your own later choice) named a source language for the caption -- never which language, since that would be a fact derived from the content of your mail. |
+| `ai.translate.draft` | span | no | `provider`, `was_local`, `tokens_in`, `tokens_out`, `latency_ms`, `error_class`, `target_lang` | One draft translation from the compose window: your own part of the draft, translated on request. Emitted only when a provider was selected; an opt-out, empty-input, no-own-text, too-long, no-provider, or budget refusal emits no span. `target_lang` is a language code from the same closed sixteen-value list, the one you chose in the compose window -- never the language MailCopilot may have suggested for the reply, and never a flag recording whether your choice came from that suggestion: no such flag exists here, on purpose, since pairing it with `target_lang` would weakly disclose the language of the message you are replying to -- the same identity the reading-side span above withholds. |
+
+The `provider` attribute on the AI feature-latency spans above that carry it (every one except `ai.chat`, which uses the separately scoped `ai.provider` attribute) is one of a fixed set of values: `anthropic-api`, `openai-api`, `gemini-api`, `local` (the future on-device model path), or `unknown`. Any value MailCopilot does not recognize is mapped to `unknown` before it is recorded, so this attribute can never widen to carry a free-form or unexpected string.
 
 ### Local database
 

@@ -36,13 +36,6 @@
   gap: 8px;
 }
 
-.titlebar-beta {
-  font-size: 0.55em;
-  opacity: 0.7;
-  font-weight: 400;
-  vertical-align: super;
-}
-
 .titlebar-badge {
   background: var(--btn-primary-bg);
   color: #fff;
@@ -1255,15 +1248,46 @@
   font-size: 12px;
 }
 
-/* --- B4 Quick Action diff preview --- */
+/* --- B4 Quick Action rewrite review panel (§3.3.B4.f5) ---
+   An overlay, not an inline strip: the panel is the only thing the user is
+   doing while it is open, and the two 180px boxes it replaced showed a couple
+   of lines of any real draft. Height follows the content up to the space the
+   window has (`max-height`), so a two-word edit stays small and a long rewrite
+   uses the whole window instead of a fixed pane. */
+.quick-action-diff-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Above ordinary compose chrome and its dropdowns (max 5000), below the
+     confirmation layer (10000): a send-time confirmation must never end up
+     behind a review panel. */
+  z-index: 8000;
+  background: rgba(2, 6, 23, 0.45);
+  /* Frameless child windows inherit `drag` from the title bar; without this the
+     backdrop would swallow the click that dismisses the panel. */
+  -webkit-app-region: no-drag;
+}
+
 .quick-action-diff {
+  position: fixed;
+  z-index: 8001;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
   border: 1px solid var(--mailcopilot-border);
-  border-radius: 6px;
-  background: var(--panel-bg);
-  padding: 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 16px 40px rgba(2, 6, 23, 0.35);
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.quick-action-diff:focus {
+  outline: none;
 }
 
 .quick-action-diff-header {
@@ -1285,22 +1309,24 @@
   color: var(--btn-primary-bg);
 }
 
+.quick-action-diff-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .quick-action-diff-close {
   margin-left: auto;
 }
 
-.quick-action-diff-panes {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.quick-action-diff-pane {
-  flex: 1 1 240px;
-  min-width: 0;
+/* The single scrolling region: marked-up text, edit list and the folded plain
+   copies all live here, so there is one scrollbar and one reading order. */
+.quick-action-diff-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 10px;
 }
 
 .quick-action-diff-pane-label {
@@ -1311,28 +1337,292 @@
   letter-spacing: 0.04em;
 }
 
+.quick-action-diff-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quick-action-diff-merged {
+  padding: 10px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 4px;
+  background: var(--mail-unread-bg);
+  color: var(--fg);
+  /* §2.79: pin the size in whole pixels instead of inheriting whatever an
+     ancestor happens to carry, and never rely on the browser default. */
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Semantic <ins>/<del> (html.spec.whatwg.org/multipage/edits.html) carry the
+   meaning; the tint is decoration on top, and the −/+ sign inside each run is
+   what makes the distinction survive without colour. */
+.quick-action-diff-del {
+  background: var(--error-bg);
+  color: var(--fg);
+  border-radius: 3px;
+  padding: 0 2px;
+  text-decoration: line-through;
+}
+
+.quick-action-diff-ins {
+  background: rgba(22, 163, 74, 0.14);
+  color: var(--fg);
+  border-radius: 3px;
+  padding: 0 2px;
+  text-decoration: none;
+}
+
+:root[data-theme='dark'] .quick-action-diff-ins {
+  background: rgba(74, 222, 128, 0.16);
+}
+
+.quick-action-diff-sign {
+  font-weight: 700;
+  font-size: 11px;
+  margin-right: 2px;
+  opacity: 0.8;
+  /* The sign is a marker, never struck through with the text it introduces. */
+  text-decoration: none;
+  display: inline-block;
+}
+
+/* An untouched stretch of the draft, folded away by default when it is long
+   enough to be in the way (the threshold is `summarizeEqualBlock` in core). */
+.quick-action-diff-fold {
+  display: inline;
+}
+
+.quick-action-diff-fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0 2px;
+  padding: 0 6px;
+  border: 1px dashed var(--btn-border);
+  border-radius: 10px;
+  background: var(--btn-bg);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.quick-action-diff-fold-toggle:hover {
+  background: var(--btn-bg-hover);
+}
+
+.quick-action-diff-edits {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quick-action-diff-edit-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.quick-action-diff-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.quick-action-diff-plain {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quick-action-diff-plain-toggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--btn-border);
+  border-radius: 10px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.quick-action-diff-plain-toggle:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* `:not([hidden])` — a bare class selector here would tie with the
+   `[hidden] { display: none }` user-agent rule on specificity (0,1,0) each,
+   and author styles win a tie over user-agent styles regardless of order, so
+   `display: flex` would defeat `hidden` and the panes would show even when
+   the toggle is collapsed. Found by tests/e2e/quick-actions-diff-preview.spec.ts
+   (§3.3.B4.f5) — no unit test catches this because jsdom does not apply the
+   cascade. */
+.quick-action-diff-plain-panes:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .quick-action-diff-text {
   margin: 0;
-  max-height: 180px;
-  overflow: auto;
   padding: 8px;
   border: 1px solid var(--mailcopilot-border);
   border-radius: 4px;
   background: var(--mail-unread-bg);
   color: var(--fg);
+  /* `font: inherit` is here to drop the UA monospace of <pre> — it also resets
+     the size to whatever the ancestor happens to carry, and no ancestor in the
+     quick-action panel sets one. Pin the size explicitly (§2.79) so this stays
+     at the interface baseline even if a wrapper later scales its own text. */
   font: inherit;
+  font-size: 13px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.quick-action-diff-after .quick-action-diff-text {
-  border-color: var(--btn-primary-bg);
+/* §2.181 — the stale warning used to borrow `compose-quick-actions-refusal`,
+   so it read exactly like the ordinary refusal line sitting a few pixels away
+   in the same toolbar. It is not the same thing: a refusal says the action did
+   not happen, this says the action is ready but applying it would destroy text
+   the user typed. It gets the warning treatment and a rule down the side. */
+.quick-action-diff-stale {
+  padding: 6px 10px;
+  border: 1px solid var(--warn-border);
+  border-left: 3px solid var(--warn-fg);
+  border-radius: 4px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .quick-action-diff-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* --- §3.3 B7 AI Proofread review panel ---
+   Reuses the overlay shell, the <del>/<ins> tinting and the stale strip of the
+   rewrite panel above; only the per-edit row is new. Narrower than the rewrite
+   panel on purpose: the unit of reading here is one short suggestion, not a
+   whole marked-up draft. */
+.proofread-panel {
+  width: min(600px, calc(100vw - 32px));
+}
+
+.proofread-edit-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* One suggestion: the before/after pair, its category and explanation, and the
+   accept control — each row is independently actionable, which is the whole
+   point of the feature. */
+.proofread-edit {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    'texts action'
+    'meta  action';
+  align-items: center;
+  gap: 2px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 4px;
+  background: var(--mail-unread-bg);
+  /* §2.79: pin the size in whole pixels rather than inheriting. */
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* An accepted suggestion is marked by a rule down its side as well as a tint,
+   so the state survives without colour. */
+.proofread-edit[data-accepted='true'] {
+  border-left: 3px solid var(--btn-primary-bg);
+  background: rgba(22, 163, 74, 0.08);
+}
+
+:root[data-theme='dark'] .proofread-edit[data-accepted='true'] {
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.proofread-edit-texts {
+  grid-area: texts;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.proofread-edit-meta {
+  grid-area: meta;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.proofread-edit-category {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+/* Model-authored text in the draft's language — it can be long and is not
+   ours, so it wraps and never grows the row's controls. */
+.proofread-edit-message {
+  word-break: break-word;
+}
+
+.proofread-edit-accept {
+  grid-area: action;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--btn-border);
+  border-radius: 12px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.proofread-edit-accept:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Suggestions that could not be anchored in the draft. Muted, but present —
+   a silently shortened list would read as a clean draft. */
+.proofread-dropped {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* --- B4 Instant Reply strip (active card) --- */
@@ -1389,7 +1679,11 @@
   border-radius: 6px;
   background: var(--panel-bg);
   color: var(--fg);
+  /* Same as .quick-action-diff-text: `font: inherit` strips the UA button font,
+     but nothing up the chain declares a size, so pin it (§2.79). The draft
+     preview child inherits from here. */
   font: inherit;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
@@ -1566,6 +1860,66 @@
   align-items: flex-start;
 }
 
+/* ── §3.3 B6 translate bar ─────────────────────────────────────────────────
+   Lives inside `.mail-viewer-meta` as a set of `.meta-row`s, so it inherits
+   that block's 12px muted type and its 4px row gap. These rules only do what
+   the neighbours cannot: allow form controls in a row that is otherwise
+   baseline-aligned text, and shrink the two controls to meta-row scale.
+   Every colour is a shared variable, so the bar follows the dark theme with
+   the rest of the reading pane. */
+.mail-translate-row {
+  /* `.meta-row` aligns to the baseline, which is right for text but puts a
+     `<select>` and a `<button>` at different heights. Same kind of override as
+     `.meta-row--recipients` above. */
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.mail-translate-select {
+  /* The global `select` rule is sized for forms (13px, 7px/10px padding).
+     Inside a meta row it has to match the 12px text around it — stated as a
+     whole number of pixels, never as a fraction of the inherited size (§2.79). */
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.mail-translate-action {
+  /* Inherits colours, hover and the disabled state from the global `button`
+     rule; only the scale changes. Padding is given in px because the global
+     rule expresses it in `em`, which would re-resolve against the 12px set
+     just above and drift (§2.79). */
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 12px;
+}
+
+.mail-translate-notice,
+.mail-translate-refusal {
+  /* A refusal here is a NORMAL outcome — the account has the feature off, or
+     the language could not be named — so it reads as a quiet remark in the
+     meta block, not as an application error. Deliberately NOT the `--warn-*`
+     palette that `.privacy-banner` uses. */
+  color: var(--muted);
+  line-height: 1.45;
+  /* These rows are prose, so let them wrap instead of holding one line. */
+  align-items: flex-start;
+}
+
+.mail-translate-restate {
+  /* `.btn-link` is sized for toolbars; here the control sits INSIDE a sentence
+     (§3.3.B6.f2), so it has to sit on the same line as the words around it
+     rather than open a gap in the middle of the prose. Only the box changes —
+     colour, hover and focus stay `.btn-link`'s. Size stated in whole pixels,
+     never as a fraction of the inherited 12px (§2.79). */
+  padding: 0;
+  font-size: 12px;
+  text-decoration: underline;
+  vertical-align: baseline;
+}
+
 /* ── RecipientList ────────────────────────────────────────────────────────── */
 .recipient-list {
   display: flex;
@@ -1620,13 +1974,52 @@
   border-style: dashed;
 }
 
+/* §2.128: the attachment block must never take the reading area hostage.
+ * The chip count is capped in `src/utils/attachmentList.ts`; the max-height
+ * here is the second, purely visual guard — long filenames on a narrow window
+ * can still wrap the capped chips onto several rows, and the expanded list is
+ * unbounded by design (it holds every part of the message, including the ones
+ * the body inlined — nothing is filtered out any more). Either way the block
+ * scrolls itself instead of pushing the message off screen. */
 .mail-attachments {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 8px;
   padding: 0 16px 12px;
   border-bottom: 1px solid var(--mailcopilot-border);
   flex-shrink: 0;
+  max-height: 18vh;
+  overflow-y: auto;
+}
+
+.mail-attachments--expanded {
+  max-height: 30vh;
+}
+
+/* "Show more (N)" / "Show less" affordance — same visual language as
+ * .recipient-more-btn so the two collapsible lists in the header match. */
+.attachments-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--mailcopilot-border, #ddd);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.attachments-toggle:hover,
+.attachments-toggle:focus-visible {
+  background: var(--btn-bg-hover, rgba(0, 0, 0, 0.06));
+  color: var(--fg);
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 1px;
 }
 
 .attachment-chip {
@@ -1655,18 +2048,6 @@
   color: var(--muted);
   font-size: 11px;
   margin-left: 4px;
-}
-
-.attachment-preview-badge {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--chip-bg, rgba(99, 102, 241, 0.15));
-  color: var(--chip-fg, #4f46e5);
-  margin-left: 4px;
-  white-space: nowrap;
 }
 
 .mail-viewer-body {
@@ -2332,6 +2713,19 @@
   font-weight: 700;
 }
 
+/*
+ * Settings → Templates is the only tab that heads its section with a bare <h2>
+ * (every other tab uses .form-section > h3). With no explicit size it fell back
+ * to the UA `h2 { font-size: 1.5em }` rule, so the §2.79 baseline would have
+ * pushed it from 24px (1.5 × 16) to a fractional 19.5px (1.5 × 13). Pin it to
+ * the same 18px the other window headers use.
+ * The real fix is markup — that tab should use .form-section > h3 like its
+ * siblings — but that lives in Settings.tsx, outside this change.
+ */
+.settings-section h2 {
+  font-size: 18px;
+}
+
 .window-container .hint {
   color: var(--muted);
   font-size: 13px;
@@ -2434,6 +2828,17 @@
   border-radius: 999px;
   padding: 2px 8px;
   white-space: nowrap;
+}
+
+/* §2.94 — OAuth waiting step of the account wizard. Replaces the provider
+   picker for the duration of the flow so the picker is neither misleading
+   nor clickable while a connection is in progress. */
+.oauth-waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 0 4px;
+  font-size: 14px;
 }
 
 /* Identity picker (Compose "From" selector) */
@@ -2730,8 +3135,15 @@
 /* AI Settings — provider wizard */
 .ai-provider-buttons { display: flex; gap: 8px; margin-top: 8px; }
 .ai-provider-label { font-weight: 500; }
-.ai-back-link { margin-left: 8px; font-size: 0.85em; }
-.ai-reset-link { margin-left: 8px; font-size: 0.85em; color: var(--color-danger, #d33); }
+/*
+ * 12px explicitly, not `0.85em`: nothing between these buttons and `body`
+ * declares a size, so the relative value resolved against the 13px baseline to
+ * a fractional 11.05px. 12px is the size `.btn-link` already gives every other
+ * link button and the size the panel's own small chrome uses (`.status-ok`),
+ * so these two stop being a one-off.
+ */
+.ai-back-link { margin-left: 8px; font-size: 12px; }
+.ai-reset-link { margin-left: 8px; font-size: 12px; color: var(--color-danger, #d33); }
 .ai-check-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 
 /* ===== AI egress confirm modal (AiPanel — §3.10 P2) ===== */
@@ -4474,6 +4886,21 @@
   white-space: nowrap;
 }
 
+/*
+ * Original-zone caption, rendered inside `.invite-meta-value` right after the
+ * formatted range. It had no rule at all, so it ran inline and butted straight
+ * against the time: "10 August · 13:30–14:00Originally scheduled in …".
+ * Own line + muted 11px keeps it secondary to the time it annotates.
+ * Whole pixels, not an em fraction of the 13px base (CLAUDE.md §5).
+ */
+.invite-tzid-annotation {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
 .invite-actions {
   display: flex;
   flex-direction: row;
@@ -4562,4 +4989,48 @@
   .app-layout { display: block !important; }
   .mail-detail { width: 100% !important; max-width: 100% !important; }
   .mail-list-pane { display: none !important; }
+}
+
+/* §2.157 — expired sign-in strip above the message list. Quiet by design:
+   the mailbox is not broken, it is only not syncing, and the condition can
+   persist for days — so it uses the warning tokens rather than the danger
+   ones and never becomes a modal. */
+.account-auth-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 12px;
+}
+
+.account-auth-badge-icon {
+  flex-shrink: 0;
+}
+
+/* The account label can be long; it yields space to the action button rather
+   than pushing it out of the strip. */
+.account-auth-badge-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-auth-badge-action {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.account-auth-badge-action:hover {
+  background: var(--warn-border);
 }

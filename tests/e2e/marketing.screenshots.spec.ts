@@ -33,12 +33,16 @@ async function applyLanguage(page: Page, lang: Language): Promise<void> {
   }, lang)
 
   await page.evaluate(async (language) => {
-    const current = await window.api.invoke('settings:get') as Record<string, unknown>
+    // Only the fields this test needs. `settings:save` merges its payload
+    // into the persisted settings, so echoing the whole object back adds
+    // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+    // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+    // `forbidden_field`, silently dropping the configuration below.
     await window.api.invoke('settings:save', {
-      ...current,
       language,
       theme: 'light',
-      aiProvider: 'subscription',
+      aiProvider: 'openai-api',
+      aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
       aiPrivacyConsent: true,
       aiPanelOpen: false,
     })

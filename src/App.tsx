@@ -1,5 +1,6 @@
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { setSentryUserEnabled, setSentryUserId, startManualSpan } from './sentry'
+import { folderRoleFromPath } from './utils/metrics'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useTranslation } from 'react-i18next'
 import type { AccountMeta, AttachmentMeta, ComposeInit, FolderPreference, FolderRoles, Mailbox, MailSummary, MessageDetails } from '../packages/net/types'
@@ -17,12 +18,44 @@ import {
   uniqEmails, computeReplyRecipients, prefixSubject, htmlToText, quoteText, formatSmartDate, sortFolders,
   deriveIsSentByMe,
 } from './utils/mail'
+import { isFolderCountedInBadges } from '@mailcopilot/core'
+import { TranslatedError, presentedError } from './utils/errorPresentation'
 import { useMailLinkClick } from './hooks/useMailLinkClick'
+import { useMailOpenRef } from './hooks/useMailOpenRef'
 import { useCertRecovery } from './hooks/useCertRecovery'
+import { useAccountAuthState } from './hooks/useAccountAuthState'
 import LinkWarningDialog from './components/LinkWarningDialog'
 import CertRecoveryDialog from './components/CertRecoveryDialog'
+import AccountAuthBadge from './components/AccountAuthBadge'
 import SentCopyFailedToast from './components/SentCopyFailedToast'
 import { resolveThreadItems, expandBulkToThreads } from './utils/threadActions'
+// §2.238 — per-message folder derivation for every destructive set operation.
+// Deep path into the same module `./utils/threadActions` re-exports; the
+// wrapper's export list was outside this change's file scope.
+import {
+  dragSelectionRefs,
+  groupByAccountFolder,
+  parseMailRefs,
+  planMarkSeenGroups,
+  planMoveToFolder,
+  planRoleMove,
+  resolveKnownRefs,
+  serializeMailRefs,
+  soleGroup,
+  type FolderGroup,
+  type MailRef,
+  type RoleMovePlan,
+} from '@mailcopilot/core/threadActions'
+import {
+  countSelectedRows,
+  leadKeyOfRowContaining,
+  pickThreadOpenTarget,
+  rowContaining,
+  rowIsSelected,
+  rowLeadKeyFor,
+  toggleRowSelection,
+  type ThreadRow,
+} from './utils/threading'
 import { isThreadMode as computeIsThreadMode, pickLatestMail, pickReplyTarget, countThreadUnread } from './utils/threadToolbar'
 import { findNextAfterRemoval } from './utils/autoAdvanceNav'
 import AccountAvatar from './components/AccountAvatar'
@@ -41,6 +74,7 @@ import { useRefreshFolderCounts } from './hooks/useRefreshFolderCounts'
 import { useSidebarCompactMode } from './hooks/useSidebarCompactMode'
 import { useMailIframeDoc } from './hooks/useMailIframeDoc'
 import { useAccountIdentities } from './hooks/useAccountIdentities'
+import { useShowFullMessage } from './hooks/useShowFullMessage'
 import { startColdStartSpan } from './utils/ipcSingleFlight'
 import { prettyFolderName } from './utils/folderDisplay'
 import type { ContextMenuState } from './components/ContextMenu'
@@ -54,6 +88,7 @@ import ThreadView from './components/ThreadView'
 import MailBodyContent from './components/MailBodyContent'
 import { SingleMessageInstantReply } from './components/SingleMessageInstantReply'
 import { isAiFeatureEnabledForAccount } from './utils/aiAccountGate'
+import { useMailTranslation } from './hooks/useMailTranslation'
 import './App.css'
 
 const PAGE_SIZE = 50
@@ -69,7 +104,11 @@ const SNOOZED_FOLDER = '__SNOOZED__'
 const FOLLOWUP_FOLDER = '__FOLLOWUP__'
 const READLATER_FOLDER = '__READLATER__'
 const SIDEBAR_STORAGE_KEY = 'mailcopilot:sidebar'
-const DRAG_UIDS_MIME = 'application/x-mailcopilot-uids'
+// §2.238 — the payload carries full message refs (account, folder, uid). The
+// previous `…-uids` type carried bare UIDs, which address a message only inside
+// the mailbox they were read from; the MIME type was renamed together with the
+// shape so a payload of the old form cannot be misread as the new one.
+const DRAG_MAILREFS_MIME = 'application/x-mailcopilot-mailrefs'
 
 type MailKey = string
 type FollowUpDisplayItem = { id: number; accountId: number; toAddr: string; subject: string | null; remindAt: string; sentMessageId: string }
@@ -185,7 +224,7 @@ export function detectAuthRecoveryKind(
 }
 
 export default function App() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const tRef = useRef(t)
   tRef.current = t
   const [accounts, setAccounts] = useState<AccountMeta[]>([])
@@ -271,7 +310,6 @@ export default function App() {
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
   const [folderCtxMenu, setFolderCtxMenu] = useState<FolderContextMenuState | null>(null)
   const [savingAttachment, setSavingAttachment] = useState<string | null>(null)
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true)
   const [imapIdleEnabled, setImapIdleEnabled] = useState(true)
   const [syncIntervalMinutes, setSyncIntervalMinutes] = useState(1)
   const [hiddenUnreadFolders, setHiddenUnreadFolders] = useState<string[]>([])
@@ -303,6 +341,10 @@ export default function App() {
   // §3.3 B4: per-account Instant Reply opt-in, mirrored from settings only to
   // gate whether ThreadView renders the Instant Reply strip on the active card.
   const [aiInstantReplyEnabled, setAiInstantReplyEnabled] = useState<Record<string, boolean>>({})
+  // §3.3 B6 AI Translate — per-account opt-in, same shape/semantics as the two
+  // opt-ins above. Default OFF; main refuses with `opt_out` when an account's
+  // entry is not `true`.
+  const [aiTranslateEnabled, setAiTranslateEnabled] = useState<Record<string, boolean>>({})
   const [aiQuickPrompt, setAiQuickPrompt] = useState<string | null>(null)
   // pendingGoRef, pendingGoTimer — in useKeyboardShortcuts
   const alwaysLoadImagesRef = useRef(alwaysLoadImages)
@@ -371,7 +413,10 @@ export default function App() {
   const [canSelfUpdate, setCanSelfUpdate] = useState(true)
 
   // Confirm permanent deletion from trash
-  const [confirmDelete, setConfirmDelete] = useState<{ accountId: number; folder: string; uids: number[]; bulk: boolean } | null>(null)
+  // §2.238 — the pending permanent deletion is a LIST of (account, folder)
+  // groups, not one folder plus a flat UID list: a conversation may sit in more
+  // than one folder, and a UID is only addressable inside its own mailbox.
+  const [confirmDelete, setConfirmDelete] = useState<{ groups: FolderGroup<MailRef>[]; bulk: boolean } | null>(null)
 
   // Thread-level action confirmation
   type ThreadActionConfirm = { action: 'archive' | 'delete' | 'spam'; msgs: MailSummary[] }
@@ -403,7 +448,6 @@ export default function App() {
   viewModeRef.current = viewMode
   const qRef = useRef(q)
   qRef.current = q
-  const maxKnownUidByFolder = useRef<Record<string, number>>({})
   const headerSyncInFlight = useRef(new Map<string, Promise<unknown>>())
   const idleRefreshTimer = useRef<number | null>(null)
   const searchDebounceRef = useRef<number | null>(null)
@@ -422,6 +466,12 @@ export default function App() {
   // Per-folder timeout (5 min) prevents one stuck folder from blocking the entire queue.
   const bgSyncQueue = useRef(Promise.resolve())
 
+  // The live account set is the boundary of every per-account unread store:
+  // the hook drops (and refuses) keys of accounts that are no longer here, so
+  // a deleted account cannot be resurrected by an in-flight answer, and no
+  // explicit cleanup call has to be remembered at the deletion sites.
+  const accountIds = useMemo(() => accounts.map(a => a.id), [accounts])
+
   const {
     folderUnreadPending,
     bump: bumpFolderUnreadPending,
@@ -430,7 +480,7 @@ export default function App() {
     applyOverrides: applyUnreadOverrides,
     reset: resetLocalPending,
     ackMailboxes,
-  } = useUnreadPending()
+  } = useUnreadPending(accountIds)
 
   const {
     filterMode, setFilterMode,
@@ -438,7 +488,7 @@ export default function App() {
     selectionAnchorKey,
     threadRows, activeThread,
     selectedCount, hasMultiSelection,
-    viewMailsRef,
+    viewMailsRef, threadRowsRef,
   } = useMailListView({ mails, active, groupConversations, sortMode })
 
   const hasAccount = accounts.length > 0 && typeof currentAccountId === 'number'
@@ -451,6 +501,19 @@ export default function App() {
     [readLaterItems, currentAccountId],
   )
   const activeKey = active ? mailKey(active) : ''
+
+  // §3.3 B6 AI Translate — wiring only; the whole state machine (target
+  // language, in-flight token, refusals, original/translation switch and the
+  // per-message reset) lives in `useMailTranslation` so App.tsx does not grow
+  // another feature (CLAUDE.md §5 hotspot policy). Nothing here can reach a
+  // provider: the hook only calls IPC from an explicit user click.
+  const mailTranslation = useMailTranslation({
+    message: active
+      ? { accountId: active.accountId, folder: active.folder, uid: active.uid }
+      : null,
+    enabled: isAiFeatureEnabledForAccount(aiTranslateEnabled, active?.accountId),
+    uiLocale: i18n.language,
+  })
 
   const accountsById = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts])
   const currentAccount = useMemo(
@@ -500,7 +563,11 @@ export default function App() {
         setError(t(startingKey, { account: accountLabel }))
         try {
           const result = await window.api.invoke(channel, accountId) as { ok?: boolean }
-          if (!result?.ok) throw new Error(t('common.error'))
+          // TranslatedError, not Error: this branch throws so the catch below
+          // owns the cooldown + reopen-account cleanup once, and its message is
+          // already our own translated copy. `presentedError` passes it through
+          // instead of collapsing it into the generic sentence.
+          if (!result?.ok) throw new TranslatedError(t('common.error'))
           authRecoveryCooldownUntil.current.delete(accountId)
           setError(t(successKey, { account: accountLabel }))
           void window.setTimeout(() => {
@@ -519,7 +586,7 @@ export default function App() {
           } catch {
             // ignore
           }
-          setError(t(failedHelpKey, { error: String(oauthErr) }))
+          setError(t(failedHelpKey, { error: presentedError(t, oauthErr) }))
           return true
         }
       }
@@ -648,7 +715,7 @@ export default function App() {
       }
       setOutboxItems(mapped)
     } catch (e) {
-      setError(t('app.errors.load', { error: String(e) }))
+      setError(t('app.errors.load', { error: presentedError(t, e) }))
     } finally {
       setOutboxLoading(false)
     }
@@ -766,46 +833,16 @@ export default function App() {
     syncingRef.current = syncing
   }, [syncing])
 
-  const maybeNotifyNewMail = useCallback((accountId: number, folder: string, list: MailSummary[]) => {
-    if (list.length === 0) return
-    // Lists arrive sorted by UID descending, so the first element is usually the newest.
-    const maxUid = list[0]?.uid
-    if (typeof maxUid !== 'number') return
+  // §2.99: new-mail OS notifications moved to the main process, which owns them
+  // even while every window is closed. The renderer deliberately raises none —
+  // a second source here would double every toast.
 
-    const k = `${accountId}:${folder}`
-    const prev = maxKnownUidByFolder.current[k]
-    maxKnownUidByFolder.current[k] = Math.max(prev ?? 0, maxUid)
-
-    // First sync for a folder: only record the baseline, no notifications.
-    if (typeof prev !== 'number' || prev <= 0) return
-    if (!notificationsEnabled) return
-
-    // MVP: notify only for INBOX (but for all accounts).
-    if (folder !== 'INBOX') return
-    if (document.visibilityState === 'visible' && document.hasFocus()) return
-    if (typeof Notification === 'undefined') return
-
-    const newUnread = list.filter(m => m.uid > prev && m.unread).slice(0, 3)
-    for (const m of newUnread) {
-      try {
-        const title = (m.subject || '').trim() || t('notifications.newMail')
-        const body = (m.from || '').trim()
-        new Notification(title, { body })
-      } catch {
-        // ignore
-      }
-    }
-  }, [notificationsEnabled, t])
-  const maybeNotifyNewMailRef = useRef(maybeNotifyNewMail)
-  maybeNotifyNewMailRef.current = maybeNotifyNewMail
-
-  // Load settings (notifications / IMAP IDLE) and subscribe to changes.
+  // Load settings (IMAP IDLE, appearance, AI) and subscribe to changes.
   useEffect(() => {
     let cancelled = false
 
     const apply = (s: {
       theme?: unknown
-      notificationsEnabled?: unknown
       imapIdleEnabled?: unknown
       syncIntervalMinutes?: unknown
       hiddenUnreadFolders?: unknown
@@ -825,6 +862,7 @@ export default function App() {
       aiEgressPolicy?: unknown
       aiThreadSummaryEnabled?: unknown
       aiInstantReplyEnabled?: unknown
+      aiTranslateEnabled?: unknown
       sentryEnabled?: unknown
       workOffline?: unknown
     } | undefined) => {
@@ -837,7 +875,6 @@ export default function App() {
         setSentryUserId(window.api.installIdHash)
       }
       setTheme(s.theme === 'dark' ? 'dark' : 'light')
-      setNotificationsEnabled(Boolean(s.notificationsEnabled ?? true))
       setImapIdleEnabled(Boolean(s.imapIdleEnabled ?? true))
       if (typeof s.syncIntervalMinutes === 'number') setSyncIntervalMinutes(s.syncIntervalMinutes)
       if (Array.isArray(s.hiddenUnreadFolders)) setHiddenUnreadFolders(s.hiddenUnreadFolders as string[])
@@ -878,6 +915,15 @@ export default function App() {
       } else {
         setAiInstantReplyEnabled({})
       }
+      // §3.3 B6: same normalization for the AI Translate per-account opt-in.
+      if (s.aiTranslateEnabled && typeof s.aiTranslateEnabled === 'object') {
+        const raw = s.aiTranslateEnabled as Record<string, unknown>
+        const next: Record<string, boolean> = {}
+        for (const [k, v] of Object.entries(raw)) next[k] = v === true
+        setAiTranslateEnabled(next)
+      } else {
+        setAiTranslateEnabled({})
+      }
       setWorkOffline(Boolean(s.workOffline ?? false))
     }
 
@@ -885,7 +931,6 @@ export default function App() {
       try {
         const s = await window.api.invoke('settings:get') as {
           theme?: unknown
-          notificationsEnabled?: unknown
           imapIdleEnabled?: unknown
           syncIntervalMinutes?: unknown
           hiddenUnreadFolders?: unknown
@@ -905,6 +950,7 @@ export default function App() {
           aiEgressPolicy?: unknown
           aiThreadSummaryEnabled?: unknown
           aiInstantReplyEnabled?: unknown
+          aiTranslateEnabled?: unknown
           sentryEnabled?: unknown
         } | undefined
         if (!cancelled) apply(s)
@@ -918,7 +964,6 @@ export default function App() {
     const onSettingsChanged = (s: unknown) => {
       if (s && typeof s === 'object') apply(s as {
         theme?: unknown
-        notificationsEnabled?: unknown
         imapIdleEnabled?: unknown
         syncIntervalMinutes?: unknown
         hiddenUnreadFolders?: unknown
@@ -938,6 +983,7 @@ export default function App() {
         aiEgressPolicy?: unknown
         aiThreadSummaryEnabled?: unknown
         aiInstantReplyEnabled?: unknown
+        aiTranslateEnabled?: unknown
         sentryEnabled?: unknown
       })
       else void fetchAndApply()
@@ -953,7 +999,7 @@ export default function App() {
   // Phishing-aware link-click pipeline (IDN/http/mismatch/unsafeBypass checks).
   // mail:link IPC listener is attached and cleaned up inside the hook.
   const { linkPrompt, dismissPrompt, approvePrompt } = useMailLinkClick(
-    (errMsg) => setError(tRef.current('app.errors.openExternal', { error: errMsg })),
+    (errMsg) => setError(tRef.current('app.errors.openExternal', { error: presentedError(tRef.current, errMsg) })),
   )
 
   // TLS trust rework Phase A3 — cert-recovery dialog + interception notices.
@@ -966,6 +1012,11 @@ export default function App() {
     dismiss: dismissCert,
     dismissNotice: dismissCertNotice,
   } = useCertRecovery()
+
+  // §2.157 — accounts whose credentials main saw fail repeatedly. State and
+  // IPC live in the hook; App only turns ids into labelled strips.
+  const { needsReauth: accountsNeedingReauth, openAccountSettings: openAccountForReauth } =
+    useAccountAuthState()
 
   // When opening a new message: reset local view states (banner/modals).
   useEffect(() => {
@@ -983,7 +1034,14 @@ export default function App() {
   // inline → external-image extract/fetch/replace → CSP wrap) lives in
   // useMailIframeDoc to keep App.tsx from growing the §3.10 security
   // pipeline inline (hotspot policy, CLAUDE.md §5).
-  const { doc: mailIframeDoc, hasExternalImages: mailHasExternalImages } = useMailIframeDoc({
+  const {
+    doc: mailIframeDoc,
+    hasExternalImages: mailHasExternalImages,
+    // §2.128: the parts whose chip the list drops. Passed straight to
+    // MailBodyContent — one decision, one owner (the hook that substituted
+    // their bytes).
+    hiddenAttachments: mailHiddenAttachments,
+  } = useMailIframeDoc({
     active,
     details,
     alwaysLoadImages,
@@ -1054,7 +1112,6 @@ export default function App() {
             const raw = await window.api.invoke('net:inboxSummaries', accountId, path) as MailSummary[]
             if (pendingMoveEpochRef.current !== epochBefore) return
             const list = filterSnoozed(applyUnreadOverrides(accountId, path, raw, 'remote'))
-            maybeNotifyNewMail(accountId, path, list)
 
             // If this is the current folder of the selected account and we are not searching — update the message list.
             const isCurrent =
@@ -1085,7 +1142,7 @@ export default function App() {
         idleRefreshTimer.current = null
       }
     }
-  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, maybeNotifyNewMail, q, setHasMore, viewMode])
+  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, q, setHasMore, viewMode])
 
   // clearSendUndo — from useUndoSystem
 
@@ -1276,10 +1333,10 @@ export default function App() {
           void window.api.invoke('accounts:setCurrent', chosen).catch(() => {})
         }
 
-        // Reset local "pending" and maxUid tracking to avoid sending notifications on startup.
+        // Reset local "pending" unread tracking so a cold start does not carry
+        // optimistic deltas from the previous session into the folder badges.
         invalidateContext()
         resetLocalPending()
-        maxKnownUidByFolder.current = {}
         console.debug('[active→null] init-load')
         setActive(null)
         setSelectedKeys(new Set())
@@ -1429,8 +1486,12 @@ export default function App() {
               try {
                 const raw = await window.api.invoke('net:inboxSummaries', a.id, 'INBOX') as MailSummary[]
                 if (cancelled) return
-                const patched = applyUnreadOverrides(a.id, 'INBOX', raw, 'remote')
-                maybeNotifyNewMailRef.current(a.id, 'INBOX', patched)
+                // The result is intentionally unused: on a 'remote' list this
+                // call reconciles optimistic unread overrides against the fresh
+                // server flags and drops the ones the server has caught up
+                // with. Dropping it would strand pending deltas and desync the
+                // folder badges.
+                applyUnreadOverrides(a.id, 'INBOX', raw, 'remote')
               } catch {
                 // IMAP unavailable for inbox summaries — not critical.
               }
@@ -1547,7 +1608,7 @@ export default function App() {
           }
         })()
       } catch (e) {
-        if (!cancelled) setError(tRef.current('app.errors.load', { error: String(e) }))
+        if (!cancelled) setError(tRef.current('app.errors.load', { error: presentedError(tRef.current, e) }))
       }
     }
 
@@ -1732,7 +1793,6 @@ export default function App() {
       if (currentAccountIdRef.current !== aid || currentFolderRef.current !== f || viewModeRef.current !== 'account' || qRef.current) return
       if (pendingMoveEpochRef.current !== epochBefore) return
       const list = filterSnoozed(applyUnreadOverrides(aid, f, raw, 'remote'))
-      maybeNotifyNewMail(aid, f, list)
       setMails(list)
       cursorBeforeUid.current = list.length > 0 ? list[list.length - 1].uid : undefined
       setHasMore(list.length >= PAGE_SIZE)
@@ -1747,13 +1807,13 @@ export default function App() {
     } catch (e) {
       const handled = await maybeRecoverAuthIssue(aid, e)
       if (!handled && currentAccountIdRef.current === aid && viewModeRef.current === 'account') {
-        setError(t('app.errors.sync', { error: String(e) }))
+        setError(t('app.errors.sync', { error: presentedError(t, e) }))
       }
       setConnectionStatus(prev => { const m = new Map(prev); m.set(aid, 'error'); return m })
     } finally {
       if (syncOpSeq.current === mySync) setSyncing(false)
     }
-  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, invalidateContext, loadFollowUps, loadOutbox, loadReadLater, loadSnoozed, maybeNotifyNewMail, maybeRecoverAuthIssue, setHasMore, t, viewMode])
+  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, invalidateContext, loadFollowUps, loadOutbox, loadReadLater, loadSnoozed, maybeRecoverAuthIssue, setHasMore, t, viewMode])
 
   // Drops any in-flight search request and clears the search lifecycle so
   // a stale worker response cannot clobber the new view, and infinite-scroll
@@ -1782,7 +1842,10 @@ export default function App() {
     setQ('')
     if (viewMode !== 'account') setViewMode('account')
     setCurrentFolder(folder)
-    console.debug('[active→null] switchFolder', folder)
+    // Log the folder's ROLE, never its path: renderer console output becomes a
+    // Sentry breadcrumb (src/sentry.ts), and folder names are server-controlled
+    // text the consent screen promises we do not collect.
+    console.debug('[active→null] switchFolder', folderRoleFromPath(folder))
     setActive(null)
     setSelectedKeys(new Set())
     selectionAnchorKey.current = null
@@ -1850,7 +1913,7 @@ export default function App() {
   }, [applyUnreadOverrides])
 
   // Stable refs for callbacks used inside the unified-load effect.
-  // Prevents the effect from re-running when `t` or `maybeNotifyNewMail` get new references
+  // Prevents the effect from re-running when `t` or the override helpers get new references
   // (e.g. on window focus → i18n.changeLanguage → new `t` → cascading re-creation).
   const applyUnreadOverridesRef = useRef(applyUnreadOverrides)
   applyUnreadOverridesRef.current = applyUnreadOverrides
@@ -1903,7 +1966,7 @@ export default function App() {
             : undefined
           setHasMore(list.length >= PAGE_SIZE)
         } catch (e) {
-          if (ctxSeq.current === seq) setError(tRef.current('app.errors.load', { error: String(e) }))
+          if (ctxSeq.current === seq) setError(tRef.current('app.errors.load', { error: presentedError(tRef.current, e) }))
         }
 
         // 2) On entering unified, sync INBOX of selected accounts so the aggregate is complete.
@@ -1912,8 +1975,8 @@ export default function App() {
             try {
               const raw = await window.api.invoke('net:inboxSummaries', id, 'INBOX') as MailSummary[]
               if (ctxSeq.current !== seq) return
-              const list = applyUnreadOverridesRef.current(id, 'INBOX', raw, 'remote')
-              maybeNotifyNewMailRef.current(id, 'INBOX', list)
+              // Result unused on purpose — see the reconciliation note above.
+              applyUnreadOverridesRef.current(id, 'INBOX', raw, 'remote')
             } catch {
               // ignore
             }
@@ -1944,14 +2007,14 @@ export default function App() {
             : undefined
           setHasMore(list.length >= PAGE_SIZE)
         } catch (e) {
-          if (ctxSeq.current === seq) setError(tRef.current('app.errors.sync', { error: String(e) }))
+          if (ctxSeq.current === seq) setError(tRef.current('app.errors.sync', { error: presentedError(tRef.current, e) }))
         }
       } finally {
         if (ctxSeq.current === seq) setSyncing(false)
       }
     })()
   // Callbacks used inside are accessed via refs to avoid re-running on reference changes
-  // (e.g. `t` changes on window focus → cascades through maybeNotifyNewMail → effect re-runs
+  // (e.g. `t` changes on window focus → cascades through the callbacks → effect re-runs
   // → setActive(null) → email disappears).  Only true data deps trigger a reload.
   }, [
     accounts,
@@ -2165,9 +2228,11 @@ export default function App() {
     } catch (e) {
       // Search pagination can be cancelled mid-flight when the user types a new query;
       // that's expected, not an error worth surfacing.
+      // `msg` is for the cancellation probe only — the presentation tag is a
+      // prefix, so substring matching is unaffected — and never for display.
       const msg = e instanceof Error ? e.message : String(e)
       if (/Search request cancelled/i.test(msg)) return
-      if (ctxSeq.current === seq) setError(t('app.errors.load', { error: msg }))
+      if (ctxSeq.current === seq) setError(t('app.errors.load', { error: presentedError(t, e) }))
     } finally {
       loading.current = false
       setPaginatingSearch(false)
@@ -2196,8 +2261,8 @@ export default function App() {
           try {
             const raw = await window.api.invoke('net:inboxSummaries', id, 'INBOX', opts?.lightweight) as MailSummary[]
             if (ctxSeq.current !== seq) return
-            const list = applyUnreadOverrides(id, 'INBOX', raw, 'remote')
-            maybeNotifyNewMail(id, 'INBOX', list)
+            // Result unused on purpose — see the reconciliation note above.
+            applyUnreadOverrides(id, 'INBOX', raw, 'remote')
             setConnectionStatus(prev => { const m = new Map(prev); m.set(id, 'ok'); return m })
           } catch {
             setConnectionStatus(prev => { const m = new Map(prev); m.set(id, 'error'); return m })
@@ -2233,7 +2298,7 @@ export default function App() {
           setHasMore(list.length >= PAGE_SIZE)
         }
       } catch (e) {
-        if (ctxSeq.current === seq) setError(t('app.errors.sync', { error: String(e) }))
+        if (ctxSeq.current === seq) setError(t('app.errors.sync', { error: presentedError(t, e) }))
       } finally {
         if (ctxSeq.current === seq) setSyncing(false)
       }
@@ -2247,7 +2312,6 @@ export default function App() {
     applyUnreadOverridesForMixedList,
     hasAccount,
     invalidateContext,
-    maybeNotifyNewMail,
     q,
     setHasMore,
     syncFolder,
@@ -2272,9 +2336,15 @@ export default function App() {
     const seq = ctxSeq.current
     const myOpen = ++openSeq.current
     setActive(m)
-    const k = mailKey(m)
-    setSelectedKeys(new Set([k]))
-    selectionAnchorKey.current = k
+    // The opened message stands for its row in the selection, whichever message
+    // of the row it is — selection is a row property and every consumer resolves
+    // membership through `row.items` (`rowIsSelected`). No mapping here: `m` may
+    // arrive before its row exists (notification, assistant link, snooze
+    // wake-up), and mapping what the list does not hold yet is what turned this
+    // into a deferred-reconciliation problem. See `rowLeadKeyFor`'s doc comment.
+    const selKey = mailKey(m)
+    setSelectedKeys(new Set([selKey]))
+    selectionAnchorKey.current = selKey
     setDetails(null)
     setLoadingBody(true)
     // §2.17 Phase 0 — renderer Sentry span around the full open path.
@@ -2329,7 +2399,7 @@ export default function App() {
         void window.api.invoke('net:setSeen', m.accountId, m.folder, [m.uid], true).catch(() => {})
       }
     } catch (e) {
-      if (ctxSeq.current === seq && openSeq.current === myOpen) setError(t('app.errors.loadMessage', { error: String(e) }))
+      if (ctxSeq.current === seq && openSeq.current === myOpen) setError(t('app.errors.loadMessage', { error: presentedError(t, e) }))
       endOpenSpan()
     } finally {
       if (ctxSeq.current === seq && openSeq.current === myOpen) setLoadingBody(false)
@@ -2338,11 +2408,26 @@ export default function App() {
     }
   }, [bumpFolderUnreadPending, recordPendingUnread, selectionAnchorKey, setSelectedKeys, t])
 
+  // §2.145 — "show full message" for a soft-capped body. Owns its own in-flight
+  // flag and drops a result whose message is no longer the open one; see the
+  // hook. Feeds `setDetails` directly because the re-parse returns the SAME
+  // message, only less clipped.
+  const { loadingFull, requestFullMessage } = useShowFullMessage(
+    active ? { accountId: active.accountId, folder: active.folder, uid: active.uid } : null,
+    setDetails,
+  )
+
   // Ref for auto-focus: allows calling openMail from removeFromUi/removeManyFromUi without circular dependencies.
   const openMailRef = useRef(openMail)
   openMailRef.current = openMail
 
-  const onMailClick = useCallback((e: React.MouseEvent, m: MailSummary) => {
+  // `m` is always the row lead (the Virtuoso row renders `row.lead`), and this is
+  // where selection is brought onto leads — the moment of a user action, when the
+  // rows certainly exist. `row` also steers the plain-click OPEN target: a bold
+  // row must open the message that makes it bold (see `pickThreadOpenTarget`),
+  // otherwise the click leaves the folder counter untouched and the row bold
+  // forever.
+  const onMailClick = useCallback((e: React.MouseEvent, m: MailSummary, row?: ThreadRow) => {
     const k = mailKey(m)
     // Multi-select: Ctrl/Cmd toggles, Shift selects range.
     if (e.shiftKey) {
@@ -2353,7 +2438,15 @@ export default function App() {
         selectionAnchorKey.current = k
         return
       }
-      const aIdx = list.findIndex(x => mailKey(x) === anchor)
+      let aIdx = list.findIndex(x => mailKey(x) === anchor)
+      if (aIdx < 0) {
+        // The anchor is whatever message was last selected, and opening leaves a
+        // mid-thread one there routinely. `list` holds row leads only, so map the
+        // anchor through its row now — at click time the rows are loaded, which
+        // is exactly why this is done here and not when the anchor was set.
+        const anchorLead = leadKeyOfRowContaining(threadRowsRef.current, anchor)
+        if (anchorLead !== null) aIdx = list.findIndex(x => mailKey(x) === anchorLead)
+      }
       const bIdx = list.findIndex(x => mailKey(x) === k)
       if (aIdx < 0 || bIdx < 0) {
         setSelectedKeys(new Set([k]))
@@ -2367,29 +2460,28 @@ export default function App() {
     }
 
     if (e.ctrlKey || e.metaKey) {
-      setSelectedKeys(prev => {
-        const next = new Set(prev)
-        if (next.has(k)) next.delete(k)
-        else next.add(k)
-        if (next.size === 0) selectionAnchorKey.current = null
-        else selectionAnchorKey.current = k
-        return next
-      })
+      // Toggling the ROW, not the lead key: the row may be selected through any
+      // of its messages, so `toggleRowSelection` owns the whole rule.
+      const next = toggleRowSelection(row ?? rowContaining(threadRowsRef.current, m), selectedKeys)
+      setSelectedKeys(next.keys)
+      selectionAnchorKey.current = next.anchorKey
       return
     }
 
-    void openMail(m)
-  }, [openMail, selectionAnchorKey, setSelectedKeys, viewMailsRef])
+    void openMail(row ? pickThreadOpenTarget(row) : m)
+  }, [openMail, selectedKeys, selectionAnchorKey, setSelectedKeys, threadRowsRef, viewMailsRef])
 
   const onDragStartMail = useCallback((e: React.DragEvent, m: MailSummary) => {
     if (viewMode !== 'account') return
-    const k = mailKey(m)
-    const uids = selectedKeys.has(k)
-      ? viewMailsRef.current.filter(x => selectedKeys.has(mailKey(x))).map(x => x.uid)
-      : [m.uid]
-    e.dataTransfer.setData(DRAG_UIDS_MIME, JSON.stringify(uids))
+    // Dragging a selected row drags every MESSAGE of every selected row, each
+    // with the folder it was read from (§2.238) — the lead's UID alone dropped
+    // the rest of the conversation and travelled without its mailbox.
+    // Membership is asked through `rowIsSelected` / `row.items`, never through
+    // `selectedKeys.has(leadKey)` (CLAUDE.md §5).
+    const refs = dragSelectionRefs(threadRowsRef.current, m, selectedKeys)
+    e.dataTransfer.setData(DRAG_MAILREFS_MIME, serializeMailRefs(refs))
     e.dataTransfer.effectAllowed = 'move'
-  }, [selectedKeys, viewMailsRef, viewMode])
+  }, [selectedKeys, threadRowsRef, viewMode])
 
   // --- Mail actions ---
 
@@ -2402,7 +2494,11 @@ export default function App() {
     // Auto-advance: if removing active mail — navigate based on autoAdvance setting.
     if (isRemovingActive) {
       const list = viewMailsRef.current
-      const idx = list.findIndex(m => mailKey(m) === k)
+      // `list` holds row leads only, while the active message is routinely a
+      // mid-thread one — looking its own key up here would miss and disable
+      // auto-advance entirely. Locate the ROW that contains it instead.
+      const leadKey = rowLeadKeyFor(threadRowsRef.current, target)
+      const idx = list.findIndex(m => mailKey(m) === leadKey)
       const next = findNextAfterRemoval(list, idx, autoAdvance, new Set([k]), mailKey)
       if (next) {
         void openMailRef.current(next)
@@ -2420,7 +2516,7 @@ export default function App() {
       return next
     })
     if (selectionAnchorKey.current === k) selectionAnchorKey.current = null
-  }, [active, autoAdvance, selectionAnchorKey, setSelectedKeys, viewMailsRef])
+  }, [active, autoAdvance, selectionAnchorKey, setSelectedKeys, threadRowsRef, viewMailsRef])
 
   const setSeenForMail = useCallback(async (m: MailSummary, seen: boolean) => {
     const seq = ctxSeq.current
@@ -2439,7 +2535,7 @@ export default function App() {
       if (delta !== 0) bumpFolderUnreadPending(m.accountId, m.folder, delta)
       if (beforeUnread !== afterUnread) recordPendingUnread(m.accountId, m.folder, m.uid, afterUnread)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, recordPendingUnread, t])
 
@@ -2455,7 +2551,7 @@ export default function App() {
         sel && sel.accountId === m.accountId && sel.folder === m.folder && sel.uid === m.uid ? { ...sel, flagged } : sel
       ))
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.flag', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.flag', { error: presentedError(t, e) }))
     }
   }, [t])
 
@@ -2472,7 +2568,7 @@ export default function App() {
         sel && sel.accountId === m.accountId && sel.folder === m.folder && sel.uid === m.uid ? { ...sel, pinned: newPinned } : sel
       ))
     } catch (e) {
-      setError(t('app.errors.pin', { error: String(e) }))
+      setError(t('app.errors.pin', { error: presentedError(t, e) }))
     }
   }, [t])
 
@@ -2486,8 +2582,10 @@ export default function App() {
     // Auto-advance: if removing active mail — navigate based on autoAdvance setting.
     if (isRemovingActive) {
       const list = viewMailsRef.current
-      const activeKey = mailKey(active!)
-      const idx = list.findIndex(m => mailKey(m) === activeKey)
+      // Same as in removeFromUi: `list` is row leads, the active message may sit
+      // mid-thread, so index by the lead of the row that contains it.
+      const leadKey = rowLeadKeyFor(threadRowsRef.current, active!)
+      const idx = list.findIndex(m => mailKey(m) === leadKey)
       const next = findNextAfterRemoval(list, idx, autoAdvance, keys, mailKey)
       if (next) {
         void openMailRef.current(next)
@@ -2505,7 +2603,7 @@ export default function App() {
       return next
     })
     if (selectionAnchorKey.current && keys.has(selectionAnchorKey.current)) selectionAnchorKey.current = null
-  }, [active, autoAdvance, selectionAnchorKey, setSelectedKeys, viewMailsRef])
+  }, [active, autoAdvance, selectionAnchorKey, setSelectedKeys, threadRowsRef, viewMailsRef])
 
   // Background archive notification (Send & Archive via queue)
   useEffect(() => {
@@ -2601,77 +2699,94 @@ export default function App() {
       }
       for (const m of selected) recordPendingUnread(m.accountId, m.folder, m.uid, afterUnread)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.markSeen', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, groupConversations, mails, recordPendingUnread, selectedKeys, t, threadRows])
 
-  const moveUidsToFolder = useCallback(async (uids: number[], toFolder: string) => {
+  /**
+   * §2.238 — moves a set of messages into `toFolder`, dispatching one `net:move`
+   * per (account, source folder) group. The source is never `currentFolder` for
+   * the whole set: an all-folders search fills the list with rows from several
+   * mailboxes, and a UID sent with a foreign folder name addresses whatever
+   * message carries that UID there.
+   */
+  const moveMessagesToFolder = useCallback(async (refs: MailRef[], toFolder: string) => {
     if (viewMode !== 'account') return
     if (typeof currentAccountId !== 'number') return
+    if (!toFolder) return
 
-    const uniq = Array.from(new Set(uids))
-    if (uniq.length === 0) return
-    if (!toFolder || toFolder === currentFolder) return
+    const plan = planMoveToFolder(refs, { accountId: currentAccountId, folder: toFolder })
+    if (plan.groups.length === 0) return
 
     const seq = ctxSeq.current
     try {
-      await window.api.invoke('net:move', currentAccountId, currentFolder, toFolder, uniq)
-      if (ctxSeq.current !== seq) return
+      for (const g of plan.groups) {
+        await window.api.invoke('net:move', g.accountId, g.folder, toFolder, g.uids)
+        if (ctxSeq.current !== seq) return
 
-      const movedSet = new Set(uniq)
-      const movedMsgs = mails.filter(m => (
-        m.accountId === currentAccountId && m.folder === currentFolder && movedSet.has(m.uid)
-      ))
-      const unreadMoved = movedMsgs.filter(m => m.unread).length
-      if (unreadMoved) {
-        bumpFolderUnreadPending(currentAccountId, currentFolder, -unreadMoved)
-        bumpFolderUnreadPending(currentAccountId, toFolder, +unreadMoved)
+        const movedSet = new Set(g.uids)
+        const movedMsgs = mails.filter(m => (
+          m.accountId === g.accountId && m.folder === g.folder && movedSet.has(m.uid)
+        ))
+        const unreadMoved = movedMsgs.filter(m => m.unread).length
+        if (unreadMoved) {
+          bumpFolderUnreadPending(g.accountId, g.folder, -unreadMoved)
+          bumpFolderUnreadPending(g.accountId, toFolder, +unreadMoved)
+        }
+        for (const uid of g.uids) clearPendingUnread(g.accountId, g.folder, uid)
+        removeManyFromUi(movedMsgs)
       }
-      for (const uid of uniq) clearPendingUnread(currentAccountId, currentFolder, uid)
-      removeManyFromUi(movedMsgs)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: presentedError(t, e) }))
     }
-  }, [bumpFolderUnreadPending, clearPendingUnread, currentAccountId, currentFolder, mails, removeManyFromUi, t, viewMode])
+  }, [bumpFolderUnreadPending, clearPendingUnread, currentAccountId, mails, removeManyFromUi, t, viewMode])
 
   const bulkMove = useCallback(async (toFolder: string) => {
     if (viewMode !== 'account') return
     const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
-    const uids = msgs.map(m => m.uid)
-    await moveUidsToFolder(uids, toFolder)
-  }, [groupConversations, mails, moveUidsToFolder, selectedKeys, threadRows, viewMode])
+    await moveMessagesToFolder(msgs, toFolder)
+  }, [groupConversations, mails, moveMessagesToFolder, selectedKeys, threadRows, viewMode])
+
+  /**
+   * The folder an account uses for a role. Roles are a property of the ACCOUNT,
+   * so they are looked up per account id; the `roles` state is the same map for
+   * the current account and stands in until its entry is cached.
+   */
+  const roleFolderFor = useCallback((accountId: number, role: 'archive' | 'junk' | 'trash'): string | undefined => (
+    (rolesByAccount.current.get(accountId) ?? (accountId === currentAccountId ? roles : {}))[role]
+  ), [currentAccountId, roles])
+
+  const roleNotFoundLabel = useCallback((role: 'archive' | 'junk' | 'trash'): string => (
+    role === 'archive' ? t('mail.actions.archiveNotFound')
+      : role === 'junk' ? t('mail.actions.junkNotFound')
+        : t('mail.actions.trashNotFound')
+  ), [t])
 
   // Unified-mode helper: group messages by (accountId, folder) and move each group to the target role folder.
   const bulkMoveByRole = useCallback(async (role: 'archive' | 'junk' | 'trash') => {
     const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
     if (msgs.length === 0) {
-      setError(`Bulk ${role}: no messages selected (selectedKeys=${selectedKeys.size}, mails=${mails.length})`)
+      // Silent no-op, matching the account-mode siblings (bulkArchive /
+      // bulkSpam / bulkDelete all `return` on an empty expansion). This used to
+      // raise an English banner with internal counters in it — hardcoded copy
+      // the user cannot act on, and inconsistent with the same gesture in the
+      // other view mode. The counters stay, in the console, where they help.
+      console.warn('[bulkMoveByRole] empty expansion', {
+        role,
+        // Both numbers: they differ when rows merged behind the set.
+        selectedKeys: selectedKeys.size,
+        selectedRows: countSelectedRows(threadRows, selectedKeys),
+        mails: mails.length,
+      })
       return
     }
 
-    // Group by (accountId, folder) and validate targets before starting
-    const groups: Array<{ accountId: number; folder: string; targetFolder: string; msgs: MailSummary[]; uids: number[] }> = []
-    let skippedNoRole = false
-    const byKey = new Map<string, { accountId: number; folder: string; msgs: MailSummary[] }>()
-    for (const m of msgs) {
-      const key = `${m.accountId}:${m.folder}`
-      let g = byKey.get(key)
-      if (!g) { g = { accountId: m.accountId, folder: m.folder, msgs: [] }; byKey.set(key, g) }
-      g.msgs.push(m)
-    }
-    for (const g of byKey.values()) {
-      const r = rolesByAccount.current.get(g.accountId) ?? {} as Record<string, string | undefined>
-      const targetFolder = (r as Record<string, string | undefined>)[role]
-      if (!targetFolder) { skippedNoRole = true; continue }
-      if (targetFolder === g.folder) continue
-      groups.push({ ...g, targetFolder, uids: g.msgs.map(m => m.uid) })
-    }
+    // Group by (accountId, folder) and validate targets before starting.
+    // §2.238 — this is the shape every destructive set operation now uses.
+    const { groups, missingRole } = planRoleMove(msgs, id => roleFolderFor(id, role))
 
     if (groups.length === 0) {
-      if (skippedNoRole) {
-        const label = role === 'archive' ? t('mail.actions.archiveNotFound') : role === 'junk' ? t('mail.actions.junkNotFound') : t('mail.actions.trashNotFound')
-        setError(label)
-      }
+      if (missingRole) setError(roleNotFoundLabel(role))
       return
     }
 
@@ -2705,49 +2820,12 @@ export default function App() {
           })
           inboxZeroDecrement(restoreMsgs.length)
         }
-        setError(t('app.errors.move', { error: String(e) }))
+        setError(t('app.errors.move', { error: presentedError(t, e) }))
       })
     }
 
-    if (skippedNoRole) {
-      const label = role === 'archive' ? t('mail.actions.archiveNotFound') : role === 'junk' ? t('mail.actions.junkNotFound') : t('mail.actions.trashNotFound')
-      setError(label)
-    }
-  }, [bumpFolderUnreadPending, clearPendingUnread, groupConversations, inboxZeroDecrement, inboxZeroIncrement, mails, removeManyFromUi, selectedKeys, setError, setMails, t, threadRows])
-
-  const bulkArchive = useCallback(() => {
-    if (viewMode !== 'account') { void bulkMoveByRole('archive'); return }
-    if (typeof currentAccountId !== 'number') return
-    if (!roles.archive) { setError(t('mail.actions.archiveNotFound')); return }
-    const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
-    if (msgs.length === 0) return
-    moveWithUndo(currentAccountId, msgs, currentFolder, roles.archive, t('app.undo.archived'))
-  }, [bulkMoveByRole, currentAccountId, currentFolder, groupConversations, mails, moveWithUndo, roles.archive, selectedKeys, t, threadRows, viewMode])
-
-  const bulkSpam = useCallback(() => {
-    if (viewMode !== 'account') { void bulkMoveByRole('junk'); return }
-    if (typeof currentAccountId !== 'number') return
-    if (!roles.junk) { setError(t('mail.actions.junkNotFound')); return }
-    const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
-    if (msgs.length === 0) return
-    moveWithUndo(currentAccountId, msgs, currentFolder, roles.junk, t('app.undo.spammed'))
-  }, [bulkMoveByRole, currentAccountId, currentFolder, groupConversations, mails, moveWithUndo, roles.junk, selectedKeys, t, threadRows, viewMode])
-
-  const bulkDelete = useCallback(() => {
-    if (viewMode !== 'account') { void bulkMoveByRole('trash'); return }
-    if (typeof currentAccountId !== 'number') return
-    const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
-    const uids = msgs.map(m => m.uid)
-    if (uids.length === 0) return
-
-    if (roles.trash && currentFolder !== roles.trash) {
-      // Move to trash — with undo
-      moveWithUndo(currentAccountId, msgs, currentFolder, roles.trash, t('app.undo.deleted'))
-    } else {
-      // Permanently — confirm
-      setConfirmDelete({ accountId: currentAccountId, folder: currentFolder, uids, bulk: true })
-    }
-  }, [bulkMoveByRole, currentAccountId, currentFolder, groupConversations, mails, moveWithUndo, roles.trash, selectedKeys, t, threadRows, viewMode])
+    if (missingRole) setError(roleNotFoundLabel(role))
+  }, [bumpFolderUnreadPending, clearPendingUnread, groupConversations, inboxZeroDecrement, inboxZeroIncrement, mails, removeManyFromUi, roleFolderFor, roleNotFoundLabel, selectedKeys, setError, setMails, t, threadRows])
 
   const moveMailToFolder = useCallback(async (m: MailSummary, toFolder: string) => {
     if (!toFolder || toFolder === m.folder) return
@@ -2763,9 +2841,88 @@ export default function App() {
     try {
       await window.api.invoke('net:move', m.accountId, m.folder, toFolder, [m.uid])
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.move', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, clearPendingUnread, inboxZeroIncrement, removeFromUi, t])
+
+  /**
+   * §2.238 — sends a role-move plan out as one unawaited `moveMailToFolder` per
+   * MESSAGE, each carrying that message's OWN source folder (`m.folder`).
+   *
+   * That per-message shape is what keeps the §2.238 invariant — a UID never
+   * travels with a folder it does not belong to — but it is deliberately not
+   * described as a batched per-group move, because it is not one. The calls are
+   * independent and optimistic: each removes its row from the list before its
+   * `net:move` returns and reports its own failure, so a set that fails halfway
+   * leaves the successful part moved with NO rollback. Collapsing a group into a
+   * single `net:move` would change the partial-failure semantics (all-or-nothing
+   * per group, and a rollback story for the optimistic UI), which is a behaviour
+   * change rather than a comment fix.
+   *
+   * Undo is offered only when the plan has a SINGLE group and that group is the
+   * folder currently open: the undo bar replays exactly one (account, folder)
+   * pair, so a set spanning two source folders would come back into one of them
+   * — most of it foreign there. The affordance is withheld rather than faked
+   * (the move itself still happens, per group, immediately).
+   */
+  const dispatchRoleMove = useCallback((plan: RoleMovePlan<MailSummary>, undoLabel: string) => {
+    if (plan.groups.length === 0) return
+    const sole = soleGroup(plan.groups)
+    if (sole && viewMode === 'account' && sole.accountId === currentAccountId && sole.folder === currentFolder) {
+      moveWithUndo(sole.accountId, sole.msgs, sole.folder, sole.targetFolder, undoLabel)
+      return
+    }
+    for (const g of plan.groups) {
+      for (const m of g.msgs) void moveMailToFolder(m, g.targetFolder)
+    }
+  }, [currentAccountId, currentFolder, moveMailToFolder, moveWithUndo, viewMode])
+
+  /**
+   * §2.238 — deletion of a set. Groups that can go to their account's trash are
+   * moved there per source folder; groups already in trash (or whose account has
+   * no trash folder) are the irreversible remainder and go behind the
+   * confirmation dialog, each with its own folder. The old code picked one
+   * branch for the whole set from the head message's folder.
+   */
+  const dispatchDelete = useCallback((msgs: MailSummary[], bulk: boolean) => {
+    if (msgs.length === 0) return
+    const plan = planRoleMove(msgs, id => roleFolderFor(id, 'trash'))
+    const movable = new Set(plan.groups.flatMap(g => g.msgs.map(m => mailKey(m))))
+    const permanent = groupByAccountFolder(msgs.filter(m => !movable.has(mailKey(m))))
+    dispatchRoleMove(plan, t('app.undo.deleted'))
+    if (permanent.length > 0) setConfirmDelete({ groups: permanent, bulk })
+  }, [dispatchRoleMove, roleFolderFor, t])
+
+  const bulkArchive = useCallback(() => {
+    if (viewMode !== 'account') { void bulkMoveByRole('archive'); return }
+    const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
+    if (msgs.length === 0) return
+    const plan = planRoleMove(msgs, id => roleFolderFor(id, 'archive'))
+    if (plan.groups.length === 0) {
+      if (plan.missingRole) setError(t('mail.actions.archiveNotFound'))
+      return
+    }
+    dispatchRoleMove(plan, t('app.undo.archived'))
+  }, [bulkMoveByRole, dispatchRoleMove, groupConversations, mails, roleFolderFor, selectedKeys, t, threadRows, viewMode])
+
+  const bulkSpam = useCallback(() => {
+    if (viewMode !== 'account') { void bulkMoveByRole('junk'); return }
+    const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
+    if (msgs.length === 0) return
+    const plan = planRoleMove(msgs, id => roleFolderFor(id, 'junk'))
+    if (plan.groups.length === 0) {
+      if (plan.missingRole) setError(t('mail.actions.junkNotFound'))
+      return
+    }
+    dispatchRoleMove(plan, t('app.undo.spammed'))
+  }, [bulkMoveByRole, dispatchRoleMove, groupConversations, mails, roleFolderFor, selectedKeys, t, threadRows, viewMode])
+
+  const bulkDelete = useCallback(() => {
+    if (viewMode !== 'account') { void bulkMoveByRole('trash'); return }
+    const msgs = expandBulkToThreads(selectedKeys, mails, threadRows, groupConversations)
+    if (msgs.length === 0) return
+    dispatchDelete(msgs, true)
+  }, [bulkMoveByRole, dispatchDelete, groupConversations, mails, selectedKeys, threadRows, viewMode])
 
   const archiveMailTarget = useCallback((m: MailSummary) => {
     const r = rolesByAccount.current.get(m.accountId) ?? (m.accountId === currentAccountId ? roles : {})
@@ -2805,8 +2962,9 @@ export default function App() {
       return
     }
 
-    // Permanently from trash — confirm
-    setConfirmDelete({ accountId: m.accountId, folder: m.folder, uids: [m.uid], bulk: false })
+    // Permanently from trash — confirm. One message, so one group, but it still
+    // carries its own folder rather than the folder the list is showing.
+    setConfirmDelete({ groups: groupByAccountFolder([m]), bulk: false })
   }, [currentAccountId, currentFolder, groupConversations, moveMailToFolder, moveWithUndo, roles, t, threadRows, viewMode])
 
   const executeForeverDelete = useCallback(async (accountId: number, folder: string, uids: number[]) => {
@@ -2824,13 +2982,17 @@ export default function App() {
       for (const uid of uniq) clearPendingUnread(accountId, folder, uid)
       removeManyFromUi(removedMsgs)
     } catch (e) {
-      if (ctxSeq.current === seq) setError(t('app.errors.delete', { error: String(e) }))
+      if (ctxSeq.current === seq) setError(t('app.errors.delete', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, clearPendingUnread, mails, removeManyFromUi, t])
 
   const confirmDeleteAction = useCallback(async () => {
     if (!confirmDelete) return
-    await executeForeverDelete(confirmDelete.accountId, confirmDelete.folder, confirmDelete.uids)
+    // One `net:delete` per (account, folder) group — see §2.238. The dialog may
+    // stand for messages of a conversation that live in more than one folder.
+    for (const g of confirmDelete.groups) {
+      await executeForeverDelete(g.accountId, g.folder, g.uids)
+    }
     setConfirmDelete(null)
   }, [confirmDelete, executeForeverDelete])
 
@@ -2839,51 +3001,34 @@ export default function App() {
     if (!threadConfirm) return
     const { action, msgs } = threadConfirm
     setThreadConfirm(null)
-    const m0 = msgs[0]
-    const r = rolesByAccount.current.get(m0.accountId) ?? (m0.accountId === currentAccountId ? roles : {})
-    const inCurrentView = viewMode === 'account' && m0.accountId === currentAccountId && m0.folder === currentFolder
 
-    if (action === 'archive') {
-      const target = r.archive
-      if (!target) return
-      if (inCurrentView) {
-        moveWithUndo(m0.accountId, msgs, m0.folder, target, t('app.undo.archived'))
-      } else {
-        for (const m of msgs) void moveMailToFolder(m, target)
-      }
-    } else if (action === 'spam') {
-      const target = r.junk
-      if (!target) return
-      if (inCurrentView) {
-        moveWithUndo(m0.accountId, msgs, m0.folder, target, t('app.undo.spammed'))
-      } else {
-        for (const m of msgs) void moveMailToFolder(m, target)
-      }
-    } else if (action === 'delete') {
-      if (r.trash && m0.folder !== r.trash) {
-        if (inCurrentView) {
-          moveWithUndo(m0.accountId, msgs, m0.folder, r.trash, t('app.undo.deleted'))
-        } else {
-          for (const m of msgs) void moveMailToFolder(m, r.trash)
-        }
-      } else {
-        setConfirmDelete({ accountId: m0.accountId, folder: m0.folder, uids: msgs.map(m => m.uid), bulk: true })
-      }
+    if (action === 'delete') { dispatchDelete(msgs, true); return }
+
+    const role = action === 'archive' ? 'archive' : 'junk'
+    const plan = planRoleMove(msgs, id => roleFolderFor(id, role))
+    if (plan.groups.length === 0) {
+      if (plan.missingRole) setError(roleNotFoundLabel(role))
+      return
     }
-  }, [threadConfirm, currentAccountId, currentFolder, moveWithUndo, moveMailToFolder, roles, t, viewMode])
+    dispatchRoleMove(plan, action === 'archive' ? t('app.undo.archived') : t('app.undo.spammed'))
+  }, [dispatchDelete, dispatchRoleMove, roleFolderFor, roleNotFoundLabel, t, threadConfirm])
 
   const snoozeMessage = useCallback(async (mail: MailSummary, wakeAt: Date) => {
     const items = resolveThreadItems(mail, threadRows, groupConversations)
-    const uids = items.filter(m => m.uid).map(m => m.uid)
-    if (uids.length === 0) return
+    // §2.238 — one call per source folder: the conversation may span folders,
+    // and `mail:snoozeAdd` addresses UIDs inside the folder it is given.
+    const groups = groupByAccountFolder(items.filter(m => m.uid))
+    if (groups.length === 0) return
     try {
-      await window.api.invoke('mail:snoozeAdd', mail.accountId, mail.folder, uids, wakeAt.toISOString())
-      const unreadCount = items.filter(m => m.unread).length
-      if (unreadCount > 0) bumpFolderUnreadPending(mail.accountId, mail.folder, -unreadCount)
-      removeManyFromUi(items)
-      inboxZeroIncrement(items.length)
+      for (const g of groups) {
+        await window.api.invoke('mail:snoozeAdd', g.accountId, g.folder, g.uids, wakeAt.toISOString())
+        const unreadCount = g.msgs.filter(m => m.unread).length
+        if (unreadCount > 0) bumpFolderUnreadPending(g.accountId, g.folder, -unreadCount)
+        removeManyFromUi(g.msgs)
+        inboxZeroIncrement(g.msgs.length)
+      }
     } catch (e) {
-      setError(t('app.errors.move', { error: String(e) }))
+      setError(t('app.errors.move', { error: presentedError(t, e) }))
     }
   }, [bumpFolderUnreadPending, groupConversations, inboxZeroIncrement, removeManyFromUi, t, threadRows])
 
@@ -2891,53 +3036,41 @@ export default function App() {
 
   const markReadThread = useCallback(async () => {
     if (!activeThread || activeThread.count <= 1) return
-    const items = activeThread.items
-    const m0 = items[0]
-    const unreadItems = items.filter(m => m.unread)
-    if (unreadItems.length === 0) return
-    const uids = unreadItems.map(m => m.uid)
+    // §2.238 — `\Seen` is written per message, inside the folder that message
+    // was read from. The conversation is our local derivative and may span
+    // folders, so the head's folder does not stand for the rest.
+    const groups = planMarkSeenGroups(activeThread.items)
+    if (groups.length === 0) return
     try {
-      await window.api.invoke('net:setSeen', m0.accountId, m0.folder, uids, true)
-      setMails(prev => prev.map(m => {
-        if (m.accountId === m0.accountId && m.folder === m0.folder && uids.includes(m.uid)) {
-          return { ...m, unread: false }
-        }
-        return m
-      }))
-      bumpFolderUnreadPending(m0.accountId, m0.folder, -unreadItems.length)
+      for (const g of groups) {
+        await window.api.invoke('net:setSeen', g.accountId, g.folder, g.uids, true)
+        const uidSet = new Set(g.uids)
+        setMails(prev => prev.map(m => (
+          m.accountId === g.accountId && m.folder === g.folder && uidSet.has(m.uid)
+            ? { ...m, unread: false }
+            : m
+        )))
+        bumpFolderUnreadPending(g.accountId, g.folder, -g.uids.length)
+      }
     } catch (e) {
-      setError(t('app.errors.markSeen', { error: String(e) }))
+      setError(t('app.errors.markSeen', { error: presentedError(t, e) }))
     }
   }, [activeThread, bumpFolderUnreadPending, t])
 
   const archiveThread = useCallback(() => {
     if (!activeThread || activeThread.count <= 1) return
-    const items = activeThread.items
-    const m0 = items[0]
-    const r = rolesByAccount.current.get(m0.accountId) ?? (m0.accountId === currentAccountId ? roles : {})
-    if (!r.archive) { setError(t('mail.actions.archiveNotFound')); return }
-    if (viewMode === 'account' && m0.accountId === currentAccountId && m0.folder === currentFolder) {
-      moveWithUndo(m0.accountId, items, m0.folder, r.archive, t('app.undo.archived'))
-    } else {
-      for (const m of items) void moveMailToFolder(m, r.archive)
+    const plan = planRoleMove(activeThread.items, id => roleFolderFor(id, 'archive'))
+    if (plan.groups.length === 0) {
+      if (plan.missingRole) setError(t('mail.actions.archiveNotFound'))
+      return
     }
-  }, [activeThread, currentAccountId, currentFolder, moveMailToFolder, moveWithUndo, roles, t, viewMode])
+    dispatchRoleMove(plan, t('app.undo.archived'))
+  }, [activeThread, dispatchRoleMove, roleFolderFor, t])
 
   const deleteThread = useCallback(async () => {
     if (!activeThread || activeThread.count <= 1) return
-    const items = activeThread.items
-    const m0 = items[0]
-    const r = rolesByAccount.current.get(m0.accountId) ?? (m0.accountId === currentAccountId ? roles : {})
-    if (r.trash && m0.folder !== r.trash) {
-      if (viewMode === 'account' && m0.accountId === currentAccountId && m0.folder === currentFolder) {
-        moveWithUndo(m0.accountId, items, m0.folder, r.trash, t('app.undo.deleted'))
-      } else {
-        for (const m of items) void moveMailToFolder(m, r.trash)
-      }
-    } else {
-      setConfirmDelete({ accountId: m0.accountId, folder: m0.folder, uids: items.map(m => m.uid), bulk: true })
-    }
-  }, [activeThread, currentAccountId, currentFolder, moveMailToFolder, moveWithUndo, roles, t, viewMode])
+    dispatchDelete(activeThread.items, true)
+  }, [activeThread, dispatchDelete])
 
   const deleteMail = useCallback(async () => {
     if (!active) return
@@ -3035,7 +3168,7 @@ export default function App() {
 
       await window.api.invoke('ui:openCompose', m.accountId, init)
     } catch (e) {
-      setError(t('app.errors.compose', { error: String(e) }))
+      setError(t('app.errors.compose', { error: presentedError(t, e) }))
     }
   }, [active, accountsById, t])
 
@@ -3078,7 +3211,7 @@ export default function App() {
       }
       await window.api.invoke('ui:openCompose', ref.accountId, init)
     } catch (e) {
-      setError(t('app.errors.compose', { error: String(e) }))
+      setError(t('app.errors.compose', { error: presentedError(t, e) }))
     }
   }, [active, accountsById, t])
 
@@ -3105,7 +3238,7 @@ export default function App() {
         source: 'draft',
       } satisfies ComposeInit)
     } catch (e) {
-      setError(t('app.errors.compose', { error: String(e) }))
+      setError(t('app.errors.compose', { error: presentedError(t, e) }))
     }
   }, [active, t])
 
@@ -3115,7 +3248,7 @@ export default function App() {
       await window.api.invoke('mail:queueSendNow', item.id)
       await loadOutbox(item.accountId)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     } finally {
       setOutboxActionId(null)
     }
@@ -3131,7 +3264,7 @@ export default function App() {
       }
       await loadOutbox(aid)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     } finally {
       setOutboxActionId(null)
     }
@@ -3144,7 +3277,7 @@ export default function App() {
       await window.api.invoke('mail:queueReschedule', item.id, at)
       await loadOutbox(item.accountId)
     } catch (e) {
-      setError(t('app.errors.queue', { error: String(e) }))
+      setError(t('app.errors.queue', { error: presentedError(t, e) }))
     } finally {
       setOutboxActionId(null)
     }
@@ -3156,8 +3289,11 @@ export default function App() {
     e.preventDefault()
     e.stopPropagation()
     const k = mailKey(m)
-    // If mail is already selected — keep multi-selection, otherwise switch to single
-    if (!selectedKeys.has(k)) {
+    // If the ROW is already selected — keep the multi-selection, otherwise switch
+    // to single. Asked through `row.items`: a row selected through a mid-thread
+    // key (what opening leaves behind) would otherwise read as unselected here,
+    // and right-clicking it would throw the rest of the multi-selection away.
+    if (!rowIsSelected(rowContaining(threadRowsRef.current, m), selectedKeys)) {
       setSelectedKeys(new Set([k]))
       selectionAnchorKey.current = k
     }
@@ -3166,7 +3302,7 @@ export default function App() {
     const x = Math.min(e.clientX, window.innerWidth - MENU_W - 8)
     const y = Math.min(e.clientY, window.innerHeight - MENU_H - 8)
     setCtxMenu({ x: Math.max(8, x), y: Math.max(8, y), mail: m, moveOpen: false })
-  }, [selectionAnchorKey, selectedKeys, setSelectedKeys])
+  }, [selectionAnchorKey, selectedKeys, setSelectedKeys, threadRowsRef])
 
   const closeCtxMenu = useCallback(() => setCtxMenu(null), [])
   const closeFolderCtxMenu = useCallback(() => setFolderCtxMenu(null), [])
@@ -3203,7 +3339,7 @@ export default function App() {
         switchFolder(nextName)
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [applyAccountMailboxesAndRoles, switchFolder, t])
 
@@ -3218,7 +3354,7 @@ export default function App() {
         switchFolder('INBOX')
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [applyAccountMailboxesAndRoles, switchFolder, t])
 
@@ -3229,7 +3365,7 @@ export default function App() {
         void window.api.invoke('net:syncFolderHeaders', menu.accountId, menu.folderPath, { mode: 'full' }).catch(() => {})
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3239,7 +3375,7 @@ export default function App() {
     try {
       await upsertFolderPref(menu.accountId, menu.folderPath, { icon })
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3249,7 +3385,7 @@ export default function App() {
       await upsertFolderPref(menu.accountId, menu.folderPath, { includeInBadges: !current })
       setFolders(prev => [...prev])
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3263,7 +3399,7 @@ export default function App() {
         setFolders(prev => [...prev])
       }
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [switchFolder, t, upsertFolderPref])
 
@@ -3277,7 +3413,7 @@ export default function App() {
       await upsertFolderPref(menu.accountId, menu.folderPath, { indexInSearch: !current })
       setFolders(prev => [...prev])
     } catch (e) {
-      setError(t('app.errors.sync', { error: String(e) }))
+      setError(t('app.errors.sync', { error: presentedError(t, e) }))
     }
   }, [t, upsertFolderPref])
 
@@ -3294,7 +3430,7 @@ export default function App() {
         setError(t('app.errors.attachment', { error: res.error || t('common.error') }))
       }
     } catch (e) {
-      setError(t('app.errors.attachment', { error: String(e) }))
+      setError(t('app.errors.attachment', { error: presentedError(t, e) }))
     } finally {
       setSavingAttachment(null)
     }
@@ -3353,7 +3489,7 @@ export default function App() {
             : undefined
           setHasMore(list.length >= PAGE_SIZE)
         } catch (e) {
-          setError(t('app.errors.search', { error: String(e) }))
+          setError(t('app.errors.search', { error: presentedError(t, e) }))
         }
         return
       }
@@ -3454,9 +3590,10 @@ export default function App() {
       }
     } catch (e) {
       // Cancellation is expected when the user types fast and we supersede prior requests.
+      // Probe only — see the note in the search-pagination catch above.
       const msg = e instanceof Error ? e.message : String(e)
       if (!/Search request cancelled/i.test(msg)) {
-        setError(t('app.errors.search', { error: msg }))
+        setError(t('app.errors.search', { error: presentedError(t, e) }))
       }
     } finally {
       // Only the most recent request is allowed to clear the spinner;
@@ -3567,13 +3704,11 @@ export default function App() {
       const prefs = folderPrefsByAccount.current.get(a.id) ?? {}
       let sum = 0
       for (const f of acFolders) {
-        const visible = prefs[f.path]?.visible ?? true
-        if (!visible) continue
+        // §2.99 (review H2): the badge-inclusion rule is shared with the main
+        // process (OS badge / tray tooltip) so the taskbar can never claim
+        // unread mail this sidebar does not show. Do not re-inline it here.
         const role = getFolderRole(f.path, f.specialUse, acRoles)
-        const includeInBadges = typeof prefs[f.path]?.includeInBadges === 'boolean'
-          ? Boolean(prefs[f.path]?.includeInBadges)
-          : role === '\\Inbox'
-        if (!includeInBadges) continue
+        if (!isFolderCountedInBadges({ pref: prefs[f.path], role })) continue
         const base = typeof f.unread === 'number' ? f.unread : 0
         const pending = folderUnreadPending[`${a.id}:${f.path}`] ?? 0
         sum += Math.max(0, base + pending)
@@ -3626,7 +3761,7 @@ export default function App() {
   const metaDate = metaDateIso ? new Date(metaDateIso).toLocaleString() : ''
 
   useEffect(() => {
-    document.title = globalUnread > 0 ? `MailCopilot Beta (${globalUnread})` : 'MailCopilot Beta'
+    document.title = globalUnread > 0 ? `MailCopilot (${globalUnread})` : 'MailCopilot'
   }, [globalUnread])
 
   const focusSearchInput = useCallback(() => {
@@ -3638,8 +3773,25 @@ export default function App() {
     setGroupConversations(next)
     void (async () => {
       try {
-        const current = await window.api.invoke('settings:get') as Record<string, unknown>
-        await window.api.invoke('settings:save', { ...current, groupConversations: next })
+        // Send ONLY the changed field. Main re-reads the current settings and
+        // merges the payload before persisting (electron/main.ts), so a
+        // renderer-side read-modify-write is unnecessary — and actively
+        // harmful: `settings:get` returns main-only fields
+        // (launchAtLoginStatus, aiApiKeySaved, telemetryConsent,
+        // mcpEnableStdio, spellcheckAvailable), and the §3.10 P0 gate refuses
+        // the WHOLE request when it sees them. Measured on the Windows stand
+        // 2026-08-27: "settings:save rejected: forbidden main-only field
+        // attempt", and the write silently no-opped.
+        //
+        // The refusal was invisible because the handler RETURNS
+        // `{ ok: false, reason: 'forbidden_field' }` rather than throwing, and
+        // no caller here inspects the reply — the `catch` below never fired.
+        // Sending one field removes the refusal; it does not add reply
+        // checking, which none of these fire-and-forget writes do.
+        //
+        // Bonus: the old shape could also clobber a concurrent write with a
+        // stale snapshot, since the whole object was echoed back.
+        await window.api.invoke('settings:save', { groupConversations: next })
       } catch {
         // ignore
       }
@@ -3652,8 +3804,8 @@ export default function App() {
       const next = !prev
       void (async () => {
         try {
-          const current = await window.api.invoke('settings:get') as Record<string, unknown>
-          await window.api.invoke('settings:save', { ...current, aiPanelOpen: next })
+          // Only the changed field — see setGroupConversationsAndPersist.
+          await window.api.invoke('settings:save', { aiPanelOpen: next })
         } catch { /* ignore */ }
       })()
       return next
@@ -3670,13 +3822,25 @@ export default function App() {
     }
     void (async () => {
       try {
-        const current = await window.api.invoke('settings:get') as Record<string, unknown>
-        await window.api.invoke('settings:save', { ...current, [key]: value })
+        // Only the changed field — see setGroupConversationsAndPersist. This is
+        // the worst of the four sites to get wrong: it is the AI panel's
+        // onboarding provider pick, so a refused write left the panel asking
+        // the user to choose a provider they had just chosen.
+        await window.api.invoke('settings:save', { [key]: value })
       } catch { /* ignore */ }
     })()
   }, [])
 
-  const openAiSource = useCallback(async (ref: MessageRef) => {
+  /**
+   * Resolve a message reference (AI source link, new-mail notification) and
+   * open it: cache first, IMAP as a fallback, then select the account/folder.
+   *
+   * `silentIfMissing` is for references the user did not type — a notification
+   * click may land after the message was deleted or moved elsewhere, which is
+   * ordinary rather than an error worth a banner. Those degrade to selecting
+   * the referenced folder so the window still lands somewhere useful.
+   */
+  const openMessageRef = useCallback(async (ref: MessageRef, opts?: { silentIfMissing?: boolean }) => {
     const { accountId, folder, uid } = ref
 
     let summary = await window.api.invoke('cache:messageByUid', accountId, folder, uid) as MailSummary | null
@@ -3708,28 +3872,43 @@ export default function App() {
       }
     }
 
+    const needsSelection =
+      viewMode !== 'account' || currentAccountId !== accountId || currentFolder !== folder
+
     if (!summary) {
+      if (opts?.silentIfMissing) {
+        if (needsSelection) selectAccount(accountId, folder)
+        return
+      }
       setError(t('app.errors.loadMessage', { error: `Source not found: ${accountId}/${folder}/${uid}` }))
       return
     }
 
-    if (viewMode !== 'account' || currentAccountId !== accountId || currentFolder !== folder) {
-      selectAccount(accountId, folder)
-    }
+    if (needsSelection) selectAccount(accountId, folder)
     await openMail(summary)
   }, [currentAccountId, currentFolder, openMail, selectAccount, t, viewMode])
 
+  const openAiSource = useCallback(
+    (ref: MessageRef) => openMessageRef(ref),
+    [openMessageRef],
+  )
+
+  // §2.99: a new-mail notification click arrives from main as identifiers only.
+  // No memoization needed — the hook holds the handler in a ref.
+  useMailOpenRef(ref => openMessageRef(ref, { silentIfMissing: true }))
+
   // Determine context type for AI
   const aiContextType = useMemo<'email' | 'thread' | 'folder' | 'multi-select' | null>(() => {
-    if (selectedKeys.size > 1) return 'multi-select'
+    // Rows, not raw keys: `selectedCount` is derived from the current rows.
+    if (hasMultiSelection) return 'multi-select'
     if (active && details) return groupConversations ? 'thread' : 'email'
     if (hasAccount) return 'folder'
     return null
-  }, [active, details, selectedKeys.size, hasAccount, groupConversations])
+  }, [active, details, hasMultiSelection, hasAccount, groupConversations])
 
   const aiContextData = useMemo(() => {
     if (aiContextType === 'multi-select') {
-      return { count: selectedKeys.size, folder: currentFolder, viewMode }
+      return { count: selectedCount, folder: currentFolder, viewMode }
     }
     if (aiContextType === 'email' || aiContextType === 'thread') {
       return active ? { accountId: active.accountId, folder: active.folder, uid: active.uid, subject: active.subject } : null
@@ -3748,7 +3927,7 @@ export default function App() {
       return { folder: currentFolder, accountId: currentAccountId, viewMode, accounts: allAccs }
     }
     return null
-  }, [aiContextType, active, accounts, connectionStatus, currentAccountId, currentFolder, selectedKeys.size, unifiedAccountFilter, viewMode])
+  }, [aiContextType, active, accounts, connectionStatus, currentAccountId, currentFolder, selectedCount, unifiedAccountFilter, viewMode])
 
   const summarizeWithAi = useCallback(() => {
     const prompt =
@@ -3947,7 +4126,7 @@ export default function App() {
     active, activeThread, hasAccount, hasMultiSelection,
     hotkeysPreset, selectedKeys, showCommandPalette,
     sidebarWidth, currentAccountId,
-    undoInfoRef, qRef, viewMailsRef, selectionAnchorKey,
+    undoInfoRef, qRef, viewMailsRef, threadRowsRef, selectionAnchorKey,
     rolesByAccount, virtuosoRef, onSearchRef,
     openMail, replyMail,
     archiveMail, deleteMail, spamMail,
@@ -3966,7 +4145,7 @@ export default function App() {
       <div className="titlebar">
         <span className="titlebar-title">
           <img src="icon.svg" alt="" className="titlebar-icon" draggable={false} />
-          MailCopilot <span className="titlebar-beta">Beta</span>
+          MailCopilot
           {globalUnread > 0 && <span className="titlebar-badge">{globalUnread}</span>}
         </span>
         <div className="titlebar-controls">
@@ -4097,14 +4276,20 @@ export default function App() {
                   onDrop={(e) => {
                     if (!hasAccount || viewMode !== 'account') return
                     e.preventDefault()
-                    const raw = e.dataTransfer.getData(DRAG_UIDS_MIME)
-                    if (!raw) return
-                    try {
-                      const uids = JSON.parse(raw) as number[]
-                      void moveUidsToFolder(uids, f.path)
-                    } catch {
-                      // ignore
-                    }
+                    // Refs, not bare UIDs (§2.238): each moves out of the folder
+                    // it was read from. `parseMailRefs` is fail-closed — a
+                    // payload it cannot fully understand yields no move at all.
+                    // The payload then SELECTS among the messages this renderer
+                    // holds; it never addresses one on its own, so a ref naming
+                    // a mailbox the user never loaded resolves to nothing and
+                    // moves nothing. Nothing resolved => do nothing at all (no
+                    // fallback to the open folder — that was the §2.238 bug).
+                    const dropped = resolveKnownRefs(
+                      parseMailRefs(e.dataTransfer.getData(DRAG_MAILREFS_MIME)),
+                      threadRowsRef.current,
+                    )
+                    if (dropped.length === 0) return
+                    void moveMessagesToFolder(dropped, f.path)
                   }}
                 >
                   <FolderIcon role={role} customIcon={pref?.icon} />
@@ -4241,8 +4426,8 @@ export default function App() {
             onClick={async () => {
               const next = !workOffline
               setWorkOffline(next)
-              const s = await window.api.invoke('settings:get') as Record<string, unknown>
-              await window.api.invoke('settings:save', { ...s, workOffline: next })
+              // Only the changed field — see setGroupConversationsAndPersist.
+              await window.api.invoke('settings:save', { workOffline: next })
             }}
           >
             {workOffline ? <WifiOff size={18} /> : <Wifi size={18} />}
@@ -4269,6 +4454,21 @@ export default function App() {
 
         {/* Mail list */}
         <section className="mail-list" data-testid="inbox-list">
+          {/* §2.157 — mailboxes whose sign-in expired. Rendered above the list
+              header (not as a modal): the failure is not urgent but it is
+              open-ended, so it has to stay visible until it is fixed. Driven
+              off `accounts`, so a flag for an account that no longer exists
+              renders nothing. */}
+          {accounts
+            .filter(a => accountsNeedingReauth.has(a.id))
+            .map(a => (
+              <AccountAuthBadge
+                key={a.id}
+                accountId={a.id}
+                accountLabel={(a.name || a.email || a.imap.user || '').trim()}
+                onFix={openAccountForReauth}
+              />
+            ))}
           <div className="mail-list-header">
             <div className="mail-list-top-row">
               <span className="mail-list-title">
@@ -4460,7 +4660,7 @@ export default function App() {
               <button className="btn-icon" disabled={selectedCount === 0} onClick={() => void setSeenForMany(true)} title={selectedCount === 0 ? t('mail.actions.selectToAct') : t('mail.actions.markRead')}>
                 <MailOpen size={16} />
               </button>
-              <button className="btn-icon" disabled={selectedCount === 0} onClick={() => void setSeenForMany(false)} title={selectedCount === 0 ? t('mail.actions.selectToAct') : t('mail.actions.markUnread')}>
+              <button data-testid="bulk-mark-unread" className="btn-icon" disabled={selectedCount === 0} onClick={() => void setSeenForMany(false)} title={selectedCount === 0 ? t('mail.actions.selectToAct') : t('mail.actions.markUnread')}>
                 <MailCheck size={16} />
               </button>
               <button className="btn-icon" disabled={selectedCount === 0 || (viewMode === 'account' && !roles.junk)} onClick={() => void bulkSpam()} title={selectedCount === 0 ? t('mail.actions.selectToAct') : t('mail.actions.spam')}>
@@ -4745,7 +4945,7 @@ export default function App() {
                 })()
                 const activeKey = active ? mailKey(active) : null
                 const rowHasActive = Boolean(activeKey && row.items.some(item => mailKey(item) === activeKey))
-                const rowHasSelected = row.items.some(item => selectedKeys.has(mailKey(item)))
+                const rowHasSelected = rowIsSelected(row, selectedKeys)
                 const accountColor = (() => {
                   if (viewMode !== 'unified') return null
                   const a = accountsById.get(m.accountId)
@@ -4756,8 +4956,8 @@ export default function App() {
                 return (
                 <div
                   data-testid="mail-item"
-                  className={`mail-item ${rowHasSelected ? 'mail-selected' : ''} ${rowHasActive ? 'mail-active' : ''} ${m.unread ? 'mail-unread' : ''}`}
-                  onClick={(e) => onMailClick(e, m)}
+                  className={`mail-item ${rowHasSelected ? 'mail-selected' : ''} ${rowHasActive ? 'mail-active' : ''} ${row.unreadCount > 0 ? 'mail-unread' : ''}`}
+                  onClick={(e) => onMailClick(e, m, row)}
                   onContextMenu={(e) => openContextMenu(e, m)}
                   draggable={hasAccount && viewMode === 'account'}
                   onDragStart={(e) => onDragStartMail(e, m)}
@@ -5023,6 +5223,7 @@ export default function App() {
                       alwaysLoadImages={alwaysLoadImages}
                       showExternalImages={showExternalImages}
                       mailIframeDoc={mailIframeDoc}
+                      hiddenAttachments={mailHiddenAttachments}
                       iframeKey={`${activeKey}:${alwaysLoadImages || showExternalImages ? 'ext' : 'safe'}`}
                       mailIframeRef={mailIframeRef}
                       activeMailKey={`${active?.accountId}:${active?.folder}:${active?.uid}`}
@@ -5030,6 +5231,9 @@ export default function App() {
                       onShowExternalImages={() => setShowExternalImages(true)}
                       onRetry={() => { if (active) void openMail(active) }}
                       onDownloadAttachment={att => { if (active) void saveAttachment(active, att) }}
+                      onShowFullMessage={requestFullMessage}
+                      loadingFullMessage={loadingFull}
+                      translation={mailTranslation}
                     />
                   )}
                 />
@@ -5066,6 +5270,7 @@ export default function App() {
                     alwaysLoadImages={alwaysLoadImages}
                     showExternalImages={showExternalImages}
                     mailIframeDoc={mailIframeDoc}
+                    hiddenAttachments={mailHiddenAttachments}
                     iframeKey={`${activeKey}:${alwaysLoadImages || showExternalImages ? 'ext' : 'safe'}`}
                     mailIframeRef={mailIframeRef}
                     activeMailKey={`${active?.accountId}:${active?.folder}:${active?.uid}`}
@@ -5073,6 +5278,9 @@ export default function App() {
                     onShowExternalImages={() => setShowExternalImages(true)}
                     onRetry={() => { if (active) void openMail(active) }}
                     onDownloadAttachment={att => { if (active) void saveAttachment(active, att) }}
+                    onShowFullMessage={requestFullMessage}
+                    loadingFullMessage={loadingFull}
+                    translation={mailTranslation}
                   />
                 </>
               )}
@@ -5191,14 +5399,14 @@ export default function App() {
           onClose={closeCtxMenu}
           onToggleMoveOpen={toggleCtxMoveOpen}
           onReply={replyMail}
-          onToggleSeen={selectedKeys.size > 1
+          onToggleSeen={hasMultiSelection
             ? () => void setSeenForMany(true)
             : setSeenForMail}
-          onMove={selectedKeys.size > 1
+          onMove={hasMultiSelection
             ? (_mail, folder) => void bulkMove(folder)
             : moveMailToFolder}
-          onSpam={selectedKeys.size > 1 ? () => bulkSpam() : spamMailTarget}
-          onArchive={selectedKeys.size > 1 ? () => bulkArchive() : archiveMailTarget}
+          onSpam={hasMultiSelection ? () => bulkSpam() : spamMailTarget}
+          onArchive={hasMultiSelection ? () => bulkArchive() : archiveMailTarget}
           onSnooze={(mail) => {
             setSnoozeAnchor({ mail, rect: new DOMRect(ctxMenu.x, ctxMenu.y, 0, 0) })
           }}
@@ -5206,9 +5414,9 @@ export default function App() {
             void window.api.invoke('mail:readLaterAdd', mail.accountId, mail.folder, [mail.uid])
           }}
           onPin={(mail) => void togglePin(mail)}
-          onDelete={selectedKeys.size > 1 ? () => bulkDelete() : deleteMailTarget}
+          onDelete={hasMultiSelection ? () => bulkDelete() : deleteMailTarget}
           t={t}
-          selectedCount={selectedKeys.size}
+          selectedCount={selectedCount}
         />
       )}
 
@@ -5421,7 +5629,7 @@ export default function App() {
         <div className="confirm-overlay" role="presentation" onClick={() => setConfirmDelete(null)}>
           <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-delete-title" aria-describedby="confirm-delete-desc" onClick={e => e.stopPropagation()}>
             <span className="sr-only" id="confirm-delete-title">{t('app.confirm.ariaTitle')}</span>
-            <p id="confirm-delete-desc">{t('app.confirm.deleteForever', { count: confirmDelete.uids.length })}</p>
+            <p id="confirm-delete-desc">{t('app.confirm.deleteForever', { count: confirmDelete.groups.reduce((n, g) => n + g.uids.length, 0) })}</p>
             <div className="confirm-dialog-actions">
               <button onClick={() => setConfirmDelete(null)}>{t('app.confirm.no')}</button>
               <button className="btn-primary" data-testid="confirm-delete-yes" onClick={() => void confirmDeleteAction()}>

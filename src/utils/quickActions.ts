@@ -1,37 +1,50 @@
 /**
- * B4 "Compose Quick Actions + Instant Reply" — renderer-side pure helpers and
- * the request/response contract types the renderer expects from the backend.
+ * B4 "Compose Quick Actions + Instant Reply" + B7 "AI Proofread" — renderer-side
+ * pure helpers over the shared main↔renderer contract.
  *
- * These types MIRROR the canonical `packages/types` definitions the backend
- * agents (ai-mcp + electron-boundary) are expected to add for the
- * `ai:quickAction:rewrite` / `ai:instantReply:generate` IPC channels. They live
- * here (not `packages/types`) only so the renderer type-checks against the
- * declared contract before the backend lands; once the canonical shared types
- * exist in `@mailcopilot/types`, these can be replaced by re-exports. No email
- * content is ever built into a prompt on the renderer side — the renderer sends
- * the RAW draft text (quick action) or a message REF (instant reply), and
- * `electron/services/ai.ts` wraps untrusted content with `wrapUntrusted()`
- * before injecting it into any provider prompt.
+ * §3.3.B4.f3(c): the contract types are no longer duplicated here. They live in
+ * `@mailcopilot/types` and both sides — `electron/services/ai.ts` /
+ * `electron/services/composeAi.ts` and this module — import the SAME
+ * definitions, so a refusal reason added on one side is a compile error on the
+ * other until it is handled. The re-exports below keep every existing renderer
+ * import path (`src/utils/quickActions`) working unchanged.
+ *
+ * No email content is ever built into a prompt on the renderer side — the
+ * renderer sends only the user's OWN part of the draft, as identified by
+ * `splitComposeBody()` (quick action, proofread), or a message REF (instant
+ * reply), and main wraps untrusted content with `wrapUntrusted()` before
+ * injecting it into any provider prompt. The quoted original, the forwarded
+ * message and the signature never leave the renderer at all (§2.78); where no
+ * boundary is recognizable the split falls back to "all own text", so this is a
+ * best-effort narrowing, not a parser guarantee — see the limitation list in
+ * `packages/core/composeBody.ts` and §2.173.
  *
  * CLAUDE.md §5 hotspot policy: Compose.tsx / ThreadView.tsx stay thin, all the
  * preset metadata, cursor-insert math, and refusal mapping live here as pure,
  * unit-testable functions.
  */
 
-/**
- * The four compose quick-action presets. The renderer only ever sends the
- * preset ID (a low-cardinality enum) plus the raw draft text — it NEVER builds
- * the rewrite instruction itself. Main maps the preset ID to a system prompt in
- * `ai.ts`, so the actual instruction text is a backend concern (kept out of the
- * renderer to avoid prompt drift and to keep untrusted-content wrapping on one
- * side only).
- *
- *   - `improve`  — polish clarity/tone while preserving meaning.
- *   - `shorter`  — condense to the essential message.
- *   - `formal`   — raise register to a formal/professional tone.
- *   - `grammar`  — fix grammar/spelling only, minimal wording change.
- */
-export type QuickActionPreset = 'improve' | 'shorter' | 'formal' | 'grammar'
+import type {
+  QuickActionPreset,
+  ProofreadEditCategory,
+  ProofreadRefusalReason,
+} from '@mailcopilot/types'
+
+export type {
+  QuickActionPreset,
+  QuickActionRequest,
+  QuickActionRefusalReason,
+  QuickActionResult,
+  InstantReplyRequest,
+  InstantReplyRefusalReason,
+  InstantReplyDraft,
+  InstantReplyResult,
+  ProofreadEdit,
+  ProofreadEditCategory,
+  ProofreadRequest,
+  ProofreadRefusalReason,
+  ProofreadResult,
+} from '@mailcopilot/types'
 
 /** Ordered list of presets as rendered in the compose toolbar. */
 export const QUICK_ACTION_PRESETS: readonly QuickActionPreset[] = [
@@ -50,84 +63,54 @@ export function quickActionLabelKey(preset: QuickActionPreset): string {
 }
 
 /**
- * Request payload for the `ai:quickAction:rewrite` IPC channel.
+ * Refusals the renderer decides on its own; these NEVER arrive over IPC.
+ *   - `no_own_text` — the draft consists solely of quoted/forwarded material
+ *     and a signature, so there is nothing of the user's own to rewrite
+ *     (§2.78: an AI rewrite never touches quoted text or the signature).
  *
- * `text` is the CURRENT draft body verbatim (untrusted from the model's point
- * of view once it re-enters a prompt — main wraps it). `accountId` scopes the
- * budget/provider selection to the account authoring the draft.
+ * Note the asymmetry with B7: `no_own_text` is renderer-only for a QUICK ACTION
+ * (the toolbar gates the button before any IPC), but it is a REAL backend
+ * refusal reason for a proofread check, because main re-splits the received
+ * text itself and can conclude there is nothing of the user's own to check.
  */
-export type QuickActionRequest = {
-  accountId: number
-  preset: QuickActionPreset
-  /** Current draft body text to rewrite. Never concatenated into a prompt here. */
-  text: string
-}
+export type QuickActionLocalRefusalReason = 'no_own_text'
+
+/** Everything the toolbar can render as an inline refusal. */
+export type QuickActionDisplayRefusal =
+  | import('@mailcopilot/types').QuickActionRefusalReason
+  | QuickActionLocalRefusalReason
 
 /**
- * Structured refusal reasons the renderer surfaces inline (never thrown),
- * mirroring the B2 Thread Summary discipline so budget/no-provider/etc. degrade
- * gracefully instead of crashing the toolbar.
- *   - `budget`         — daily/monthly AI budget cap exceeded.
- *   - `no_provider`    — no AI provider configured.
- *   - `provider_error` — provider call failed / returned unusable output.
- *   - `empty_input`    — draft body was empty/whitespace (nothing to rewrite).
+ * Every proofread refusal the renderer renders inline. Identical to the backend
+ * union today — B7 has no renderer-only refusal, because the "nothing of your
+ * own to check" case is decided by main (which owns the authoritative split)
+ * rather than pre-gated in the toolbar. Kept as a named alias so the panel has
+ * one symbol to exhaustively switch over, exactly like
+ * {@link QuickActionDisplayRefusal}.
  */
-export type QuickActionRefusalReason =
-  | 'budget'
-  | 'no_provider'
-  | 'provider_error'
-  | 'empty_input'
+export type ProofreadDisplayRefusal = ProofreadRefusalReason
 
 /**
- * Discriminated result of a `ai:quickAction:rewrite` call. The renderer branches
- * on `ok`: `true` carries the rewritten text (shown in the diff preview),
- * `false` carries a structured reason (never an exception).
- */
-export type QuickActionResult =
-  | { ok: true; rewritten: string; provider: string }
-  | { ok: false; reason: QuickActionRefusalReason }
-
-/**
- * Request payload for the `ai:instantReply:generate` IPC channel.
+ * i18n key for a proofread edit's category chip.
  *
- * The renderer supplies only a message REF (`folder` + `uid`, plus optional
- * `messageId` for compat) — NEVER body text. Main fetches the canonical body
- * from the local SQLite cache by `(accountId, folder, uid)` and wraps it with
- * `wrapUntrusted()` before prompting. This mirrors the B2 contract's "refs only,
- * bodies fetched by main" cache-poisoning defense (CLAUDE.md §5).
+ * The switch is exhaustive over {@link ProofreadEditCategory} so adding a
+ * category to the contract is a compile error here until it gets a label. The
+ * `default:` arm exists for a wire value outside the union (a rogue/older main)
+ * and falls back to `wording` — the same normalization main applies — rather
+ * than rendering a raw key or the model's own English category name.
  */
-export type InstantReplyRequest = {
-  accountId: number
-  folder: string
-  uid: number
-  /** Ignored by main (compat only); identity is cache-derived. */
-  messageId?: string | null
+export function proofreadCategoryKey(category: ProofreadEditCategory): string {
+  switch (category) {
+    case 'spelling':
+    case 'grammar':
+    case 'punctuation':
+    case 'wording':
+    case 'clarity':
+      return `ai.quickAction.proofread.category.${category}`
+    default:
+      return 'ai.quickAction.proofread.category.wording'
+  }
 }
-
-/** Instant Reply refusal reasons — a superset-compatible subset of the quick-action set. */
-export type InstantReplyRefusalReason =
-  | 'budget'
-  | 'no_provider'
-  | 'provider_error'
-
-/**
- * A single generated draft option. `text` prefills a new Compose body verbatim
- * on selection; nothing is ever sent automatically (no-auto-send invariant).
- * `tone` is an optional short localized-by-model hint the UI may show as a chip
- * label; the renderer treats it as opaque display text.
- */
-export type InstantReplyDraft = {
-  text: string
-  tone?: string
-}
-
-/**
- * Discriminated result of a `ai:instantReply:generate` call. On success the
- * backend returns 2–3 draft options; on refusal a structured reason.
- */
-export type InstantReplyResult =
-  | { ok: true; drafts: InstantReplyDraft[] }
-  | { ok: false; reason: InstantReplyRefusalReason }
 
 /**
  * Result of inserting `insert` into `original` at caret position `caret`.
@@ -162,4 +145,69 @@ export function insertAtCaret(original: string, insert: string, caret: number): 
  */
 export function hasRewritableText(text: string): boolean {
   return text.trim().length > 0
+}
+
+/**
+ * Whether a pending preview was computed against a draft the user has since
+ * edited (§2.78 AC-h).
+ *
+ * The rewrite round trip is asynchronous: the user can keep typing while the
+ * provider works. "Replace" writes a body derived from the SNAPSHOT taken at
+ * click time, so applying it to a draft that changed in the meantime would
+ * silently drop whatever was typed during generation. The monotonic request
+ * token in `useQuickActions` only guards against a second PRESET click — it
+ * cannot see body edits, which is exactly the gap this closes.
+ *
+ * Deliberately an exact string comparison over the WHOLE body: an edit inside
+ * the untouched tail (signature, quoted block) invalidates the snapshot just as
+ * much as an edit inside the rewritten part, because the replacement carries
+ * the snapshot's tail verbatim.
+ */
+export function isPreviewStale(preview: { sourceBody: string }, currentBody: string): boolean {
+  return preview.sourceBody !== currentBody
+}
+
+/**
+ * The three AI actions the compose toolbar hosts. Each owns an independent
+ * request/refusal/review state machine (`useQuickActions`, `useProofread`,
+ * `useDraftTranslation`) and none of them can see the others.
+ */
+export type ComposeAiAction = 'rewrite' | 'proofread' | 'translate'
+
+/**
+ * Which toolbar actions currently occupy the draft: a request of theirs is in
+ * flight, or their review panel is on screen awaiting a decision.
+ */
+export type ComposeAiActivity = Record<ComposeAiAction, boolean>
+
+/**
+ * Whether `self` must be disabled because ANOTHER toolbar action occupies the
+ * draft (§3.3 B6.f-renderer).
+ *
+ * The three state machines are independent by construction, so nothing in them
+ * prevents a second one from starting: the user could hold an open rewrite diff
+ * and click Translate, ending up with two review panels stacked over the same
+ * body and two paid requests answering overlapping questions. Whichever panel
+ * was applied second would then write a replacement derived from a snapshot the
+ * first one had already invalidated — the staleness guard catches that, but
+ * only after the money is spent and the second panel is dead on arrival.
+ *
+ * One owner of "busy or under review" therefore lives at the TOOLBAR level,
+ * where all three are visible, rather than as three pairwise checks that would
+ * have to be re-derived every time a fourth action is added. The rule is
+ * deliberately about OTHER actions only: an action never blocks itself, so
+ * re-running a preset while its own diff is open keeps working exactly as
+ * before.
+ *
+ * A refusal line is not occupancy — it is a finished, dismissible message, and
+ * blocking the other two behind it would be a regression with no accident to
+ * prevent.
+ */
+export function isBlockedByOtherAction(
+  activity: ComposeAiActivity,
+  self: ComposeAiAction,
+): boolean {
+  return (Object.keys(activity) as ComposeAiAction[]).some(
+    action => action !== self && activity[action],
+  )
 }

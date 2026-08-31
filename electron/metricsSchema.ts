@@ -38,15 +38,51 @@ export const DOMAINS = {
   compose_source: ['new', 'reply', 'reply_all', 'forward', 'mailto', 'template', 'ai_chip', 'draft'] as const,
   onboarding_method: ['oauth', 'manual'] as const,
   session_end_reason: ['quit', 'update', 'crash'] as const,
+  // §2.99 — could the tray icon OBJECT be created? 'failed' means a local
+  // failure (unreadable or empty icon image, a platform that refused). It is
+  // NOT a statement about the desktop: on Linux construction succeeds whether
+  // or not any host takes the icon, and we no longer try to find out (§2.228 —
+  // the close-to-tray gate that asked was removed).
+  tray_outcome: ['created', 'failed'] as const,
+  tray_action: ['open', 'compose', 'check_mail', 'quit'] as const,
+  // §2.99 — why a decided-upon new-mail notification was not shown. Today the
+  // only member is "the user was already looking at the app"; a population
+  // dominated by it means the notifications add nothing for those users.
+  notification_suppressed_reason: ['app_focused'] as const,
   misdirection_kind: ['external_domain', 'new_recipients_in_reply'] as const,
   misdirection_outcome: ['accepted', 'cancelled'] as const,
   search_error_kind: ['cancelled', 'error'] as const,
   auth_refresh_failure_reason: ['refresh_token_expired', 'network', 'unknown'] as const,
   auth_refresh_provider: ['outlook', 'google'] as const,
   auth_refresh_suppressed_reason: ['cooldown'] as const,
+  // §2.157 — why the per-account "sign in again" flag came down. The two
+  // members are NOT interchangeable: 'signed_in' is the mechanism working (the
+  // mailbox started authenticating again, with or without the user doing
+  // anything), 'account_removed' is the user deleting the account instead of
+  // fixing it — which resolves the flag but not the problem it reported. A
+  // population where 'account_removed' dominates means the prompt is not
+  // leading anywhere useful.
+  account_reauth_clear_reason: ['signed_in', 'account_removed'] as const,
+  // §2.157 — how long the flag stood before it came down. Coarse, unbounded at
+  // the top: the interesting shapes are "cleared within a minute" (a transient
+  // that never needed a badge, i.e. the threshold is too low) and "24h+" (the
+  // mailbox stayed silently broken for a day, i.e. the badge is not reaching
+  // the user). 'unknown' covers a clear with no recorded raise time — only
+  // reachable if the flag survived a code path that did not record one, so a
+  // non-zero rate is a bug in this service, not a user state.
+  account_reauth_flag_duration: [
+    '<1min',
+    '1-10min',
+    '10-60min',
+    '1-6h',
+    '6-24h',
+    '24h+',
+    'unknown',
+  ] as const,
   // TLS trust rework — did the pin-time certificate capture produce a usable
   // trust anchor? A fingerprint-only pin cannot make a self-signed server
-  // verify (buildTlsOptions needs the certificate body for `ca`), so a
+  // verify (buildTlsOptions needs the certificate body to put into the shared
+  // SecureContext it hands the transport), so a
   // population stuck on 'unavailable' means the recovery flow still fails
   // closed and the capture path needs a STARTTLS-capable probe.
   cert_pin_pem: ['captured', 'unavailable', 'mismatch'] as const,
@@ -82,11 +118,73 @@ export const DOMAINS = {
   // 10s budget — distinguishes "served from network" from "fell back to
   // headers because the network was too slow".
   cache_hit_level: ['memory', 'db', 'eml', 'imap', 'imap_timeout'] as const,
-  // §2.17 Phase 0 — pool wait timing requester tag. Identifies which
-  // subsystem was waiting on the per-account IMAP pool semaphore. Phase 0
-  // records timing only; Phase 1 will use this tag to give the interactive
-  // tier priority over background indexer / sync.
+  // §2.17 — requester tier for the IMAP locks. Phase 0 recorded it and did
+  // nothing with it; Phase 1 made it the scheduling key, so the same tag now
+  // reads as "who waited, at which tier" AND as "who was served first".
   imap_pool_requester: ['interactive', 'background', 'indexer', 'sync', 'other'] as const,
+  // §2.17 Phase 1 — WHICH lock the wait happened on. Phase 0 instrumented only
+  // the per-account pool, which is not where the reported incident lived: the
+  // offline body sync and the interactive open share the SINGLETON lock, and
+  // that queue was invisible. Without the split, "interactive waits are gone"
+  // could not be told apart from "we are still not measuring the right queue".
+  // Range of the instrument before you quote it: it measures the wait to ENTER
+  // a lock, and only above 500ms — not time spent behind an already-running
+  // holder. An empty interactive tail is therefore not proof of bounded
+  // interactive latency. Full statement: `startLockWaitReport` in
+  // packages/net/imap.ts.
+  imap_lock_kind: ['singleton', 'pool'] as const,
+  // §2.124 — where one EML parse actually ran. The whole point of the metric
+  // is that these are NOT interchangeable: 'inline_below_threshold' is the
+  // healthy, expected path for ordinary messages, while 'inline_unavailable'
+  // means the off-thread parse silently stopped existing and every large
+  // message is back to freezing the main loop for seconds. Both look identical
+  // to the user (the app works, only slower), so nothing but this tag can tell
+  // them apart. 'worker_failed' is a parse that died inside the worker on
+  // these particular bytes — one message lost, feature intact —
+  // and 'worker_aborted' is the caller walking away (message closed
+  // mid-parse), split out so an abandoned open is never counted as a failure.
+  eml_parse_path: [
+    'worker',
+    'worker_failed',
+    'worker_aborted',
+    'inline_below_threshold',
+    'inline_unavailable',
+  ] as const,
+  // §2.124 — why off-thread parsing stopped being possible, reported once per
+  // session on the transition. 'script_missing' is the build/packaging failure
+  // (the worker chunk is not next to the main bundle — the mode that leaves
+  // the app working and 10× slower with no other symptom), 'spawn_failed' is
+  // the `new Worker()` constructor refusing, 'startup_failed' a worker that
+  // died (or timed out) BEFORE ANNOUNCING ITSELF — the readiness handshake, not
+  // "before answering a job". The distinction is the whole security property:
+  // bytes are dispatched only to an announced worker, so a death before the
+  // announcement is causally independent of any message, while a worker that
+  // died before answering might well have died OF the message it was holding.
+  // See `readyGeneration` in packages/net/emlWorkerClient.ts.
+  // 'not_main_thread' is a defensive branch:
+  // the worker entry parses inline by construction, so it means somebody wired
+  // the offloading entry point into the worker itself.
+  eml_worker_unavailable_reason: [
+    'script_missing',
+    'spawn_failed',
+    'startup_failed',
+    'not_main_thread',
+  ] as const,
+  // §2.124 — raw `.eml` size band of a parse dispatch. Deliberately the same
+  // five bands `bucketBodySize()` produces for `smtp.send`, so one vocabulary
+  // covers message size everywhere; packages/net/eml.test.ts asserts the two
+  // stay in step. Coarse by design — the narrowest band spans a kilobyte and
+  // the widest is unbounded, so a value is an aggregate over a huge population
+  // of sizes and cannot single out a message.
+  eml_size_bucket: ['<1KB', '1-10KB', '10-100KB', '100KB-1MB', '1MB+'] as const,
+  // §2.145 — which tier of the SOFT body cap tripped. 'default' is the
+  // first-tier limit every open starts at; 'full' is the raised limit reached
+  // only when the user clicked "show full message" — so a 'full' trip means the
+  // raised tier was not enough either, i.e. the message stayed clipped even
+  // after an explicit request. Those two are acted on differently: a first-tier
+  // population says where the clip point sits for real mail, while any volume
+  // of 'full' says the second tier is set too low to keep its promise.
+  eml_body_cap_tier: ['default', 'full'] as const,
   // §3.10 P0: every mutating MCP tool now goes through preview→apply.
   // The `kind` tag identifies which family of action audit events refer to.
   // Adding a new mutating tool? Add the tag here AND in
@@ -140,7 +238,9 @@ export const DOMAINS = {
   // host taxonomy, NOT an AI provider). Emitted from main only. 'local' covers
   // the future on-device (T2.5 Ollama) path; the `was_local` boolean on the
   // span disambiguates it, but the provider id is still tagged for grouping.
-  ai_provider: ['subscription', 'anthropic-api', 'openai-api', 'gemini-api', 'local', 'unknown'] as const,
+  // §2.218 — 'subscription' was removed with the provider itself. Emitters map
+  // any unrecognised id to 'unknown', so a stale value can never widen this tag.
+  ai_provider: ['anthropic-api', 'openai-api', 'gemini-api', 'local', 'unknown'] as const,
   // §3.3 B2 — bucketed error taxonomy for the thread-summary span. Privacy
   // invariant: never a raw provider error message (which can carry hostnames /
   // model ids / stderr) — only these enumerated classes. 'none' is the success
@@ -148,11 +248,71 @@ export const DOMAINS = {
   // §3.3 B4 quick-action / instant-reply spans below (same closed taxonomy —
   // 'none' success, 'provider_error' transport/no-result, 'parse_error' empty/
   // unusable output) so both features share one privacy-reviewed error domain.
-  ai_summary_error_class: ['none', 'provider_error', 'parse_error'] as const,
+  // `internal_error` (§3.3.B4.f2) is a BUG OF OURS, not a provider failure: an
+  // unexpected throw in our own orchestration. It is a separate value precisely
+  // so it cannot hide inside `provider_error` — a dashboard that cannot tell
+  // "the API failed" from "our code threw" answers neither question. The B2
+  // summary path never emits it; the three compose surfaces do.
+  ai_summary_error_class: ['none', 'provider_error', 'parse_error', 'internal_error'] as const,
+  // §3.3 B6 AI Translate — the closed set of language codes the feature accepts
+  // as a TARGET. A CLOSED enum rather than 'string' on purpose: the codes are
+  // already a sixteen-value enum on the contract type (`TranslateLanguageCode`),
+  // so nothing is gained by letting arbitrary text into a tag, and a domain
+  // check is what keeps a future free-form language string from arriving here.
+  //
+  // TARGET ONLY, and the 'unknown' member is gone with the source attribute
+  // (§3.3.B6.f1). The target is a choice the USER makes — it defaults to the
+  // interface language, which the consent disclosure already covers — so
+  // sending it reveals nothing that was not already disclosed and answers the
+  // one question that decides the offered list: which languages people actually
+  // translate INTO.
+  //
+  // The SOURCE language is not sent, and this comment is where the previous
+  // reasoning is retracted rather than quietly deleted. It argued that language
+  // identity "is not PII on its own — it is a property of the mail, not of the
+  // person". That is false in this pipeline for two independent reasons. First,
+  // the source language is DERIVED FROM THE BODY of the user's mail by the local
+  // detector, and `telemetryConsent.never.bodies` promises in six locales that
+  // nothing we send is built from the user's text, with one narrow enumerated
+  // exception that is not this. Second, every event carries `install_id_hash` as
+  // the Sentry `user.id`, so the attribute is not a free-floating property of a
+  // message — it attaches "receives Arabic mail" to a stable pseudonymous
+  // identity, which is exactly the linkage that makes pseudonymous data
+  // personal. This project has already answered the identical question the
+  // identical way twice, for the spell checker: `spellcheck.configured` ships a
+  // COUNT ("Which languages you chose is never included") and
+  // `spellcheck.dictionary_consent` ships no names at all. The translate span
+  // now ships a BOOLEAN — see `source_labeled` on `ai.translate.message`, which
+  // still answers the operational question (how often is detection not good
+  // enough to caption the result) without naming anything.
+  translate_language: [
+    'en', 'ru', 'uk', 'de', 'fr', 'es', 'it', 'pt',
+    'nl', 'pl', 'tr', 'ar', 'zh', 'ja', 'ko', 'hi',
+  ] as const,
   // §3.3 B4 Compose Quick Actions — which rewrite preset ran. Low-cardinality
   // enum (four presets) tagged for grouping; carries NO draft content, only the
-  // preset identity the user picked. Emitted from main only.
+  // preset identity the user picked. Emitted from main (the rewrite span and
+  // the input-cap refusal) and, since §3.3.B4.f5, from the renderer as well —
+  // the review panel is the only place that knows what the user did with the
+  // result. The preset identity is the same four-value enum on both sides.
   ai_quick_action_preset: ['improve', 'shorter', 'formal', 'grammar'] as const,
+  // §3.3.B4.f5 Compose Quick Actions — what the user did with a rewrite they
+  // were shown. Closed enum of the three explicit choices the review panel
+  // offers; there is no fourth "abandoned" member, because a panel that goes
+  // away without a choice (the window closed, another preset was started over
+  // it) records nothing at all — see the event's own note.
+  ai_quick_action_outcome: ['replaced', 'inserted', 'cancelled'] as const,
+  // §2.78 Compose Quick Actions — coarse length buckets for a draft that was
+  // REFUSED for exceeding the quick-action input cap. Privacy boundary: the
+  // draft length is never reported as a number (a character count is a fine-
+  // grained fingerprint of one specific piece of writing); only a wide bucket
+  // ships, which is the minimum resolution that answers the one question the
+  // counter exists for — "is the cap too tight, or are the refusals
+  // pathological pastes?". Six values are declared, five of them reachable:
+  // the event only fires ABOVE the 8000-character cap, so '<=8k' cannot be
+  // emitted today and exists so LOWERING the cap cannot produce an
+  // out-of-domain value.
+  ai_quick_action_length_bucket: ['<=8k', '8k-12k', '12k-20k', '20k-50k', '50k-100k', '100k+'] as const,
   // §2.20 PR1 — reasons why a *_preview tool early-returned without
   // registering a pending action. `empty_match` covers the "matched=0 /
   // scanned=0" case (refused to register an empty preview that would
@@ -166,6 +326,11 @@ export const DOMAINS = {
   // metricsBuckets.ts (bucketCount), kept inline here as an enum so the
   // CI schema check rejects out-of-domain tag values at the IPC bridge.
   ai_action_batch_bucket: ['0', '1', '2', '3-5', '6-10', '11-20', '21-50', '51+'] as const,
+  // §2.123 — which half of a preview→apply pair proved that a chat turn was
+  // about mutating the mailbox. Two values, both structural (the name of a
+  // tool the turn called), never derived from model or user text. Used by
+  // `ai.turn.action_not_prepared`; see electron/services/aiTurnGuard.ts.
+  ai_turn_guard_role: ['preview', 'apply'] as const,
   // §3.10 P2 — bucketed enums for the internet-tool interceptor metric
   // `ai.egress.intercepted`. Mirrors the catalogue in
   // `electron/services/aiInternetGate.ts` (`KNOWN_INTERCEPT_TOOL_TAGS` /
@@ -195,6 +360,28 @@ export const DOMAINS = {
   // `mainOnly: true`, so a compromised renderer cannot emit it; this domain is
   // the second-line guard that rejects any out-of-enum value at the IPC bridge.
   external_open_source: ['window_open', 'ui_ipc', 'update_dialog', 'unsubscribe', 'oauth'] as const,
+  // §2.93(a) — which section the native context menu offered. Structural by
+  // construction: derived from the menu plan (electron/services/contextMenu.ts),
+  // never from the link URL or the selected text.
+  context_menu_context: ['link', 'editable', 'selection'] as const,
+  // §2.93(a) — which link item of the native context menu was activated.
+  context_menu_link_action: ['open', 'copy_address'] as const,
+  // §2.103 — which spelling item of the native context menu was activated.
+  // Structural, like the two above: derived from the plan item that was
+  // clicked. Neither the misspelled word nor the chosen replacement is ever a
+  // tag value — in a reply that word is quoted mail, and the user's own typing
+  // is no more sendable than that.
+  context_menu_spell_action: ['replace', 'add_to_dictionary'] as const,
+  // §2.103 — how a dictionary-download consent ended. 'blocked_busy' is a
+  // request that arrived while another confirmation was open, 'failed' a dialog
+  // that could not be shown (never an acceptance), and 'unconsented_download'
+  // is the defence-in-depth guard firing: Chromium began fetching a dictionary
+  // for a language with no grant record, which is a defect in
+  // electron/services/spellcheck.ts rather than a user action. The LANGUAGE is
+  // never a tag — a person's dictionary set is a statement about who they are.
+  spellcheck_consent_outcome: [
+    'accepted', 'declined', 'blocked_busy', 'failed', 'unconsented_download',
+  ] as const,
   // §2.23 PR1 — Sent-copy APPEND failure buckets. SMTP delivery succeeded but
   // the IMAP APPEND of the copy into the Sent folder failed. `reason` is the
   // low-cardinality classification produced by classifySentCopyAppendFailure
@@ -218,6 +405,39 @@ export const DOMAINS = {
   // sync (a drift is caught by typecheck, since call sites pass string literals
   // against the union).
   secret_store_surface: ['imap_smtp', 'oauth_refresh', 'ai_keys', 'unknown'] as const,
+  // §2.122 — which AI provider's stored key an operation touched. Mirrors
+  // `ApiKeyProvider` in electron/services/ai.ts. Closed enum: the tag can never
+  // start carrying a key, a key id, or free text.
+  ai_key_provider: ['anthropic-api', 'openai-api', 'gemini-api'] as const,
+  // §2.122 — which secret-store operation on an AI key.
+  ai_key_op: ['read', 'write', 'delete'] as const,
+  // §2.122 — its outcome. 'found' / 'absent' split the read: "the store
+  // answered and there is a key" vs "the store answered and there is none".
+  // 'store_error' is the third state that used to be invisible — the store
+  // itself failed, so we know NOTHING about whether a key exists. 'ok' is the
+  // success of a write or a delete.
+  ai_key_outcome: ['found', 'absent', 'ok', 'store_error'] as const,
+  // §2.119 — which AI destination setting a confirmation was about. Two
+  // members and nothing else: 'endpoint' is `aiOpenAiBaseUrl`, 'proxy' is
+  // `aiProxyUrl`. The ADDRESS never appears in telemetry — not the host, not a
+  // hash of it, not its length.
+  ai_destination_field: ['endpoint', 'proxy'] as const,
+  // §2.119 — how the confirmation ended. 'blocked_invalid' is a requested
+  // address that is not a usable http(s) URL (refused without a dialog),
+  // 'blocked_busy' a change that arrived while another confirmation was open.
+  ai_destination_outcome: ['accepted', 'declined', 'blocked_invalid', 'blocked_busy'] as const,
+  // §2.167 — which settings field a save dropped while applying the rest. The
+  // members are the field NAMES, mirroring `SETTINGS_REFUSABLE_FIELDS` in
+  // electron/settingsSaveRefusal.ts one-for-one: a settings field name is our
+  // own vocabulary, and abstracting it (as `ai_destination_field` does for two
+  // fields the user thinks of as one address) would only cost the reader the
+  // ability to act on the number. Adding a member here means adding it there.
+  settings_refused_field: ['mcpExportWhitelist'] as const,
+  // §2.167 — why. 'unknown_export_tool' = an entry outside the MCP export
+  // ceiling (EXPORTABLE_MCP_TOOLS), typically a tool name persisted by an older
+  // build and round-tripped back by the settings window. The offending NAME is
+  // renderer input and is never sent — this enum is the whole disclosure.
+  settings_refusal_code: ['unknown_export_tool'] as const,
 } as const
 
 export type DomainName = keyof typeof DOMAINS
@@ -229,7 +449,14 @@ export type MetricKind = 'event' | 'histogram' | 'gauge'
 
 export type MetricDefinition = {
   kind: MetricKind
-  /** One-line purpose. Used by the schema dump that generates telemetry.md. */
+  /**
+   * One-line purpose, for reviewers of this file. The user-facing disclosure
+   * (docs/docs/privacy/telemetry.md and its five translations) is hand-written,
+   * NOT generated from here — the generator that claimed otherwise silently
+   * dropped 60% of the registry and was deleted (§2.130). Adding an entry below
+   * obliges you to document it in all six pages; scripts/check-telemetry-docs.mjs
+   * fails the build until you do.
+   */
   purpose: string
   tags: Record<string, TagSpec>
   /** Buffer this event in a 10s window and flush one aggregated record. */
@@ -309,6 +536,65 @@ export const METRIC_EVENTS = {
       windows_moved: 'number',
       pass: 'number',
     },
+    mainOnly: true,
+  },
+
+  // --- Tray / background operation (§2.99) ----------------------------------
+  'tray.created': {
+    kind: 'event',
+    purpose:
+      'Outcome of a tray-icon OBJECT creation attempt (at startup, or when the tray is re-enabled in settings). outcome=failed is a failure on our side — an empty or unreadable icon image, an exception part-way through initialisation — and says nothing about whether the desktop draws the icon: on Linux construction succeeds even when no StatusNotifier host ever takes it, and we do not ask (§2.228, gate removed). A population dominated by failed means these users never get an icon at all, so the tray feature is not reaching them.',
+    tags: {
+      outcome: 'tray_outcome',
+      platform: 'platform',
+    },
+    mainOnly: true,
+  },
+  'tray.menu_action': {
+    kind: 'event',
+    purpose:
+      'Which tray menu entry the user invoked. Answers whether the tray is used as a launcher, as a mail-check button, or only to quit — i.e. which entries earn their place.',
+    tags: {
+      action: 'tray_action',
+    },
+    mainOnly: true,
+  },
+  'notification.shown': {
+    kind: 'event',
+    purpose:
+      'A new-mail notification was shown. batched=true means one toast covered several messages. No account, folder, subject or sender — aggregate volume only.',
+    tags: {
+      batched: 'boolean',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  'notification.suppressed': {
+    kind: 'event',
+    purpose:
+      'A new-mail notification was decided upon but not shown, because the user was already looking at the app. Read against notification.shown it says how much of the feature is pure interruption.',
+    tags: {
+      reason: 'notification_suppressed_reason',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  'notification.clicked': {
+    kind: 'event',
+    purpose:
+      'A new-mail notification was clicked. Read against notification.shown it says whether the notifications lead anywhere; a near-zero rate means they are noise and should be narrowed.',
+    tags: {},
+    aggregate: true,
+    mainOnly: true,
+  },
+  'badge.updated': {
+    kind: 'event',
+    purpose:
+      'The unread badge/tooltip total changed. has_unread only — never the count. Answers whether the badge tracks reality or churns.',
+    tags: {
+      has_unread: 'boolean',
+    },
+    aggregate: true,
     mainOnly: true,
   },
 
@@ -463,10 +749,10 @@ export const METRIC_EVENTS = {
     },
   },
 
-  // --- Search (existing; staying for backward compat — rewritten in PR 2) --
+  // --- Search ---------------------------------------------------------------
   'search.duration_ms': {
     kind: 'histogram',
-    purpose: 'End-to-end FTS search latency (main-side, pre-remote-merge). Will be replaced by search.completed in PR 2.',
+    purpose: 'End-to-end FTS search latency, measured main-side before remote results are merged in.',
     tags: {
       scope: 'scope',
       folder_role: 'folder_role',
@@ -522,18 +808,26 @@ export const METRIC_EVENTS = {
   },
 
   // --- FTS / DB maintenance (existing) --------------------------------------
-  'fts.optimize.duration_ms': {
+  // §2.156: the blocking `optimize` pass was replaced by an incremental merge
+  // cycle, so the metric reports the cycle, not a single call. `work_ms` is
+  // the SUM of the synchronous merge steps (the loop time actually consumed),
+  // `max_step_ms` the longest single one — that is the number that says
+  // whether the event loop still got to breathe. Segment counts are segments
+  // now; the old pair counted 4 KB storage blocks and called them segments.
+  'fts.merge.work_ms': {
     kind: 'histogram',
-    purpose: 'FTS5 optimize pass: time and segment count before/after.',
+    purpose: 'FTS5 incremental merge cycle: total synchronous merge time, longest step, segment count before/after.',
     tags: {
+      outcome: 'string',
+      steps: 'number',
+      max_step_ms: 'number',
       segments_before: 'number',
       segments_after: 'number',
-      reduction: 'number',
     },
   },
-  'fts.optimize.failed': {
+  'fts.merge.failed': {
     kind: 'event',
-    purpose: 'FTS5 optimize threw an error.',
+    purpose: 'FTS5 incremental merge threw an error.',
     tags: {
       reason: 'string',
     },
@@ -627,6 +921,63 @@ export const METRIC_EVENTS = {
       provider: 'provider',
       consecutive: 'number',
     },
+  },
+
+  // --- §2.157 — "this mailbox needs signing in again" funnel ---------------
+  //
+  // Three events, one question each, in the order a user meets them:
+  //   account.reauth_flagged      — did the mechanism ever fire in the field?
+  //   account.reauth_badge_clicked— did the user act on it (click)?
+  //   account.reauth_cleared      — did the problem get fixed, and how fast?
+  //
+  // The pair (flagged, cleared) is the one that decides whether this feature
+  // stays: a flag rate near zero means the silent-auth-failure case is rarer
+  // than the incident suggested, and a cleared rate near zero with long
+  // durations means users see the badge and cannot act on it.
+  //
+  // NOT aggregated on purpose. All three are edge-triggered — one record per
+  // real state transition or one per click — so the volume is already bounded,
+  // and aggregation would additionally suppress the local `Metrics` log line
+  // while collection is off (see the eml.parse_dispatch note above), removing
+  // the only local evidence exactly where it is most useful.
+  //
+  // PII: NO account id on any of them. The id is a stable identifier, not an
+  // aggregate — the number of accounts involved is the aggregate, and that is
+  // what `flagged_accounts_bucket` carries. No host, no address, no provider
+  // (the service that emits these does not know one), no server text.
+  'account.reauth_flagged': {
+    kind: 'event',
+    purpose: 'A mailbox crossed the consecutive-auth-failure threshold and was flagged as needing re-authentication. Fired once per raise transition, never per failed attempt, so this counts broken credentials and not network flaps.',
+    tags: {
+      // Size of the flagged set AFTER this raise, bucketed (bucketCount). One
+      // account at a time is the expected shape. Several accounts flagging
+      // together points at us, not at the providers: a misclassification that
+      // reads a local network or TLS failure as an auth failure.
+      flagged_accounts_bucket: 'string',
+    },
+    // Emitted from electron/services/accountAuthState.ts only. A renderer must
+    // not be able to fabricate credential-failure evidence.
+    mainOnly: true,
+  },
+  'account.reauth_cleared': {
+    kind: 'event',
+    purpose: 'A mailbox stopped being flagged as needing re-authentication, tagged with why and with how long the flag stood. Answers whether the reported problem actually gets fixed and how long users spend not receiving mail.',
+    tags: {
+      reason: 'account_reauth_clear_reason',
+      flag_duration: 'account_reauth_flag_duration',
+    },
+    mainOnly: true,
+  },
+  'account.reauth_badge_clicked': {
+    kind: 'event',
+    purpose: 'User clicked the re-authentication badge, i.e. asked for the account editor to be opened. Counts clicks, not confirmed openings: it is recorded on the click and stays recorded if the open call then fails. Paired with account.reauth_flagged it measures whether the message reaches an action at all; without it a flat cleared rate cannot be told apart from a badge nobody notices.',
+    // Deliberately NOT mainOnly: the click is only distinguishable in the
+    // renderer. The account editor opens through the shared `ui:openAccount`
+    // channel, which main also serves for the ordinary Settings path, so main
+    // cannot tell the two apart. There is nothing to smuggle — the event has
+    // no tags at all, so the worst a compromised renderer can do is inflate a
+    // click counter.
+    tags: {},
   },
 
   // --- TLS trust rework (Phase A2) — cert-error recovery funnel -------------
@@ -728,11 +1079,140 @@ export const METRIC_EVENTS = {
   },
   'imap.pool_queue_wait_ms': {
     kind: 'event',
-    purpose: 'Per-account IMAP pool wait observed at withImapRetryPerAccount entry. Phase 0 records timing only (no scheduling change) — emitted only when wait_to_acquire exceeds 500ms so dashboards see the long-tail.',
+    purpose: 'Wait to enter an IMAP lock, observed at the retry-wrapper entry — `lock=pool` for the per-account pool, `lock=singleton` for the shared main-client lock. Emitted only above 500ms so dashboards see the long-tail. What we act on: a persistent `requester=interactive` long tail after §2.17 Phase 1 means priority scheduling is not reaching the queue that actually blocks the user.',
     tags: {
       requester: 'imap_pool_requester',
       wait_ms_bucket: 'string',
+      lock: 'imap_lock_kind',
     },
+  },
+  // §2.124 — off-thread MIME parsing exists because the MIME splitter yields
+  // to the event loop once per ~77 bytes, and a turn on the Electron main loop
+  // costs ~0.1–0.25 ms: a 9.6 MB message froze the UI for 17.5 s. The client
+  // deliberately falls back to the inline parse when the worker cannot start,
+  // which is the right failure policy and also the reason this metric has to
+  // exist — a missing build chunk, a dev/packaged path difference or an
+  // Electron restriction on worker_threads would leave the app fully working
+  // and 10× slower, with nothing anywhere saying so. The app's own UiFreeze
+  // watchdog cannot see it either: `monitorEventLoopDelay` measures the worst
+  // SINGLE gap between iterations, and this failure mode is thousands of
+  // microsecond yields — a 27 s inline parse never trips it (measured).
+  //
+  // What we act on:
+  //  - 'inline_unavailable' above a trickle → the feature is dead in the
+  //    field; open a build/packaging bug. This is the alarm.
+  //  - the split of 'inline_below_threshold' across size buckets → whether
+  //    EML_WORKER_MIN_BYTES (64 KiB, picked from a turn-cost model, never
+  //    validated in the field) leaves a real population of borderline parses
+  //    on the main loop. A 10-100KB band that dominates says lower it.
+  //  - 'worker_failed' concentrated in one size bucket → the worker's
+  //    resourceLimits ceiling is too low for real messages, not a pathology.
+  //
+  // PII-clean by construction: two closed enum tags. The size bucket is the
+  // same five-band vocabulary `smtp.send` already uses; no length, no UID, no
+  // folder, no filename, nothing derived from message content.
+  //
+  // NOT aggregated on purpose. Aggregation buffers for 10 s and — being itself
+  // a consent-bearing act — emits nothing at all while collection is off,
+  // which would take the local `Metrics` log line away exactly when it is the
+  // only evidence available (a fresh profile, an e2e run, a user who declined
+  // telemetry). Volume is bounded by user opens, so a record per dispatch is
+  // affordable.
+  //
+  // `mainOnly: true` — emitted from packages/net through the reportNetEvent
+  // seam, which only the main process wires. A renderer must not be able to
+  // fabricate evidence that off-thread parsing is healthy.
+  'eml.parse_dispatch': {
+    kind: 'event',
+    purpose: 'One EML parse dispatch, tagged with the path it actually took (worker / inline below threshold / inline because the worker is unavailable / failed / aborted) and the message size band. Answers "is off-thread parsing alive in the field, and is the offload threshold in the right place?".',
+    tags: {
+      path: 'eml_parse_path',
+      size_bucket: 'eml_size_bucket',
+    },
+    mainOnly: true,
+  },
+  // §2.124 — the transition, not the ongoing cost. Fired ONCE per session, on
+  // the flip into "off-thread parsing is not possible here"; `eml.parse_dispatch`
+  // carries what it costs from then on. A counter tick per message would bury
+  // the moment of failure in the volume it causes, and the reason — which is
+  // what tells a maintainer whether to look at the build, the packaging or the
+  // runtime — is only knowable at the flip.
+  //
+  // Pairs with the sanitised Sentry report the same transition emits through
+  // `reportNetError('eml.parse.worker', ...)`, which carries the closed error
+  // class and never the raw error (see services/netErrorTelemetry.ts).
+  'eml.parse_worker_unavailable': {
+    kind: 'event',
+    purpose: 'Off-thread EML parsing became impossible for the rest of the session, tagged with why. Fired once on the transition, not per message. Answers "did the parse worker silently stop existing in this build?".',
+    tags: {
+      reason: 'eml_worker_unavailable_reason',
+    },
+    mainOnly: true,
+  },
+  // §2.145 — the two parse caps, counted separately because they are separate
+  // decisions with separate consequences, and reading them as one number would
+  // hide the only one that costs a user anything.
+  //
+  // THESE ARE CAP-TRIP EVENTS, NOT UI EVENTS. The distinction matters when
+  // reading the numbers, because neither one implies a user saw anything:
+  //  - 'eml.parse_cap_hard' fires wherever the ceiling is enforced, and since
+  //    §2.145 wave 2.1 that includes the ACQUISITION boundaries. The background
+  //    offline sync refusing an oversized download trips it with no message
+  //    open and no placeholder rendered — nobody was looking. Counting it is
+  //    the point: that path is exactly where an oversized message arrives
+  //    without anyone asking for it.
+  //  - 'eml.parse_cap_soft' fires on any capped parse of a local EML, including
+  //    ones with no viewer attached — the AI attachment-list tool parses the
+  //    same file through the same path, and a trip there shows no banner to
+  //    anyone.
+  // So a hard count is "how often the policy refused a message", not "how often
+  // a user met the placeholder", and the soft count likewise. If the
+  // user-facing question is ever the one that matters, it needs its own event
+  // rather than a reinterpretation of these.
+  //
+  // What we act on:
+  //  - ANY volume of 'eml.parse_cap_hard' is a report that somebody in the field
+  //    receives mail above 100 MiB — three times the largest message our own
+  //    data has ever seen, and well beyond what most consumer providers accept
+  //    (roughly 20–50 MB), though an organisation CAN raise its own ceiling
+  //    (Microsoft 365 tops out at 150 MB), so "nobody can send this" is not the
+  //    claim; see packages/net/limits.ts for the full derivation. A non-trivial
+  //    count means the number was picked wrong, and it is the only evidence we
+  //    can have: the app does not crash, an interactive open shows a
+  //    placeholder while a background-sync refusal shows nothing to anyone, and
+  //    nothing else anywhere would say the message existed.
+  //  - the 'default'/'full' split of 'eml.parse_cap_soft' answers where the clip
+  //    point should sit. A large first-tier population against a negligible
+  //    'full' one says the tiers work; 'full' trips say the raised tier does not
+  //    keep its promise ("ask and you see the rest") and has to move.
+  //
+  // Both are `mainOnly` and both are emitted through the packages/net
+  // reportNetEvent seam, which only the main process wires — the same reason
+  // eml.parse_dispatch carries the flag: a renderer must not be able to
+  // fabricate evidence about how a message was parsed. Not aggregated, for the
+  // reason spelled out at eml.parse_dispatch: the local log line is the only
+  // evidence available while collection is off, and a cap trip is rare enough
+  // that a record per trip costs nothing.
+  //
+  // PII-clean by construction: a size band from the same five-band vocabulary
+  // used everywhere else, and a two-value enum. No length, no subject, no
+  // sender, no filename, no UID, no folder.
+  'eml.parse_cap_hard': {
+    kind: 'event',
+    purpose: 'The hard cap on raw RFC822 size refused a message — either at parse entry, or earlier at an acquisition boundary (an oversized IMAP download stopped mid-stream, an oversized local .eml refused after a stat). A refusal during an open shows a header-only placeholder; a refusal during background offline sync shows nothing to anyone. Answers "does anyone actually receive mail this size, i.e. is the cap in the right place?".',
+    tags: {
+      size_bucket: 'eml_size_bucket',
+    },
+    mainOnly: true,
+  },
+  'eml.parse_cap_soft': {
+    kind: 'event',
+    purpose: 'A decoded message body was cut at the soft cap, tagged with which tier tripped (the default limit, or the raised limit the user asked for). Usually that means a viewer showed the "beginning only" banner, but not always — any capped parse of a local .eml trips it, including the AI attachment-list tool, which renders nothing. Answers "where should the clip point sit, and is the raised tier high enough to keep its promise?".',
+    tags: {
+      size_bucket: 'eml_size_bucket',
+      tier: 'eml_body_cap_tier',
+    },
+    mainOnly: true,
   },
 
   // --- DB data-loss signals -------------------------------------------------
@@ -758,6 +1238,20 @@ export const METRIC_EVENTS = {
       folder_role: 'folder_role',
       provider: 'provider',
     },
+  },
+  'imap.header_response_unaddressable': {
+    kind: 'event',
+    purpose: 'A header FETCH response carried no usable UID, so it could not be stored and the sync run reported itself incomplete (the folder stays off covered_full instead of pinning a watermark above the hole). Counts runs, not responses. A spike names the provider whose FETCH stream is dropping UIDs.',
+    tags: {
+      folder_role: 'folder_role',
+      provider: 'provider',
+    },
+    // The FETCH stream is a main-process fact: the only legitimate emitter is
+    // packages/net, bridged through setNetEventReporter in main.ts, so nothing
+    // is silenced by refusing it from the renderer. A compromised renderer
+    // could otherwise fabricate it with in-domain tags and invent a provider
+    // regression that never happened.
+    mainOnly: true,
   },
   'db.shutdown_wal_checkpoint_ms': {
     kind: 'histogram',
@@ -879,6 +1373,46 @@ export const METRIC_EVENTS = {
     },
   },
 
+  // §2.167 — `settings:save` applied everything except one field. Sibling of
+  // `mcp.stdio.connect_blocked{reason='forbidden_field'}` above, and the
+  // contrast between the two is the point: that one counts a payload REFUSED
+  // WHOLE for reaching at a main-only field (a security event), this one counts
+  // a payload that was SAVED with one field dropped for carrying a value
+  // outside its domain (a data-hygiene event).
+  //
+  // What we will act on. A non-trivial rate means installs are carrying a
+  // persisted export-tool name this build no longer exports, and every save
+  // from those installs silently keeps the old whitelist — i.e. the settings
+  // window is round-tripping a value it should have dropped, and its whitelist
+  // edits are not landing. The fix is in the renderer (filter names outside the
+  // exported ceiling before sending), so a rate that does NOT fall after that
+  // ships means the stale value has another source. A flat zero after the
+  // renderer half lands is the signal to consider retiring this counter.
+  //
+  // PII-clean by construction: two closed enum tags, both minted in
+  // electron/settingsSaveRefusal.ts. The submitted tool name is not one of
+  // them — it is renderer input, so it never leaves the process, not even as a
+  // length or a hash.
+  //
+  // `aggregate: true` — an install in this state emits on EVERY save, including
+  // the incidental ones the main window makes (panel width, offline toggle), so
+  // the interesting quantity is a count per window, not an envelope per save.
+  //
+  // `mainOnly: true` — the verdict is main's alone; a compromised renderer must
+  // not be able to fabricate a refusal history through the `metrics:record`
+  // bridge, nor to smuggle a string past the domain check by emitting it
+  // directly.
+  'settings.field_refused': {
+    kind: 'event',
+    purpose: 'A settings:save was applied with one field dropped because its value was outside that field\'s domain, tagged with the field and a machine reason. Answers "are installs carrying settings values this build cannot accept, and which?".',
+    tags: {
+      field: 'settings_refused_field',
+      code: 'settings_refusal_code',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+
   // --- AI action audit (§3.10 P0 — preview→apply confirmation barrier) ----
   //
   // Every mutating AI MCP tool emits one of these audit events. Together
@@ -954,6 +1488,34 @@ export const METRIC_EVENTS = {
   // multi-folder batches — the surface where the codex HIGH
   // confirmation-integrity gap (forge multi-folder scope past
   // single-folder summary) lived before the renderer fix-wave.
+  // §2.123 — a chat turn used the destructive tool machinery (a *_preview or
+  // *_apply call) and ended with NOTHING armed for confirmation. The user is
+  // told so in the panel; this counter tells us how often it happens, which is
+  // the difference between "one bad model day" and "our prompt or tool surface
+  // routinely walks the model into a dead end". Structural signal only — the
+  // detector never reads model or user text (see aiTurnGuard.ts).
+  //
+  // `mainOnly: true`: the verdict is produced by the main-process turn guard
+  // from observed tool calls; a renderer emitting it would be inventing an
+  // event about main-process state it cannot see.
+  //
+  // NOT aggregated on purpose (same reasoning as account.reauth_* above). It is
+  // edge-triggered at most once per chat turn, and only on the mismatch branch,
+  // so the volume is bounded by how fast a human can send messages — there is no
+  // burst for a 10 s window to collapse. Aggregation would also suppress the
+  // local `Metrics` log line while collection is off, removing the only local
+  // evidence of a detection exactly where a developer would look for it. The
+  // disclosure pages state `Aggregated: no` for this event; flipping the flag
+  // means rewriting all six of them.
+  'ai.turn.action_not_prepared': {
+    kind: 'event',
+    purpose: 'A chat turn called a destructive *_preview/*_apply tool but registered no pending action, so no confirmation button existed at the end of the turn.',
+    tags: {
+      role: 'ai_turn_guard_role',
+      search_calls_bucket: 'ai_action_batch_bucket',
+    },
+    mainOnly: true,
+  },
   'ai.action.batch_size': {
     kind: 'event',
     purpose: 'Recorded when a preview registration includes a (potentially multi-account, multi-folder) batch. Accounts_count, emails_count and folders_count are coarse buckets — never raw integers.',
@@ -1124,6 +1686,96 @@ export const METRIC_EVENTS = {
     mainOnly: true,
   },
 
+  // --- §2.78 Compose Quick Actions — input-cap refusal -----------------------
+  //
+  // A quick action (Improve / Shorter / Formal / Fix grammar) refused the draft
+  // because it exceeded QUICK_ACTION_INPUT_CHAR_CAP. Recorded at the refusal
+  // point in electron/services/ai.ts, BEFORE provider selection and before any
+  // budget reservation — so it is free, and it is the only signal this outcome
+  // produces (the `ai.quick_action.rewrite` span deliberately covers provider
+  // calls only, so a refusal never opens one).
+  //
+  // Question it answers: is the 8000-character cap a reasonable ceiling or is
+  // it in the way of ordinary long emails? Without this counter the question is
+  // unanswerable — the refusal is invisible to every other metric. A high rate
+  // in the lowest REACHABLE bucket ('8k-12k' — '<=8k' never fires, the event is
+  // only recorded above the cap) means the cap is too tight for real drafts; a
+  // rate concentrated in the top buckets means it is doing its job against
+  // pathological pastes.
+  //
+  // PII boundary: two closed enums and nothing else. `preset` is the four-value
+  // preset identity already used by the span; `length_bucket` is a coarse
+  // bucket, never the raw character count. No draft text, no fragment of it, no
+  // exact length, no address, no account id.
+  'ai.quick_action.input_too_long': {
+    kind: 'event',
+    purpose: 'A compose quick action refused the draft because it exceeded the input character cap (§2.78). Recorded before provider selection and before any budget reservation, so the refusal costs nothing and emits no rewrite span.',
+    tags: {
+      preset: 'ai_quick_action_preset',
+      length_bucket: 'ai_quick_action_length_bucket',
+    },
+    mainOnly: true,
+  },
+
+  // §3.3 B7 — the proofread check refused a draft over its input cap. Same
+  // question as the quick-action counter above ("is the 8000-character cap in
+  // the way of ordinary long emails?"), asked separately because the two caps
+  // can move independently and because the stakes differ: a truncated proofread
+  // would report "no mistakes" for the part it never read, so this cap refuses
+  // rather than checking half a letter.
+  //
+  // One coarse bucket and nothing else — no preset (a check has none), no exact
+  // length, no draft text, no account id.
+  'ai.proofread.input_too_long': {
+    kind: 'event',
+    purpose: 'A proofread check refused the draft because it exceeded the input character cap (§3.3 B7). Recorded before provider selection and before any budget reservation, so the refusal costs nothing and emits no check span.',
+    tags: {
+      length_bucket: 'ai_quick_action_length_bucket',
+    },
+    mainOnly: true,
+  },
+
+  // --- §3.3.B4.f5 Compose Quick Actions — what happened to the preview -------
+  //
+  // The user was shown a rewrite in the review panel and made one of the three
+  // explicit choices it offers: Replace, Insert at cursor, or Cancel.
+  //
+  // Question it answers: is the rewrite feature producing text people actually
+  // take? Every other quick-action signal stops at "a rewrite was produced" —
+  // the span records latency and provider, the refusal counter records what
+  // never reached a model. None of them can distinguish a feature people use
+  // from a feature people look at once and dismiss, and that is exactly the
+  // decision this counter has to inform (invest in the corrector on top of it,
+  // or retire it). A population dominated by 'cancelled' means the rewrites are
+  // not worth taking; a healthy 'replaced' share is what makes B7 worth
+  // building on this panel.
+  //
+  // NOT mainOnly: the renderer is the only process that knows the outcome —
+  // the choice never crosses IPC (Replace and Insert are local edits to the
+  // draft the user has not sent yet). It ships over the whitelisted
+  // `metrics:record` channel, whose tag values main re-validates against the
+  // two closed enums below.
+  //
+  // Deliberate blind spot, so nobody reads the ratio as exhaustive: a preview
+  // that goes away WITHOUT a choice — the compose window closed, another preset
+  // started over it — records nothing. Inventing an 'abandoned' member would
+  // mean reporting an outcome from an unmount, which cannot distinguish "the
+  // user walked away" from "React re-rendered". Sum(outcomes) is therefore ≤
+  // the number of previews shown, and the interesting ratio is replaced+
+  // inserted vs cancelled WITHIN the recorded population.
+  //
+  // PII boundary: two closed enums and nothing else. Not the draft, not its
+  // length, not the number of edits the panel found, not the account id —
+  // nothing derived from the text in any way.
+  'ai.quick_action.preview_outcome': {
+    kind: 'event',
+    purpose: 'What the user did with a Compose Quick Actions rewrite they were shown: replaced their own text with it, inserted it at the cursor, or dismissed it (§3.3.B4.f5). Recorded in the renderer, where the choice happens; a preview dismissed without a choice records nothing.',
+    tags: {
+      preset: 'ai_quick_action_preset',
+      outcome: 'ai_quick_action_outcome',
+    },
+  },
+
   // --- §2.19 Auto-update UX -------------------------------------------------
   //
   // Visibility into the auto-update funnel: how often users (or the timer)
@@ -1211,15 +1863,31 @@ export const METRIC_EVENTS = {
     },
     aggregate: true,
   },
+  // §2.156: `top_inflight` used to name the oldest inflight IPC channel while
+  // reading as "the culprit". It is not one — a handler awaiting the network
+  // or delegating to the search worker holds no event-loop time at all, and in
+  // the field it blamed `net:setSeen` for a 67 s freeze. The tag is renamed to
+  // what it actually is; attribution for the main-process freeze now comes
+  // from `top_sql` / `sql_ms`, measured around the synchronous SQLite calls
+  // themselves (packages/db/sqlTiming.ts). `top_sql` is a two-identifier
+  // "<verb> <table>" digest of our own SQL — never a bind value.
   'ui.freeze.renderer_ms': {
     kind: 'histogram',
     purpose: 'Renderer event loop was blocked longer than the freeze threshold.',
     tags: {
       duration_bucket: 'string',
       inflight_count: 'number',
-      top_inflight: 'string',
+      oldest_inflight: 'string',
     },
     aggregate: true,
+    // Named for the renderer, emitted by MAIN: the renderer reports its own lag
+    // as numbers over the `log:uiFreeze` channel, and registerUiFreezeHandler
+    // turns that into this metric with tags derived from `inflightIpc` — a map
+    // the renderer cannot write to. `oldest_inflight` is a free-form `string`
+    // that the per-tag enum check cannot narrow, so without this flag a
+    // compromised renderer could post `metrics:record` with message content in
+    // it. Same defect as `ui.freeze.main_ms` below, same fix.
+    mainOnly: true,
   },
   'ui.freeze.main_ms': {
     kind: 'histogram',
@@ -1227,9 +1895,21 @@ export const METRIC_EVENTS = {
     tags: {
       duration_bucket: 'string',
       inflight_count: 'number',
-      top_inflight: 'string',
+      oldest_inflight: 'string',
+      top_sql: 'string',
+      sql_ms: 'number',
     },
     aggregate: true,
+    // Emitted ONLY by startMainLoopFreezeWatchdog in main. `top_sql` and
+    // `oldest_inflight` are free-form `string` tags, and the schema's per-tag
+    // enum check cannot narrow them — so without this flag a compromised
+    // renderer could post `metrics:record` with `top_sql: '<any text>'` and
+    // push a subject line, an address or a search query into Sentry under a
+    // name the disclosure page describes as "verb + table". The renderer has
+    // no legitimate reason to emit this: its own freeze report travels over
+    // the dedicated `log:uiFreeze` channel as numbers, and main is what turns
+    // that into `ui.freeze.renderer_ms`.
+    mainOnly: true,
   },
 
   // --- §2.25 (re-diagnosis) — centralized external-open gate ---------------
@@ -1255,6 +1935,81 @@ export const METRIC_EVENTS = {
       source: 'external_open_source',
     },
     aggregate: true,
+    mainOnly: true,
+  },
+
+  // --- §2.93(a) — native context menu --------------------------------------
+  //
+  // Usage signal for the context menu the app gained in §2.93(a): is it live,
+  // and what do people right-click on? `ui.context_menu_shown` fires once per
+  // popped menu with the SECTION it offered; `ui.context_menu_link_action`
+  // fires when one of the two link items is activated (the edit items use
+  // Electron menu roles, which ignore `click`, so they have no per-action
+  // record — the shown event covers them).
+  //
+  // Both are `mainOnly: true` — they are emitted from the main-process
+  // `context-menu` handler only, so a compromised renderer cannot forge them
+  // at the metrics IPC bridge. PII-clean by construction: the tags are fixed
+  // enums computed from the menu plan; the link URL, the link text and the
+  // selected text never leave the handler.
+  'ui.context_menu_shown': {
+    kind: 'event',
+    purpose: 'The native context menu was shown; `context` says which section it offered (link / editable field / selection).',
+    tags: {
+      context: 'context_menu_context',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  'ui.context_menu_link_action': {
+    kind: 'event',
+    purpose: 'A link item of the native context menu was activated (open in browser / copy link address).',
+    tags: {
+      action: 'context_menu_link_action',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  'ui.context_menu_spell_action': {
+    kind: 'event',
+    purpose: 'A spelling item of the native context menu was activated (replacement applied / word added to the personal dictionary).',
+    tags: {
+      action: 'context_menu_spell_action',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+
+  // --- §2.103 spell checking ------------------------------------------------
+  //
+  // Two questions, and both are ones we would act on: is the feature used at
+  // all (it costs a native dialog and a settings section — if nobody arms it,
+  // that is a signal), and how often does the dictionary-download consent get
+  // refused (a high refusal rate means the prompt's wording, not the feature,
+  // is the problem). `mainOnly: true` on both — they are emitted from the
+  // main-process service, and a renderer must not be able to forge either an
+  // "enabled" count or a consent outcome.
+  //
+  // PII: `language_count` is a NUMBER of languages, never their names. Which
+  // dictionaries a person enables says what languages they read and write.
+  'spellcheck.configured': {
+    kind: 'event',
+    purpose: 'Spell checking state as applied to the browser session (at launch and after each settings save): whether it is armed, how many dictionaries are enabled, and whether the OS owns the language list (macOS).',
+    tags: {
+      enabled: 'boolean',
+      language_count: 'number',
+      platform_owned: 'boolean',
+    },
+    aggregate: true,
+    mainOnly: true,
+  },
+  'spellcheck.dictionary_consent': {
+    kind: 'event',
+    purpose: 'Outcome of the native prompt asking to download a hunspell dictionary from the third-party CDN, with the number of languages it covered.',
+    tags: {
+      outcome: 'spellcheck_consent_outcome',
+      language_count: 'number',
+    },
     mainOnly: true,
   },
 
@@ -1290,6 +2045,66 @@ export const METRIC_EVENTS = {
       surface: 'secret_store_surface',
       platform: 'platform',
     },
+    mainOnly: true,
+  },
+  // --- §2.122 — AI API key storage operations --------------------------------
+  //
+  // The question this answers: do stored AI keys stay stored? A user lost five
+  // of them, and the local log held zero lines about the secret store for a
+  // whole day of runtime, so "the key survived a restart, but that does not
+  // always happen" could not be checked against anything. The counter makes the
+  // shape visible in aggregate: writes that succeed followed by reads that come
+  // back 'absent' is a key evaporating; 'store_error' is the keychain being
+  // unreachable, which is a different failure with a different fix.
+  //
+  // We will act on it: a non-trivial absent-after-write rate reopens the
+  // storage path, and a store_error rate reopens the keychain fallback.
+  //
+  // PII-clean by construction: three closed enum tags. The key itself never
+  // appears — not as a value, not as a length, not as a hash. Neither does the
+  // backend's error text (that stays in the local log as a class name plus a
+  // message LENGTH, and in the captured exception).
+  //
+  // `mainOnly: true` — emitted only by electron/services/ai.ts in the main
+  // process; a compromised renderer must not be able to fabricate a storage
+  // history through the `metrics:record` bridge.
+  //
+  // `aggregate: true` — a read happens on every AI request, so the events are
+  // buffered and flushed as counts rather than one envelope per keystroke of
+  // work.
+  // §2.119 — a change of the address AI requests (and with them the API key)
+  // are sent to was put in front of the user. We will act on it: a decline
+  // rate that is anything but near-zero means the prompt is firing for changes
+  // the user did not make — either a normalisation gap in
+  // electron/services/aiDestination.ts (the same destination asked about
+  // twice) or something writing the setting behind the user's back, and both
+  // are bugs to open. A 'blocked_busy' that is not vanishingly rare means
+  // something is driving `settings:save` in a loop.
+  //
+  // PII-clean by construction: two closed enum tags, and the destination is
+  // not one of them.
+  //
+  // `mainOnly: true` — only electron/services/aiDestinationGuard.ts emits it;
+  // a compromised renderer must not be able to fabricate a history of
+  // confirmations it never obtained through the `metrics:record` bridge.
+  'ai.destination_confirm': {
+    kind: 'event',
+    purpose: 'A change of the AI endpoint or proxy address was put to the user for native confirmation, tagged with the field and the outcome. Answers "is the destination gate firing only when a human really changed the address, and what do they answer?".',
+    tags: {
+      field: 'ai_destination_field',
+      outcome: 'ai_destination_outcome',
+    },
+    mainOnly: true,
+  },
+  'ai.api_key_store_op': {
+    kind: 'event',
+    purpose: 'An AI API key was read from / written to / deleted from the OS secret store, tagged with the provider and the outcome. Answers "do stored keys stay stored, and when they do not, was it an empty store or a broken one?".',
+    tags: {
+      op: 'ai_key_op',
+      provider: 'ai_key_provider',
+      outcome: 'ai_key_outcome',
+    },
+    aggregate: true,
     mainOnly: true,
   },
   // §2.82 — the user pressed "allow" on the consent screen. That is the ONLY
@@ -1466,9 +2281,11 @@ export const ELECTRON_SPANS = {
   // provider id, was_local, token counts, latency, bucketed error class) — the
   // draft text and rewritten output NEVER appear here (privacy invariants at the
   // top of file). Structured refusals with no provider call (empty_input /
-  // no_provider / budget) emit no span.
+  // too_long / no_provider / budget) emit no span — the `too_long` refusal
+  // (§2.78) has its own counter, `ai.quick_action.input_too_long` above; the
+  // other three remain uncounted by design.
   'ai.quick_action.rewrite': {
-    purpose: 'One compose quick-action rewrite generation (§3.3 B4): preset → provider call → whole rewritten text. Emitted only when a provider call was made; empty-input/no-provider/budget refusals emit no span.',
+    purpose: 'One compose quick-action rewrite generation (§3.3 B4): preset → provider call → whole rewritten text. Emitted only when a provider call was made; empty-input/too-long/no-provider/budget refusals emit no span (too-long is counted by ai.quick_action.input_too_long).',
     attributes: {
       preset: 'ai_quick_action_preset',
       provider: 'ai_provider',
@@ -1495,6 +2312,133 @@ export const ELECTRON_SPANS = {
       latency_ms: 'number',
       error_class: 'ai_summary_error_class',
       draft_count: 'number',
+    },
+  },
+  // §3.3 B7 AI Proofread — one span per check that reached a provider.
+  //
+  // `edit_count` is how many edits the user was offered; `dropped_count` is how
+  // many model proposals could NOT be anchored in the draft and were discarded
+  // (§3.3 B7 AC-e). The pair is the whole reason this span exists beyond
+  // latency: a rising `dropped_count` against a flat `edit_count` is the signal
+  // that the model has started returning snippets it did not copy out of the
+  // draft, which is invisible to the user (they simply see a shorter list) and
+  // invisible to every other metric. That is a regression we would act on by
+  // changing the prompt or the provider default.
+  //
+  // PII boundary: counts, provider identity, token counts, latency and a closed
+  // error class. The edits themselves — the draft snippet, the replacement and
+  // the model-authored explanation — never appear here, and the explanation in
+  // particular is third-party free text that is displayed and nothing else.
+  'ai.proofread.check': {
+    purpose: 'One proofread check (§3.3 B7): own-text draft → provider call → list of individually acceptable edits. Emitted only when a provider call was made; empty-input/too-long/opt-out/no-own-text/no-provider/budget refusals emit no span (too-long is counted by ai.proofread.input_too_long).',
+    attributes: {
+      provider: 'ai_provider',
+      was_local: 'boolean',
+      tokens_in: 'number',
+      tokens_out: 'number',
+      latency_ms: 'number',
+      error_class: 'ai_summary_error_class',
+      edit_count: 'number',
+      dropped_count: 'number',
+    },
+  },
+  // §3.3 B6 AI Translate — one span per translation the user asked for,
+  // INCLUDING the ones served from the local cache (`cache_hit: true`, no
+  // provider call, no tokens, no audit row). The cache hits are in deliberately:
+  // without them the span answers "how often did we pay to translate" and not
+  // "how often did people translate", and the ratio between those two is the
+  // whole question the cache exists to move.
+  //
+  // `target_lang` is the closed sixteen-code enum — the language the USER asked
+  // for, which answers whether the offered list matches what people translate
+  // into. `source_labeled` is a BOOLEAN and deliberately not a language:
+  // the source is derived from the body of the user's mail, and every event
+  // carries `install_id_hash` as the Sentry `user.id`, so naming it would ship a
+  // fact built from the user's text against a stable pseudonymous identity —
+  // which `telemetryConsent.never.bodies` promises we do not do (§3.3.B6.f1; see
+  // the `translate_language` domain comment for the full retraction and for the
+  // two spell-checker precedents that already decided this question). The
+  // boolean still answers what the attribute existed for: how often local
+  // detection is not confident enough to caption the result. `error_class`
+  // distinguishes a provider failure from our own bug from an unusable/truncated
+  // completion (both of the latter are 'parse_error' here: a translation the
+  // provider says it cut off is refused rather than shown, and that refusal must
+  // be visible).
+  //
+  // PII boundary: provider identity, token counts, latency, ONE user-chosen
+  // language code and three booleans. The message text, the translation, the
+  // SOURCE language, the subject, the addresses, the folder name and the account
+  // id NEVER appear here.
+  'ai.translate.message': {
+    purpose: 'One message translation (§3.3 B6): cached message text → provider call → translated plain text. Emitted for cache hits too (cache_hit distinguishes them); opt-out/empty/too-long/no-provider/budget refusals emit no span. source_labeled says only WHETHER a source language was determined, never which.',
+    attributes: {
+      provider: 'ai_provider',
+      was_local: 'boolean',
+      tokens_in: 'number',
+      tokens_out: 'number',
+      latency_ms: 'number',
+      error_class: 'ai_summary_error_class',
+      source_labeled: 'boolean',
+      target_lang: 'translate_language',
+      cache_hit: 'boolean',
+    },
+  },
+  // §3.3 B6 part 2 (draft side) — one span per draft translation the user asked
+  // for. A SEPARATE span from `ai.translate.message` rather than a `direction`
+  // attribute on it: the two answer different questions (how often is received
+  // mail translated, versus how often is written mail), they have different
+  // attribute sets (there is no cache and no source label here), and collapsing
+  // them would make every existing query about the reading side silently start
+  // counting drafts.
+  //
+  // `target_lang` is the closed sixteen-code enum — the language the USER named
+  // in the picker, which answers whether the offered list matches what people
+  // write in. It ships on exactly the ground its reading-side twin does: a code
+  // the user chose in the interface, not one derived from anybody's mail.
+  //
+  // ── WHY THERE IS NO SUGGESTION FLAG, AND WHY IT MAY NOT COME BACK ──
+  //
+  // The first version of this span carried a boolean saying whether the target
+  // the user asked for had started as the language we suggested from the message
+  // being replied to. It was REMOVED BEFORE SHIPPING, and the reason is not a
+  // privacy judgement — it is that the attribute was broken. Nothing on the
+  // `ai:translate:draft` channel carries the fact: the schema has no origin
+  // field, main cannot derive one, so the attribute reported `false` on every
+  // single request regardless of the truth. A metric that always answers the
+  // same wrong thing is worse than an absent one — it invites exactly the
+  // conclusion it cannot support ("nobody accepts our suggestions"), and
+  // CLAUDE.md §8 "measure what you'll act on" rules it out.
+  //
+  // Do NOT close the gap by adding an origin field to the channel. That would be
+  // a RENDERER CLAIM ABOUT ITS OWN STATE on a channel whose entire design is
+  // that main verifies what it is told; main could neither confirm nor refute
+  // it, so the attribute would be trustworthy only as far as the renderer is —
+  // which is the assumption this feature is built not to make. Reviving the
+  // product question ("do people accept the suggestion?") needs a carrier main
+  // can stand behind, and its own boundary review.
+  //
+  // Note what removing it also dissolved, since an open question was recorded
+  // here before: with no suggestion flag there is no `target_lang` + "came from
+  // a suggestion" pairing, so nothing on this span weakly discloses the language
+  // of INCOMING mail — the fact §3.3.B6.f1 deliberately retracted from the
+  // reading span (where the source language became the boolean
+  // `source_labeled`). What remains is a language the user picked, which was
+  // never the concern.
+  //
+  // PII boundary: provider identity, token counts, latency, ONE user-chosen
+  // language code and one boolean. The draft text, the translation, the
+  // SUGGESTED language, the draft's own language, the recipients, the subject
+  // and the account id NEVER appear here.
+  'ai.translate.draft': {
+    purpose: 'One draft translation (§3.3 B6 draft side): the user\'s own part of a compose draft → provider call → translated plain text. Emitted only when a provider was selected; opt-out/empty/too-long/no-own-text/no-provider/budget refusals emit no span. Neither the suggested language nor whether the target came from a suggestion is ever reported.',
+    attributes: {
+      provider: 'ai_provider',
+      was_local: 'boolean',
+      tokens_in: 'number',
+      tokens_out: 'number',
+      latency_ms: 'number',
+      error_class: 'ai_summary_error_class',
+      target_lang: 'translate_language',
     },
   },
 } as const satisfies Record<string, { purpose: string; attributes: Record<string, TagSpec> }>
@@ -1577,6 +2521,9 @@ export const METRIC_SPAN_OP: Record<MetricSpanName, string> = {
   'ai.thread_summary.generate': 'ai.thread_summary.generate',
   'ai.quick_action.rewrite': 'ai.quick_action.rewrite',
   'ai.instant_reply.generate': 'ai.instant_reply.generate',
+  'ai.proofread.check': 'ai.proofread.check',
+  'ai.translate.message': 'ai.translate.message',
+  'ai.translate.draft': 'ai.translate.draft',
   // DB-layer.
   'db.upsert_messages': 'db.upsert_messages',
   'db.reconcile_uids': 'db.reconcile_uids',

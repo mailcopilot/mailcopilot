@@ -10,6 +10,11 @@ const ALLOWED_INVOKE_CHANNELS = [
   'accounts:getCurrent',
   'accounts:autoconfig',
   'accounts:removePreview',
+  // §2.157 — read-only snapshot of which accounts main believes need
+  // re-authentication: `{ needsReauth: number[] }`, account ids only. Pull
+  // companion of the `accounts:authStateChanged` broadcast below, for windows
+  // that open after the flag was raised.
+  'accounts:authState',
   'oauth:google:connect',
   'oauth:microsoft:connect',
   'net:testImap',
@@ -162,6 +167,58 @@ const ALLOWED_INVOKE_CHANNELS = [
   //     CLAUDE.md §5). Per-account opt-in gated (aiInstantReplyEnabled), read-only.
   'ai:quickAction:rewrite',
   'ai:instantReply:generate',
+  // §3.3 B7 AI Proofread.
+  //   ai:proofread:check — request { accountId, text } → a LIST of individually
+  //     acceptable edits, each addressed as a (offset, length) span into the
+  //     exact string that was sent, plus its replacement. Read-only: nothing is
+  //     written back to the draft, and the send path never consults the result
+  //     (the corrector is informational and can never block sending). Main
+  //     re-splits the received text with splitComposeBody() and confines both
+  //     the prompt and every returned span to the part ITS OWN split classifies
+  //     as the user's text (§2.78; that split is a best-effort read of flat
+  //     text, §2.173 — not an authoritative boundary), wraps it with
+  //     wrapUntrusted(), and gates on the per-account aiProofreadEnabled opt-in
+  //     (fail-closed OFF).
+  'ai:proofread:check',
+  // §3.3 B6 AI Translate (read side).
+  //   ai:translate:message — request { accountId, folder, uid, targetLang,
+  //     sourceLang? } → the message translated into targetLang, as PLAIN TEXT.
+  //     The renderer sends NO body text: main reads the canonical text from the
+  //     local SQLite cache by (accountId, folder, uid) and wraps it with
+  //     wrapUntrusted() before prompting. `targetLang` / `sourceLang` are
+  //     members of a closed sixteen-value enum, mapped to the prompt through a
+  //     fixed table in packages/core/language.ts — the renderer never composes
+  //     the model instruction. Per-account opt-in gated (aiTranslateEnabled,
+  //     fail-closed OFF), budget-capped, never automatic: a translation only
+  //     ever happens on an explicit user action. Read-only — nothing is written
+  //     to the message and no destructive path is touched. The response carries
+  //     `translatedText` and has NO html field: it is model output derived from
+  //     untrusted mail and must be rendered as text, never as markup.
+  'ai:translate:message',
+  // §3.3 B6 AI Translate (draft side).
+  //   ai:translate:draft — request { accountId, text, targetLang } → the user's
+  //     own part of the compose draft, translated into targetLang, as PLAIN
+  //     TEXT. Unlike its reading-side sibling this channel DOES carry text: a
+  //     draft exists only in the compose window, so there is no cached canonical
+  //     copy for main to resolve — the same concession ai:proofread:check makes,
+  //     and bounded the same way. Main does not trust the renderer's claim that
+  //     it sent only own text: it re-splits the payload with splitComposeBody()
+  //     (§2.78), prompts ONLY the part its own split calls the user's text, and
+  //     returns that translation with any quote / forward banner / signature it
+  //     found in the payload restored byte-for-byte around it. The draft is
+  //     wrapped with wrapUntrusted() before prompting; `targetLang` is a member
+  //     of the same closed sixteen-value enum mapped through the fixed table in
+  //     packages/core/language.ts, so the renderer never composes the model
+  //     instruction, and there is no free-form instruction field on the channel.
+  //     Per-account opt-in gated on the SAME aiTranslateEnabled setting as the
+  //     reading side (fail-closed OFF, enforced in main regardless of what the
+  //     renderer draws), budget-capped, and never automatic: no translation
+  //     happens on window open, on the suggested language appearing, or on the
+  //     user changing it — only on an explicit press. Read-only: nothing is
+  //     written back to the draft and the send path never consults the result.
+  //     The response carries `translatedText` and has NO html field — it is
+  //     model output derived from untrusted text and must be rendered as text.
+  'ai:translate:draft',
   // §3.10 P0: renderer-driven confirmation gate. The token returned by
   // `ai:action:apply` is the structural barrier between AI proposing a
   // mutating action and the underlying callback firing — main-only
@@ -250,6 +307,11 @@ const ALLOWED_LISTEN_CHANNELS = [
   'main-process-message',
   'settings:changed',
   'accounts:changed',
+  // §2.157 — edge-triggered: emitted only when the set of accounts needing
+  // re-authentication actually changes. Payload `{ needsReauth: number[] }` —
+  // ids only, no addresses, host names or server error text (it reaches every
+  // open window). State lives in electron/services/accountAuthState.ts.
+  'accounts:authStateChanged',
   'compose:init',
   'mail:link',
   'mail:exists',
@@ -303,6 +365,19 @@ const ALLOWED_LISTEN_CHANNELS = [
   // can scope printing to the focused message-body iframe rather than the
   // whole window chrome. Payload-less notification.
   'mail:print',
+  // §2.99 — the user clicked a new-mail notification shown by the main
+  // process. Payload: { accountId: number, folder: string, uid: number } —
+  // IDENTIFIERS ONLY. The subject and the sender that the OS notification
+  // displayed are deliberately not here: the renderer looks the message up in
+  // the local cache by this ref, so no mail content crosses the bridge and a
+  // stale ref opens nothing rather than showing text of unknown provenance.
+  'mail:openRef',
+  // §2.94 — coarse progress of an interactive OAuth connection, so the
+  // account wizard can show what it is waiting on instead of leaving the
+  // provider picker up for the ~60s of post-browser server probing.
+  // Payload: { provider: 'gmail' | 'outlook', stage: OAuthConnectStage } —
+  // no addresses, names or tokens (it reaches every open window).
+  'oauth:progress',
 ] as const
 
 type InvokeChannel = typeof ALLOWED_INVOKE_CHANNELS[number]
@@ -323,6 +398,65 @@ function channelMap(channel: ListenChannel) {
     LISTENER_MAP.set(channel, m)
   }
   return m
+}
+
+/**
+ * §2.99 (review M1) — replay-on-subscribe for `mail:openRef`.
+ *
+ * A notification click can create the window, and main sends the ref on
+ * `did-finish-load` — which fires BEFORE React mounts the effect that
+ * subscribes. Without a buffer that click is silently lost: the app comes to
+ * the front showing whatever it showed last.
+ *
+ * Scope is deliberately one channel and one value: this is a user gesture that
+ * must not evaporate, not a general event log. The buffer is cleared as soon as
+ * it is delivered, so a later subscriber cannot resurrect an old click, and it
+ * is replaced (never queued) so a burst of clicks opens the last one.
+ *
+ * The listener runs at module scope so the buffering starts when the preload
+ * does — earlier than any renderer code can run.
+ */
+let bufferedMailOpenRef: unknown = null
+let mailOpenRefHasListener = false
+ipcRenderer.on('mail:openRef', (_event, payload: unknown) => {
+  if (mailOpenRefHasListener) return
+  bufferedMailOpenRef = payload
+})
+
+/**
+ * Deliver a buffered ref to the listener that just attached, once.
+ *
+ * The delivery is asynchronous (the caller is still inside its own `on()` call
+ * and may not be ready to be re-entered), which opens a window in which that
+ * listener can detach again — an effect that unsubscribes immediately, or an
+ * HMR swap. Handing the click to a listener that is no longer registered would
+ * lose it exactly as the missing buffer did, so at fire time the registration
+ * is re-checked against the same map `off()` maintains, and a click whose
+ * listener went away is PUT BACK for the next subscriber (review round 2,
+ * MEDIUM-1).
+ */
+function replayBufferedMailOpenRef(listener: RendererListener): void {
+  if (bufferedMailOpenRef === null) return
+  const payload = bufferedMailOpenRef
+  bufferedMailOpenRef = null
+  setTimeout(() => {
+    const subscribers = LISTENER_MAP.get('mail:openRef')
+    // The original subscriber first; otherwise whoever replaced it (an HMR swap
+    // consumed the buffer under the old listener's name, and the click belongs
+    // to the app, not to a particular closure).
+    const target = subscribers?.has(listener)
+      ? listener
+      : subscribers && subscribers.size > 0
+        ? [...subscribers.keys()][0]
+        : null
+    if (!target) {
+      // Nobody at all: put the click back for the next subscriber, unless a
+      // newer one has already taken the slot.
+      if (bufferedMailOpenRef === null) bufferedMailOpenRef = payload
+      return
+    }
+    try { target(payload) } catch { /* renderer-side failure is not ours */ }
+  }, 0)
 }
 
 // Detect initial theme from additionalArguments (synchronous, no IPC round-trip).
@@ -367,6 +501,12 @@ contextBridge.exposeInMainWorld('api', {
     const wrapped: IpcListener = (_event, ...args) => listener(...args)
     m.set(listener, wrapped)
     ipcRenderer.on(channel, wrapped)
+    // §2.99 (review M1) — hand over a notification click that arrived before
+    // this subscription existed.
+    if (channel === 'mail:openRef') {
+      mailOpenRefHasListener = true
+      replayBufferedMailOpenRef(listener)
+    }
   },
   off: (channel: ListenChannel, listener: RendererListener) => {
     if (!(ALLOWED_LISTEN_CHANNELS as readonly string[]).includes(channel)) {
@@ -377,7 +517,12 @@ contextBridge.exposeInMainWorld('api', {
     if (!wrapped) return
     ipcRenderer.off(channel, wrapped)
     m?.delete(listener)
-    if (m && m.size === 0) LISTENER_MAP.delete(channel)
+    if (m && m.size === 0) {
+      LISTENER_MAP.delete(channel)
+      // Nobody is listening again (HMR, window teardown): resume buffering so a
+      // click landing in the gap is not lost either.
+      if (channel === 'mail:openRef') mailOpenRefHasListener = false
+    }
   },
   /**
    * Fire-and-forget telemetry from the renderer. Uses ipcRenderer.send (no
@@ -405,5 +550,14 @@ contextBridge.exposeInMainWorld('api', {
     }
     // Safety net: also remove any untracked listeners
     ipcRenderer.removeAllListeners(channel)
+    if (channel === 'mail:openRef') {
+      mailOpenRefHasListener = false
+      // `removeAllListeners` dropped the module-scope buffering listener too —
+      // re-register it, or the next click before a subscriber would vanish.
+      ipcRenderer.on('mail:openRef', (_event, payload: unknown) => {
+        if (mailOpenRefHasListener) return
+        bufferedMailOpenRef = payload
+      })
+    }
   },
 })

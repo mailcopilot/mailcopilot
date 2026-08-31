@@ -1,6 +1,19 @@
 export { substituteVars } from './templateVars'
 
-export { buildThreadRows, type ThreadRow } from './threading'
+export {
+  buildThreadRows,
+  countSelectedRows,
+  firstSelectedRow,
+  leadKeyOfRowContaining,
+  pickThreadOpenTarget,
+  rowContaining,
+  rowIsSelected,
+  rowLeadKeyFor,
+  singleMessageRow,
+  toggleRowSelection,
+  type RowSelectionToggle,
+  type ThreadRow,
+} from './threading'
 
 export { resolveThreadItems, expandBulkToThreads } from './threadActions'
 
@@ -52,6 +65,14 @@ export {
 } from './mail'
 
 export {
+  extractImageSrcCids,
+  selectCidPartsToInline,
+  selectPartsToHide,
+  MAX_INLINE_CID_PARTS,
+} from './cidRefs'
+export type { InlineCidCandidate, ResolvedCidPart } from './cidRefs'
+
+export {
   normalizeExternalUrl,
   buildRoutedMailLink,
   isRoutedMailLink,
@@ -61,6 +82,17 @@ export {
   matchCondition,
   matchRule,
   evaluateRules,
+  findMailRuleRefusal,
+  findEncodedMailRuleRefusal,
+  parseMailRuleParts,
+  RULE_OPS,
+  RULE_ACTION_TYPES,
+  formatMailRuleRefusal,
+  parseMailRuleRefusal,
+  mailRuleRefusalError,
+  MAIL_RULE_REFUSED_ERROR,
+  type MailRuleRefusal,
+  type MailRuleRefusalReason,
   type RuleField,
   type RuleOp,
   type RuleCondition,
@@ -122,6 +154,22 @@ export {
   isLinuxInstallerError,
 } from './transientErrors'
 
+// §2.127 — user-facing error presentation. Only the RENDERER half of
+// errorPresentation.ts is re-exported here: the renderer decodes the tag the
+// main-process funnel embedded and picks a sentence from a closed vocabulary.
+// The encoder side (`presentedIpcMessage`, `describeErrorForLog`) is
+// main-process-only and stays on the deep path `@mailcopilot/core/errorPresentation`,
+// so a renderer file cannot reach for it by autocomplete.
+export {
+  ERROR_PRESENTATION_KEYS,
+  ERROR_PRESENTATION_I18N_KEYS,
+  isErrorPresentationKey,
+  classifyErrorPresentation,
+  decodeErrorPresentation,
+  stripErrorPresentation,
+  type ErrorPresentationKey,
+} from './errorPresentation'
+
 export {
   isKeychainUnavailableError,
   KEYCHAIN_UNAVAILABLE_RE,
@@ -134,6 +182,12 @@ export {
 } from './quotedText'
 
 export {
+  analyzeTableReferences,
+  type SqlTableReferences,
+  type SqlGuardRefusalReason,
+} from './sqlGuard'
+
+export {
   scrubUserPathsShape,
   scrubEmailAddressesShape,
   scrubEventPiiWith,
@@ -141,3 +195,47 @@ export {
   type ScrubbableEvent,
   type ScrubbableLog,
 } from './piiScrub'
+
+export {
+  splitComposeBody,
+  joinComposeBody,
+  type ComposeBodySplit,
+} from './composeBody'
+
+// §3.3.B4.f5 — segmentation of an AI rewrite for the Compose review panel.
+// Pure and DOM-free on purpose: the same functions back the per-edit corrector
+// (B7), which has no panel of its own.
+export {
+  diffComposeText,
+  segmentComposeEdit,
+  applyComposeDiff,
+  changedBlockIds,
+  summarizeEqualBlock,
+  COMPOSE_DIFF_COLLAPSE_MIN_CHARS,
+  COMPOSE_DIFF_COLLAPSE_MIN_LINES,
+  type ComposeDiffBlock,
+  type ComposeDiffBlockKind,
+  type ComposeDiffOp,
+  type ComposeDiffResult,
+  type ComposeDiffSegment,
+  type ComposeDiffEqualSummary,
+  // §3.3 B7 — span-addressed edits. Identity is a span in the draft, never a
+  // position in a list (§2.251), so a per-edit acceptance survives a
+  // regeneration of the preview it was made in.
+  composeEditId,
+  resolveComposeEdits,
+  applyComposeEdits,
+  COMPOSE_EDIT_MAX_SPAN_CHARS,
+  type ComposeEditSpan,
+  type ComposeEditProposal,
+  type ResolvedComposeEdit,
+} from './composeDiff'
+
+// §2.99 — one badge-inclusion policy for the in-app badge and the OS badge.
+export {
+  isFolderCountedInBadges,
+  sumBadgeUnread,
+  type FolderBadgePref,
+  type BadgeUnreadRow,
+  type BadgeFolderContext,
+} from './unreadBadgePolicy'

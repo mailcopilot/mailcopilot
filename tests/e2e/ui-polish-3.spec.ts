@@ -22,10 +22,14 @@ test('uiaudit.7: AI panel input is visible when panel has no content (empty stat
 
     // Configure AI provider and consent so the full panel renders (not onboarding)
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
       await window.api.invoke('settings:save', {
-        ...current,
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
       })
     })
@@ -67,10 +71,14 @@ test('uiaudit.7: AI panel input remains visible when body has many messages', as
 
     // Configure AI with consent
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
       await window.api.invoke('settings:save', {
-        ...current,
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
       })
     })
@@ -133,10 +141,14 @@ test('uiaudit.7: .ai-input-area is a direct child of .ai-panel, not inside .ai-b
 
     // Configure AI with consent so full panel renders
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
       await window.api.invoke('settings:save', {
-        ...current,
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
       })
     })

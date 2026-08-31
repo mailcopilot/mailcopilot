@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Mock dependencies of imap.ts — DB and SMTP (better-sqlite3 is a native module).
@@ -20,12 +22,18 @@ vi.mock('./smtp', () => ({
 
 import {
   detectFolderRoles, listMailboxes,
-  connectImapPerAccount, withImapRetryPerAccount, disconnectAllPerAccount,
+  connectImapPerAccount, withImapRetryPerAccount, disconnectAllPerAccount, disconnectPerAccount,
   extractReferencesHeader,
   collectAttachmentFilenames,
   __testDetectAttachments,
   classifyImapError,
+  registerConnectionOutcomeHandler,
+  unregisterConnectionOutcomeHandler,
+  registerAccountGenerationProvider,
+  unregisterAccountGenerationProvider,
   fetchAllFolderHeaders,
+  fetchFolderSummariesPage,
+  fetchSummariesByUids,
   syncFolderFlagsOnly,
   withImapRetry,
   registerAuthErrorHandler,
@@ -46,6 +54,12 @@ import {
   __resetSaveDraftLockForTest,
   extractMessageIdFromRaw,
   forceDisconnectImap,
+  connectImap,
+  readServerUid,
+  serverUidEnumerationIsComplete,
+  withImapPriority,
+  MAX_OVERTAKES_BEFORE_PROMOTION,
+  __imapOpLockStateForTest,
 } from './imap'
 import {
   __resetAuthRefreshCooldown,
@@ -62,7 +76,10 @@ import {
   removeStaleMessages,
   removeStaleMessagesByUids,
   setUnread,
+  upsertMessages,
+  upsertContactsIncoming,
 } from '../db'
+import type { ImapConnectionOutcome } from './imap'
 import type { ImapConfig, Mailbox } from './types'
 
 // Mock mailboxOpen result — configurable per test
@@ -71,6 +88,40 @@ let mockMailboxResult: { exists: number; highestModseq: bigint | null; uidValidi
 }
 // Mock fetch results — configurable per test (array of message-like objects)
 let mockFetchResults: Array<{ uid: number; flags?: Set<string>; envelope?: Record<string, unknown>; bodyStructure?: unknown; internalDate?: Date; headers?: Buffer }> = []
+// `c.mailbox.exists` as ImapFlow reports it AFTER the connection has been
+// live for a while — distinct from `mockMailboxResult.exists`, which is the
+// count returned by the one-shot `mailboxOpen()` at SELECT time. Unset by
+// default (undefined), matching every pre-existing test where `c.mailbox`
+// is absent from the mock connection object; `liveServerExists()` falls
+// back to the SELECT-time total whenever this is undefined.
+let mockLiveMailboxExists: number | undefined = undefined
+// Responses for the UID-keyed header FETCH — phase 2 of fetchAllFolderHeaders,
+// a separate command on the wire from the 1:* FLAGS scan of phase 1.
+//
+// It needs its own array because a single one is REPLAYED: the mock hands the
+// same entries to both phases, so a malformed FLAGS response comes back as a
+// malformed header response and raises `headersIncomplete` in a run where the
+// header loop never saw anything wrong. Tests then go green for a defect they
+// do not reproduce.
+//
+// `null` is the well-behaved server: it answers a UID FETCH with exactly the
+// messages the range asked for, drawn from `mockFetchResults`. A response the
+// FLAGS phase could not attribute to a UID is therefore NOT in that answer —
+// the server was never asked for it. Set this array to model a header FETCH
+// that itself answers badly.
+let mockHeaderFetchResults: typeof mockFetchResults | null = null
+
+/** Which responses a given FETCH command sees. Only a UID-keyed fetch asking
+ *  for envelopes is treated as the header phase; sequence ranges, 1:* scans
+ *  and header-only fetches keep serving `mockFetchResults` verbatim. */
+function fetchResponsesFor(range: unknown, fields: unknown): typeof mockFetchResults {
+  const wantsEnvelope = Boolean((fields as { envelope?: boolean } | undefined)?.envelope)
+  const uidList = typeof range === 'string' && /^\d+(,\d+)*$/.test(range) ? range : null
+  if (!wantsEnvelope || !uidList) return mockFetchResults
+  if (mockHeaderFetchResults) return mockHeaderFetchResults
+  const requested = new Set(uidList.split(',').map(Number))
+  return mockFetchResults.filter(m => typeof m.uid === 'number' && requested.has(m.uid))
+}
 
 // Mock ImapFlow for listMailboxes + fetchAllFolderHeaders + syncFolderFlagsOnly
 vi.mock('imapflow', () => {
@@ -87,12 +138,16 @@ vi.mock('imapflow', () => {
       close: vi.fn(),
       noop: vi.fn().mockResolvedValue(undefined),
       mailboxOpen: vi.fn().mockImplementation(() => Promise.resolve(mockMailboxResult)),
-      fetch: vi.fn().mockImplementation(() => ({
+      get mailbox() {
+        return mockLiveMailboxExists === undefined ? undefined : { exists: mockLiveMailboxExists }
+      },
+      fetch: vi.fn().mockImplementation((range: unknown, fields: unknown) => ({
         [Symbol.asyncIterator]: () => {
+          const responses = fetchResponsesFor(range, fields)
           let i = 0
           return {
             next: () => {
-              if (i < mockFetchResults.length) return Promise.resolve({ value: mockFetchResults[i++], done: false })
+              if (i < responses.length) return Promise.resolve({ value: responses[i++], done: false })
               return Promise.resolve({ value: undefined, done: true })
             },
           }
@@ -1039,6 +1094,8 @@ describe('fetchAllFolderHeaders', () => {
     vi.clearAllMocks()
     mockMailboxResult = { exists: 10, highestModseq: BigInt(100), uidValidity: 1 }
     mockFetchResults = []
+    mockLiveMailboxExists = undefined
+    mockHeaderFetchResults = null
   })
 
   it('skips when knownModseq matches server highestModseq', async () => {
@@ -1284,6 +1341,265 @@ describe('fetchAllFolderHeaders', () => {
     expect(removeStaleMessagesByUids).toHaveBeenCalledWith(1, 'INBOX', [5])
   })
 
+  it('drops only the unaddressable header from a batch, delivering its siblings to onBatch (db/net stitch)', async () => {
+    // packages/db enforces "no unstorable uid" with a BEFORE INSERT trigger
+    // that RAISE(ABORT)s the whole statement (see messages_uid_guard_ins in
+    // packages/db/index.ts). If this loop ever stopped filtering before
+    // calling onBatch, a single malformed FETCH response would either hand
+    // upsertMessages a row the trigger rejects (aborting the WHOLE batch
+    // transaction, including sibling messages that fetched fine) or — pre
+    // readServerUid — silently mint a NULL-uid row again. Neither is
+    // acceptable: this test is the seam proving the network side never lets
+    // an unstorable row reach that boundary in the first place.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(0)
+    vi.mocked(getFolderUids).mockReturnValue([])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map())
+    // The FLAGS scan is clean — both UIDs are addressable, so both are asked
+    // for by the header FETCH. The malformed response belongs to that second
+    // command, which is the loop under test.
+    mockFetchResults = [
+      { uid: 10, flags: new Set() },
+      { uid: 11, flags: new Set() },
+    ]
+    mockHeaderFetchResults = [
+      { uid: 10, flags: new Set(), envelope: { subject: 'first', from: [{ address: 'a@example.test', name: 'A' }] } } as unknown as { uid: number; flags: Set<string> },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // no uid at all
+      { uid: 11, flags: new Set(), envelope: { subject: 'second', from: [{ address: 'b@example.test', name: 'B' }] } } as unknown as { uid: number; flags: Set<string> },
+    ]
+
+    const delivered: Array<{ uid: number }> = []
+    const result = await fetchAllFolderHeaders(testCfg, 'INBOX', 1, (msgs) => {
+      for (const m of msgs) delivered.push(m)
+    })
+
+    // Only the two addressable headers reach onBatch — never an `uid:
+    // undefined` row, and never a thrown error from the missing-UID response.
+    expect(delivered.map(m => m.uid)).toEqual([10, 11])
+    expect(delivered.every(m => typeof m.uid === 'number')).toBe(true)
+    expect(result.fetched).toBe(2)
+    expect(result.headersIncomplete).toBe(true)
+  })
+
+  it('does NOT expunge a live UID when the FLAGS scan came up short', async () => {
+    // Full-sync expunge detection reconciles against the key set of the FLAGS
+    // scan, so a response it could not attribute to a UID is a hole in that
+    // set — and UID 2 is a live message the reconcile would delete locally.
+    // 1 UID read against 2 the server holds: completeness cannot be shown.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(2)
+    vi.mocked(getFolderUids).mockReturnValue([1, 2])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map([
+      [1, { unread: false, flagged: false }],
+      [2, { unread: false, flagged: false }],
+    ]))
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // no UID
+    ]
+
+    await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {})
+
+    expect(removeStaleMessagesByUids).not.toHaveBeenCalled()
+  })
+
+  it('raises the completeness bar when mail arrives mid-scan (live mailbox.exists > SELECT-time count)', async () => {
+    // The SELECT-time total (2) alone would make readUids=2 look like a
+    // complete scan, and cached UID 99 would be reconciled away as expunged.
+    // But `c.mailbox.exists` grew to 5 while the FETCH stream was running —
+    // new mail arrived mid-scan — so the real bar is 5, the scan is short,
+    // and UID 99 must be left alone. Removing the `Math.max` in
+    // liveServerExists (falling back to the SELECT-time total alone) makes
+    // this test observe a wrongful delete.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    mockLiveMailboxExists = 5
+    vi.mocked(getAccountMessageCount).mockReturnValue(3)
+    vi.mocked(getFolderUids).mockReturnValue([1, 2, 99])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map([
+      [1, { unread: false, flagged: false }],
+      [2, { unread: false, flagged: false }],
+      [99, { unread: false, flagged: false }],
+    ]))
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // unreadable
+      { uid: 2, flags: new Set() },
+    ]
+
+    await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {})
+
+    expect(removeStaleMessagesByUids).not.toHaveBeenCalled()
+  })
+
+  it('does NOT expunge on the same-modseq reconcile when the enumeration repeated a UID', async () => {
+    // Fifth destructive path: modseq unchanged but EXISTS disagrees with the
+    // local count, so a full 1:* enumeration decides what to delete. Here the
+    // server answers with UID 1 twice and never sends 2 or 3 — no response is
+    // unreadable, yet the set covers one message out of three. Counting
+    // responses instead of distinct UIDs (or short-circuiting on "nothing was
+    // rejected") deletes UID 2 here.
+    mockMailboxResult = { exists: 3, highestModseq: BigInt(200), uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(2)
+    vi.mocked(getFolderUids).mockReturnValue([1, 2])
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { uid: 1, flags: new Set() },
+    ]
+
+    const result = await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {}, { knownModseq: '200' })
+
+    expect(result.skipped).toBe(true)
+    expect(removeStaleMessagesByUids).not.toHaveBeenCalled()
+  })
+
+  it('does NOT expunge on the CHANGEDSINCE fallback when the enumeration came up short', async () => {
+    // Fourth destructive path: CONDSTORE delta sync noticed EXISTS does not
+    // match "local + new", so it falls back to a full 1:* enumeration to find
+    // what was expunged. The server sends one UID for a three-message
+    // mailbox; UIDs 2 and 3 are alive and would be deleted locally.
+    mockMailboxResult = { exists: 3, highestModseq: BigInt(200), uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(4) // forces total !== expectedTotal
+    vi.mocked(getFolderUids).mockReturnValue([1, 2, 3])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map([
+      [1, { unread: false, flagged: false }],
+      [2, { unread: false, flagged: false }],
+      [3, { unread: false, flagged: false }],
+    ]))
+    mockFetchResults = [{ uid: 1, flags: new Set() }]
+
+    // knownModseq !== highestModseq → CHANGEDSINCE path.
+    await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {}, { knownModseq: '100' })
+
+    expect(removeStaleMessagesByUids).not.toHaveBeenCalled()
+  })
+
+  it('drops a UID outside the RFC range without costing its batch siblings', async () => {
+    // A value like 1e100 passes `Number.isInteger`, so it used to reach
+    // packages/db, where the storage guard RAISE(ABORT)s — taking down the
+    // transaction for every sibling header in the same batch. The network
+    // side rejects it instead, and the run reports itself incomplete so the
+    // caller does not pin a watermark above the message it could not store.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(0)
+    vi.mocked(getFolderUids).mockReturnValue([])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map())
+    mockFetchResults = [
+      { uid: 12, flags: new Set() },
+      { uid: 13, flags: new Set() },
+    ]
+    // The header FETCH asked for 12 and 13; one of the two answers carries a
+    // UID no reader could use. It is the answer to this command that decides
+    // the run's completeness, so it is this command that has to be malformed.
+    mockHeaderFetchResults = [
+      { uid: 1e100, flags: new Set(), envelope: { subject: 'oversized', from: [{ address: 'a@example.test' }] } } as unknown as { uid: number; flags: Set<string> },
+      { uid: 12, flags: new Set(), envelope: { subject: 'sibling', from: [{ address: 'b@example.test' }] } } as unknown as { uid: number; flags: Set<string> },
+    ]
+
+    const delivered: Array<{ uid: number }> = []
+    const result = await fetchAllFolderHeaders(testCfg, 'INBOX', 1, (msgs) => {
+      for (const m of msgs) delivered.push(m)
+    })
+
+    expect(delivered.map(m => m.uid)).toEqual([12])
+    expect(result.headersIncomplete).toBe(true)
+  })
+
+  it('does not report a clean run as incomplete', async () => {
+    // Counterpart to the two tests above: `headersIncomplete` costs the
+    // folder its covered_full promotion, so a run that stored everything it
+    // fetched must not raise it.
+    mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(0)
+    vi.mocked(getFolderUids).mockReturnValue([])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map())
+    mockFetchResults = [
+      { uid: 12, flags: new Set(), envelope: { subject: 'fine', from: [{ address: 'b@example.test' }] } } as unknown as { uid: number; flags: Set<string> },
+    ]
+
+    const result = await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {})
+
+    expect(result.headersIncomplete).toBeUndefined()
+  })
+
+  it('re-requests a dropped UID on the next run, because the run reported itself incomplete', async () => {
+    // The defect this closes: `newUids` is rebuilt from scratch every run, so
+    // "the UID stays in newUids for the next round" was never true. The next
+    // round's floor is `sinceUid`, which electron/main.ts derives from the
+    // highest UID that LANDED — and UID 11 landed while UID 10 was dropped.
+    // Without the incompleteness signal the floor rises to 11 and UID 10 is
+    // unreachable forever.
+    const callerWatermarkRule = (stored: number[], incomplete: boolean | undefined): number | undefined =>
+      // Mirrors main.ts: a watermark is only pinned on a completed crawl
+      // (covered_full); an incomplete run stays on the resumable path, which
+      // passes no sinceUid at all.
+      incomplete ? undefined : Math.max(...stored)
+
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(0)
+    vi.mocked(getFolderUids).mockReturnValue([])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map())
+    // The FLAGS scan sees both UIDs, so both are asked for by name; the header
+    // FETCH is where UID 10's answer comes back unusable. Modelling the loss in
+    // the FLAGS phase instead would prove nothing: UID 10 would never enter
+    // `newUids`, the header FETCH would never request it, and the flag under
+    // test would be raised by a command that was not the one at fault.
+    mockFetchResults = [
+      { uid: 10, flags: new Set() },
+      { uid: 11, flags: new Set() },
+    ]
+    mockHeaderFetchResults = [
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // UID 10's response, unreadable
+      { uid: 11, flags: new Set(), envelope: { subject: 'neighbour', from: [{ address: 'b@example.test' }] } } as unknown as { uid: number; flags: Set<string> },
+    ]
+
+    const firstRun: number[] = []
+    const first = await fetchAllFolderHeaders(testCfg, 'INBOX', 1, (msgs) => {
+      for (const m of msgs) firstRun.push(m.uid)
+    })
+    expect(firstRun).toEqual([11])
+
+    const sinceUid = callerWatermarkRule(firstRun, first.headersIncomplete)
+    expect(sinceUid).toBeUndefined()
+
+    // Second run: the server answers properly this time — no header-phase
+    // override, so it replies with exactly the UIDs it was asked for.
+    mockHeaderFetchResults = null
+    mockFetchResults = [
+      { uid: 10, flags: new Set(), envelope: { subject: 'recovered', from: [{ address: 'a@example.test' }] } } as unknown as { uid: number; flags: Set<string> },
+      { uid: 11, flags: new Set(), envelope: { subject: 'neighbour', from: [{ address: 'b@example.test' }] } } as unknown as { uid: number; flags: Set<string> },
+    ]
+    const secondRun: number[] = []
+    await fetchAllFolderHeaders(testCfg, 'INBOX', 1, (msgs) => {
+      for (const m of msgs) secondRun.push(m.uid)
+    }, { sinceUid })
+
+    expect(secondRun).toContain(10)
+  })
+
+  it('still expunges when the unreadable response was an extra one', async () => {
+    // Counterpart: the scan read both UIDs the server says it holds, so the
+    // unreadable response was an unsolicited extra and the enumeration is
+    // whole. UID 3 really is gone — a mailbox with a second active client must
+    // not lose expunge reconciliation for good.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getAccountMessageCount).mockReturnValue(3)
+    vi.mocked(getFolderUids).mockReturnValue([1, 2, 3])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map([
+      [1, { unread: false, flagged: false }],
+      [2, { unread: false, flagged: false }],
+      [3, { unread: false, flagged: false }],
+    ]))
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // unsolicited
+      { uid: 2, flags: new Set() },
+    ]
+
+    await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {})
+
+    expect(removeStaleMessagesByUids).toHaveBeenCalledWith(1, 'INBOX', [3])
+  })
+
   it('returns empty folder correctly', async () => {
     mockMailboxResult = { exists: 0, highestModseq: null, uidValidity: 1 }
 
@@ -1347,6 +1663,280 @@ describe('fetchAllFolderHeaders', () => {
     await fetchAllFolderHeaders(testCfg, 'INBOX', 1, () => {}, { knownUidValidity: 1 })
 
     expect(removeStaleMessages).toHaveBeenCalledWith(1, 'INBOX', [], { reason: 'uidvalidity_bump' })
+  })
+})
+
+// --- sender address spoofing (envelope From without an address) ---
+
+/**
+ * Regression suite for the sender-identity boundary.
+ *
+ * The bug: every fetch path derived `fromAddr` as `address || name`, so an
+ * envelope carrying only a display name — `From: "victim@example.com"` with no
+ * angle-bracket address — stored that attacker-chosen string as the sender's
+ * *address*. The `from_address` static-rule condition matches on `fromAddr`
+ * alone and can carry destructive actions (move / delete / mark spam), so a
+ * forged display name was enough to trigger another sender's rules.
+ *
+ * Four fetch paths produce summaries and none of them share code with the
+ * others, so each is driven end-to-end here rather than testing the helper in
+ * isolation. Two of them additionally persist the summary through
+ * `upsertMessages`, where a second `fromAddr || from` fallback re-introduced the
+ * same spoof one layer below; those writes are asserted too.
+ */
+describe('sender address is never derived from the display name', () => {
+  type EnvAddr = { name?: string; address?: string }
+  type SenderFields = { from: string; fromAddr: string; fromName?: string }
+
+  const SPOOF: EnvAddr = { name: 'victim@example.com' }
+  const NORMAL: EnvAddr = { name: 'Alice Smith', address: 'alice@example.com' }
+  const ADDRESS_ONLY: EnvAddr = { address: 'bob@example.com' }
+
+  const envelopeMessage = (uid: number, from: EnvAddr) => ({
+    uid,
+    flags: new Set<string>(),
+    internalDate: new Date('2026-01-01T00:00:00Z'),
+    envelope: { subject: 'subj', from: [from], to: [] },
+    bodyStructure: undefined,
+  })
+
+  /**
+   * One entry per production fetch path that builds a `MailSummary`. `run`
+   * arranges the mock server to return exactly one message from `sender` and
+   * returns the three sender fields that path produced.
+   */
+  const paths: Array<{ name: string; run: (sender: EnvAddr) => Promise<SenderFields> }> = [
+    {
+      name: 'fetchAllFolderHeaders (new-message header fetch)',
+      run: async (sender) => {
+        mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+        vi.mocked(getAccountMessageCount).mockReturnValue(0)
+        vi.mocked(getFolderUids).mockReturnValue([])
+        vi.mocked(getFolderFlags).mockReturnValue(new Map())
+        mockFetchResults = [envelopeMessage(1, sender)]
+
+        const seen: SenderFields[] = []
+        await fetchAllFolderHeaders(testCfg, 'INBOX', 1, (msgs) => {
+          for (const m of msgs) seen.push({ from: m.from, fromAddr: m.fromAddr ?? '', fromName: m.fromName })
+        })
+        expect(seen).toHaveLength(1)
+        return seen[0]
+      },
+    },
+    {
+      name: 'fetchFolderSummariesPage (first page, no beforeUid)',
+      run: async (sender) => {
+        mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+        mockFetchResults = [envelopeMessage(1, sender)]
+
+        const rows = await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+        expect(rows).toHaveLength(1)
+        return { from: rows[0].from, fromAddr: rows[0].fromAddr ?? '', fromName: rows[0].fromName }
+      },
+    },
+    {
+      name: 'fetchFolderSummariesPage (backward pagination, beforeUid)',
+      run: async (sender) => {
+        mockMailboxResult = { exists: 10, highestModseq: null, uidValidity: 1 }
+        mockFetchResults = [envelopeMessage(3, sender)]
+
+        const rows = await fetchFolderSummariesPage(testCfg, 'INBOX', 10, 5, 1)
+        expect(rows).toHaveLength(1)
+        return { from: rows[0].from, fromAddr: rows[0].fromAddr ?? '', fromName: rows[0].fromName }
+      },
+    },
+    {
+      name: 'fetchSummariesByUids (hydration by UID)',
+      run: async (sender) => {
+        mockMailboxResult = { exists: 10, highestModseq: null, uidValidity: 1 }
+        mockFetchResults = [envelopeMessage(7, sender)]
+
+        const rows = await fetchSummariesByUids(testCfg, 'INBOX', [7], 1)
+        expect(rows).toHaveLength(1)
+        return { from: rows[0].from, fromAddr: rows[0].fromAddr ?? '', fromName: rows[0].fromName }
+      },
+    },
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(getAccountMessageCount).mockReturnValue(0)
+    vi.mocked(getFolderUids).mockReturnValue([])
+    vi.mocked(getFolderFlags).mockReturnValue(new Map())
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+    mockMailboxResult = { exists: 10, highestModseq: BigInt(100), uidValidity: 1 }
+    mockFetchResults = []
+  })
+
+  for (const path of paths) {
+    describe(path.name, () => {
+      it('display name that looks like an address does NOT become fromAddr', async () => {
+        const s = await path.run(SPOOF)
+        // The security assertion: nothing the sender typed into the display
+        // name may surface as the parsed address.
+        expect(s.fromAddr).toBe('')
+        // The name itself is not lost — the list view still shows the sender.
+        expect(s.fromName).toBe('victim@example.com')
+        expect(s.from).toBe('victim@example.com')
+      })
+
+      it('name + address envelope is unchanged', async () => {
+        const s = await path.run(NORMAL)
+        expect(s.fromAddr).toBe('alice@example.com')
+        expect(s.fromName).toBe('Alice Smith')
+        expect(s.from).toBe('Alice Smith')
+      })
+
+      it('address without a name is unchanged', async () => {
+        const s = await path.run(ADDRESS_ONLY)
+        expect(s.fromAddr).toBe('bob@example.com')
+        expect(s.fromName).toBeUndefined()
+        expect(s.from).toBe('bob@example.com')
+      })
+    })
+  }
+
+  // The two paths above that persist summaries used to re-add the fallback in
+  // their upsertMessages payload (`fromAddr || from`). Fixing only the parser
+  // would leave the spoofed value in the `messages.from_addr` column, which is
+  // the value static rules and search actually read.
+  describe('persisted row', () => {
+    const persistedFromAddr = () => {
+      const calls = vi.mocked(upsertMessages).mock.calls
+      expect(calls.length).toBeGreaterThan(0)
+      const rows = calls[calls.length - 1][2]
+      expect(rows).toHaveLength(1)
+      return rows[0]
+    }
+
+    it('fetchFolderSummariesPage writes an empty from_addr for a nameless-address sender', async () => {
+      mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+      mockFetchResults = [envelopeMessage(1, SPOOF)]
+
+      await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+      const row = persistedFromAddr()
+      expect(row.fromAddr).toBe('')
+      expect(row.fromName).toBe('victim@example.com')
+    })
+
+    it('fetchSummariesByUids writes an empty from_addr for a nameless-address sender', async () => {
+      mockMailboxResult = { exists: 10, highestModseq: null, uidValidity: 1 }
+      mockFetchResults = [envelopeMessage(7, SPOOF)]
+
+      await fetchSummariesByUids(testCfg, 'INBOX', [7], 1)
+
+      const row = persistedFromAddr()
+      expect(row.fromAddr).toBe('')
+      expect(row.fromName).toBe('victim@example.com')
+    })
+
+    it('a real address still reaches the persisted row', async () => {
+      mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+      mockFetchResults = [envelopeMessage(1, NORMAL)]
+
+      await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+      expect(persistedFromAddr().fromAddr).toBe('alice@example.com')
+    })
+  })
+
+  // Contact capture is address-keyed. A spoofed display name must not create a
+  // contact under the impersonated address.
+  describe('contact capture', () => {
+    it('skips a sender whose envelope declares no address', async () => {
+      mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+      mockFetchResults = [envelopeMessage(1, SPOOF)]
+
+      await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+      expect(upsertContactsIncoming).toHaveBeenCalledWith([])
+    })
+
+    it('still captures a sender with a real address', async () => {
+      mockMailboxResult = { exists: 1, highestModseq: null, uidValidity: 1 }
+      mockFetchResults = [envelopeMessage(1, NORMAL)]
+
+      await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+      expect(upsertContactsIncoming).toHaveBeenCalledWith([
+        { email: 'alice@example.com', name: 'Alice Smith' },
+      ])
+    })
+  })
+})
+
+// The whole-folder reconcile inside fetchFolderSummariesPage treats the page
+// as the authoritative keep-list, which makes it the fourth place where an
+// unreadable UID would delete a live message rather than merely skip it.
+describe('fetchFolderSummariesPage — whole-folder reconcile', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    mockMailboxResult = { exists: 10, highestModseq: BigInt(100), uidValidity: 1 }
+    mockFetchResults = []
+    mockLiveMailboxExists = undefined
+    mockHeaderFetchResults = null
+  })
+
+  it('does NOT reconcile when the page holds fewer DISTINCT UIDs than the folder', async () => {
+    // Two entries, one message: the server answered the same message twice
+    // and never sent the other. Measuring the page by entry count (as
+    // `result.length` did) makes a half-covered page look authoritative, and
+    // the missing message is deleted from the cache.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { uid: 1, flags: new Set() },
+    ]
+
+    await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+    expect(removeStaleMessages).not.toHaveBeenCalled()
+  })
+
+  it('does NOT reconcile when mail arrived while the page was streaming', async () => {
+    // SELECT reported 2 and the page holds both, but `c.mailbox.exists` grew
+    // to 4 mid-scan: two messages exist that the page never saw. Reconciling
+    // against the SELECT-time count deletes whatever the cache holds for
+    // them. The bar has to be the live count, as it is on the sync paths.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    mockLiveMailboxExists = 4
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { uid: 2, flags: new Set() },
+    ]
+
+    await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+    expect(removeStaleMessages).not.toHaveBeenCalled()
+  })
+
+  it('does NOT reconcile when the page came up short of the folder', async () => {
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // no UID
+    ]
+
+    await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+    expect(removeStaleMessages).not.toHaveBeenCalled()
+  })
+
+  it('still reconciles when the unreadable response was an extra one', async () => {
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // unsolicited
+      { uid: 2, flags: new Set() },
+    ]
+
+    await fetchFolderSummariesPage(testCfg, 'INBOX', 10, undefined, 1)
+
+    expect(removeStaleMessages).toHaveBeenCalledWith(1, 'INBOX', [2, 1], { reason: 'reconcile' })
   })
 })
 
@@ -1442,6 +2032,112 @@ describe('syncFolderFlagsOnly', () => {
 
     expect(result.uidValidityChanged).toBeUndefined()
     expect(result.newUids).toEqual([1, 2])
+  })
+
+  it('does NOT delete local messages when a FETCH response carried no UID', async () => {
+    // The server UID set is the evidence that a cached message was expunged.
+    // A response we cannot attribute to a UID is a hole in that evidence, so
+    // treating absence as expunge here would delete live mail.
+    mockMailboxResult = { exists: 3, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getFolderUids).mockReturnValue([1, 2, 3])
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // no UID
+      { uid: 3, flags: new Set() },
+    ]
+
+    const result = await syncFolderFlagsOnly(testCfg, 'INBOX', 1)
+
+    expect(result.deletedCount).toBe(0)
+    expect(removeStaleMessagesByUids).not.toHaveBeenCalled()
+    // The same doubt applies to the new-UID half of the result: a response we
+    // could not read may have been a message we would have reported as new,
+    // so the caller must not pin the crawl state on this run.
+    expect(result.stalewipeGuardTripped).toBe(true)
+  })
+
+  it('still deletes expunged UIDs when the unreadable response was an extra one', async () => {
+    // The scan read every UID the server says the mailbox holds, so the
+    // unattributable response was an extra and the enumeration is whole.
+    // Without this the guard latches on any account with a second active
+    // client and expunged mail sits in the cache forever.
+    mockMailboxResult = { exists: 2, highestModseq: null, uidValidity: 1 }
+    vi.mocked(getFolderUids).mockReturnValue([1, 2, 3])
+    mockFetchResults = [
+      { uid: 1, flags: new Set() },
+      { flags: new Set() } as unknown as { uid: number; flags: Set<string> }, // unsolicited
+      { uid: 2, flags: new Set() },
+    ]
+
+    const result = await syncFolderFlagsOnly(testCfg, 'INBOX', 1)
+
+    expect(removeStaleMessagesByUids).toHaveBeenCalledWith(1, 'INBOX', [3])
+    expect(result.deletedCount).toBe(1)
+    expect(result.stalewipeGuardTripped).toBeUndefined()
+  })
+})
+
+describe('serverUidEnumerationIsComplete', () => {
+  it('trusts a set that covers the mailbox', () => {
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 5, serverExists: 5 })).toBe(true)
+    // An extra unsolicited FETCH for a message that arrived and was counted
+    // leaves the set larger than the count — still covering.
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 6, serverExists: 5 })).toBe(true)
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 0, serverExists: 0 })).toBe(true)
+  })
+
+  it('refuses a short enumeration even when NO response was rejected', () => {
+    // The three ways an enumeration comes up short without a single
+    // unreadable response: the stream simply ends early, the server repeats
+    // one UID instead of sending another (the caller passes a SET size, so a
+    // repeat never inflates the count), or it sends nothing at all. The
+    // earlier form short-circuited to `true` on "no unreadable responses" and
+    // waved all three through.
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 4, serverExists: 5 })).toBe(false)
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 1, serverExists: 2 })).toBe(false)
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 0, serverExists: 5 })).toBe(false)
+  })
+
+  it('refuses any enumeration measured against an unusable mailbox size', () => {
+    // Same direction as the mailbox.exists guards: an ambiguous count is not
+    // a licence to delete. Checked unconditionally now — previously a
+    // non-numeric `exists` was never even looked at unless a response had
+    // already been rejected.
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 99, serverExists: Number.NaN })).toBe(false)
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 99, serverExists: Number.POSITIVE_INFINITY })).toBe(false)
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: 99, serverExists: -1 })).toBe(false)
+    expect(serverUidEnumerationIsComplete({ distinctServerUids: Number.NaN, serverExists: 1 })).toBe(false)
+  })
+})
+
+describe('readServerUid', () => {
+  it('accepts a well-formed server UID', () => {
+    expect(readServerUid({ uid: 1 })).toBe(1)
+    expect(readServerUid({ uid: 4294967295 })).toBe(4294967295)
+  })
+
+  it('rejects every shape that used to slip through the `as number` cast', () => {
+    expect(readServerUid({})).toBeUndefined()
+    expect(readServerUid({ uid: undefined })).toBeUndefined()
+    expect(readServerUid({ uid: null })).toBeUndefined()
+    expect(readServerUid({ uid: Number.NaN })).toBeUndefined()
+    expect(readServerUid({ uid: 0 })).toBeUndefined()
+    expect(readServerUid({ uid: -1 })).toBeUndefined()
+    expect(readServerUid({ uid: 1.5 })).toBeUndefined()
+    expect(readServerUid({ uid: '7' })).toBeUndefined()
+  })
+
+  it('rejects integers outside the RFC 3501 UID range', () => {
+    // `Number.isInteger(1e100)` is true. Letting such a value through hands
+    // packages/db a row it stores as REAL, which the storage guard aborts —
+    // and an ABORT fails the whole sync batch, not just the bad row. The
+    // range check is what keeps a malformed response costing one message.
+    expect(readServerUid({ uid: 1e100 })).toBeUndefined()
+    expect(readServerUid({ uid: 4294967296 })).toBeUndefined()
+    expect(readServerUid({ uid: Number.MAX_SAFE_INTEGER })).toBeUndefined()
+    expect(readServerUid({ uid: Number.POSITIVE_INFINITY })).toBeUndefined()
+    // The boundary itself is a legal UID and must survive.
+    expect(readServerUid({ uid: 4294967295 })).toBe(4294967295)
   })
 })
 
@@ -2625,6 +3321,27 @@ describe('startIdle — in-loop OAuth token refresh', () => {
     } catch { /* ignore */ }
     __resetAuthRefreshCooldown()
     setNetErrorReporter(null)
+  })
+
+  // §2.110 — imapflow 1.7 made the auto-IDLE delay configurable and leaves
+  // auto-IDLE ON by default. This connection runs a hand-managed IDLE cycle
+  // (idle() raced against a refresh timer, then NOOP to force DONE) plus its
+  // own reconnect loop, so a library that also enters IDLE on its own
+  // schedule would be competing for the same connection. Nothing else in the
+  // suite pins the flag: dropping it breaks no assertion here and only shows
+  // up against a live server, which is exactly why it is pinned.
+  it('builds the manually-managed IDLE connection with auto-IDLE disabled', async () => {
+    const client1 = makeFakeClient()
+    const imapflow = await import('imapflow')
+    const ImapFlowMock = vi.mocked(imapflow.ImapFlow)
+    ImapFlowMock.mockImplementationOnce(() => client1 as unknown as InstanceType<typeof imapflow.ImapFlow>)
+
+    await startIdle(accountId, makeOauthCfg(), 'INBOX', () => {})
+    await flushMicrotasks()
+
+    expect(ImapFlowMock).toHaveBeenCalledTimes(1)
+    const opts = ImapFlowMock.mock.calls[0][0] as { disableAutoIdle?: boolean }
+    expect(opts.disableAutoIdle).toBe(true)
   })
 
   it('auth error + registered handler invokes handler BEFORE sleep, reconnects, emits auth_refreshed telemetry', async () => {
@@ -4201,5 +4918,1258 @@ describe('sweepOrphanDrafts — orphan cleanup (§2.16 AC5)', () => {
 
     // sweep is best-effort — must not propagate.
     await expect(sweepOrphanDrafts(1, cfg, 'Drafts')).resolves.toEqual({ groups: 0, deleted: 0 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §2.165 — connection-outcome reporting boundary
+// ---------------------------------------------------------------------------
+// The defect this suite pins: "this mailbox needs signing in again" used to be
+// raised and cleared from a handful of hand-picked call sites in main.ts (all
+// three clearing sites were header fetches), so every other path that proves
+// the credentials work — folder listing, remote search, pagination, flag sync,
+// move, delete, drafts, body fetch, offline replay — was invisible to the
+// state. An account whose folders are all on manual sync never ran any of the
+// three, so the banner could never come down.
+
+describe('§2.165 — connection outcome registry', () => {
+  const outcomes: ImapConnectionOutcome[] = []
+
+  function subscribe(): void {
+    registerConnectionOutcomeHandler((o) => { outcomes.push(o) })
+  }
+
+  /** Minimal ImapFlow double: enough for listMailboxes / the dedicated-connection
+   *  paths / the IDLE prologue. Installed per-test so the suites above (which
+   *  reset the shared constructor mock in their own hooks) cannot bleed in. */
+  function installDefaultImapFlow(
+    overrides: Record<string, unknown> = {},
+  ): void {
+    const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+    ImapFlowMock.mockReset()
+    ImapFlowMock.mockImplementation(() => ({
+      connect: vi.fn().mockResolvedValue(undefined),
+      logout: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+      usable: true,
+      on: vi.fn(),
+      removeListener: vi.fn(),
+      close: vi.fn(),
+      noop: vi.fn().mockResolvedValue(undefined),
+      mailboxOpen: vi.fn().mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 }),
+      idle: vi.fn().mockImplementation(() => new Promise<void>(() => { /* parked */ })),
+      fetch: vi.fn(),
+      fetchOne: vi.fn().mockResolvedValue(null),
+      ...overrides,
+    }) as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+  }
+
+  let imapflowModule: typeof import('imapflow')
+
+  beforeEach(async () => {
+    outcomes.length = 0
+    imapflowModule = await import('imapflow')
+    installDefaultImapFlow()
+    forceDisconnectImap()
+    __resetAuthRefreshCooldown()
+    __resetAuthRefreshConsecutiveForTest()
+  })
+
+  afterEach(async () => {
+    unregisterConnectionOutcomeHandler()
+    unregisterAccountGenerationProvider()
+    forceDisconnectImap()
+    await disconnectAllPerAccount()
+    __resetAuthRefreshCooldown()
+  })
+
+  // --- AC0: the reason this exists ---
+
+  it('AC0: a success on a path main never wired is still reported', async () => {
+    // listMailboxes is the canonical "unwired" path: opening the folder tree
+    // is a full login, but it was not one of the three call sites that could
+    // clear the flag. On the current boundary it must report like any other.
+    subscribe()
+
+    await listMailboxes(9, {
+      host: 'imap.unwired.com', port: 993, secure: true, user: 'u@unwired.com', pass: 'p',
+    })
+
+    expect(outcomes).toEqual([{ accountId: 9, accountGeneration: null, ok: true }])
+  })
+
+  // --- AC1 / AC2: every retry wrapper reports on the outward edge ---
+
+  it('withImapRetry reports success', async () => {
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.w1.com', port: 993, secure: true, user: 'w1@t.com', pass: 'p' }
+
+    await expect(withImapRetry(101, cfg, async () => 'ok')).resolves.toBe('ok')
+
+    expect(outcomes).toEqual([{ accountId: 101, accountGeneration: null, ok: true }])
+  })
+
+  it('withImapRetry reports failure carrying the original error', async () => {
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.w1.com', port: 993, secure: true, user: 'w1@t.com', pass: 'p' }
+    const boom = new Error('AUTHENTICATE failed')
+
+    await expect(withImapRetry(102, cfg, async () => { throw boom })).rejects.toBe(boom)
+
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ accountId: 102, accountGeneration: null, ok: false })
+    // Identity, not a copy: the subscriber classifies with the ONE classifier
+    // (classifyImapError), which needs the error itself.
+    expect((outcomes[0] as { error: unknown }).error).toBe(boom)
+  })
+
+  it('withImapRetryPerAccount reports success and failure', async () => {
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.w2.com', port: 993, secure: true, user: 'w2@t.com', pass: 'p' }
+
+    await expect(withImapRetryPerAccount(103, cfg, async () => 7)).resolves.toBe(7)
+    const boom = new Error('Invalid credentials')
+    await expect(withImapRetryPerAccount(103, cfg, async () => { throw boom })).rejects.toBe(boom)
+
+    expect(outcomes).toHaveLength(2)
+    expect(outcomes[0]).toEqual({ accountId: 103, accountGeneration: null, ok: true })
+    expect(outcomes[1]).toMatchObject({ accountId: 103, accountGeneration: null, ok: false, error: boom })
+  })
+
+  it('withDedicatedImapRetry reports success (via fetchFolderSummariesPage)', async () => {
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.w3.com', port: 993, secure: true, user: 'w3@t.com', pass: 'p' }
+
+    await expect(fetchFolderSummariesPage(cfg, 'INBOX', 10, undefined, 104)).resolves.toEqual([])
+
+    expect(outcomes).toEqual([{ accountId: 104, accountGeneration: null, ok: true }])
+  })
+
+  it('withDedicatedImapRetry reports failure (via fetchFolderSummariesPage)', async () => {
+    subscribe()
+    const boom = new Error('AUTHENTICATE failed')
+    installDefaultImapFlow({ mailboxOpen: vi.fn().mockRejectedValue(boom) })
+    const cfg: ImapConfig = { host: 'imap.w3.com', port: 993, secure: true, user: 'w3@t.com', pass: 'p' }
+
+    // This path re-wraps the failure with the host prefix before it leaves the
+    // callback; the boundary reports whatever the caller sees, unmodified.
+    const thrown = await fetchFolderSummariesPage(cfg, 'INBOX', 10, undefined, 105)
+      .then(() => null, (e: unknown) => e)
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toContain('AUTHENTICATE failed')
+
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ accountId: 105, accountGeneration: null, ok: false, error: thrown })
+    // …and it still classifies as auth, which is what the subscriber acts on.
+    expect(classifyImapError((outcomes[0] as { error: unknown }).error)).toBe('auth')
+  })
+
+  it('a throwing subscriber changes neither the result nor the retry semantics', async () => {
+    registerConnectionOutcomeHandler(() => { throw new Error('subscriber exploded') })
+    const cfg: ImapConfig = { host: 'imap.w4.com', port: 993, secure: true, user: 'w4@t.com', pass: 'p' }
+
+    await expect(withImapRetry(106, cfg, async () => 'still-ok')).resolves.toBe('still-ok')
+
+    let attempts = 0
+    await expect(
+      withImapRetry(106, cfg, async () => { attempts++; throw new Error('Unexpected close') }),
+    ).rejects.toThrow('Unexpected close')
+    // 1 initial + 2 retries — the retry budget is untouched by the subscriber.
+    expect(attempts).toBe(3)
+  })
+
+  it('reports nothing once the subscriber is unregistered', async () => {
+    subscribe()
+    unregisterConnectionOutcomeHandler()
+    unregisterConnectionOutcomeHandler() // idempotent
+    const cfg: ImapConfig = { host: 'imap.w5.com', port: 993, secure: true, user: 'w5@t.com', pass: 'p' }
+
+    await withImapRetry(107, cfg, async () => 'ok')
+
+    expect(outcomes).toEqual([])
+  })
+
+  it('reports success on a reused connection too — no fresh login is required (accepted §2.165 tradeoff)', async () => {
+    // connectImap() caches a singleton client per userKey and returns it
+    // as-is while `usable` stays true, so a second call in the same test
+    // never re-authenticates. The boundary reports the CALLER's outcome, not
+    // whether a fresh login just happened — so a revoked-password account
+    // whose session is still open in memory would keep clearing its own
+    // badge on every call until the stale connection finally drops.
+    //
+    // This is a KNOWN, ACCEPTED TRADEOFF, not a claim that the window is
+    // safe: the product decision was to keep this behaviour rather than force
+    // a fresh login on every operation, and that decision has not been
+    // re-examined since. This test pins the behaviour AS-IS — it documents
+    // what the code does today, not that the exposure is bounded or
+    // measured. Revisit the tradeoff, don't "fix" this test to assert
+    // something stronger without changing the production code first.
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.reuse.com', port: 993, secure: true, user: 'reuse@t.com', pass: 'p' }
+    const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+
+    // The wrapped operation must itself go through connectImap() — exactly
+    // what every production caller of withImapRetry does — for the singleton
+    // cache to be exercised at all.
+    await expect(withImapRetry(130, cfg, async () => { await connectImap(cfg); return 'first' })).resolves.toBe('first')
+    await expect(withImapRetry(130, cfg, async () => { await connectImap(cfg); return 'second' })).resolves.toBe('second')
+
+    // One login for two operations — the second one reused the cached client.
+    expect(ImapFlowMock).toHaveBeenCalledTimes(1)
+    expect(outcomes).toEqual([
+      { accountId: 130, accountGeneration: null, ok: true },
+      { accountId: 130, accountGeneration: null, ok: true },
+    ])
+  })
+
+  // --- AC3: exactly one report per outward call ---
+
+  it('AC3: a wrapped call nested inside another reports once, not twice', async () => {
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.nest.com', port: 993, secure: true, user: 'nest@t.com', pass: 'p' }
+
+    const result = await withImapRetry(108, cfg, async () =>
+      withImapRetryPerAccount(108, cfg, async () => 'inner'))
+
+    expect(result).toBe('inner')
+    expect(outcomes).toEqual([{ accountId: 108, accountGeneration: null, ok: true }])
+  })
+
+  it('AC3: a nested failure counts once — one error must not read as two', async () => {
+    subscribe()
+    const cfg: ImapConfig = { host: 'imap.nest.com', port: 993, secure: true, user: 'nest@t.com', pass: 'p' }
+    const boom = new Error('Invalid credentials')
+
+    await expect(
+      withImapRetry(109, cfg, async () =>
+        withImapRetryPerAccount(109, cfg, async () => { throw boom })),
+    ).rejects.toBe(boom)
+
+    // Threshold for the badge is two consecutive auth failures; double-counting
+    // one login would raise it on the first.
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ accountId: 109, accountGeneration: null, ok: false, error: boom })
+  })
+
+  it('AC3: concurrent independent operations each report their own outcome', async () => {
+    subscribe()
+    const cfgA: ImapConfig = { host: 'imap.conc-a.com', port: 993, secure: true, user: 'a@conc.com', pass: 'p' }
+    const cfgB: ImapConfig = { host: 'imap.conc-b.com', port: 993, secure: true, user: 'b@conc.com', pass: 'p' }
+
+    // Two per-account operations overlapping in time: the nesting guard must be
+    // async-context scoped, not a module-level depth counter (which would make
+    // B look "nested inside" A and silently drop B's report).
+    let releaseA: () => void = () => {}
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+    const runA = withImapRetryPerAccount(110, cfgA, async () => { await gateA; return 'a' })
+    const runB = withImapRetryPerAccount(111, cfgB, async () => 'b')
+    await runB
+    releaseA()
+    await runA
+
+    expect(outcomes.map(o => o.accountId).sort((x, y) => x - y)).toEqual([110, 111])
+    expect(outcomes.every(o => o.ok)).toBe(true)
+  })
+
+  // --- AC4: a failure that the token refresh repaired is a success ---
+
+  it('AC4: auth failure → token refresh → retry succeeds reports success only', async () => {
+    subscribe()
+    const cfg: ImapConfig = {
+      host: 'outlook.office365.com', port: 993, secure: true,
+      user: 'refresh@outlook.com', pass: undefined, accessToken: 'stale',
+    }
+    const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+    registerAuthErrorHandler(112, refreshFn)
+    try {
+      let attempt = 0
+      const result = await withImapRetryPerAccount(112, cfg, async () => {
+        attempt++
+        if (attempt === 1) throw new Error('AUTHENTICATE failed — token expired')
+        return 'recovered'
+      })
+
+      expect(result).toBe('recovered')
+      expect(refreshFn).toHaveBeenCalledTimes(1)
+      // The interim auth error never reaches the subscriber: it was repaired
+      // inside the boundary, so the failure streak must not advance.
+      expect(outcomes).toEqual([{ accountId: 112, accountGeneration: null, ok: true }])
+    } finally {
+      unregisterAuthErrorHandler(112)
+    }
+  })
+
+  // --- AC5: the IDLE cycle reports in both directions ---
+
+  describe('AC5: IDLE cycle', () => {
+    const accountId = 120
+
+    interface FakeIdleClient {
+      connect: ReturnType<typeof vi.fn>
+      logout: ReturnType<typeof vi.fn>
+      usable: boolean
+      on: ReturnType<typeof vi.fn>
+      removeListener: ReturnType<typeof vi.fn>
+      noop: ReturnType<typeof vi.fn>
+      mailboxOpen: ReturnType<typeof vi.fn>
+      idle: ReturnType<typeof vi.fn>
+      breakIdle: (err?: Error) => void
+    }
+
+    function makeFakeIdleClient(): FakeIdleClient {
+      let idleResolve: (() => void) | null = null
+      let idleReject: ((err: Error) => void) | null = null
+      const fc: Partial<FakeIdleClient> = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        logout: vi.fn().mockImplementation(async () => {
+          if (idleResolve) { const r = idleResolve; idleResolve = null; r() }
+        }),
+        usable: true,
+        on: vi.fn(),
+        removeListener: vi.fn(),
+        noop: vi.fn().mockResolvedValue(undefined),
+        mailboxOpen: vi.fn().mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 }),
+        idle: vi.fn().mockImplementation(() => new Promise<void>((resolve, reject) => {
+          idleResolve = resolve
+          idleReject = reject
+        })),
+        breakIdle: (err?: Error) => {
+          if (err) {
+            if (idleReject) { const r = idleReject; idleResolve = null; idleReject = null; r(err) }
+          } else if (idleResolve) { const r = idleResolve; idleResolve = null; idleReject = null; r() }
+        },
+      }
+      return fc as FakeIdleClient
+    }
+
+    async function flushMicrotasks(n = 40) {
+      for (let i = 0; i < n; i++) await Promise.resolve()
+    }
+
+    function idleCfg(): ImapConfig {
+      return {
+        host: 'outlook.office365.com', port: 993, secure: true,
+        user: 'idle@outlook.com', pass: undefined, accessToken: 'stale-token',
+      }
+    }
+
+    afterEach(async () => {
+      unregisterAuthErrorHandler(accountId)
+      try {
+        await Promise.race([
+          stopIdle(),
+          new Promise<void>((resolve) => { setTimeout(resolve, 500) }),
+        ])
+      } catch { /* ignore */ }
+    })
+
+    it('a successful connect + select is reported as success', async () => {
+      subscribe()
+      const client1 = makeFakeIdleClient()
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+
+      expect(outcomes).toEqual([{ accountId, accountGeneration: null, ok: true }])
+    })
+
+    it('a failing connect prologue is reported as failure', async () => {
+      subscribe()
+      const boom = new Error('AUTHENTICATE failed')
+      const client1 = makeFakeIdleClient()
+      client1.connect.mockRejectedValueOnce(boom)
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await expect(startIdle(accountId, idleCfg(), 'INBOX', () => {})).rejects.toBe(boom)
+
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]).toMatchObject({ accountId, accountGeneration: null, ok: false, error: boom })
+    })
+
+    it('an in-loop auth failure that no refresh can repair is reported as failure', async () => {
+      subscribe()
+      // No handler registered → invokeAuthHandlerWithCooldown returns null →
+      // the loop falls through to the auth backoff. Silent today; a failure now.
+      const client1 = makeFakeIdleClient()
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      const boom = new Error('AUTHENTICATE failed — XOAUTH2 token expired')
+      client1.breakIdle(boom)
+      await flushMicrotasks()
+
+      expect(outcomes[0]).toEqual({ accountId, accountGeneration: null, ok: true })
+      expect(outcomes[1]).toMatchObject({ accountId, accountGeneration: null, ok: false, error: boom })
+    })
+
+    it('a cycle restored by a token refresh is reported as success', async () => {
+      subscribe()
+      const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+      registerAuthErrorHandler(accountId, refreshFn)
+
+      const client1 = makeFakeIdleClient()
+      const client2 = makeFakeIdleClient()
+      const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+      ImapFlowMock.mockImplementationOnce(() => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      ImapFlowMock.mockImplementationOnce(() => client2 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      client1.breakIdle(new Error('AUTHENTICATE failed — XOAUTH2 token expired'))
+      await flushMicrotasks()
+
+      expect(refreshFn).toHaveBeenCalledTimes(1)
+      // Prologue success, then the recovered cycle — and no failure in between.
+      expect(outcomes).toEqual([
+        { accountId, accountGeneration: null, ok: true },
+        { accountId, accountGeneration: null, ok: true },
+      ])
+    })
+
+    // §2.165 fix wave 2 — gap 5: the branches above cover the prologue and one
+    // reconnect-succeeds cycle, but not the other three exit points of the
+    // IDLE loop, each a SEPARATE `notifyConnectionOutcome` call site in
+    // packages/net/imap.ts. Deleting or duplicating the report at any one of
+    // them changes the count the badge threshold works from, silently.
+
+    it('a healthy cycle that parks WITHOUT throwing is reported as a second, distinct success', async () => {
+      // Reached through the try branch (idle() resolves), not the catch a
+      // rejected prologue or a broken cycle goes through — this is the "the
+      // fresh token actually delivered push" proof, and for a mailbox whose
+      // folders are all on manual sync it is the ONLY such proof there is.
+      subscribe()
+      const client1 = makeFakeIdleClient()
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      // No-argument breakIdle: idle() resolves cleanly, exactly what a clean
+      // IDLE refresh cycle does — as opposed to breakIdle(err), which every
+      // other test in this describe uses to simulate a failure.
+      client1.breakIdle()
+      await flushMicrotasks()
+
+      expect(outcomes).toEqual([
+        { accountId, accountGeneration: null, ok: true }, // the prologue
+        { accountId, accountGeneration: null, ok: true }, // the parked cycle
+      ])
+    })
+
+    it('auth-refresh storm-brake exhaustion is reported as a failure, with no reconnect attempted', async () => {
+      // Four consecutive in-loop auth errors: the first three each succeed via
+      // refresh + reconnect (three "ok: true" reports, one per cycle); the
+      // brake trips on the fourth BEFORE any handler or reconnect is invoked,
+      // and that is reported as a failure — a distinct call site
+      // (packages/net/imap.ts, the `consecutive >= AUTH_REFRESH_MAX_CONSECUTIVE`
+      // branch) from the generic "cycle failed" report every other failure in
+      // this file goes through.
+      subscribe()
+      const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+      registerAuthErrorHandler(accountId, refreshFn)
+
+      const c1 = makeFakeIdleClient()
+      const c2 = makeFakeIdleClient()
+      const c3 = makeFakeIdleClient()
+      const c4 = makeFakeIdleClient()
+      const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+      ImapFlowMock.mockImplementationOnce(() => c1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      ImapFlowMock.mockImplementationOnce(() => c2 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      ImapFlowMock.mockImplementationOnce(() => c3 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      ImapFlowMock.mockImplementationOnce(() => c4 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      // Guard: the brake must stop the loop before a fifth client is built —
+      // if it didn't, this test would be exercising the wrong branch.
+      const wouldLeak = vi.fn(() => makeFakeIdleClient() as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      ImapFlowMock.mockImplementation(wouldLeak)
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      const authErr = new Error('AUTHENTICATE failed — XOAUTH2 token expired')
+      c1.breakIdle(authErr)
+      await flushMicrotasks()
+      c2.breakIdle(authErr)
+      await flushMicrotasks()
+      c3.breakIdle(authErr)
+      await flushMicrotasks()
+      c4.breakIdle(authErr)
+      await flushMicrotasks()
+
+      expect(wouldLeak).not.toHaveBeenCalled()
+      expect(outcomes).toEqual([
+        { accountId, accountGeneration: null, ok: true }, // prologue
+        { accountId, accountGeneration: null, ok: true }, // iter 1: refresh + reconnect succeeded
+        { accountId, accountGeneration: null, ok: true }, // iter 2: refresh + reconnect succeeded
+        { accountId, accountGeneration: null, ok: true }, // iter 3: refresh + reconnect succeeded
+        { accountId, accountGeneration: null, ok: false, error: authErr }, // iter 4: brake trips, no reconnect attempted
+      ])
+    })
+
+    it('terminal reconnect failure after a successful refresh is reported as a failure carrying the reconnect error', async () => {
+      // The refresh itself succeeds (a fresh token is minted), but every
+      // attempt to reconnect and re-select the mailbox with it fails — the
+      // network is down, not the credentials. That is still a "credentials
+      // unverified" outcome for this account, and it is reported once, using
+      // the RECONNECT error (what actually made the loop give up), not the
+      // original auth error that started the recovery.
+      vi.useFakeTimers()
+      try {
+        subscribe()
+        const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+        registerAuthErrorHandler(accountId, refreshFn)
+
+        const client1 = makeFakeIdleClient()
+        const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+        ImapFlowMock.mockImplementationOnce(
+          () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+        )
+        const reconnectErr = new Error('ECONNREFUSED attempt')
+        for (let i = 0; i < AUTH_REFRESH_MAX_RECONNECT_ATTEMPTS; i++) {
+          ImapFlowMock.mockImplementationOnce(() => { throw reconnectErr })
+        }
+
+        await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+        for (let i = 0; i < 40; i++) await Promise.resolve()
+        client1.breakIdle(new Error('AUTHENTICATE failed — XOAUTH2 token expired'))
+        for (let i = 0; i < 40; i++) await Promise.resolve()
+
+        for (let i = 0; i < AUTH_REFRESH_MAX_RECONNECT_ATTEMPTS; i++) {
+          await vi.advanceTimersByTimeAsync(5 * 60_000) // BACKOFF_MS.network
+          for (let j = 0; j < 40; j++) await Promise.resolve()
+        }
+
+        // Prologue success, then ONE terminal failure — no intermediate
+        // success was ever reported, because none of the
+        // AUTH_REFRESH_MAX_RECONNECT_ATTEMPTS reconnects completed.
+        expect(outcomes).toEqual([
+          { accountId, accountGeneration: null, ok: true },
+          { accountId, accountGeneration: null, ok: false, error: reconnectErr },
+        ])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // --- AC9 for IDLE: one stamp per login, taken when the login was made ---
+    //
+    // The IDLE loop is the hardest case for the stamp and the reason it is a
+    // single up-front snapshot. The loop OUTLIVES the call that started it: it
+    // holds one authenticated connection for hours and keeps emitting verdicts
+    // about that login long after startIdle returned. A loop that main failed
+    // to stop in time is precisely the attacker-visible path — so every verdict
+    // it emits must name the account it actually logged into, and must NOT
+    // re-attach itself to whoever holds the id now.
+    //
+    // Each test below flips the provider AFTER the login it is about, then
+    // drives one report site. All of them kill the same class of mutation:
+    // moving the capture from the head of startIdle into the loop body / into
+    // the report itself, at that site.
+
+    it('AC9-IDLE: the prologue stamps at entry, even if the id is reissued during connect', async () => {
+      subscribe()
+      let generation = 5
+      registerAccountGenerationProvider(() => generation)
+      const boom = new Error('AUTHENTICATE failed')
+      const client1 = makeFakeIdleClient()
+      client1.connect.mockImplementation(async () => { generation = 6; throw boom })
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await expect(startIdle(accountId, idleCfg(), 'INBOX', () => {})).rejects.toBe(boom)
+
+      expect(outcomes).toEqual([{ accountId, accountGeneration: 5, ok: false, error: boom }])
+    })
+
+    it('AC9-IDLE: a cycle that parks cleanly carries the generation of the login, not of the moment', async () => {
+      subscribe()
+      let generation = 5
+      registerAccountGenerationProvider(() => generation)
+      const client1 = makeFakeIdleClient()
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      generation = 6 // account deleted and the id handed to a new mailbox
+      client1.breakIdle()
+      await flushMicrotasks()
+
+      expect(outcomes).toEqual([
+        { accountId, accountGeneration: 5, ok: true }, // prologue
+        { accountId, accountGeneration: 5, ok: true }, // parked cycle — still generation 5
+      ])
+    })
+
+    it('AC9-IDLE: an unrepairable in-loop failure carries the generation of the login', async () => {
+      // The dangerous direction: a stale loop's FAILURES are what would raise
+      // "sign in again" on a mailbox that never failed.
+      subscribe()
+      let generation = 5
+      registerAccountGenerationProvider(() => generation)
+      const client1 = makeFakeIdleClient()
+      vi.mocked(imapflowModule.ImapFlow).mockImplementationOnce(
+        () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+      )
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      generation = 6
+      const boom = new Error('AUTHENTICATE failed — XOAUTH2 token expired')
+      client1.breakIdle(boom)
+      await flushMicrotasks()
+
+      expect(outcomes[1]).toEqual({ accountId, accountGeneration: 5, ok: false, error: boom })
+    })
+
+    it('AC9-IDLE: a token refresh is not a new generation', async () => {
+      // The refresh mints a fresh access token for the SAME account through a
+      // handler keyed by the same id. Re-reading the generation after the
+      // reconnect would reopen the hole through a narrower door: a stale loop
+      // that manages one successful refresh would silently adopt the new
+      // mailbox's identity.
+      subscribe()
+      let generation = 5
+      registerAccountGenerationProvider(() => generation)
+      const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+      registerAuthErrorHandler(accountId, refreshFn)
+
+      const client1 = makeFakeIdleClient()
+      const client2 = makeFakeIdleClient()
+      const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+      ImapFlowMock.mockImplementationOnce(() => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      ImapFlowMock.mockImplementationOnce(() => client2 as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      generation = 6
+      client1.breakIdle(new Error('AUTHENTICATE failed — XOAUTH2 token expired'))
+      await flushMicrotasks()
+
+      expect(refreshFn).toHaveBeenCalledTimes(1)
+      expect(outcomes).toEqual([
+        { accountId, accountGeneration: 5, ok: true },
+        { accountId, accountGeneration: 5, ok: true },
+      ])
+    })
+
+    it('AC9-IDLE: the storm-brake failure carries the generation of the login', async () => {
+      // Fourth report site — reached without any handler or reconnect call, so
+      // it is the one most easily left unstamped by a partial fix.
+      subscribe()
+      let generation = 5
+      registerAccountGenerationProvider(() => generation)
+      const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+      registerAuthErrorHandler(accountId, refreshFn)
+
+      const clients = [makeFakeIdleClient(), makeFakeIdleClient(), makeFakeIdleClient(), makeFakeIdleClient()]
+      const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+      for (const c of clients) {
+        ImapFlowMock.mockImplementationOnce(() => c as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+      }
+
+      await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+      await flushMicrotasks()
+      generation = 6
+      const authErr = new Error('AUTHENTICATE failed — XOAUTH2 token expired')
+      for (const c of clients) {
+        c.breakIdle(authErr)
+        await flushMicrotasks()
+      }
+
+      expect(outcomes).toEqual([
+        { accountId, accountGeneration: 5, ok: true },
+        { accountId, accountGeneration: 5, ok: true },
+        { accountId, accountGeneration: 5, ok: true },
+        { accountId, accountGeneration: 5, ok: true },
+        { accountId, accountGeneration: 5, ok: false, error: authErr },
+      ])
+    })
+
+    it('AC9-IDLE: the terminal reconnect failure carries the generation of the login', async () => {
+      // Fifth and last report site, and the one the loop exits through — the
+      // final word a stale loop says before going quiet.
+      vi.useFakeTimers()
+      try {
+        subscribe()
+        let generation = 5
+        registerAccountGenerationProvider(() => generation)
+        const refreshFn = vi.fn().mockResolvedValue('fresh-token')
+        registerAuthErrorHandler(accountId, refreshFn)
+
+        const client1 = makeFakeIdleClient()
+        const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+        ImapFlowMock.mockImplementationOnce(
+          () => client1 as unknown as InstanceType<typeof imapflowModule.ImapFlow>,
+        )
+        const reconnectErr = new Error('ECONNREFUSED attempt')
+        for (let i = 0; i < AUTH_REFRESH_MAX_RECONNECT_ATTEMPTS; i++) {
+          ImapFlowMock.mockImplementationOnce(() => { throw reconnectErr })
+        }
+
+        await startIdle(accountId, idleCfg(), 'INBOX', () => {})
+        for (let i = 0; i < 40; i++) await Promise.resolve()
+        generation = 6
+        client1.breakIdle(new Error('AUTHENTICATE failed — XOAUTH2 token expired'))
+        for (let i = 0; i < 40; i++) await Promise.resolve()
+
+        for (let i = 0; i < AUTH_REFRESH_MAX_RECONNECT_ATTEMPTS; i++) {
+          await vi.advanceTimersByTimeAsync(5 * 60_000) // BACKOFF_MS.network
+          for (let j = 0; j < 40; j++) await Promise.resolve()
+        }
+
+        expect(outcomes).toEqual([
+          { accountId, accountGeneration: 5, ok: true },
+          { accountId, accountGeneration: 5, ok: false, error: reconnectErr },
+        ])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  // --- AC9: the generation stamp (fix wave 4) ---
+  //
+  // Account ids are reused ("max(id) + 1"), so a verdict identified by id alone
+  // cannot say WHICH mailbox it is about: a report from an operation of a
+  // deleted mailbox, landing after the id was reissued, reads exactly like a
+  // report about the new one. Waves 2 and 3 tried to fence this off on the
+  // subscriber's side — first by checking the id still exists, then by a
+  // 120-second quarantine — and both left the same two edges open: a server
+  // that holds an operation open longer than the window defeats it, and a
+  // genuine verdict of the NEW account arriving inside the window is thrown
+  // away (for a mailbox on manual sync, possibly the only verdict there is).
+  //
+  // The stamp removes the window rather than tuning it. Everything in this
+  // block exists to pin ONE property: the stamp names the account as it was
+  // when the operation STARTED, so a late verdict fails the comparison instead
+  // of being handed to a stranger.
+
+  describe('AC9: generation stamp', () => {
+    const cfg: ImapConfig = { host: 'imap.gen.com', port: 993, secure: true, user: 'gen@t.com', pass: 'p' }
+
+    it('carries the generation the provider reports for that account id', async () => {
+      // Kills: dropping the provider lookup and hardcoding the field to null,
+      // or stamping a constant.
+      subscribe()
+      registerAccountGenerationProvider((id) => (id === 201 ? 42 : 999))
+
+      await withImapRetry(201, cfg, async () => 'ok')
+
+      expect(outcomes).toEqual([{ accountId: 201, accountGeneration: 42, ok: true }])
+    })
+
+    it('AC9-CORE: the stamp is taken at the START of the operation, not at report time', async () => {
+      // The load-bearing test of the whole wave. The provider changes its
+      // answer WHILE the operation is in flight — exactly what a delete +
+      // re-add of the id looks like from here — and the verdict must still
+      // carry the value read at the start.
+      //
+      // Kills: reading the generation inside notifyConnectionOutcome / inside
+      // the try-catch of withOutcomeReporting, i.e. any form of
+      // `notifyConnectionOutcome({ accountGeneration: captureAccountGeneration(accountId), … })`.
+      subscribe()
+      let generation = 7
+      registerAccountGenerationProvider(() => generation)
+
+      await withImapRetry(202, cfg, async () => {
+        generation = 8 // the id got reissued mid-operation
+        return 'ok'
+      })
+
+      expect(outcomes).toEqual([{ accountId: 202, accountGeneration: 7, ok: true }])
+    })
+
+    it('AC9-CORE: the same holds on the failure path', async () => {
+      // Kills: capturing at start on the success branch only (an asymmetric
+      // fix would leave the dangerous half — a stale FAILURE is what raises the
+      // badge on an innocent mailbox — wide open).
+      subscribe()
+      let generation = 7
+      registerAccountGenerationProvider(() => generation)
+      const boom = new Error('AUTHENTICATE failed')
+
+      await expect(withImapRetry(203, cfg, async () => {
+        generation = 8
+        throw boom
+      })).rejects.toBe(boom)
+
+      expect(outcomes).toEqual([{ accountId: 203, accountGeneration: 7, ok: false, error: boom }])
+    })
+
+    it('the stamp is taken before the op lock is awaited, not after the queue clears', async () => {
+      // The realistic version of the race: an operation is ISSUED under
+      // generation 3, then sits behind the global IMAP op chain while the
+      // account is deleted and its id handed to a new mailbox. It must report
+      // the generation it was issued under.
+      //
+      // Kills: moving the capture inside withImapOpLock / withPerAccountOpLock
+      // (i.e. stamping after the wait), which reads as "correct" — the value is
+      // still read before the network call — but re-attaches a queued operation
+      // to whoever owns the id by the time the lock frees.
+      subscribe()
+      let generation = 3
+      registerAccountGenerationProvider(() => generation)
+
+      let releaseFirst: () => void = () => {}
+      const gate = new Promise<void>((resolve) => { releaseFirst = resolve })
+      const first = withImapRetry(204, cfg, async () => { await gate; return 'first' })
+      // Issued now, but the global op chain holds it until `first` completes.
+      const second = withImapRetry(204, cfg, async () => 'second')
+
+      generation = 4 // id reissued while the second op is still queued
+      releaseFirst()
+      await first
+      await second
+
+      expect(outcomes).toEqual([
+        { accountId: 204, accountGeneration: 3, ok: true },
+        { accountId: 204, accountGeneration: 3, ok: true },
+      ])
+    })
+
+    it('asks the provider for the id it is about, and concurrent operations do not swap stamps', async () => {
+      // Kills: passing a wrong/constant id to the provider, and hoisting the
+      // captured value into module scope where two overlapping operations
+      // would clobber each other's stamp.
+      subscribe()
+      const seen: number[] = []
+      registerAccountGenerationProvider((id) => { seen.push(id); return id * 10 })
+      const cfgA: ImapConfig = { host: 'imap.gen-a.com', port: 993, secure: true, user: 'a@gen.com', pass: 'p' }
+      const cfgB: ImapConfig = { host: 'imap.gen-b.com', port: 993, secure: true, user: 'b@gen.com', pass: 'p' }
+
+      let releaseA: () => void = () => {}
+      const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+      const runA = withImapRetryPerAccount(205, cfgA, async () => { await gateA; return 'a' })
+      const runB = withImapRetryPerAccount(206, cfgB, async () => 'b')
+      await runB
+      releaseA()
+      await runA
+
+      expect(seen.sort((x, y) => x - y)).toEqual([205, 206])
+      expect(outcomes.slice().sort((x, y) => x.accountId - y.accountId)).toEqual([
+        { accountId: 205, accountGeneration: 2050, ok: true },
+        { accountId: 206, accountGeneration: 2060, ok: true },
+      ])
+    })
+
+    it('AC3 still holds: a nested call reports once and does NOT re-read the generation', async () => {
+      // Kills: capturing in the nested pass-through branch, and any re-read
+      // between the inner call and the outer report. Also re-pins the
+      // single-report guard, which the stamp must not disturb.
+      subscribe()
+      let generation = 11
+      registerAccountGenerationProvider(() => generation)
+
+      await withImapRetry(207, cfg, async () =>
+        withImapRetryPerAccount(207, cfg, async () => { generation = 12; return 'inner' }))
+
+      expect(outcomes).toEqual([{ accountId: 207, accountGeneration: 11, ok: true }])
+    })
+
+    // --- unregistered / misbehaving provider: one answer, `null` ---
+    //
+    // `null` is the "unattributable" stamp, and the contract wave B implements
+    // is that it matches nothing — a missing provider silences the stream
+    // rather than letting unattributable verdicts move a mailbox's sign-in
+    // state. That is the safe direction: a wiring bug then shows up as a badge
+    // that never moves, not as a badge raised on the wrong account, and the
+    // wiring itself is pinned by a test in main rather than by a runtime
+    // fallback here.
+
+    it('stamps null when no provider is registered', async () => {
+      // Kills: defaulting the field to 0 (which would collide with a real
+      // generation 0) or omitting the field entirely.
+      subscribe()
+      registerAccountGenerationProvider(() => 5)
+      unregisterAccountGenerationProvider()
+      unregisterAccountGenerationProvider() // idempotent
+
+      await withImapRetry(208, cfg, async () => 'ok')
+
+      expect(outcomes).toEqual([{ accountId: 208, accountGeneration: null, ok: true }])
+    })
+
+    it('stamps null when the provider reports no live account for the id', async () => {
+      // Kills: treating the provider's `null` as "provider unavailable, retry
+      // later" or coercing it to a number.
+      subscribe()
+      registerAccountGenerationProvider(() => null)
+
+      await withImapRetry(209, cfg, async () => 'ok')
+
+      expect(outcomes).toEqual([{ accountId: 209, accountGeneration: null, ok: true }])
+    })
+
+    it('a throwing provider degrades the stamp to null and changes nothing about the operation', async () => {
+      // Kills: removing the try/catch around the provider call — the throw
+      // would then propagate out of withOutcomeReporting and fail an IMAP
+      // operation that the server answered perfectly well.
+      subscribe()
+      registerAccountGenerationProvider(() => { throw new Error('provider exploded') })
+
+      await expect(withImapRetry(210, cfg, async () => 'still-ok')).resolves.toBe('still-ok')
+
+      expect(outcomes).toEqual([{ accountId: 210, accountGeneration: null, ok: true }])
+    })
+
+    it('a provider returning a non-finite number stamps null rather than NaN', async () => {
+      // Kills: removing the Number.isFinite guard. NaN would satisfy
+      // `typeof x === 'number'`, survive into the payload, and then compare
+      // unequal to EVERYTHING on the subscriber's side — including itself —
+      // which is a silent, permanent mute that looks like a working stamp.
+      subscribe()
+      registerAccountGenerationProvider(() => Number.NaN)
+
+      await withImapRetry(211, cfg, async () => 'ok')
+
+      expect(outcomes).toEqual([{ accountId: 211, accountGeneration: null, ok: true }])
+    })
+
+    it('every report site in imap.ts passes a generation', async () => {
+      // Structural backstop for the five IDLE-loop sites plus the two prologue
+      // ones: a future sixth report site added without a stamp would emit a
+      // verdict that is unattributable by construction, and no behavioural test
+      // covers a branch that does not exist yet.
+      //
+      // Kills: adding `notifyConnectionOutcome({ accountId, ok: false, error })`
+      // anywhere in the file.
+      const source = readFileSync(fileURLToPath(new URL('./imap.ts', import.meta.url)), 'utf8')
+      const calls = source.match(/notifyConnectionOutcome\(\{[^}]*\}/g) ?? []
+      expect(calls.length).toBeGreaterThanOrEqual(9)
+      for (const call of calls) expect(call).toContain('accountGeneration')
+
+      // …and the stamp is read in exactly two places: the wrapper funnel and
+      // the head of startIdle. A third call site would mean somebody re-reads
+      // it somewhere, which is the defect itself.
+      const captures = source.match(/captureAccountGeneration\(/g) ?? []
+      // 1 declaration + 2 call sites.
+      expect(captures).toHaveLength(3)
+    })
+  })
+
+  // --- AC8: no silent accountId defaults ---
+
+  it('AC8: imap.ts declares no implicit `accountId = 1` default', () => {
+    // A forgotten argument used to be harmless (every production caller passes
+    // one). Once the boundary reports, it would clear the banner on the WRONG
+    // mailbox — a silent, cross-account failure.
+    const source = readFileSync(fileURLToPath(new URL('./imap.ts', import.meta.url)), 'utf8')
+    expect(source).not.toMatch(/accountId\s*=\s*\d/)
+  })
+})
+
+// --- §2.17 Phase 1: priority scheduling on the two IMAP locks ---
+//
+// Phase 0 shipped the `priority` tag and used it for nothing: both locks were
+// FIFO promise chains, so an interactive open queued behind the offline body
+// sync (main.log 2026-08-26: `net:setSeen` 10 941 ms). These cases assert the
+// tag now reaches the queue, from both the explicit opts and the ambient
+// scope, and that the bulk tiers still drain.
+
+describe('§2.17 Phase 1 — singleton op lock priority (withImapRetry)', () => {
+  const cfg: ImapConfig = { host: 'imap.prio.com', port: 993, secure: true, user: 'prio@x.com', pass: 'p' }
+
+  afterEach(() => {
+    forceDisconnectImap()
+  })
+
+  it('serves a later interactive op before an earlier indexer op', async () => {
+    const order: string[] = []
+    let releaseHolder!: () => void
+    const gate = new Promise<void>(r => { releaseHolder = r })
+
+    // A sync-tier operation holds the lock — this is the offline body sync in
+    // the incident.
+    const holder = withImapRetry(1, cfg, async () => {
+      order.push('sync-holder')
+      await gate
+    }, 2, { priority: 'sync' })
+    await Promise.resolve()
+
+    const indexerOp = withImapRetry(1, cfg, async () => { order.push('indexer') }, 2, { priority: 'indexer' })
+    const backgroundOp = withImapRetry(1, cfg, async () => { order.push('background') }, 2, { priority: 'background' })
+    // Enters the queue LAST and must run FIRST.
+    const interactiveOp = withImapRetry(1, cfg, async () => { order.push('interactive') }, 2, { priority: 'interactive' })
+    // All three really are queued behind the holder — the ordering below is a
+    // scheduling decision, not three ops that happened to run sequentially.
+    expect(__imapOpLockStateForTest()).toEqual({ locked: true, queued: 3 })
+
+    releaseHolder()
+    await Promise.all([holder, indexerOp, backgroundOp, interactiveOp])
+
+    expect(order).toEqual(['sync-holder', 'interactive', 'background', 'indexer'])
+  })
+
+  it('takes the tier from the ambient scope when opts is omitted', async () => {
+    const order: string[] = []
+    let releaseHolder!: () => void
+    const gate = new Promise<void>(r => { releaseHolder = r })
+
+    const holder = withImapPriority('sync', () => withImapRetry(2, cfg, async () => {
+      order.push('holder')
+      await gate
+    }))
+    await Promise.resolve()
+
+    // No opts anywhere below: the tag is carried by the caller's async context,
+    // which is how every production call site sets it.
+    const indexerOp = withImapPriority('indexer', () => withImapRetry(2, cfg, async () => { order.push('indexer') }))
+    const interactiveOp = withImapPriority('interactive', () => withImapRetry(2, cfg, async () => { order.push('interactive') }))
+
+    releaseHolder()
+    await Promise.all([holder, indexerOp, interactiveOp])
+
+    expect(order).toEqual(['holder', 'interactive', 'indexer'])
+  })
+
+  it('does not starve the indexer under a continuous interactive stream', async () => {
+    const order: string[] = []
+    let releaseHolder!: () => void
+    const gate = new Promise<void>(r => { releaseHolder = r })
+
+    const holder = withImapRetry(3, cfg, async () => { await gate }, 2, { priority: 'other' })
+    await Promise.resolve()
+
+    const indexerOp = withImapRetry(3, cfg, async () => { order.push('indexer') }, 2, { priority: 'indexer' })
+    const stream: Promise<void>[] = []
+    for (let i = 0; i < MAX_OVERTAKES_BEFORE_PROMOTION + 5; i++) {
+      stream.push(withImapRetry(3, cfg, async () => { order.push(`i${i}`) }, 2, { priority: 'interactive' }))
+    }
+
+    releaseHolder()
+    await Promise.all([holder, indexerOp, ...stream])
+
+    const pos = order.indexOf('indexer')
+    expect(pos).toBeGreaterThanOrEqual(0)
+    // Bounded by the promotion threshold, not by the length of the stream.
+    expect(pos).toBeLessThanOrEqual(MAX_OVERTAKES_BEFORE_PROMOTION)
+  })
+
+  it('releases the lock when the operation throws', async () => {
+    await expect(
+      withImapRetry(4, cfg, async () => { throw new Error('NO [ALERT] permanent failure') }, 0, { priority: 'interactive' }),
+    ).rejects.toThrow()
+    // The next op must not hang behind the failed one.
+    await expect(withImapRetry(4, cfg, async () => 'ok', 0, { priority: 'interactive' })).resolves.toBe('ok')
+  })
+})
+
+describe('§2.17 Phase 1 — per-account pool priority (withImapRetryPerAccount)', () => {
+  const cfg: ImapConfig = { host: 'imap.poolprio.com', port: 993, secure: true, user: 'poolprio@x.com', pass: 'p' }
+
+  afterEach(async () => {
+    await disconnectAllPerAccount()
+  })
+
+  it('serves a later interactive op before an earlier indexer op', async () => {
+    const order: string[] = []
+    let releaseHolder!: () => void
+    const gate = new Promise<void>(r => { releaseHolder = r })
+
+    const holder = withImapRetryPerAccount(11, cfg, async () => {
+      order.push('holder')
+      await gate
+    }, 2, { priority: 'sync' })
+    await Promise.resolve()
+
+    const indexerOp = withImapRetryPerAccount(11, cfg, async () => { order.push('indexer') }, 2, { priority: 'indexer' })
+    const interactiveOp = withImapRetryPerAccount(11, cfg, async () => { order.push('interactive') }, 2, { priority: 'interactive' })
+
+    releaseHolder()
+    await Promise.all([holder, indexerOp, interactiveOp])
+
+    expect(order).toEqual(['holder', 'interactive', 'indexer'])
+  })
+
+  it('still serializes operations for one account', async () => {
+    let concurrent = 0
+    let peak = 0
+    const op = (priority: 'interactive' | 'indexer') => withImapRetryPerAccount(12, cfg, async () => {
+      concurrent += 1
+      peak = Math.max(peak, concurrent)
+      await new Promise(r => setTimeout(r, 5))
+      concurrent -= 1
+    }, 2, { priority })
+    await Promise.all([op('indexer'), op('interactive'), op('indexer')])
+    expect(peak).toBe(1)
+  })
+
+  it('inherits the ambient tier set by the caller', async () => {
+    const order: string[] = []
+    let releaseHolder!: () => void
+    const gate = new Promise<void>(r => { releaseHolder = r })
+
+    const holder = withImapRetryPerAccount(13, cfg, async () => { await gate }, 2, { priority: 'sync' })
+    await Promise.resolve()
+
+    const indexerOp = withImapPriority('indexer', () => withImapRetryPerAccount(13, cfg, async () => { order.push('indexer') }))
+    const interactiveOp = withImapPriority('interactive', () => withImapRetryPerAccount(13, cfg, async () => { order.push('interactive') }))
+
+    releaseHolder()
+    await Promise.all([holder, indexerOp, interactiveOp])
+
+    expect(order).toEqual(['interactive', 'indexer'])
+  })
+
+  it('releases the pool lock when the operation throws', async () => {
+    await expect(
+      withImapRetryPerAccount(14, cfg, async () => { throw new Error('NO [ALERT] permanent failure') }, 0, { priority: 'interactive' }),
+    ).rejects.toThrow()
+    // The next op for the same account must not hang behind the failed one.
+    await expect(withImapRetryPerAccount(14, cfg, async () => 'ok', 0, { priority: 'interactive' })).resolves.toBe('ok')
+  })
+
+  // §2.17 Phase 1 — the historical bug this guards: `disconnectPerAccount`
+  // used to delete the per-account op chain UNCONDITIONALLY, which handed the
+  // next caller a fresh, unlocked chain that could run concurrently with an
+  // operation still in flight on the same account (a mailbox-switching
+  // hazard). `forgetIfIdle` is the fix at the imapScheduler.ts level; this
+  // proves the fix actually reaches through `disconnectPerAccount` too.
+  it('disconnectPerAccount mid-operation does not hand the next caller a fresh, unlocked lock', async () => {
+    const order: string[] = []
+    let releaseHolder!: () => void
+    const gate = new Promise<void>(r => { releaseHolder = r })
+
+    const holder = withImapRetryPerAccount(15, cfg, async () => {
+      order.push('holder-start')
+      await gate
+      order.push('holder-end')
+    }, 0, { priority: 'other' })
+    await Promise.resolve()
+
+    // Something disconnects the account WHILE the operation above is still
+    // running (e.g. a concurrent account reconfigure).
+    await disconnectPerAccount(cfg)
+
+    // A new operation arrives for the same account right after. With the old
+    // unconditional-delete behaviour this would get a fresh, unlocked lock
+    // and run concurrently with `holder` — i.e. 'after' would appear in
+    // `order` BEFORE 'holder-end'.
+    const after = withImapRetryPerAccount(15, cfg, async () => { order.push('after') }, 0, { priority: 'other' })
+
+    // Give `after` every opportunity to run early if it (incorrectly) got an
+    // unlocked mutex — several microtask turns, still well before we release
+    // the holder's gate.
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(order).toEqual(['holder-start'])
+
+    releaseHolder()
+    await Promise.all([holder, after])
+
+    expect(order).toEqual(['holder-start', 'holder-end', 'after'])
+  })
+})
+
+describe('§2.17 Phase 1 — the singleton lock and the per-account pool are independent', () => {
+  const cfg: ImapConfig = { host: 'imap.bothlocks.com', port: 993, secure: true, user: 'both@x.com', pass: 'p' }
+
+  afterEach(async () => {
+    forceDisconnectImap()
+    await disconnectAllPerAccount()
+  })
+
+  it('a singleton-lock op and a pool-lock op run concurrently — they do not collapse into one shared serialization point', async () => {
+    // The two describe blocks above prove ordering WITHIN each lock in
+    // isolation; neither can catch a regression that accidentally routed
+    // both `withImapRetry` and `withImapRetryPerAccount` through the same
+    // underlying PriorityMutex instance (or any other change that serializes
+    // them against each other), which is a plausible refactor mistake given
+    // both call `resolveImapPriority` and both take a `PriorityMutex`-shaped
+    // lock. Everyday load — the body indexer (pool) plus opening a message
+    // (singleton) — depends on this NOT happening. Proof is genuine overlap
+    // in wall-clock time, not just "both eventually completed".
+    let singletonRunning = false
+    let poolRunning = false
+    let overlapped = false
+
+    let releaseSingleton!: () => void
+    const singletonGate = new Promise<void>(r => { releaseSingleton = r })
+    let releasePool!: () => void
+    const poolGate = new Promise<void>(r => { releasePool = r })
+
+    const singletonOp = withImapRetry(600, cfg, async () => {
+      singletonRunning = true
+      if (poolRunning) overlapped = true
+      await singletonGate
+      singletonRunning = false
+    }, 2, { priority: 'interactive' })
+
+    const poolOp = withImapRetryPerAccount(601, cfg, async () => {
+      poolRunning = true
+      if (singletonRunning) overlapped = true
+      await poolGate
+      poolRunning = false
+    }, 2, { priority: 'interactive' })
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Both are inside their bodies at the same time — if they shared one
+    // lock, the second to start would still be queued here, not running.
+    expect(singletonRunning).toBe(true)
+    expect(poolRunning).toBe(true)
+    expect(overlapped).toBe(true)
+
+    releaseSingleton()
+    releasePool()
+    await Promise.all([singletonOp, poolOp])
+  })
+})
+
+describe('§2.17 Phase 1 — pool_queue_wait_ms lock tag', () => {
+  const cfg: ImapConfig = { host: 'imap.locktag.com', port: 993, secure: true, user: 'locktag@x.com', pass: 'p' }
+
+  afterEach(async () => {
+    await disconnectAllPerAccount()
+    forceDisconnectImap()
+    const { setNetEventReporter } = await import('./telemetry')
+    setNetEventReporter(null)
+  })
+
+  it("tags a singleton-lock wait with lock='singleton' and the ambient requester", async () => {
+    const events: Array<{ name: string; tags: Record<string, string | number | boolean> }> = []
+    const { setNetEventReporter } = await import('./telemetry')
+    setNetEventReporter((name, tags) => { events.push({ name, tags }) })
+
+    const holder = withImapRetry(21, cfg, async () => {
+      await new Promise(r => setTimeout(r, 600))
+    }, 2, { priority: 'sync' })
+    await new Promise(r => setTimeout(r, 5))
+    const waiter = withImapPriority('interactive', () => withImapRetry(21, cfg, async () => 'ok'))
+
+    await Promise.all([holder, waiter])
+
+    const waitEvents = events.filter(e => e.name === 'imap.pool_queue_wait_ms')
+    expect(waitEvents).toHaveLength(1)
+    expect(waitEvents[0]!.tags.lock).toBe('singleton')
+    expect(waitEvents[0]!.tags.requester).toBe('interactive')
+  })
+
+  it("tags a per-account wait with lock='pool'", async () => {
+    const events: Array<{ name: string; tags: Record<string, string | number | boolean> }> = []
+    const { setNetEventReporter } = await import('./telemetry')
+    setNetEventReporter((name, tags) => { events.push({ name, tags }) })
+
+    const holder = withImapRetryPerAccount(22, cfg, async () => {
+      await new Promise(r => setTimeout(r, 600))
+    }, 2, { priority: 'indexer' })
+    await new Promise(r => setTimeout(r, 5))
+    const waiter = withImapRetryPerAccount(22, cfg, async () => 'ok', 2, { priority: 'interactive' })
+
+    await Promise.all([holder, waiter])
+
+    const waitEvents = events.filter(e => e.name === 'imap.pool_queue_wait_ms')
+    expect(waitEvents).toHaveLength(1)
+    expect(waitEvents[0]!.tags.lock).toBe('pool')
   })
 })

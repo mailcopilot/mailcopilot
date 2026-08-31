@@ -64,6 +64,20 @@ describe('evaluateConsent', () => {
       .toBe('denied')
   })
 
+  // §2.122 — the concrete upgrade path, pinned with the literal historical
+  // version rather than `CURRENT - 1`: everyone who answered the FIRST
+  // disclosure must be asked again, because `ai.api_key_store_op` reports a
+  // category that disclosure did not name. The literal is deliberate — if a
+  // later change bumps the version again, this case must keep proving that a
+  // v1 answer is stale, which `CURRENT - 1` would stop doing.
+  it('AC6: a grant recorded under disclosure v1 is stale after the §2.122 bump', () => {
+    const v1Grant = { telemetryConsent: { granted: true, version: 1, at: AT } }
+    expect(TELEMETRY_CONSENT_VERSION).toBeGreaterThan(1)
+    expect(evaluateConsent(v1Grant)).toBe('needed')
+    // And "needed" must mean silence, not just "show the screen".
+    expect(isTelemetryAllowed({ ...v1Grant, sentryEnabled: true })).toBe(false)
+  })
+
   it('honors a decision recorded by a newer build (downgrade path)', () => {
     expect(evaluateConsent({ telemetryConsent: { granted: true, version: TELEMETRY_CONSENT_VERSION + 1, at: AT } }))
       .toBe('granted')
@@ -94,6 +108,35 @@ describe('isTelemetryAllowed', () => {
 
   it('is false when the About switch is off even if consent was granted', () => {
     expect(isTelemetryAllowed({ telemetryConsent: makeConsentRecord(true, AT), sentryEnabled: false })).toBe(false)
+  })
+
+  it('fails CLOSED on a corrupt About switch, not open', () => {
+    // The predicate used to be `sentryEnabled !== false`, which let every
+    // non-`false` value through — including values no legitimate writer ever
+    // produces. This matters because `sentryPreflight.ts` reads the raw settings
+    // JSON *before* schema validation on purpose (it must decide whether to arm
+    // the SDK before normal settings load), so a corrupt value genuinely reaches
+    // this function and the schema that would reject it runs too late. With a
+    // valid grant plus a corrupt switch, telemetry started — the one branch of
+    // the §2.82 chain that failed open.
+    const granted = { telemetryConsent: makeConsentRecord(true, AT) }
+    for (const corrupt of [null, 0, 1, '', 'false', 'true', 'no', 'yes', NaN, [], {}]) {
+      expect(
+        isTelemetryAllowed({ ...granted, sentryEnabled: corrupt as unknown }),
+      ).toBe(false)
+    }
+  })
+
+  it('an ABSENT About switch still allows — that is the old-profile compatibility case', () => {
+    // The other direction, pinned next to it so a future "tighten this" edit has
+    // to confront both at once: a profile written before the field existed has
+    // no key at all, and the schema's own default for it is `true`. Treating
+    // absence as refusal would silently turn telemetry off for users who had
+    // granted consent, which is a different bug, not a safer one.
+    expect(isTelemetryAllowed({ telemetryConsent: makeConsentRecord(true, AT) })).toBe(true)
+    expect(
+      isTelemetryAllowed({ telemetryConsent: makeConsentRecord(true, AT), sentryEnabled: undefined }),
+    ).toBe(true)
   })
 
   it('is false without a consent record even when sentryEnabled is true', () => {

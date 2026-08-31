@@ -74,14 +74,28 @@ setNetEventReporter((name, tags) => {
 // packages/db opens SQLite and runs schema migrations at module-import time
 // — and ES imports are hoisted, so by the time this imperative call runs,
 // the very first DB ops (including the entire cold-start migration round)
-// have already executed against the default sink. To avoid silently
-// dropping that telemetry, the seam in packages/db/telemetry.ts uses a
-// bounded ring buffer as its default sink and drains it into the real
-// starter on installation. See the "Buffered ring buffer" comment in
-// packages/db/telemetry.ts for the timing-fidelity tradeoff and the
-// `buffered=true` / `buffered_duration_ms` attribute decoration applied
-// to replayed spans. packages/db itself never imports Sentry.
-import { setDbTelemetrySink, setDbErrorReporter, setDbEventReporter } from '../packages/db/telemetry'
+// have already executed against the default sink. That default SPAN sink
+// still carries a bounded buffer that drains on installation, but read the
+// consent paragraph below before assuming it catches any of that: retention
+// is gated, the gate is injected by the statement below, and no DB work
+// happens between that statement and the real sink — so the cold-start round
+// it was written for is NOT captured today. The buffer only becomes load
+// bearing if bootstrap is ever split in two (gate first, `await import()` the
+// rest). Error reports raised before the reporter below exists are simply
+// dropped — nothing buffers them, by design.
+// packages/db itself never imports Sentry.
+//
+// §2.82: buffering is COLLECTION, so it obeys the consent gate like every
+// other accumulator. packages/db cannot import electron/telemetryGate, so the
+// gate is injected here and the reset hook registered, exactly as metrics.ts
+// and featureReach.ts do for their own buckets. Fail-closed by construction:
+// this statement runs after the hoisted imports above, so during import-time
+// migrations no gate exists and nothing is retained at all.
+import { setDbTelemetrySink, setDbErrorReporter, setDbEventReporter, setDbTelemetryCollectionGate, resetDbTelemetryBuffer } from '../packages/db/telemetry'
+import { isTelemetryCollectionAllowed, registerTelemetryCollectionResetHook } from './telemetryGate'
+setDbTelemetryCollectionGate(isTelemetryCollectionAllowed)
+registerTelemetryCollectionResetHook(resetDbTelemetryBuffer)
+import { takeSlowSqlSamples } from '../packages/db/sqlTiming'
 // Same rationale as setNetTelemetrySink above — packages/db forwards
 // `name: string` through a layer-pure seam.
 setDbTelemetrySink((name, attributes) => startMetricSpanDynamic(name, attributes))
@@ -135,6 +149,11 @@ process.on('unhandledRejection', (reason) => {
 })
 
 import { app, BrowserWindow, shell, Menu, dialog, screen } from 'electron'
+import { buildChildWindowOptions, centerOverRect, isStandaloneWindowKind, type ChildWindowKind } from './childWindowOptions'
+import { computeIsE2E } from './e2eFlag'
+// §2.145 — whether a stored details row may be served; see that module for why
+// the threshold is the SERVER-DIRECT writer's bound and not the EML soft cap.
+import { isServableCachedDetail, isServableCachedDetailJson } from './cachedDetailGuard'
 import { handleIpc, registerMetricsRecordHandler, registerUiFreezeHandler, startMainLoopFreezeWatchdog } from './ipc'
 import { recordEvent, recordHistogram, flushAggregator, startMetricSpan, bucketQueryLen, bucketResultCount, bucketDuration, bucketFolderCount, bucketTimeSinceSync, bucketCount, bucketFreedBytes, bucketBodySize, folderRoleFromPath, providerFromHost } from './metrics'
 import {
@@ -160,13 +179,17 @@ if (!gotSingleInstanceLock) {
   process.exit(0)
 } else {
   app.on('second-instance', (_event, argv) => {
-    const allWindows = BrowserWindow.getAllWindows()
-    const mainWindow = allWindows.find(w => !w.isDestroyed())
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-    }
-    // Handle mailto: URL passed from second instance (Linux/Windows)
+    // §2.99 — relaunching from the launcher is the way back on Linux/Windows:
+    // the first instance may be minimized, hidden by close-to-tray, or running
+    // with no window at all. All three repairs (and the create-if-absent case)
+    // belong to `showMainWindow()`, which is also what the tray's Open item and
+    // the macOS `activate` handler call — one implementation, so the routes
+    // back cannot drift apart. The hand-inlined copy this replaces additionally
+    // picked the FIRST live window rather than the main one, so a relaunch with
+    // a Compose or Settings window open raised the wrong window.
+    showMainWindow()
+    // Handle mailto: URL passed from second instance (Linux/Windows). Unrelated
+    // to bringing the app back — a relaunch carrying a mailto: does both.
     const mailtoArg = argv.find(a => a.startsWith('mailto:'))
     if (mailtoArg) handleMailtoUrl(mailtoArg)
   })
@@ -220,7 +243,9 @@ function handleMailtoUrl(url: string) {
   }
   const init = { ...parseMailtoUrl(url), source: 'mailto' as const }
   const accountId = getSettings().currentAccountId ?? listAccounts()[0]?.id ?? 1
-  composeCtx = { accountId, init }
+  // No `replyRef` on a mailto: there is no correspondent's message to read, so
+  // there is nothing to suggest (§3.3 B6 draft side).
+  composeCtx = { accountId, init, suggestion: null }
   openComposeWindow()
 }
 
@@ -248,6 +273,7 @@ import { domainToUnicode } from 'node:url'
 import tls from 'node:tls'
 import { z } from 'zod'
 import { refreshGoogleAccessToken, runGoogleOAuthFlow } from './googleOAuth'
+import type { OAuthConnectStage, OAuthProgress } from '@mailcopilot/types'
 import { requireGoogleOAuthCredentials } from './googleOAuthConfig'
 // Microsoft OAuth low-level flows are now consumed via electron/services/outlookOAuthService.ts
 import {
@@ -263,11 +289,16 @@ import {
   fetchMessageBody,
   downloadMessagePart,
   parseEmlBuffer,
+  parseEmlHeaderFacts,
   extractEmlAttachment,
   EML_ATTACHMENT_PART_PREFIX,
+  // §2.145 wave 2.1 — the acquisition ceiling and the counter it feeds.
+  MAX_EML_PARSE_BYTES,
+  recordHardParseCapTrip,
   downloadRawMessage,
   saveEml,
   readEml,
+  readEmlBounded,
   deleteEmls,
   deleteAccountEmls,
   listAccounts,
@@ -324,8 +355,12 @@ import {
   DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST,
   findForbiddenMcpStdioEnvKeys,
   setMcpEnvSanitizationListener,
+  withImapPriority,
 } from '../packages/net/index'
 import { requestSafeRemoteBytes } from '../packages/net/safeRemoteFetch'
+// §2.172 — every e2e fixture seeding site splits the raw `From:` header here,
+// so the seeded rows carry the same address/name split production writes.
+import { senderPartsFromHeader } from './e2eSenderParts'
 // §2.33 PR2a: setSecretBackend is exported from packages/net/config but is NOT
 // re-exported from packages/net/index — import it directly from the config
 // module (same style as electron/services/ai.ts), keeping scope to main.ts.
@@ -336,7 +371,24 @@ import { requestSafeRemoteBytes } from '../packages/net/safeRemoteFetch'
 import { setSecretBackend, getRawPersistedSettings } from '../packages/net/config'
 import type { AccountConfig, AccountMeta, AttachmentMeta, CalendarInvite, ComposeInit, FolderRoles, FolderPreference, ImapConfig, Mailbox, MessageDetails, UnsubscribeAttemptResult } from '../packages/net/types'
 import { queueItemToComposeInit } from './queueComposeBridge'
-import { quickActionRewriteSchema, instantReplyGenerateSchema } from './ipcSchemas'
+import { quickActionRewriteSchema, instantReplyGenerateSchema, proofreadCheckSchema, translateDraftSchema } from './ipcSchemas'
+import { translateMessageSchema, translateMessage, forgetAccountTranslations } from './services/aiTranslate'
+import {
+  createComposeOpenSequence,
+  deliverIfStillCurrent,
+  settleTargetLangSuggestion,
+  startTargetLangSuggestion,
+  translateDraft,
+  type PendingTargetLangSuggestion,
+} from './services/composeTranslate'
+// §2.167 — the `settings:save` verdict split (whole-payload refusal vs
+// per-field refusal). Pure functions; the handler keeps the IO and the order.
+import {
+  partitionRendererSettingsIssues,
+  stripRefusedFields,
+  dropErasingUndefined,
+  type RefusedSettingsField,
+} from './settingsSaveRefusal'
 import {
   MailLinkRouter,
   ANOMALY_WINDOW_MS,
@@ -433,6 +485,7 @@ import {
   getMaxUidForFolder,
   removeStaleMessages,
   listMailRules,
+  getMailRule,
   createMailRule,
   updateMailRule,
   deleteMailRule,
@@ -480,7 +533,8 @@ import {
   getSyncState,
   upsertSyncState,
   moveMessagesLocally,
-  optimizeFts,
+  mergeFtsIndexStep,
+  ftsSegmentCount,
   appendMcpAuditEvent,
   listAiActionLog,
   aggregateAiUsage,
@@ -489,7 +543,7 @@ import {
   exportAiActionLog,
 } from '../packages/db'
 import type { TlsPinRow, AiCostReservation } from '../packages/db'
-import { matchRule, parseSearchQuery, type MailRule, type MailContext, type RuleAction, type RuleCondition } from '../packages/core'
+import { matchRule, parseSearchQuery, findEncodedMailRuleRefusal, mailRuleRefusalError, formatMailRuleRefusal, parseMailRuleParts, type MailRule, type MailContext, type MailRuleRefusal, type RuleAction } from '../packages/core'
 import {
   AI_RULE_BATCH_SIZE as CORE_AI_RULE_BATCH_SIZE,
   AI_RULE_MAX_CALLS_PER_HOUR,
@@ -507,18 +561,20 @@ import {
   runMailRules,
   type MailRulesRunnerDeps,
 } from './services/mailRulesRunner'
-import { startBodyIndexer, stopBodyIndexer, waitForIdle as waitForBodyIndexerIdle, type FetchBodyFn } from './services/bodyIndexer'
+import { startBodyIndexer, stopBodyIndexer, resetBodyIndexerBackoff, waitForIdle as waitForBodyIndexerIdle, type FetchBodyFn } from './services/bodyIndexer'
+import { startFtsMaintenance } from './services/ftsMaintenance'
 import { replayOfflineOps } from './services/offlineReplay'
 import { searchWorkerClient } from './services/searchWorkerClient'
-import { canWriteAppDir, classifyUpdateError, detectUpdateChannel, type SystemInfo } from './services/updateCheck'
+import { resolveSelfUpdateSupport, decideUpdateIpcGate, classifyUpdateError, detectUpdateChannel, type SystemInfo } from './services/updateCheck'
 import { computeOfflineSinceDate } from './services/offlineRetention'
 import { reportSentCopyAppendFailure, buildSentCopyAppendDiag } from './services/sentCopyFailure'
-import { getOutlookAccessToken, getOutlookGraphSendAccessToken, clearOutlookTokenCache, forceRefreshOutlookAccessToken, connectOutlookAccount } from './services/outlookOAuthService'
+import { getOutlookAccessToken, getOutlookGraphSendAccessToken, clearOutlookTokenCache, forceRefreshOutlookAccessToken, connectOutlookAccount, registerMissingCredentialsReporter } from './services/outlookOAuthService'
 import { secretStore } from './services/secretStore'
 import { sendMailViaGraph } from '../packages/net/graphSend'
-import { registerAuthErrorHandler, unregisterAuthErrorHandler, registerCertErrorHandler, unregisterCertErrorHandler } from '../packages/net/imap'
+import { registerAuthErrorHandler, unregisterAuthErrorHandler, registerCertErrorHandler, unregisterCertErrorHandler, classifyImapError, registerConnectionOutcomeHandler, registerAccountGenerationProvider } from '../packages/net/imap'
 import { verifyCertTrust } from '../packages/net/tls'
 import { initCertRecovery } from './services/certRecovery'
+import { initAccountAuthState, imapAuthNotConfiguredError, authNotConfiguredError } from './services/accountAuthState'
 import { extractIcsFromRawEml } from '../packages/net/message'
 import {
   parseCalendarPart,
@@ -534,6 +590,40 @@ import {
 // persistence, migration and the two IPC channels live in the service.
 import { applyAboutToggleFromOrigin, isTelemetryAllowed, clampTelemetryForRenderer } from './telemetryConsent'
 import { initTelemetryConsent } from './services/telemetryConsentService'
+import { attachContextMenu } from './services/contextMenu'
+// §2.103 — spell checking. Every decision about the Chromium spellchecker
+// (which languages, whether it is armed at all, and whether a dictionary may be
+// fetched from a third-party CDN) lives in the service — it is the single
+// writer of that state, the way windowRescue.ts is for window geometry. main
+// only wires it: at startup, per window, on save (hotspot policy).
+import {
+  initSpellcheck, applySpellcheckToWindow, reapplySpellcheck,
+  ensureSpellcheckDictionariesApproved, applySpellcheckDecision,
+  normalizeSpellcheckLanguages, spellcheckDeclinedMessage,
+} from './services/spellcheck'
+// §2.99 — tray, background operation and main-process new-mail notifications.
+// Every decision lives in these services; main only wires them (hotspot policy).
+import {
+  initBackgroundMail, initTrayIntegration, applyTrayEnabled, syncLaunchAtLogin,
+  shouldKeepRunningInBackground, noteHiddenToTray, noteFolderSynced, invalidateUnreadBadge,
+  forgetAccountBackgroundState,
+} from './services/backgroundMail'
+import { disarmTray, shutdownTray } from './services/tray'
+import type { MailRef } from './services/desktopNotifications'
+// §2.119 — human confirmation before the address AI requests (and with them
+// the user's API key) are sent to changes. Both renderer routes that can move
+// it — `settings:save` and the `ai:checkAuth` overrides — go through this.
+import {
+  ensureAiDestinationApproved,
+  aiDestinationRejectionMessage,
+} from './services/aiDestinationGuard'
+import {
+  aiDestinationOverridesSchema,
+  resolveRequestedAiDestination,
+  applyAiDestinationOverrides,
+  applyAiDestinationDecision,
+  withEffectiveProvider,
+} from './services/aiDestination'
 
 // §3.10 P0 wave 3 reinforcement: bridge the packages/net settings-migration
 // audit hook into the main-side audit pipeline (electron-log + ai_audit_log +
@@ -633,7 +723,7 @@ if (process.env.MAILCOPILOT_DATA_DIR) {
 // the previous inline block used.
 registerMetricsRecordHandler()
 registerUiFreezeHandler()
-startMainLoopFreezeWatchdog()
+startMainLoopFreezeWatchdog({ drainSlowSql: takeSlowSqlSamples })
 
 // Zod schemas for IPC parameter validation
 const accountIdSchema = z.number().int().positive()
@@ -668,6 +758,26 @@ const PENDING_MOVE_MAX_REGISTRY_GLOBAL = 200_000
 // inside Map keys. Real IMAP folder names are ≤255 chars (RFC 3501); 256
 // gives a small margin and stops absurd payloads cleanly.
 const PENDING_MOVE_MAX_FOLDER_LEN = 256
+/**
+ * §2.145 — options of one `net:messageDetails` call.
+ *
+ * Deliberately an OPTION on the existing channel rather than a channel of its
+ * own: "show the rest of this message" is the same read, at a raised body
+ * limit, and a second whitelisted channel would widen the preload surface for
+ * nothing (CLAUDE.md §5 — the IPC whitelist is a security boundary).
+ *
+ * `full` is the raised SOFT tier, and only that. It cannot lift the hard cap:
+ * that decision is taken in packages/net/eml.ts before any dispatch and takes
+ * no option from anybody, so a compromised renderer setting `full: true` on
+ * every open buys a bigger body on messages it could already read and nothing
+ * at all on the ones the hard cap refused. `.strict()` so a future field cannot
+ * arrive unnoticed, `.optional()` so every existing three-argument call site
+ * keeps working unchanged.
+ */
+const messageDetailsOptionsSchema = z
+  .object({ full: z.boolean().optional() })
+  .strict()
+  .optional()
 const paginationSchema = z.object({ limit: z.number().int().positive(), offset: z.number().int().min(0) })
 const beforeUidSchema = z.number().int().positive().optional()
 const partSchema = z.string().min(1)
@@ -875,7 +985,18 @@ const syncFolderHeadersOptionsSchema = z.object({
   maxBatches: z.number().int().positive().max(5000).optional(),
 }).strict().optional()
 
-const IS_E2E = process.env.MAILCOPILOT_E2E === '1'
+/**
+ * The e2e opt-in. Derived by `computeIsE2E` — env flag AND unpackaged build,
+ * never the env flag alone; see `electron/e2eFlag.ts` for the threat model and
+ * `electron/e2eFlag.test.ts` for the truth table.
+ *
+ * Consequence worth stating once, because ~60 branches below depend on it: on
+ * a packaged build this is `false` no matter what the environment says, so a
+ * shipped app always takes the production path — real accounts, real IMAP,
+ * real confirmation dialogs, auto-updater configured. Nothing here needs to
+ * re-check `app.isPackaged` for that guarantee.
+ */
+const IS_E2E = computeIsE2E(process.env, app.isPackaged)
 
 /**
  * Defense-in-depth guard for renderer-exposed `e2e:*` IPC handlers.
@@ -894,6 +1015,13 @@ const IS_E2E = process.env.MAILCOPILOT_E2E === '1'
  * (`electron .`) and Playwright runs (`vite build --mode e2e && electron-builder
  * install-app-deps && playwright test`) keep `isPackaged === false`, so the
  * legitimate e2e flow continues to work.
+ *
+ * The explicit `app.isPackaged` branch is kept even though `IS_E2E` now folds
+ * the same condition in (see `computeIsE2E`): it is what distinguishes "shipped
+ * build was asked for a fixture channel" — the anomaly worth a Sentry event —
+ * from the ordinary dev-without-opt-in refusal, and it keeps this guard correct
+ * on its own terms rather than by reference to how the flag happens to be
+ * derived today.
  *
  * On a packaged-build invocation we also fire a Sentry breadcrumb because it
  * is a high-signal anomaly: a benign user cannot trigger it.
@@ -970,6 +1098,15 @@ type E2EMail = {
   draftId?: string
   /** §2.22 — calendar invite fixture for e2e RSVP flow tests. */
   calendarInvite?: CalendarInvite
+  /**
+   * §2.145 — this fixture has real RFC822 bytes on disk (written by
+   * `e2e:injectMail` through `saveEml`), so `net:messageDetails` must serve it
+   * from the PRODUCTION pipeline instead of synthesising a body. Set by the
+   * injection handler only; there is no way to set it from a payload field, so
+   * a fixture can never claim to be EML-backed without bytes having been
+   * written for it.
+   */
+  emlFixture?: true
 }
 
 let E2E_UID_SEQ = 300
@@ -997,6 +1134,11 @@ type E2EText = {
   threadReplyBody: string
   account2FirstSubject: string
   account2FirstBody: string
+  /** §2.128 e2e coverage — a message whose real-attachment count crosses the
+   *  collapse ceiling (ATTACHMENT_COLLAPSED_LIMIT = 4), so the toggle/expand
+   *  path is exercised end-to-end and not just at the unit level. */
+  manyAttachmentsSubject: string
+  manyAttachmentsBody: string
 }
 
 const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
@@ -1021,6 +1163,8 @@ const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
     threadReplyBody: 'Thread reply message',
     account2FirstSubject: 'E2E2: first email',
     account2FirstBody: 'E2E test email for account 2.',
+    manyAttachmentsSubject: 'E2E1: many attachments',
+    manyAttachmentsBody: 'E2E test email with six real attachments for the collapse/expand check (account 1).',
   },
   ru: {
     firstSubject: 'E2E1: первое письмо',
@@ -1043,6 +1187,8 @@ const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
     threadReplyBody: 'Thread reply message',
     account2FirstSubject: 'E2E2: первое письмо',
     account2FirstBody: 'Тестовое письмо для e2e (аккаунт 2).',
+    manyAttachmentsSubject: 'E2E1: письмо с множеством вложений',
+    manyAttachmentsBody: 'Тестовое письмо с шестью настоящими вложениями для проверки сворачивания/раскрытия списка (аккаунт 1).',
   },
   fr: {
     firstSubject: 'E2E1: premier e-mail',
@@ -1065,6 +1211,8 @@ const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
     threadReplyBody: 'Reponse du fil',
     account2FirstSubject: 'E2E2: premier e-mail',
     account2FirstBody: 'E-mail de test E2E pour le compte 2.',
+    manyAttachmentsSubject: 'E2E1: nombreuses pieces jointes',
+    manyAttachmentsBody: "E-mail de test E2E avec six pieces jointes reelles pour verifier le pliage/depliage (compte 1).",
   },
   de: {
     firstSubject: 'E2E1: erste E-Mail',
@@ -1087,6 +1235,8 @@ const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
     threadReplyBody: 'Thread-Antwortnachricht',
     account2FirstSubject: 'E2E2: erste E-Mail',
     account2FirstBody: 'E2E-Test-E-Mail fuer Konto 2.',
+    manyAttachmentsSubject: 'E2E1: viele Anhaenge',
+    manyAttachmentsBody: 'E2E-Test-E-Mail mit sechs echten Anhaengen fuer den Einklapp-/Ausklapp-Test (Konto 1).',
   },
   es: {
     firstSubject: 'E2E1: primer correo',
@@ -1109,6 +1259,8 @@ const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
     threadReplyBody: 'Respuesta del hilo',
     account2FirstSubject: 'E2E2: primer correo',
     account2FirstBody: 'Correo de prueba E2E para la cuenta 2.',
+    manyAttachmentsSubject: 'E2E1: muchos adjuntos',
+    manyAttachmentsBody: 'Correo de prueba E2E con seis adjuntos reales para comprobar el plegado/despliegue (cuenta 1).',
   },
   it: {
     firstSubject: 'E2E1: prima email',
@@ -1131,6 +1283,8 @@ const E2E_TEXTS: Record<E2ELanguage, E2EText> = {
     threadReplyBody: 'Risposta del thread',
     account2FirstSubject: 'E2E2: prima email',
     account2FirstBody: 'Email di test E2E per account 2.',
+    manyAttachmentsSubject: 'E2E1: molti allegati',
+    manyAttachmentsBody: 'Email di test E2E con sei allegati reali per verificare il collasso/espansione (account 1).',
   },
 }
 
@@ -1227,6 +1381,41 @@ function buildE2EBoxes(lang: E2ELanguage): Record<number, Record<string, E2EMail
           text: t.flaggedBody,
         },
         {
+          // §2.128 e2e coverage — six real attachments cross the collapse
+          // ceiling (ATTACHMENT_COLLAPSED_LIMIT = 4 in
+          // src/utils/attachmentList.ts), so this fixture proves the block
+          // stays capped, the body stays readable, and expand reveals all six
+          // through a real IPC round trip — not just the unit-level model.
+          uid: 105,
+          from: 'dave@example.test',
+          to: 'e2e1@example.test',
+          subject: t.manyAttachmentsSubject,
+          // NOTE: this date does NOT control e2e list ordering. The real
+          // `net:inboxSummaries`/`net:folderPage` handlers below query the DB,
+          // which does sort `ORDER BY date DESC` (packages/db/index.ts), but
+          // the IS_E2E branch of those same handlers builds the list straight
+          // from this in-memory array sorted by `uid DESC` — date is stored
+          // for display only and never consulted for order. So this fixture
+          // sorts by uid (105) relative to the other account-1 messages
+          // regardless of what date it carries. Tests that need to open a
+          // specific fixture message must select it by subject (see
+          // attachment-list.spec.ts, print.spec.ts) rather than relying on
+          // position in the list.
+          date: '2026-02-07T23:50:00.000Z',
+          unread: false,
+          flagged: false,
+          hasAttachments: true,
+          text: t.manyAttachmentsBody,
+          attachments: [
+            { part: '2', disposition: 'attachment', contentType: 'application/pdf', cid: undefined, filename: 'invoice-01.pdf', size: 10240 },
+            { part: '3', disposition: 'attachment', contentType: 'application/pdf', cid: undefined, filename: 'invoice-02.pdf', size: 20480 },
+            { part: '4', disposition: 'attachment', contentType: 'image/jpeg', cid: undefined, filename: 'photo-01.jpg', size: 51200 },
+            { part: '5', disposition: 'attachment', contentType: 'image/jpeg', cid: undefined, filename: 'photo-02.jpg', size: 61440 },
+            { part: '6', disposition: 'attachment', contentType: 'application/zip', cid: undefined, filename: 'archive.zip', size: 102400 },
+            { part: '7', disposition: 'attachment', contentType: 'text/plain', cid: undefined, filename: 'notes.txt', size: 512 },
+          ],
+        },
+        {
           uid: 89,
           from: 'alice@example.test',
           to: 'e2e1@example.test',
@@ -1293,6 +1482,105 @@ function e2eBox(accountId: number, path: string): E2EMail[] {
   return boxes[path]
 }
 
+/**
+ * §2.145 — bounds on an EML-backed e2e fixture.
+ *
+ * `E2E_MAX_FIXTURE_EML_BYTES` stands ABOVE `MAX_EML_PARSE_BYTES` (100 MiB) on
+ * purpose: a spec has to be able to express a message on either side of the
+ * hard cap, including the boundary itself. It is bounded all the same, because
+ * "test scaffolding" is not a reason to let a caller ask for an unbounded write
+ * — see the security note on `writeE2EFixtureEml`.
+ *
+ * The base64 bound is stated in CHARACTERS because that is what the schema
+ * measures; 8 MiB of characters is ~6 MiB of bytes, far above any fixture whose
+ * exact CONTENT matters (a specific MIME shape), and a size-only fixture uses
+ * `emlPadToBytes`, which moves no bytes across IPC at all.
+ */
+const E2E_MAX_FIXTURE_EML_BYTES = 200 * 1024 * 1024
+const E2E_MAX_FIXTURE_EML_BASE64_CHARS = 8 * 1024 * 1024
+
+/**
+ * Write the raw bytes of an EML-backed e2e fixture to the message cache.
+ *
+ * SECURITY — the whole reason this is shaped the way it is. The renderer
+ * supplies CONTENT and an identity (accountId / folder / uid); it never
+ * supplies a PATH. The path is derived main-side by `saveEml`, under the app's
+ * own mail directory. The one place renderer input reaches the filesystem is
+ * the folder segment, so `.` and `..` are refused outright: `saveEml` encodes
+ * the folder with `encodeURIComponent`, which turns `/` into `%2F` and so
+ * cannot produce a nested path, but leaves those two literals alone — a bounded
+ * one-level move within the mail directory rather than an escape, and still not
+ * something this handler has any reason to allow.
+ *
+ * The rest of the exposure is the same as every other `e2e:*` handler and is
+ * governed by `assertE2EHandlerAllowed`: unreachable in a packaged build (which
+ * also reports the attempt to Sentry) and unreachable in an unpackaged build
+ * without the opt-in env var. In a dev or e2e build a compromised renderer can
+ * use it to write bounded attacker-chosen bytes into the EML cache for a
+ * message id of its choosing — which is strictly less than `e2e:injectMail`
+ * already grants (making arbitrary mail appear in the UI as if it came from the
+ * server), and both are confined to a build the user is not running.
+ */
+function writeE2EFixtureEml(
+  accountId: number,
+  folder: string,
+  uid: number,
+  mail: E2EMail,
+  base64?: string,
+  padToBytes?: number,
+): void {
+  if (folder === '.' || folder === '..') {
+    throw new Error('e2e:injectMail: folder must not be a path segment')
+  }
+  const raw = base64 !== undefined
+    ? Buffer.from(base64, 'base64')
+    : buildE2EFixtureEml(mail, padToBytes ?? 0)
+  saveEml(accountId, folder, uid, raw)
+}
+
+/**
+ * Synthesise a valid RFC822 message of EXACTLY `targetBytes`.
+ *
+ * Exact, not approximate: a cap spec's whole point is which side of a limit the
+ * message falls on, and "about 100 MiB" cannot express the boundary case. The
+ * arithmetic is therefore trivial by construction — headers, then a pad of
+ * `targetBytes - headers.length`.
+ *
+ * CONTRACT: a target smaller than the header block is REFUSED, not rounded up.
+ * There is no valid message shorter than its own headers, so the honest answers
+ * are "refuse" or "return something larger than you asked for" — and the second
+ * is the worse one here, because the only reason to name an exact size is to
+ * sit on a specific side of a cap. A spec that asks for 40 bytes and silently
+ * receives 130 would be testing a message it did not describe.
+ *
+ * Header values are stripped of CR and LF: they come from the fixture payload,
+ * and a stray newline would silently terminate the header block early, leaving
+ * the spec debugging a message that is malformed for a reason nothing states.
+ */
+function buildE2EFixtureEml(mail: E2EMail, targetBytes: number): Buffer {
+  const clean = (v: string | undefined) => (v ?? '').replace(/[\r\n]/g, ' ')
+  const headers = Buffer.from([
+    `From: ${clean(mail.from)}`,
+    `To: ${clean(mail.to)}`,
+    `Subject: ${clean(mail.subject)}`,
+    `Date: ${clean(mail.date)}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="utf-8"',
+    '',
+    '',
+  ].join('\r\n'), 'utf8')
+  if (targetBytes < headers.length) {
+    throw new Error(
+      `e2e:injectMail: emlPadToBytes must be at least ${headers.length} for this fixture's headers`,
+    )
+  }
+  if (targetBytes === headers.length) return headers
+  // Single-byte ASCII, so the byte count and the decoded character count agree
+  // — a spec reasoning about the soft cap should not also have to reason about
+  // UTF-8 expansion.
+  return Buffer.concat([headers, Buffer.alloc(targetBytes - headers.length, 0x78)])
+}
+
 function e2eFindInAnyBox(accountId: number, uid: number): E2EMail | undefined {
   for (const box of Object.values(e2eBoxes(accountId))) {
     const found = box.find(m => m.uid === uid)
@@ -1301,6 +1589,13 @@ function e2eFindInAnyBox(accountId: number, uid: number): E2EMail | undefined {
   return undefined
 }
 
+/**
+ * Recipient-side display parsing for e2e fixtures. NOT for senders: the sender
+ * split goes through `senderPartsFromHeader` (electron/e2eSenderParts.ts), which
+ * delegates the "what may become an address" verdict to the production parser.
+ * The `includes('@')` fallback below stays only because a recipient list is not
+ * an identity an attacker steers rules with — see §2.172 followup.
+ */
 function parseDisplayAddress(raw: string): { name?: string; address?: string } {
   const s = (raw || '').trim()
   if (!s) return {}
@@ -1322,14 +1617,6 @@ function parseDisplayAddressList(rawList: string | undefined): Array<{ name?: st
     .split(',')
     .map(x => parseDisplayAddress(x))
     .filter(x => Boolean((x.address || '').trim()))
-}
-
-function displayFromParts(raw: string): { from: string; fromAddr: string; fromName?: string } {
-  const p = parseDisplayAddress(raw)
-  const fromAddr = (p.address || '').trim()
-  const fromName = (p.name || '').trim() || undefined
-  const from = (fromName || fromAddr || '').trim()
-  return { from, fromAddr: fromAddr || raw.trim(), fromName }
 }
 
 function htmlToPlainText(html: string): string {
@@ -1381,13 +1668,19 @@ function e2eMailboxes(accountId: number) {
   if (cdpPort) app.commandLine.appendSwitch('remote-debugging-port', cdpPort)
 }
 
-// Linux: set X11 WM_CLASS so the window manager associates the running window
-// with our .desktop file's StartupWMClass=MailCopilot, instead of creating a
-// separate "Electron" taskbar group when launched in dev mode (where the
-// Electron binary is `node_modules/.bin/electron`, not the renamed production
-// binary). Skip in E2E to avoid interfering with parallel test isolation.
+// Linux: the GTK program class, used by the toolkit windows Chromium creates on
+// our behalf (the legacy tray icon plug among them).
+//
+// It is NOT what associates our window with the launcher, despite what this
+// comment used to claim: measured on Ubuntu GNOME 46 / X11, the main window's
+// WM_CLASS ignored this switch entirely and followed `desktopName` from
+// package.json instead — which is where that association is now pinned (see
+// electron-builder.json5, `linux.syncDesktopName`). The value is derived from
+// the same app name rather than spelled out again, so there is one name in the
+// session and not two. Skip in E2E to avoid interfering with parallel test
+// isolation.
 if (process.platform === 'linux' && !IS_E2E) {
-  app.commandLine.appendSwitch('class', 'MailCopilot')
+  app.commandLine.appendSwitch('class', app.getName())
 }
 
 let win: BrowserWindow | null
@@ -1530,7 +1823,17 @@ async function openExternalGated(url: string, source: string): Promise<boolean> 
   return true
 }
 
-function configureExternalLinks(w: BrowserWindow) {
+/**
+ * Per-window link routing + native context menu wiring.
+ *
+ * @param opts.routesMailLinks true only for windows whose renderer subscribes
+ *   to `mail:link` (the main window via App.tsx and the standalone message
+ *   window via MailWindow.tsx — both through `useMailLinkClick`). It gates the
+ *   context menu's "open link in browser" item: on a surface with no consumer
+ *   the item would be a silent no-op, and the honest answer is not to offer it
+ *   rather than to open a second, unguarded route to the browser.
+ */
+function configureExternalLinks(w: BrowserWindow, opts: { routesMailLinks: boolean }) {
   w.webContents.setWindowOpenHandler(({ url }) => {
     void openExternalGated(url, 'window_open')
     return { action: 'deny' }
@@ -1621,6 +1924,26 @@ function configureExternalLinks(w: BrowserWindow) {
     details.preventDefault()
     emitMailLink(action.payload)
   })
+
+  // §2.93(a) — the app's ONLY native context menu (Electron draws none of its
+  // own, and Menu.setApplicationMenu(null) removes the application menu too).
+  // Wired here, and only here, because this is where the per-window
+  // `mail:link` funnel is built: the menu's "open link in browser" hands the
+  // link to `emitMailLink` — the same route a click takes — instead of
+  // reaching shell.openExternal on a second path that would drift from it.
+  // Menu construction and every routing decision live in the service; main
+  // keeps the wiring only (CLAUDE.md §5 hotspot policy).
+  attachContextMenu(w, {
+    getLanguage: () => getSettings().language ?? 'en',
+    emitMailLink: opts.routesMailLinks ? emitMailLink : undefined,
+  })
+
+  // §2.103 — the spellchecker policy is applied to this window's session too,
+  // not only to the default session at startup. Today every window shares
+  // `session.defaultSession`, so this is normally a repeat; the invariant being
+  // held is that no window exists whose session was configured by nobody —
+  // Chromium's own default there is "armed, OS locale, download the dictionary".
+  applySpellcheckToWindow(w)
 }
 
 // --- Window state persistence ---
@@ -1727,6 +2050,128 @@ function childBrowserArgs(): string[] {
   return [...themeArgs(), ...installIdArgs(), ...sentryEnabledArgs()]
 }
 
+/**
+ * Corner shape for the frameless windows this app creates. **Linux only** —
+ * on every other platform the key is deliberately absent so the platform
+ * default applies. Do NOT "tidy" this back into an unconditional
+ * `roundedCorners: false`; the asymmetry is the point.
+ *
+ * WHY LINUX OPTS OUT. Electron 43 flipped the `roundedCorners` default to
+ * `true` and extended it to Linux (in 40 the option was `@platform
+ * darwin,win32` and Linux frameless windows were always square). A `frame:
+ * false` window gets no WM resize borders on Linux, so resizing is emulated in
+ * the renderer by `src/components/ResizeEdges.tsx`: 5px edge strips plus 8x8px
+ * corner squares pinned to the window's extreme corners. A client-side-
+ * decoration corner radius (typically 8-12px) covers exactly that area, so the
+ * diagonal `sw`/`se` handles would be clipped away on the one platform that
+ * depends on them, and the edge strips would lose their ends. The square shape
+ * is also what the window backgrounds in `src/App.css` and `themeBg()` are
+ * drawn against.
+ *
+ * WHY macOS IS LEFT ALONE. Setting `roundedCorners: false` on a frameless
+ * window there is not cosmetic: `NativeWindowMac` runs `SetBorderless(true)`,
+ * which clears `NSWindowStyleMaskTitled` — the AppKit prerequisite for native
+ * fullscreen. Electron's own docs said so outright until ~v25 ("Setting this
+ * property to `false` will prevent the window from being fullscreenable"); the
+ * sentence was dropped from the docs later, but the code path is unchanged in
+ * 43.3.0. This app treats fullscreen as a valid window state — see
+ * `electron/services/windowRescue.ts`, which no-ops on it — and macOS rounding
+ * was the native appearance before this upgrade, causing no problem.
+ * `ResizeEdges` is inert off Linux anyway (`if (!isLinux || maximized) return
+ * null`), so there is nothing to win and a fullscreen regression to lose.
+ *
+ * WHY WINDOWS IS LEFT ALONE. Rounding there predates Electron 43 (Windows 11
+ * build 22000+; older builds ignore the option) and is the native look.
+ *
+ * Rounding the Linux windows is a deliberate UI change that has to come with
+ * reshaped resize handles (Track C), not a side effect of a version bump.
+ */
+function framelessCornerOptions(): Pick<Electron.BrowserWindowConstructorOptions, 'roundedCorners'> {
+  return process.platform === 'linux' ? { roundedCorners: false } : {}
+}
+
+/**
+ * §3.3.B4.f6 — windows created WITHOUT a WM parent (Compose, standalone
+ * message windows; see `childWindowOptions.ts` for why).
+ *
+ * Electron closes a window's children when the window itself closes. Since
+ * these two kinds no longer are children, that teardown has to happen here,
+ * otherwise closing the main window would leave orphaned windows behind —
+ * on Linux/Windows they would keep `window-all-closed` from firing and the
+ * app would never quit; on macOS they would outlive the session the user
+ * meant to end. Tearing them down explicitly keeps the pre-unparenting
+ * lifetime.
+ */
+const standaloneChildWindows = new Set<BrowserWindow>()
+
+function registerStandaloneChildWindow(child: BrowserWindow): void {
+  standaloneChildWindows.add(child)
+  child.on('closed', () => { standaloneChildWindows.delete(child) })
+}
+
+/**
+ * Tear down every standalone window. Called when the main window closes, i.e.
+ * at the end of the session.
+ *
+ * `destroy()`, not `close()`, and that is a security property rather than a
+ * style choice. `close()` is a REQUEST: it runs the page's unload handlers and
+ * a `beforeunload` handler can cancel it outright. The lifetime this function
+ * exists to reproduce — Electron's own teardown of WM children — is not
+ * cancellable, and neither is the guarantee the docs make ("standalone windows
+ * are destroyed with the main window"). A window whose renderer has been
+ * compromised (email-borne XSS, prompt injection, a rogue MCP tool) would
+ * otherwise survive the session it belongs to, keeping a live preload bridge —
+ * and on Linux/Windows keeping `window-all-closed` from firing, so the app
+ * would never quit and the survivor would be invisible to the user.
+ *
+ * Nothing legitimate is lost: no window in this app registers `beforeunload`
+ * or an unload-time flush, so an honest window cannot tell the two apart.
+ * Compose persists its draft on a typing debounce (localStorage + `net:saveDraft`
+ * in `src/windows/Compose.tsx`); `close()` would not have saved anything extra,
+ * because there is no unload handler for it to run.
+ *
+ * `destroy()` still emits `closed`, so each window's registry entry is removed
+ * exactly as on a normal close.
+ */
+function closeStandaloneChildWindows(): void {
+  // Snapshot: teardown synchronously mutates the set via the `closed` listener.
+  for (const child of [...standaloneChildWindows]) {
+    // A window torn down through another path is already gone; calling into it
+    // would throw and abandon the rest of the snapshot.
+    if (!child.isDestroyed()) child.destroy()
+  }
+}
+
+/**
+ * Initial placement for a standalone window: centred over the main window and
+ * clamped to its display's work area. The window manager did this for us while
+ * these windows were transient children; a top-level window would otherwise
+ * land on the platform-default display, which on a multi-monitor setup need
+ * not be the one the main window is on. Creation-time placement only — bounds
+ * corrections stay with the windowRescue single writer.
+ *
+ * THE ONLY placement path for standalone windows — Compose and the standalone
+ * message window both go through it. The message window used to have its own
+ * `offsetFromMainWindow()` (place to the right of main, else inset), which
+ * picked the display by testing which work area contained the main window's
+ * top-left corner and never clamped horizontally; a main window wider than the
+ * work area therefore pushed the message window off screen. `screen
+ * .getDisplayMatching()` picks by largest overlap instead, and `centerOverRect`
+ * clamps on both axes.
+ *
+ * Successive windows cascade by a small diagonal step so several open message
+ * windows do not land on the same pixel (they are deduplicated per message, not
+ * globally). The step count is the number of standalone windows currently open,
+ * which is exactly what `standaloneChildWindows` tracks — the registry is read
+ * before the new window registers itself, so the first one is centred exactly.
+ */
+function centerOverMainWindow(width: number, height: number): { x?: number; y?: number } {
+  if (!win || win.isDestroyed()) return {}
+  const main = win.getBounds()
+  const workArea = screen.getDisplayMatching(main).workArea
+  return centerOverRect(main, workArea, { width, height }, standaloneChildWindows.size)
+}
+
 function createWindow() {
   // Remove standard menu (File, Edit, View...)
   Menu.setApplicationMenu(null)
@@ -1741,9 +2186,10 @@ function createWindow() {
     minWidth: MAIN_WINDOW_MIN_WIDTH,
     minHeight: MAIN_WINDOW_MIN_HEIGHT,
     frame: false,
+    ...framelessCornerOptions(),
     show: false,
     backgroundColor: themeBg(),
-    title: 'MailCopilot Beta',
+    title: 'MailCopilot',
     icon: path.join(process.env.VITE_PUBLIC, 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
@@ -1760,7 +2206,23 @@ function createWindow() {
   // Save window state on close; track the last normal (non-maximized)
   // bounds on both resize AND move so a maximized-window save restores the
   // position the user actually left the normal window at.
-  win.on('close', () => { if (win && !win.isDestroyed()) saveWindowState(win) })
+  win.on('close', (event) => {
+    if (win && !win.isDestroyed()) saveWindowState(win)
+    // §2.99 — close to tray. Gated on the preference AND on the icon object
+    // existing, and on nothing else: the §2.228 desktop-side confirmation was
+    // removed because hiding is recoverable without any icon at all. There are
+    // two routes back and between them they cover every platform we ship:
+    // relaunching from the launcher on Linux/Windows (`second-instance` above)
+    // and clicking the dock icon on macOS (`activate` below) — both go through
+    // `showMainWindow()`, which shows and focuses a hidden window. The tray menu
+    // carries Quit on top of that. `shuttingDown` keeps app.quit()/updater
+    // teardown on the normal path.
+    if (!shuttingDown && shouldKeepRunningInBackground() && win && !win.isDestroyed()) {
+      event.preventDefault()
+      win.hide()
+      noteHiddenToTray()
+    }
+  })
   const rememberNormalBounds = () => {
     if (win && !win.isDestroyed() && !win.isMaximized() && !win.isFullScreen()) {
       (win as unknown as { _lastBounds?: Electron.Rectangle })._lastBounds = win.getBounds()
@@ -1768,6 +2230,12 @@ function createWindow() {
   }
   win.on('resize', rememberNormalBounds)
   win.on('move', rememberNormalBounds)
+
+  // §3.3.B4.f6 — Compose and standalone message windows are no longer WM
+  // children of this window, so Electron does not tear them down with it.
+  // Destroy them here to preserve the previous lifetime — unconditionally, the
+  // way the WM teardown was (see `closeStandaloneChildWindows`).
+  win.on('closed', () => { closeStandaloneChildWindows() })
 
   // Broadcast maximize state changes to renderer so the titlebar button icon stays in sync.
   // Without this, OS-level snap/maximize (drag to edge, WM shortcuts) desynchronizes
@@ -1798,7 +2266,9 @@ function createWindow() {
     }
   })
 
-  configureExternalLinks(win)
+  // Main window: App.tsx mounts useMailLinkClick, so `mail:link` has a
+  // consumer and the context menu may offer "open link in browser".
+  configureExternalLinks(win, { routesMailLinks: true })
 
   // §3.3.C-print.f1: Intercept Ctrl+P before Chromium handles it as a
   // built-in browser print shortcut and forward the action to the renderer
@@ -1818,18 +2288,128 @@ function createWindow() {
 }
 
 app.on('window-all-closed', () => {
+  // §2.99 — same gate as the close handler: the preference plus a tray icon
+  // object of ours. That icon is the immediate, visible thing a user who just
+  // closed the window can reach for — it is NOT what makes the app recoverable.
+  // Coming back is guaranteed behind it either way (relaunching on
+  // Linux/Windows, dock activation on macOS, both via `showMainWindow()`), so
+  // the icon is why hiding is not a surprise, not why it is reversible. Every
+  // other path quits exactly as before.
+  if (shouldKeepRunningInBackground()) {
+    win = null
+    return
+  }
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
   }
 })
 
+/**
+ * Per-step deadlines for the quit drain below.
+ *
+ * These five steps used to be awaited with no deadline at all, so one
+ * unreachable IMAP server, one wedged worker thread or one MCP session that
+ * never closes hung the quit forever — while the comments and the tests claimed
+ * a bounded drain. A deadline here is an upper bound on how long a step may
+ * HOLD THE QUIT, never a claim that the step finished.
+ *
+ * The IMAP figure is the established mail-client practice, not a guess: a
+ * client sends LOGOUT on every connection, waits about a second WITHOUT
+ * listening for the response, and closes. The close packets reach the server
+ * ~0.8-1.2s later, by which time it has begun processing the LOGOUT. LOGOUT is
+ * a courtesy — servers handle abrupt closes fine — so cutting the server off
+ * after that second is the normal answer, not a cost being traded away.
+ */
+const TEARDOWN_DEADLINE_MS = {
+  /** IMAP LOGOUT courtesy window (IDLE connection and the per-account pool
+   *  alike). The pool logs its connections out through Promise.allSettled, so
+   *  one dead server does not serialise behind another inside this budget. */
+  imapLogout: 1_000,
+  /** Search worker exit. Deliberately SHORTER than the client's own 5s exit
+   *  wait: the worker is a read-only FTS query thread holding nothing
+   *  un-persisted, so its 5s would dominate the drain budget for a thread whose
+   *  loss costs exactly nothing — process exit reaps it either way. */
+  searchWorker: 2_000,
+  /** MCP export server. `http.Server.close()` resolves only once every open
+   *  connection has ended, and a single idle SSE session on loopback holds one
+   *  open indefinitely; the listening socket is released at process exit. */
+  mcpExportStop: 1_000,
+  /** MCP client transports (child processes / SSE). Killing a child that will
+   *  not close politely is process exit's job, not the drain's. */
+  mcpClientDisconnect: 1_000,
+} as const
+
+/**
+ * Run one teardown step under a hard deadline. Never throws and never rejects:
+ * everything after it in the drain — the WAL checkpoint, the tray release, the
+ * exit — must stay reachable whatever a socket, a worker thread or a child
+ * process decides to do.
+ *
+ * `Promise.race` does not cancel the loser; it only stops us waiting for it.
+ * That is exactly the "send the courtesy, then close" model above.
+ *
+ * Logs carry the step label (ours) and never third-party text.
+ */
+async function drainStep(
+  label: string,
+  deadlineMs: number,
+  run: () => Promise<unknown>,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const deadline = new Promise<'timeout'>(resolve => {
+      timer = setTimeout(() => resolve('timeout'), deadlineMs)
+      timer.unref?.()
+    })
+    const started = run().then(() => 'done' as const, () => 'failed' as const)
+    const outcome = await Promise.race([started, deadline])
+    if (outcome === 'timeout') {
+      logMain.warn('shutdown step exceeded its deadline — abandoning it and continuing the drain', { step: label, deadlineMs })
+    } else if (outcome === 'failed') {
+      logMain.warn('shutdown step failed', { step: label })
+    }
+  } catch {
+    // `run()` threw synchronously before producing a promise.
+    logMain.warn('shutdown step failed', { step: label })
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 // Guard flag so before-quit runs its async shutdown exactly once. The
-// handler defers the real quit with event.preventDefault(), waits for
-// telemetry + Sentry flush, then calls app.quit() again. Without this gate
-// the second quit would re-enter the handler and deadlock.
+// handler defers the real quit with event.preventDefault(), drains the
+// background services, flushes telemetry + Sentry and then calls
+// `app.exit(0)` — NOT app.quit(). The difference is the whole point of this
+// gate: app.exit skips before-quit entirely, so the terminal call cannot
+// re-enter this handler, while a second app.quit() would (and the re-entry
+// branch below correctly preventDefaults it, which would defer the quit
+// forever). The flag covers the OTHER way in: an external quit or a second
+// SIGTERM arriving while the first drain is still in flight.
 let shuttingDown = false
 app.on('before-quit', (event) => {
+  // §2.99 — DISARM here, DESTROY at the very end of the drain below.
+  //
+  // Review L1's guarantee is disarming, not destroying: `disarmTray()` closes
+  // the unread-refresh gate so a sync pass still draining cannot re-arm the
+  // debounce and paint into a half-torn-down app. The icon itself now survives
+  // the whole drain (bounded at ~28s of explicit deadlines, plus one
+  // synchronous local-disk WAL checkpoint) wearing a "quitting" tooltip —
+  // destroying it here made Exit look like it had only removed the icon while
+  // the window sat there.
+  //
+  // That ~28s is the sum of every awaited deadline below and nothing else:
+  // 2×1s IMAP logout + 2s search worker + 1s MCP export + 1s MCP clients
+  // (TEARDOWN_DEADLINE_MS) + 10s body indexer + 10s periodic sync + 150ms
+  // post-idle drain + 1.5s Sentry flush = 27.65s. Every `await` in this handler
+  // is one of those; `main.backgroundMail.test.ts` fails if a new unbounded one
+  // appears or if this figure stops matching the constants.
+  //
+  // Placed above the re-entrancy guard and above the first `await` on purpose:
+  // the disarm then happens in the same synchronous turn as the quit itself, so
+  // nothing depends on which of this file's two `before-quit` listeners Electron
+  // calls first, and no timer callback can interleave ahead of it. Idempotent.
+  disarmTray()
   if (shuttingDown) {
     // Re-entrant call — typically a second SIGTERM (impatient supervisor) or
     // an external app.quit() arriving while the first drain is still in
@@ -1870,19 +2450,27 @@ app.on('before-quit', (event) => {
         install_id_hash: getInstallIdHash(),
       })
     } catch { /* never block shutdown on telemetry */ }
+    // Bounded teardown of the network- and process-facing services. Every one
+    // of these can wait on something outside this process, so every one of them
+    // gets a deadline (TEARDOWN_DEADLINE_MS, justified there). `drainStep`
+    // never throws, so a step that fails or overruns costs its budget and
+    // nothing else.
+    //
     // Try to stop background IMAP IDLE connection.
-    try { await stopIdle() } catch { /* ignore */ }
+    await drainStep('imap-idle-logout', TEARDOWN_DEADLINE_MS.imapLogout, () => stopIdle())
     // Close per-account IMAP connections (offline sync).
-    try { await disconnectAllPerAccount() } catch { /* ignore */ }
+    await drainStep('imap-pool-logout', TEARDOWN_DEADLINE_MS.imapLogout, () => disconnectAllPerAccount())
     // Stop background search worker.
-    try { await searchWorkerClient.shutdown() } catch { /* ignore */ }
+    await drainStep('search-worker-shutdown', TEARDOWN_DEADLINE_MS.searchWorker, () => searchWorkerClient.shutdown())
     // Stop MCP export server if running.
-    if (mcpExportServer?.status === 'running') {
-      try { await mcpExportServer.stop() } catch { /* ignore */ }
+    const exportServer = mcpExportServer
+    if (exportServer?.status === 'running') {
+      await drainStep('mcp-export-stop', TEARDOWN_DEADLINE_MS.mcpExportStop, () => exportServer.stop())
     }
     // Disconnect all MCP client connections.
-    if (mcpClientManager) {
-      try { await mcpClientManager.disconnectAll() } catch { /* ignore */ }
+    const clientManager = mcpClientManager
+    if (clientManager) {
+      await drainStep('mcp-clients-disconnect', TEARDOWN_DEADLINE_MS.mcpClientDisconnect, () => clientManager.disconnectAll())
     }
     // Stop DB-writing background timers BEFORE WAL checkpoint (Codex §2.15
     // wave-1 High #2, wave-2 High, wave-3 High). Two-step teardown:
@@ -1900,11 +2488,15 @@ app.on('before-quit', (event) => {
     }
     // Clear the remaining DB-writing intervals: send queue (1s cadence —
     // clearest race window), snooze, follow-up, offline sync, AI rules.
-    shutdownDbWritingTimers()
+    // Wrapped: everything after this point — the drain, the checkpoint and the
+    // tray release — is unreachable if this throws, and the promise would
+    // simply reject, leaving the app running with no visible progress at all.
+    try { shutdownDbWritingTimers() } catch { /* ignore */ }
     // Await in-flight body indexer + periodic sync. Individual 10s cap:
     // IMAP socket timeout is 30s and a stuck fetch on one path should not
-    // deny the other its drain budget. Upper bound: ~20s worst case. If
-    // either exceeds the cap we log and fall through — SQLite auto-replays
+    // deny the other its drain budget. These two together are ~20s worst
+    // case — the bound on the WHOLE drain is stated at the top of this
+    // handler. If either exceeds the cap we log and fall through — SQLite auto-replays
     // any pages still in `.db-wal` on next open, so residual data safety
     // does not depend on a successful checkpoint here.
     try {
@@ -1915,10 +2507,23 @@ app.on('before-quit', (event) => {
       const syncIdle = await waitForPeriodicSyncIdle(10_000)
       if (!syncIdle) logMain.warn('periodic sync still running after 10s drain — checkpoint will proceed; SQLite WAL auto-replay is the backstop')
     } catch { /* ignore */ }
-    // Short post-idle drain catches any short single-statement write that
-    // fired just before shutdownDbWritingTimers() (send-queue/snooze/etc.
-    // callbacks are synchronous DB writes, not awaited IMAP operations).
-    // Capped at 200ms.
+    // Short post-idle drain: enough for a short single-statement write that
+    // fired just before shutdownDbWritingTimers() (a snooze/follow-up tick that
+    // only touches the DB) to reach its commit.
+    //
+    // What it deliberately does NOT wait for: an in-flight send. The send-queue
+    // callback is `void processSendQueue()` — fire-and-forget — and inside it
+    // `sendMailWithAccountConfig()` awaits SMTP, so a send in progress here can
+    // still be seconds from `markSendQueueSent()`. We do not await it and do not
+    // give it a deadline of its own: the row is already claimed as `sending` and
+    // is durable in SQLite, `listDueSendQueue` in packages/db returns rows stuck
+    // in `sending` for over two minutes back to `queued`, and the queue is
+    // processed at startup. Quitting mid-send therefore costs a delay, not the
+    // message — the ordinary outbox model. (The residual is at-least-once
+    // delivery if the server accepted a message we never marked sent; that
+    // predates this handler and is out of its scope.)
+    //
+    // 150ms, i.e. a bounded courtesy, not a guarantee.
     try { await new Promise<void>(resolve => setTimeout(resolve, 150)) } catch { /* ignore */ }
     // WAL checkpoint on shutdown (2026-04-21 P0 data-loss fix).
     //
@@ -1931,9 +2536,26 @@ app.on('before-quit', (event) => {
     // guarantee that everything visible in WAL is in the main file before
     // the DB handle closes.
     //
-    // Must come AFTER stopIdle/disconnectAllPerAccount/searchWorkerClient
-    // shutdown so no other writer is racing against us — wal_checkpoint
-    // returns busy=1 if a reader holds a snapshot.
+    // Ordered after stopIdle/disconnectAllPerAccount/searchWorkerClient so that
+    // as much as possible has already committed — wal_checkpoint returns busy=1
+    // if a reader holds a snapshot, and a checkpoint that reclaims nothing is
+    // the failure mode we are avoiding.
+    //
+    // It is NOT true that no other writer can be running by now, and the code
+    // must not be read as if it were: `drainStep` races a deadline and does not
+    // cancel the loser, so a step that timed out is still executing, and a send
+    // or a body-indexer pass that overran its cap likewise keeps going. What we
+    // rely on instead:
+    //   - Those writers cannot interleave WITH the checkpoint. Their DB work is
+    //     synchronous better-sqlite3 on this same main thread; the checkpoint is
+    //     one synchronous call. Whatever they do lands strictly before or after
+    //     it, never inside it, so no transaction is torn.
+    //   - A commit that lands AFTER the checkpoint simply appends frames to a
+    //     freshly truncated WAL. That is a normal, recoverable state: SQLite
+    //     replays those frames on next open. It costs us reclamation, not data.
+    //   - Work terminated by `app.exit(0)` before its commit stays uncommitted,
+    //     which is the same outcome as a power loss at that instant and is what
+    //     the queue tables are designed for (see the send-queue note above).
     //
     // Invariant: this must NEVER block shutdown. The helper catches and
     // returns an `ok: false` flag rather than throwing, and the whole call
@@ -1971,6 +2593,21 @@ app.on('before-quit', (event) => {
     // last session's telemetry is infinitely preferable to hanging the
     // user in a "quitting..." state.
     try { await flushSentry(1500) } catch { /* ignore */ }
+    // §2.99 — the last visible act. The icon was kept alive through the whole
+    // drain so that "the icon is there" kept meaning "the app is still doing
+    // something". It is released now because everything we said we would wait
+    // for has been waited for, each within its own deadline — not because
+    // nothing is left running: a `drainStep` loser that overran its cap, or a
+    // send still awaiting SMTP, is knowingly abandoned and will be terminated
+    // by `app.exit(0)` on the next line (why that is acceptable: the checkpoint
+    // note above, and the send-queue note further up). Keeping the icon past
+    // that point would be the icon lying in the other direction.
+    //
+    // This is the only place it can be released on this path: `app.exit(0)`
+    // below emits no further lifecycle events, and no other exit route creates
+    // a tray in the first place (the single-instance-lock `process.exit(0)`
+    // runs before any icon).
+    shutdownTray()
     // app.exit(0) — bypasses before-quit. The drain above is complete; we
     // just want process exit. Using app.quit() here would re-enter the
     // before-quit handler whose re-entry guard (Codex §2.15-bis review
@@ -1980,8 +2617,22 @@ app.on('before-quit', (event) => {
   })()
 })
 
+// §2.99 — macOS route back, and the reason it must NOT be the stock recipe.
+//
+// On macOS a relaunch of a running app raises `activate` (dock icon, Spotlight,
+// `open -a`); `second-instance` never fires there at all. The boilerplate this
+// replaces — `if (BrowserWindow.getAllWindows().length === 0) createWindow()` —
+// is exactly wrong for close-to-tray: a window hidden by it still EXISTS, so
+// the count is 1, the condition is false, and clicking the dock icon did
+// nothing whatsoever. The window was unreachable, which is the premise the
+// removal of the §2.228 close gate rests on.
+//
+// `showMainWindow()` covers both cases the count was standing in for (create
+// when there is no window) and the one it missed (restore/show/focus the one
+// there is), and is the same helper `second-instance` and the tray Open item
+// use.
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  showMainWindow()
 })
 
 // Session start time. featureReach lives in its own module so both the
@@ -1990,7 +2641,23 @@ app.on('activate', () => {
 const sessionStartedAtMs = Date.now()
 let startupRecorded = false
 
-app.whenReady().then(createWindow).then(() => {
+app.whenReady().then(() => {
+  // §2.103 — BEFORE the first window loads content, and that order is the
+  // whole point: Electron populates an empty spellchecker language list from
+  // the OS locale on launch, and the hunspell dictionary for it is fetched from
+  // a third-party CDN the moment a field is checked. Arriving after the window
+  // would leave exactly the silent request this feature exists to remove.
+  initSpellcheck({
+    getSettings,
+    saveSettings,
+    getLanguage: () => getSettings().language ?? 'en',
+    // The harness never arms the checker: a test must not make the machine
+    // fetch dictionaries from a third party, and no spec can assert Chromium's
+    // own suggestion quality anyway. Settings, consent and the menu plan still
+    // run under e2e — only the session application is withheld.
+    isE2E: () => IS_E2E,
+  })
+}).then(createWindow).then(() => {
   // Single writer for window-geometry corrections (CLAUDE.md §5 "Window
   // management"). Rescue passes are deferred while the user drags the
   // custom frameless edge-resize (resizeState is the module-level state
@@ -1999,6 +2666,15 @@ app.whenReady().then(createWindow).then(() => {
   initWindowRescue({
     isInteractiveOperationActive: () => resizeState !== null,
     stopInteractiveOperation: () => stopActiveResize(),
+  })
+  // §2.99 — tray + autostart. A no-op under e2e (no tray host in the test
+  // display, and close-to-tray must not change how specs close windows).
+  initTrayIntegration({
+    iconPath: path.join(process.env.VITE_PUBLIC, 'icon.png'),
+    onOpen: () => showMainWindow(),
+    onCompose: () => openComposeWindow(),
+    onCheckMail: () => { void runPeriodicSync() },
+    getMainWindow: () => (win && !win.isDestroyed() ? win : null),
   })
   // Emit app.session_started. It is one of only three events that carry the
   // install_id_hash TAG (with session_ended and session_summary) — a
@@ -2107,11 +2783,25 @@ app.whenReady().then(createWindow).then(() => {
 
 // --- Auto-update (packaged app only, not dev/e2e) ---
 //
-// §2.19 — module-level canSelfUpdate is captured once at startup so the
-// `update:systemInfo` and `update:check` IPC handlers can return it
-// without recomputing fs.accessSync per call. The flag is constant for
-// the lifetime of the process — the install path doesn't change at runtime.
-const updateCanSelfUpdate = app.isPackaged ? canWriteAppDir(process.execPath) : false
+// §2.19 — module-level self-update capability, resolved once at startup so
+// the `update:systemInfo` / `update:check` IPC handlers can return it
+// without re-probing the filesystem per call. Constant for the lifetime of
+// the process — neither the install path nor APPIMAGE changes at runtime.
+//
+// §2.58 — the predicate used to be `canWriteAppDir(process.execPath)`, which
+// is the wrong question on Linux: on an AppImage `execPath` points inside the
+// read-only `/tmp/.mount_*` FUSE mount (so self-update was permanently off on
+// our main Linux artifact), and on .deb/.rpm the updater elevates via pkexec
+// (so an admin-owned install dir is not a refusal we get to make). The target
+// resolution lives in services/updateCheck.ts — main.ts only applies it.
+const updateSelfUpdate = resolveSelfUpdateSupport({
+  platform: process.platform,
+  isPackaged: app.isPackaged,
+  execPath: process.execPath,
+  resourcesPath: process.resourcesPath,
+  env: process.env,
+})
+const updateCanSelfUpdate = updateSelfUpdate.canSelfUpdate
 
 // §2.19 — track which trigger started the in-flight download so the
 // `update.download_completed` / `download_failed` events carry the right
@@ -2124,14 +2814,14 @@ let updateDownloadSource: 'auto' | 'manual' | null = null
 let updateDownloadStartedEmitted = false
 
 if (app.isPackaged && !IS_E2E) {
-  // §2.19 — initial autoDownload state mirrors the persisted setting,
-  // but only when the install directory is writable. On read-only
-  // installs (admin-deployed /opt, system package) the user cannot
-  // self-update at all (see SystemInfo state machine — UI disables the
-  // checkbox when canSelfUpdate=false). Without this gate, a previously
-  // persisted autoUpdateEnabled=true would silently keep auto-downloading
-  // updates that can never be applied, while the disabled checkbox in
-  // Settings → About prevents the user from turning it off.
+  // §2.19 — initial autoDownload state mirrors the persisted setting, but
+  // only where an update can actually be applied in place. §2.58 — "can be
+  // applied" is now the target-directory verdict above, not a probe of
+  // process.execPath. Without this gate a persisted autoUpdateEnabled=true
+  // would keep downloading artifacts that are KNOWN to be uninstallable (the
+  // verdict is advisory, never a proof — see `isDirWritable`);
+  // Settings → About shows the reason as a warning (the checkbox itself
+  // stays operable, so the user is never locked out of the preference).
   // Runtime toggle via Settings → About is handled in onSettingsChangedMain.
   autoUpdater.autoDownload = getSettings().autoUpdateEnabled === true && updateCanSelfUpdate
   autoUpdater.autoInstallOnAppQuit = true
@@ -2141,12 +2831,14 @@ if (app.isPackaged && !IS_E2E) {
   if (updateToken) autoUpdater.requestHeaders = { 'PRIVATE-TOKEN': updateToken }
 
   if (!updateCanSelfUpdate) {
-    logUpdate.info('App directory is not writable — user cannot self-update (admin install?)')
-    // §2.19 iter3 — one-shot warning when persisted setting is true but
-    // the install path is read-only. Helps diagnose user reports of
+    // §2.58 — log the enum pair only. `updateSelfUpdate.targetDir` is a user
+    // path (`~/Applications/...`) and must not reach the local log file.
+    logUpdate.info(`In-place self-update unavailable target=${updateSelfUpdate.kind} reason=${updateSelfUpdate.blockedReason ?? 'none'}`)
+    // §2.19 iter3 — one-shot warning when the persisted setting is true but
+    // in-place update is impossible. Helps diagnose user reports of
     // "update never applies": their setting says yes, but reality says no.
     if (getSettings().autoUpdateEnabled === true) {
-      logUpdate.warn('autoUpdateEnabled=true but install path is read-only — autoDownload forced to false')
+      logUpdate.warn(`autoUpdateEnabled=true but self-update is unavailable (reason=${updateSelfUpdate.blockedReason ?? 'none'}) — autoDownload forced to false`)
     }
   }
 
@@ -2250,14 +2942,12 @@ if (app.isPackaged && !IS_E2E) {
 
 handleIpc('update:download', async () => {
   if (!app.isPackaged) return { ok: true as const }
-  // §2.19 iter4 — gate on updateCanSelfUpdate. SystemInfo.tsx disables the
-  // download/restart affordance on read-only installs (admin /opt, system
-  // package), but a compromised renderer could bypass the disabled UI and
-  // invoke this IPC directly. The `permission` bucket is the same enum the
-  // renderer's state machine already understands.
-  if (!updateCanSelfUpdate) {
-    return { ok: false as const, reason: 'permission_denied', error_class: 'permission' as const }
-  }
+  // §2.19 iter4 / §2.58 — refuse where in-place self-update is *known*
+  // impossible. Policy, threat model and the reason .deb/.rpm is not gated
+  // here live in `decideUpdateIpcGate` (services/updateCheck.ts); main.ts only
+  // applies the decision.
+  const downloadGate = decideUpdateIpcGate({ isPackaged: app.isPackaged, canSelfUpdate: updateCanSelfUpdate })
+  if (!downloadGate.allowed) return downloadGate.reject
   // §2.19 — tag the download source so completion / failure telemetry
   // can split manual clicks from background autoDownload-driven downloads.
   updateDownloadSource = 'manual'
@@ -2344,10 +3034,45 @@ handleIpc('update:check', async () => {
 /**
  * §2.19 — system info for the About panel (versions, install path,
  * channel badge). Static at runtime, so the renderer can fetch this
- * once on Settings open. PII-safe by construction — no hostname,
- * username, or environment variables leak through.
+ * once on Settings open.
+ *
+ * PRIVACY — `installPath` (`process.execPath`) is intentionally a
+ * machine-local path. On a user-local install (per-user Windows setup, an
+ * `.app` under `~/Applications`, a build run from source, an unpacked tree in
+ * $HOME) it contains the home directory and therefore the account name. On an
+ * AppImage it does not: `execPath` resolves inside the read-only
+ * `/tmp/.mount_*` FUSE mount, and the user-owned path lives in
+ * `process.env.APPIMAGE`, which this payload never exposes. Showing the
+ * running binary is the feature — the panel exists so the user can see which
+ * one it is.
+ *
+ * The invariant is directional: this value only ever reaches the user's own
+ * Settings renderer. It is never sent to Sentry, never put into telemetry and
+ * never written to the local file log (update logging emits the bucketed
+ * `error_class`, plus `err.code` on an install failure — a short updater/OS
+ * code that stays in the file log and the native dialog). No second path is
+ * exposed either: `updateSelfUpdate.targetDir` stays in main; only its boolean
+ * verdict and the `blockedReason` enum cross the boundary. See the
+ * `SystemInfo` doc in services/updateCheck.ts before adding a field.
+ *
+ * §2.58 iter2 — "only the Settings renderer" is now ENFORCED, not merely
+ * intended: the panel that consumes this payload is rendered exclusively by
+ * the settings window (`src/Root.tsx` routes `#/settings` → `Settings` →
+ * `SystemInfo`), so any other sender asking for it is either a bug or a
+ * compromised renderer harvesting `process.execPath`. Fail-closed, same
+ * predicate and same direction as the About telemetry switch in
+ * `settings:save`. The refusal is `null` rather than a rejection: the
+ * renderer's fetch already treats a missing payload as "show the static
+ * version only" (SystemInfo.tsx keeps `info === null`), so a denied caller
+ * degrades instead of breaking, and a policy refusal does not manufacture a
+ * synthetic Sentry event through the `handleIpc` error funnel.
  */
-handleIpc('update:systemInfo', (): SystemInfo => {
+handleIpc('update:systemInfo', (event): SystemInfo | null => {
+  if (!isSettingsWindowSender(event?.sender)) {
+    // No sender identity, no payload echo — both are renderer-derived (CLAUDE.md §8).
+    logUpdate.warn('update:systemInfo refused — sender is not the settings window')
+    return null
+  }
   const appVersion = app.getVersion()
   return {
     appVersion,
@@ -2358,20 +3083,25 @@ handleIpc('update:systemInfo', (): SystemInfo => {
     platform: process.platform,
     arch: process.arch,
     installPath: process.execPath,
-    installPathWritable: updateCanSelfUpdate,
+    // §2.58 — "writable" now means the directory the updater would write to
+    // (the AppImage's own directory, not the /tmp mount). Distro packages
+    // report true: elevation, not the current user's rights, decides there.
+    installPathWritable: updateSelfUpdate.blockedReason !== 'target-dir-readonly',
     canSelfUpdate: app.isPackaged && updateCanSelfUpdate,
+    selfUpdateBlockedReason: updateSelfUpdate.blockedReason,
     isPackaged: app.isPackaged,
   }
 })
 
 handleIpc('update:install', async () => {
   if (!app.isPackaged) return { ok: true as const }
-  // §2.19 iter4 — gate on updateCanSelfUpdate. Symmetric with update:download:
-  // a compromised renderer must not be able to invoke quitAndInstall on a
-  // read-only install (no-op at best, dialog spam at worst).
-  if (!updateCanSelfUpdate) {
-    return { ok: false as const, reason: 'permission_denied', error_class: 'permission' as const }
-  }
+  // §2.19 iter4 — same gate as update:download, symmetric by design: a
+  // compromised renderer must not be able to invoke quitAndInstall where
+  // in-place update is known impossible (no-op at best, dialog spam at worst).
+  // §2.58 narrowed the predicate; on .deb/.rpm the real gate is the elevation
+  // prompt the user answers. See `decideUpdateIpcGate` for the full rationale.
+  const installGate = decideUpdateIpcGate({ isPackaged: app.isPackaged, canSelfUpdate: updateCanSelfUpdate })
+  if (!installGate.allowed) return installGate.reject
   try {
     autoUpdater.quitAndInstall()
     // §2.19 — handed off to OS for restart-and-install. On most platforms
@@ -2396,6 +3126,14 @@ handleIpc('update:install', async () => {
     // updater text (especially DebUpdater stderr) routinely contains
     // install paths and dpkg/pkexec output. The Sentry capture below is
     // also synthetic for the same reason.
+    // §2.58 iter2 — this line also prints `err.code`, which is third-party
+    // text (dpkg / pkexec / electron-updater), not one of our enums. It is
+    // allowed HERE and in the dialog below because both are local-only: the
+    // file log has no Sentry bridge (CLAUDE.md §8) and the dialog is rendered
+    // by main. It must not travel further — the telemetry event and the IPC
+    // reply below carry `error_class` alone. If a future change routes
+    // `err.code` into Sentry, telemetry or the renderer, it needs a closed
+    // dictionary first (see services/netErrorTelemetry.ts).
     logUpdate.error(`update:install failed class=${errorClass} code=${code || 'none'}`)
     try { recordEvent('update.install_outcome', { result: 'failed', error_class: errorClass }) } catch { /* telemetry must not block */ }
     if (isLinuxInstallerError(err)) {
@@ -2516,6 +3254,16 @@ const GOOGLE_TOKEN_CACHE = new Map<number, GoogleTokenCacheEntry>()
 const GOOGLE_TOKEN_REFRESH_INFLIGHT = new Map<number, Promise<GoogleTokenCacheEntry>>()
 let googleOAuthBusy = false
 
+/** Broadcasts an `oauth:progress` stage. Advisory only — a failure here must
+ *  never abort the connect flow the user is waiting on. */
+function emitOAuthProgress(provider: OAuthProgress['provider'], stage: OAuthConnectStage): void {
+  try {
+    broadcast('oauth:progress', { provider, stage } satisfies OAuthProgress)
+  } catch {
+    /* progress is advisory */
+  }
+}
+
 async function doGoogleOAuthFlow() {
   const creds = requireGoogleOAuthCredentials()
   if (googleOAuthBusy) throw new Error('Google OAuth is already running in another window')
@@ -2525,6 +3273,7 @@ async function doGoogleOAuthFlow() {
       clientId: creds.clientId,
       clientSecret: creds.clientSecret || undefined,
       openExternal: (url) => { void openExternalGated(url, 'oauth') },
+      onStage: (stage) => emitOAuthProgress('gmail', stage),
     })
   } finally {
     googleOAuthBusy = false
@@ -2539,9 +3288,35 @@ async function getGoogleAccessToken(accountId: number): Promise<string> {
   const inflight = GOOGLE_TOKEN_REFRESH_INFLIGHT.get(accountId)
   if (inflight) return (await inflight).accessToken
 
+  // §2.165 fix wave 5 — the stamp, read HERE. Everything above it in this call
+  // is synchronous, so this is the generation the id holds when the token fetch
+  // starts. The discovery below happens only AFTER the secret-store await, and
+  // ids are reused ("max + 1"): a mailbox deleted inside that window hands its
+  // id to the next account created, and an unstamped report would raise the
+  // badge on that brand-new, perfectly healthy mailbox. Read at report time it
+  // would always match and prove nothing — the read has to precede the await.
+  const accountGeneration = accountAuthState.currentGeneration(accountId)
+
   const p = (async () => {
     const found = await getOauthRefreshTokenWithSource('gmail', accountId)
-    if (!found) throw new Error(`Google refresh token for account #${accountId} not found (re-authorization required)`)
+    if (!found) {
+      // §2.165 fix wave 4 — an OAuth account with no stored refresh token
+      // cannot log in and cannot be repaired without the user signing in again,
+      // yet until now it was the one broken mailbox that never showed the
+      // badge: this rejection happens while BUILDING the config, before
+      // `assertImapAuth` looks at the credentials and before any wrapped
+      // operation exists, so neither the precondition report nor the connection
+      // boundary ever fired and the account simply went quiet.
+      //
+      // Raised here, before the throw, for the same reason `assertImapAuth`
+      // does it: the rejection fans out to every caller that wanted a token and
+      // most of them only log it. The error carries OUR discriminator (not a
+      // match on any provider's response text, and not a second classifier), so
+      // the verdict is still correct on the paths where it does travel to the
+      // service through the boundary.
+      accountAuthState.noteMissingCredentials(accountId, accountGeneration)
+      throw authNotConfiguredError(`Google refresh token for account #${accountId} not found (re-authorization required)`)
+    }
     const refreshToken = found.token
 
     const creds = requireGoogleOAuthCredentials()
@@ -2599,6 +3374,19 @@ function peerCertificateToPem(cert: tls.DetailedPeerCertificate | null | undefin
 }
 
 /**
+ * Collapse a certificate name attribute to a single display string.
+ *
+ * A relative distinguished name may repeat, and Node surfaces repeated values
+ * as an array. These two fields are shown to the user and never compared
+ * against anything, so joining is safe — but dropping the extra values would
+ * hide part of the identity the user is being asked to look at.
+ */
+function certCommonName(cn: string | string[] | undefined): string | undefined {
+  if (cn === undefined) return undefined
+  return Array.isArray(cn) ? cn.join(', ') : cn
+}
+
+/**
  * Read the leaf certificate of a TLS endpoint.
  *
  * `certPem` is INTERNAL — it exists so the pin store can persist a trust
@@ -2637,8 +3425,8 @@ async function fetchServerCertificate(hostRaw: string, portRaw: number): Promise
           host,
           port,
           fingerprintSha256,
-          subject: cert?.subject?.CN,
-          issuer: cert?.issuer?.CN,
+          subject: certCommonName(cert?.subject?.CN),
+          issuer: certCommonName(cert?.issuer?.CN),
           certPem: peerCertificateToPem(cert),
         })
       } catch (e) {
@@ -2671,6 +3459,13 @@ handleIpc('accounts:getCurrent', () => {
   if (IS_E2E) return E2E_CURRENT_ACCOUNT_ID
   return getSettings().currentAccountId
 })
+
+// §2.157 — pull side of the "this mailbox needs signing in again" state. The
+// push side is the `accounts:authStateChanged` broadcast; this channel exists
+// because a window that opens AFTER the flag was raised (app start with a
+// stale credential, a reopened Settings window) would otherwise never learn
+// about it. Read-only, ids only — see AccountAuthStatePayload.
+handleIpc('accounts:authState', () => accountAuthState.snapshot())
 
 handleIpc('accounts:setCurrent', (_e, accountId: unknown) => {
   const id = accountIdSchema.parse(accountId)
@@ -2728,6 +3523,93 @@ handleIpc('accounts:autoconfig', async (_e, email: unknown) => {
   return autoconfig(parsedEmail)
 })
 
+/**
+ * Has the account record actually left the store?
+ *
+ * §2.165 fix wave 5 — the question `accounts:remove` has to answer on a
+ * REJECTED deletion, and the reason it is answered by looking at the store
+ * rather than at the error: `deleteAccount` removes the account record first and
+ * then does more work that can fail (secret cleanup, the settings write that
+ * moves `currentAccountId` off the deleted account). A rejection therefore says
+ * nothing about whether the record survived, and the error itself says even
+ * less — matching on its text would be a classifier of somebody else's strings,
+ * which this project does not do (CLAUDE.md §5).
+ *
+ * Fail-CLOSED: an unreadable store answers "still present", so the teardown
+ * runs only when the disappearance is positively observed. The cost of a wrong
+ * "gone" is tearing down a live mailbox's auth-refresh handler and cert
+ * subscription — the exact damage the strict ordering above was introduced to
+ * prevent. The cost of a wrong "present" is the state we already have today.
+ *
+ * Uses the same lookup as the service's `accountExists` dependency, so both
+ * halves of the feature agree on what "this id addresses a live account" means.
+ */
+function accountRecordIsGone(id: number): boolean {
+  try {
+    return getAccountMeta(id) === undefined
+  } catch (err) {
+    logMain.warn('account lookup failed while finishing a removal', { accountId: id, code: errCodeOf(err) })
+    // Synthetic, code only: a store read failure carries a filesystem path (the
+    // user's home directory) and whatever the validator chose to quote back
+    // (CLAUDE.md §8 — no third-party free text leaves the process).
+    captureException(new Error(`accounts_remove_lookup_failed: ${errCodeOf(err)}`), {
+      source: 'accounts_remove',
+      step: 'account_record_is_gone',
+    })
+    return false
+  }
+}
+
+/**
+ * Everything that must happen once an account record is gone, in the order the
+ * teardown requires.
+ *
+ * Extracted (§2.165 fix wave 5) because there are now TWO ways for a record to
+ * disappear — a deletion that resolved, and a deletion that rejected after
+ * removing the record — and both owe the process exactly the same cleanup. The
+ * one that must never be skipped is `forget`: it bumps the generation, and the
+ * generation is what keeps verdicts of the vanished mailbox from landing on the
+ * next account created, since ids are reused ("max + 1"). A record that is gone
+ * with its generation left behind is the worst combination available — the id
+ * is free for reuse while every stale verdict still matches.
+ *
+ * Callers must have established that the record is gone (`accountRecordIsGone`)
+ * before calling this. Nothing here needs a config that no longer loads: both
+ * registries are keyed by account id.
+ */
+function completeAccountRemoval(id: number): void {
+  // The original reason for these two is unchanged: the closures hold
+  // references to token caches and must not outlive a deletion that happened.
+  unregisterAuthErrorHandler(id)
+  // Phase A2: drop the cert-error subscription alongside the auth handler.
+  certRecovery.unregisterAccount(id)
+  // §2.157: a deleted account must not leave a "needs sign-in" flag behind.
+  // The renderer filters the broadcast against its account list, so a stale id
+  // is invisible — but the flag would still be sitting in main's set, and
+  // nothing would ever clear it (the account can no longer sync).
+  accountAuthState.forget(id)
+  GOOGLE_TOKEN_CACHE.delete(id)
+  GOOGLE_TOKEN_REFRESH_INFLIGHT.delete(id)
+  clearOutlookTokenCache(id)
+  deleteAccountEmls(id)
+  // The list really did change, whether or not the deletion as a whole
+  // succeeded, so every window has to stop showing the mailbox.
+  broadcast('accounts:changed', { kind: 'removed', id })
+  // §2.99 (round-2 HIGH-3) — and its unread mail must stop counting towards the
+  // badge. This function is the single teardown owner for a removed account
+  // (see its doc above), so the recount rides with the rest of the cleanup.
+  invalidateUnreadBadge()
+  // §2.99 (security review MEDIUM-2) — same reason `forget` above exists: ids
+  // are reused, so the notifier's watermark and any queued toast for this
+  // account must go with the account, not outlive it under a new owner.
+  forgetAccountBackgroundState(id)
+  // §3.3.B6 (security review MEDIUM) — the in-memory translation tier holds text
+  // derived from this mailbox's mail, and both ARCHITECTURE.md and CLAUDE.md §5
+  // say deleting an account deletes its translations. The durable rows go with
+  // the account; this drops the tier that sits over them.
+  forgetAccountTranslations(id)
+}
+
 handleIpc('accounts:remove', async (_e, accountId: unknown) => {
   const id = accountIdSchema.parse(accountId)
   if (IS_E2E) {
@@ -2735,21 +3617,48 @@ handleIpc('accounts:remove', async (_e, accountId: unknown) => {
     broadcast('accounts:changed', { kind: 'removed', id })
     return { ok: true as const }
   }
-  // Unregister auth-error handler BEFORE deleting the account so that stale
-  // closures don't live until process exit (they hold references to token caches).
-  // Registry is keyed by accountId (integer), so no need to rebuild cfg or
-  // recompute a userKey — the id alone uniquely identifies the handler slot.
-  unregisterAuthErrorHandler(id)
-  // Phase A2: drop the cert-error subscription alongside the auth handler.
-  certRecovery.unregisterAccount(id)
   // If removing an account with an active IDLE, stop the push connection.
   try { await stopIdle() } catch { /* ignore */ }
-  await deleteAccount(id)
-  GOOGLE_TOKEN_CACHE.delete(id)
-  GOOGLE_TOKEN_REFRESH_INFLIGHT.delete(id)
-  clearOutlookTokenCache(id)
-  deleteAccountEmls(id)
-  broadcast('accounts:changed', { kind: 'removed', id })
+  // §2.165 — teardown happens strictly AFTER the deletion, and only for an
+  // account that is actually gone. Both halves of that sentence are load-bearing
+  // and they are NOT the same condition (fix wave 5).
+  //
+  // Ordering: `deleteAccount` can reject, and this handler then propagates the
+  // rejection. Tearing down first left a SURVIVING account without a
+  // token-refresh handler — condemned to auth failures that nothing was left to
+  // repair — without a cert-error subscription, so a TLS interception on it
+  // would pass in silence, and without its "needs sign-in" flag, the only
+  // warning the user had that the mailbox is broken.
+  //
+  // Condition: "the promise resolved" is not the same as "the account is gone".
+  // `deleteAccount` removes the record before work that can fail, so a rejection
+  // can leave the record deleted with none of the teardown done — and the
+  // generation un-bumped, which is what makes the reused id inherit the dead
+  // mailbox's verdicts. So the failure path asks the store, and finishes the
+  // cleanup when the record has in fact gone.
+  //
+  // The rejection is re-thrown either way: the deletion did NOT complete, and
+  // the caller is entitled to know that whatever else we tidied up.
+  try {
+    await deleteAccount(id)
+  } catch (err) {
+    if (accountRecordIsGone(id)) {
+      logMain.warn('account deletion failed after the record was removed; finishing teardown', {
+        accountId: id,
+        code: errCodeOf(err),
+      })
+      // Synthetic, same reason as in `accountRecordIsGone`: this rejection
+      // comes from the secret backend or the settings writer and its message
+      // quotes paths and stored values.
+      captureException(new Error(`accounts_remove_partial_delete: ${errCodeOf(err)}`), {
+        source: 'accounts_remove',
+        step: 'partial_delete',
+      })
+      completeAccountRemoval(id)
+    }
+    throw err
+  }
+  completeAccountRemoval(id)
   return { ok: true as const }
 })
 
@@ -2816,6 +3725,7 @@ handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
   let tlsCertSmtp: { host: string; port: number } | undefined
 
   logOAuth.info('Testing IMAP...')
+  emitOAuthProgress('gmail', 'imap')
   const imapRes = await withTimeout(testImapConnection({ ...imapMeta, accessToken: tokens.accessToken }), 30_000, 'IMAP')
   logOAuth.info('IMAP result:', JSON.stringify(imapRes))
   if (!imapRes.ok) {
@@ -2830,6 +3740,7 @@ handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
   // SMTP test — non-critical. If IMAP passed, the token works and SMTP should too.
   // nodemailer verify() sometimes hangs with OAuth2, so we don't block account creation.
   logOAuth.info('Testing SMTP...')
+  emitOAuthProgress('gmail', 'smtp')
   try {
     let smtpRes = await withTimeout(testSmtpConnection({ ...smtpMeta, accessToken: tokens.accessToken }), 15_000, 'SMTP')
     if (!smtpRes.ok && /timeout|ETIMEDOUT|Connection timeout/i.test(String(smtpRes.error || ''))) {
@@ -2872,9 +3783,18 @@ handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
     await setOauthRefreshToken('gmail', existingId, tokens.refreshToken)
   }
 
+  emitOAuthProgress('gmail', 'saving')
+
   const { id } = await saveAccount({
     id: existingId,
-    name: existingMeta?.name,
+    // A re-authorization must not overwrite a name the user has edited; the
+    // profile name fills in only where the record has none.
+    //
+    // Deliberately `||`, not `??`: the read schema accepts `name: ''` while
+    // the write schema requires a non-empty name, so a legacy record with a
+    // blank name would otherwise carry that blank through and make the save
+    // fail outright (codex-bg-review, 2026-08-02).
+    name: existingMeta?.name?.trim() || tokens.displayName || undefined,
     authType: 'oauth2',
     providerId: 'gmail',
     transportType: 'imap-smtp',
@@ -2890,6 +3810,14 @@ handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
   // this call is a harmless no-op overwrite with the same token.
   await setOauthRefreshToken('gmail', id, tokens.refreshToken)
   GOOGLE_TOKEN_CACHE.set(id, { accessToken: tokens.accessToken, expiresAt: tokens.expiresAt })
+  // §2.165 — a completed re-authorization is the one moment the badge must
+  // disappear at once, and the only credentials proof that does NOT travel
+  // through the connection boundary: `testImapConnection` above opened a
+  // throwaway connection with no account id attached. Gated on that test
+  // having actually passed — `tlsCertImap` set means the login was never
+  // reached, only the TLS handshake failed, and the account is saved anyway so
+  // the user can accept the certificate.
+  if (!tlsCertImap) accountAuthState.noteSignedIn(id)
   broadcast('accounts:changed', { kind: 'saved', id })
   const tlsCertRequired = (tlsCertImap || tlsCertSmtp) ? { imap: tlsCertImap, smtp: tlsCertSmtp } : undefined
   return { ok: true as const, id, email: tokens.email, tlsCertRequired }
@@ -2897,12 +3825,19 @@ handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
 
 // Microsoft 365 / Outlook.com OAuth — delegated to electron/services/outlookOAuthService.ts
 handleIpc('oauth:microsoft:connect', async (_e, existingAccountId: unknown) => {
-  return connectOutlookAccount({
+  const res = await connectOutlookAccount({
     existingAccountId,
     openExternal: (url) => { void openExternalGated(url, 'oauth') },
     broadcast,
     isE2E: IS_E2E,
   })
+  // §2.165 — same as the Google flow: the service verified IMAP with the fresh
+  // token on a throwaway connection the boundary never saw, so the cleared
+  // badge has to be reported from here. `tlsCertRequired.imap` is exactly the
+  // "saved despite an unusable IMAP endpoint" case — the login was never
+  // reached, so nothing was proven.
+  if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)
+  return res
 })
 
 // --- TLS cert recovery (Phase A2) -----------------------------------------
@@ -2964,6 +3899,126 @@ const certRecovery = initCertRecovery({
   persistNoticeShownHosts: persistCertNoticeShownHosts,
 })
 
+// --- §2.157 Expired-credentials surfacing -----------------------------------
+// Before this, an account whose password changed elsewhere (or whose OAuth
+// refresh token was revoked) failed every background sync and left nothing but
+// a `logPeriodic.warn` line — the mailbox went quiet for hours with no sign in
+// the window. Policy and state live in electron/services/accountAuthState.ts
+// (hotspot policy — main.ts only wires dependencies).
+//
+// `classifyImapError` is passed in rather than re-derived: it is the single
+// classifier for IMAP failures (CLAUDE.md §5), and 'cert' failures in
+// particular must reach certRecovery's dialog, not a "sign in again" badge.
+const accountAuthState = initAccountAuthState({
+  classifyError: classifyImapError,
+  broadcast,
+  // §2.165 — lets the service drop a verdict reported by an operation that was
+  // in flight when the account was deleted, which would otherwise resurrect a
+  // badge nothing can ever clear, or leave a stray failure behind for the next
+  // account to be issued that id (ids are reused). Consulted only where the
+  // service creates per-account state, never per failure.
+  // Mirrors the `accounts:list` handler so the stubbed e2e account list is the
+  // authority in e2e, exactly as it is for every other account lookup.
+  accountExists: (id) => (IS_E2E
+    ? E2E_ACCOUNTS.some(a => a.id === id)
+    : getAccountMeta(id) !== undefined),
+})
+
+// §2.165 (fix wave 4) — the identity half of the wiring, and it MUST come
+// first.
+//
+// Account ids are reused ("max + 1"), so an id alone does not say which mailbox
+// a verdict is about; the pair (id, generation) does. The service mints the
+// generation and bumps it on deletion, packages/net stamps every outcome with
+// the generation read at the START of the operation, and the service acts on a
+// verdict only while the stamp still matches. An unstamped verdict (`null`) is
+// discarded, which is exactly why this registration precedes the subscriber
+// below: the boundary reads the provider at operation start, so a subscriber
+// installed first would receive the session's first verdicts unattributed and
+// drop them. Both are plain module-scope statements, so nothing can run between
+// them — the order is pinned by a test
+// (`electron/main.accountAuthStateWiring.test.ts`) to keep it that way.
+registerAccountGenerationProvider((id) => accountAuthState.currentGeneration(id))
+
+// §2.165 — THE single writer of the flag.
+//
+// The connection/retry boundary in packages/net/imap reports the verdict of
+// every outward IMAP operation; no caller reports outcomes of its own. (One
+// caller escalates a verdict the boundary already reported — see
+// `noteIdleLoginRejected` below — which is a transition, not a second
+// outcome.) The predecessor
+// wiring called `noteSuccess` from three chosen sync paths — all of them header
+// fetches — which left a mailbox with every folder on manual sync unable to
+// ever clear a raised badge, and made a repaired login wait up to a full
+// periodic cycle to be noticed while the user was already reading mail through
+// half a dozen other paths that each proved the credentials work.
+//
+// Registered at module scope, i.e. before `app.whenReady` and therefore before
+// the first sync or IDLE can start: an outcome produced while no subscriber is
+// installed is dropped silently by the boundary, and the failures worth seeing
+// are exactly the ones that happen on the first pass after launch.
+//
+// The boundary hands over the ORIGINAL error object; classification is the
+// service's job and uses the one classifier this project has. Nothing derived
+// from it is logged here — an IMAP server's response text echoes the user name
+// and host (CLAUDE.md §8).
+registerConnectionOutcomeHandler((outcome) => {
+  if (outcome.ok) accountAuthState.noteSuccess(outcome.accountId, outcome.accountGeneration)
+  else accountAuthState.noteFailure(outcome.accountId, outcome.accountGeneration, outcome.error)
+})
+
+// §2.165 fix wave 4 — the Outlook token provider discovers "this account has no
+// stored refresh token" while building a config, i.e. before any wrapped
+// operation exists for the boundary to report on. It lives in a service that
+// cannot import main.ts, so it holds the slot and main.ts fills it. The Gmail
+// provider is inside this file and calls the service directly
+// (`getGoogleAccessToken`).
+//
+// Fix wave 5 — the slot carries BOTH halves of the stamped contract. The report
+// is separated from its discovery by the secret-store await, so the service
+// hands over the stamp source as well: the provider reads the generation before
+// that await and the service drops the verdict if the id changed hands in
+// between. A slot with only the report would be the unstamped path all over
+// again.
+registerMissingCredentialsReporter({
+  currentGeneration: (id) => accountAuthState.currentGeneration(id),
+  noteMissingCredentials: (id, generation) => accountAuthState.noteMissingCredentials(id, generation),
+})
+
+/**
+ * §2.165 (fix wave 2) — the one failure the counting rule can never see twice.
+ *
+ * The subscriber above feeds a threshold of two: a single auth failure is not
+ * yet a verdict, because the stream normally keeps producing evidence. IDLE's
+ * connect/authenticate/select prologue breaks that assumption. It is a full
+ * login, the boundary reports it as one failure, and then `startIdle` throws
+ * and stops — there is no retry inside it and no loop to produce a second
+ * observation. For a mailbox with every folder on manual sync the prologue is
+ * the ONLY outward connection, so under plain counting a refused login would
+ * never raise the badge at all: the mirror image of the defect §2.165 closes.
+ *
+ * So the rejection is escalated rather than re-reported. `noteLoginRejected`
+ * performs the raise transition and touches no counter, and the transition is
+ * edge-triggered — one refused login yields one badge, one broadcast and one
+ * telemetry record no matter that the boundary already counted the same error.
+ * Classification stays with the service (and therefore with the project's one
+ * IMAP classifier): a transient network failure here is weather, not a revoked
+ * password, and must not raise anything.
+ *
+ * Lives here, next to the rest of the wiring, rather than inside the IPC
+ * handler: main.ts is a hotspot and holds no policy of its own (CLAUDE.md §5),
+ * and the handler must keep re-throwing the original error untouched.
+ *
+ * §2.165 fix wave 4 — `accountGeneration` is the stamp the handler took BEFORE
+ * the login attempt started, exactly like the boundary takes one before every
+ * operation it wraps. Without it this would be the only raise-on-sight path
+ * that could flag a mailbox on the strength of a login begun for the mailbox
+ * that held the id before it.
+ */
+function noteIdleLoginRejected(accountId: number, accountGeneration: number | null, err: unknown): void {
+  accountAuthState.noteLoginRejected(accountId, accountGeneration, err)
+}
+
 /** PII-safe error identifier for TLS-pin logging: the Node error code when
  *  present, otherwise 'unknown'. Never the raw message — TLS/IMAP failures
  *  can echo server-supplied text (mirrors errCode in services/certRecovery). */
@@ -2992,7 +4047,8 @@ type PinCertCapture =
  *
  * Why the PEM matters: the pinned TLS path keeps `rejectUnauthorized: true`,
  * and a SHA-256 fingerprint cannot act as a trust anchor — only the
- * certificate itself can (`buildTlsOptions` feeds it to OpenSSL via `ca`).
+ * certificate itself can (`buildTlsOptions` builds this body into the shared
+ * `SecureContext` it hands the transport, so OpenSSL treats it as a root).
  * Without it a pinned self-signed server stays fail-closed.
  *
  * Best-effort by design: `unavailable` (endpoint unreachable, STARTTLS port,
@@ -3067,15 +4123,15 @@ async function confirmCertTrustNatively(
   port: number,
   fingerprint: string,
 ): Promise<boolean> {
-  // The e2e short-circuit is ALSO gated on the build being unpackaged. `IS_E2E`
-  // alone reads `MAILCOPILOT_E2E=1` straight out of the environment, which
-  // anything running as the user can set (wrapper script, dropper, shell
-  // profile) — and a consent gate that an env var switches off is not a consent
-  // gate. `app.isPackaged` is true for every electron-builder artifact
-  // regardless of env tampering, while dev runs and the Playwright flow keep it
-  // false, so the legitimate harness is unaffected. Same reasoning, same pair of
-  // conditions as `assertE2EHandlerAllowed` above; see its comment for the full
-  // threat model.
+  // The e2e short-circuit is ALSO gated on the build being unpackaged. That is
+  // redundant today — `IS_E2E` is `computeIsE2E(process.env, app.isPackaged)`
+  // and already false on any packaged build — and it stays here on purpose: a
+  // consent gate that an env var switches off is not a consent gate, so this
+  // one does not want its correctness to depend on how a flag defined 3000
+  // lines up happens to be derived. Cost is one boolean; the failure it guards
+  // against is a shipped build accepting an attacker's certificate with no
+  // human ever seeing the dialog. Same reasoning as `assertE2EHandlerAllowed`
+  // above; see its comment for the full threat model.
   if (IS_E2E && !app.isPackaged) return true
   // English literal: i18next does not run in the main process (see the window
   // title comment near createWindow) — same constraint as the audit-log gate.
@@ -3535,6 +4591,35 @@ handleIpc('cert:dismiss', (_e, payload: unknown) => {
   return { ok: true as const }
 })
 
+/**
+ * §2.99 (round-2 HIGH-3) — main-side OWNERS of folder-preference writes.
+ *
+ * `visible` and `includeInBadges` are inputs to the shared badge policy
+ * (packages/core/unreadBadgePolicy.ts), so every write of a preference row can
+ * change the unread total even though no message moved. Enumerating the IPC
+ * exits that happen to write prefs today is exactly the mistake this replaces:
+ * the next writer would have to remember the list. Routing every main-side
+ * write through these three wrappers means a new caller inherits the
+ * invalidation by construction.
+ */
+function writeFolderPref(accountId: number, folderPath: string, patch: Parameters<typeof upsertFolderPref>[2]) {
+  const pref = upsertFolderPref(accountId, folderPath, patch)
+  invalidateUnreadBadge()
+  return pref
+}
+
+function dropFolderPref(accountId: number, folderPath: string): boolean {
+  const removed = removeFolderPref(accountId, folderPath)
+  if (removed) invalidateUnreadBadge()
+  return removed
+}
+
+function dropStaleFolderPrefs(accountId: number, stalePaths: string[]): void {
+  if (stalePaths.length === 0) return
+  deleteStaleFolderPrefs(accountId, stalePaths)
+  invalidateUnreadBadge()
+}
+
 handleIpc('folder:prefs:list', (_e, accountId: unknown) => {
   const id = accountIdSchema.parse(accountId)
   return listFolderPrefs(id)
@@ -3547,7 +4632,7 @@ handleIpc('folder:prefs:upsert', (_e, accountId: unknown, folderPath: unknown, p
   // §2.15-ter: capture the prior indexInSearch so we can emit
   // cache.folder_index_disabled when the user toggles via context menu.
   const prevIndexInSearch = getFolderPref(id, pathValue)?.indexInSearch
-  const pref = upsertFolderPref(id, pathValue, parsedPatch)
+  const pref = writeFolderPref(id, pathValue, parsedPatch)
   if (
     typeof parsedPatch.indexInSearch === 'boolean' &&
     parsedPatch.indexInSearch === false &&
@@ -3561,7 +4646,7 @@ handleIpc('folder:prefs:upsert', (_e, accountId: unknown, folderPath: unknown, p
 handleIpc('folder:prefs:remove', (_e, accountId: unknown, folderPath: unknown) => {
   const id = accountIdSchema.parse(accountId)
   const pathValue = mailboxSchema.parse(folderPath)
-  return { ok: true as const, removed: removeFolderPref(id, pathValue) }
+  return { ok: true as const, removed: dropFolderPref(id, pathValue) }
 })
 
 /** Unread counts from SQLite cache (without IMAP requests). */
@@ -3592,10 +4677,31 @@ handleIpc('net:testSmtp', async (_e, cfg: unknown) => {
 // be unit-tested without booting the whole main.ts module graph.
 import { classifyRefreshError } from './authRefreshClassifier'
 
-async function requireAccountConfig(accountIdRaw: unknown): Promise<{ id: number; meta: AccountMeta; cfg: AccountConfig }> {
+/**
+ * A loaded account config plus the identity stamp of the mailbox it was loaded
+ * for (§2.165 fix wave 5).
+ *
+ * `accountGeneration` is read before this loader's first await and travels with
+ * the config, because everything derived from that config is a statement about
+ * the mailbox as it was AT LOAD TIME. Account ids are reused, so a deletion
+ * during the load (or during the operation the caller then runs) hands the id
+ * to the next account created; a verdict derived from the stale config must not
+ * land on that new mailbox. The only consumer today is `assertImapAuth`, and
+ * the parameter is required there so a new call site cannot forget it.
+ */
+type LoadedAccountConfig = {
+  id: number
+  meta: AccountMeta
+  cfg: AccountConfig
+  accountGeneration: number | null
+}
+
+async function requireAccountConfig(accountIdRaw: unknown): Promise<LoadedAccountConfig> {
   const id = accountIdSchema.parse(accountIdRaw)
   const meta = getAccountMeta(id)
   if (!meta) throw new Error(`Account #${id} not found`)
+  // Read before the first await below, for the reason in the type's JSDoc.
+  const accountGeneration = accountAuthState.currentGeneration(id)
   // Phase A2: subscribe this account to TLS cert-error notifications from the
   // packages/net retry wrappers. Idempotent (service-side registry), so the
   // call is safe on every config load; placing it here guarantees the
@@ -3605,9 +4711,11 @@ async function requireAccountConfig(accountIdRaw: unknown): Promise<{ id: number
   if (!base) throw new Error(`Could not load config for account #${id}`)
   const imapPins = listTlsPinsForEndpoint(id, base.imap.host, base.imap.port)
   const smtpPins = listTlsPinsForEndpoint(id, base.smtp.host, base.smtp.port)
-  // Pinned certificate bodies travel with the pins: `buildTlsOptions` adds
-  // them to `ca` as explicit trust anchors, which is what lets a self-signed
-  // or private-CA server verify WITHOUT weakening `rejectUnauthorized`.
+  // Pinned certificate bodies travel with the pins: `buildTlsOptions` folds
+  // them into the trust set the connection's shared `SecureContext` is built
+  // from, i.e. they become explicit trust anchors. That is what lets a
+  // self-signed or private-CA server verify WITHOUT weakening
+  // `rejectUnauthorized`.
   // Empty array (pins created before capture landed, or capture failed) keeps
   // the previous fail-closed behaviour.
   const imapPinCerts = listTlsPinnedCertsPemForEndpoint(id, base.imap.host, base.imap.port)
@@ -3671,6 +4779,7 @@ async function requireAccountConfig(accountIdRaw: unknown): Promise<{ id: number
     return {
       id,
       meta,
+      accountGeneration,
       cfg: {
         imap: imapCfg,
         smtp: {
@@ -3686,6 +4795,7 @@ async function requireAccountConfig(accountIdRaw: unknown): Promise<{ id: number
   return {
     id,
     meta,
+    accountGeneration,
     cfg: {
       imap: { ...base.imap, tlsPinsSha256: imapPins, tlsPinnedCertsPem: imapPinCerts },
       smtp: { ...base.smtp, tlsPinsSha256: smtpPins, tlsPinnedCertsPem: smtpPinCerts },
@@ -3693,8 +4803,29 @@ async function requireAccountConfig(accountIdRaw: unknown): Promise<{ id: number
   }
 }
 
-function assertImapAuth(accountId: number, cfg: AccountConfig['imap']) {
-  if (!cfg.pass && !cfg.accessToken) throw new Error(`IMAP authentication for account #${accountId} is not configured`)
+function assertImapAuth(accountId: number, cfg: AccountConfig['imap'], accountGeneration: number | null) {
+  if (cfg.pass || cfg.accessToken) return
+  // §2.165 — the one credentials verdict the connection boundary can never
+  // report: this check rejects BEFORE a connection is attempted, so no wrapped
+  // operation ever runs and no outcome is produced. Without this call an
+  // account that cannot even try to log in is the only kind that never shows
+  // the "sign in again" badge — precisely the account that needs it most.
+  //
+  // Reported directly rather than by letting the thrown error travel to the
+  // service: the throw fans out to ~28 call sites, most of which log it and
+  // move on, and the raise must not depend on which of them caught it. The
+  // error still carries the discriminator so the report is correct in the one
+  // case where the check DOES run inside an already-wrapped operation.
+  //
+  // §2.165 fix wave 5 — `accountGeneration` comes from `requireAccountConfig`
+  // (the sole source of every `cfg` passed here) and was read before that
+  // loader's first await. The verdict is a statement about the record that load
+  // produced, and the id can change hands between the load and this check:
+  // ids are reused, so an unstamped raise puts the badge on whichever mailbox
+  // was created next. Required rather than optional so the compiler, not a
+  // reviewer, is what stops the next call site from omitting it.
+  accountAuthState.noteMissingCredentials(accountId, accountGeneration)
+  throw imapAuthNotConfiguredError(accountId)
 }
 
 function assertSmtpAuth(accountId: number, cfg: AccountConfig['smtp']) {
@@ -3773,7 +4904,7 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
     return { messageId: 'e2e' }
   }
 
-  const { meta, cfg } = await requireAccountConfig(accountId)
+  const { meta, cfg, accountGeneration } = await requireAccountConfig(accountId)
 
   // Strip identityId before handing off — it's a renderer-side hint used
   // only by the From-header resolver above. Unknown fields are harmless
@@ -3841,7 +4972,7 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
   let sentFolderForDiag: string | undefined
   let rawSizeForDiag: number | undefined
   if (meta.providerId !== 'outlook') try {
-    assertImapAuth(accountId, cfg.imap)
+    assertImapAuth(accountId, cfg.imap, accountGeneration)
     const mailboxes = await listMailboxes(accountId, cfg.imap)
     const detected = detectFolderRoles(mailboxes)
     const roles = mergeRoles(mailboxes, detected, meta.folderRoles ?? {})
@@ -3919,11 +5050,19 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
 
 // --- Snooze background processing ---
 
+/**
+ * The owner of "snooze state changed" — every add / remove / wake path already
+ * ends here, which is why §2.99 (round-2 HIGH-3) hangs the badge invalidation
+ * off it rather than off the individual handlers and AI callbacks. A snoozed
+ * message is excluded from the unread aggregate (`countUnreadByFolder`), so
+ * both directions move the badge.
+ */
 function notifySnoozeChanged(accountId?: number) {
   broadcast('mail:snoozeChanged', {
     accountId: typeof accountId === 'number' ? accountId : null,
     at: new Date().toISOString(),
   })
+  invalidateUnreadBadge()
 }
 
 let snoozeProcessing = false
@@ -3945,6 +5084,8 @@ function processSnoozed() {
         uid: item.uid,
         messageId: item.messageId,
       })
+      // §2.99 — a woken message re-enters the unread count; the badge follows
+      // through the snooze owner above.
       notifySnoozeChanged(item.accountId)
     }
   } catch (e) {
@@ -4036,9 +5177,9 @@ async function processSendQueue() {
         if (item.archiveRef) {
           try {
             const ref = item.archiveRef
-            const { cfg } = await requireAccountConfig(ref.accountId)
-            assertImapAuth(ref.accountId, cfg.imap)
-            await moveMessages(cfg.imap, ref.folder, ref.archiveFolder, [ref.uid], ref.accountId)
+            const { cfg, accountGeneration } = await requireAccountConfig(ref.accountId)
+            assertImapAuth(ref.accountId, cfg.imap, accountGeneration)
+            await imapBackground(() => moveMessages(cfg.imap, ref.folder, ref.archiveFolder, [ref.uid], ref.accountId))
             purgeVirtualFolderRefs(ref.accountId, ref.folder, [ref.uid])
             logMail.info(`Archived original after send: account=${ref.accountId} ${ref.folder}/${ref.uid} → ${ref.archiveFolder}`)
             broadcast('mail:backgroundArchived', { accountId: ref.accountId, folder: ref.folder, uids: [ref.uid] })
@@ -4140,13 +5281,41 @@ handleIpc('net:idleStart', async (_e, accountId: unknown, mailbox: unknown) => {
     logReplay.warn(`Pre-IDLE replay failed for account #${id}:`, err)
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
-  await startIdle(id, cfg.imap, parsedMailbox, (data) => {
-    // Forward the event to renderer, where we decide what to do (sync/notifications).
-    broadcast('mail:exists', { accountId: id, ...data })
-  })
+  // §2.165: the outcome of the prologue is reported by `startIdle` itself, at
+  // the boundary that owns the connection — including the outcomes of its own
+  // reconnect cycle, which this handler never sees. What the boundary cannot
+  // know is that a rejected prologue is TERMINAL: it throws here and the loop
+  // never starts, so no second failure will ever arrive to satisfy the
+  // threshold. That is what the escalation below adds, and all it adds — the
+  // error is re-thrown unchanged (the renderer caller swallows it, but the
+  // handler contract stays the same).
+  //
+  // The stamp is read HERE, before the attempt starts, for the same reason the
+  // boundary reads its own before awaiting anything: a prologue that is still
+  // running while the account is deleted (and its id re-issued) must report the
+  // incarnation it was started for, so the escalation is discarded instead of
+  // landing on the new mailbox.
+  const idleGeneration = accountAuthState.currentGeneration(id)
+  try {
+    await startIdle(id, cfg.imap, parsedMailbox, (data) => {
+      // Forward the event to the renderer, which drives the sync. Deciding
+      // WHAT to announce is main's job since §2.99 (services/mailNotifier.ts) —
+      // the renderer no longer raises notifications.
+      const delivered = broadcast('mail:exists', { accountId: id, ...data })
+      // §2.99 — nobody is listening (the app is running in the tray with its
+      // window closed), so the event would be dropped and the mailbox would sit
+      // unsynced until the periodic timer. Drive the existing per-account pass
+      // instead — same in-flight gate, same offline/shutdown guards. Moving
+      // IDLE ownership into main is the real fix and is out of scope here.
+      if (delivered === 0) triggerAccountResync(id)
+    })
+  } catch (err) {
+    noteIdleLoginRejected(id, idleGeneration, err)
+    throw err
+  }
   // §2.16 — opportunistically clean up any duplicate drafts left by previous
   // sessions. Non-blocking, runs once per account per app session.
   maybeScheduleOrphanDraftsSweep(id, cfg.imap)
@@ -4231,7 +5400,7 @@ function ensureFolderPrefs(accountId: number, mailboxes: Array<{ path: string; s
     .filter(r => !serverPaths.has(r.folderPath))
     .map(r => r.folderPath)
   if (stalePaths.length > 0) {
-    deleteStaleFolderPrefs(accountId, stalePaths)
+    dropStaleFolderPrefs(accountId, stalePaths)
     deleteFolderCrawlStatesByPaths(accountId, stalePaths)
     for (const p of stalePaths) byPath.delete(p)
     logSync.info(`Pruned ${stalePaths.length} stale folder prefs for account #${accountId}: ${stalePaths.join(', ')}`)
@@ -4247,7 +5416,7 @@ function ensureFolderPrefs(accountId: number, mailboxes: Array<{ path: string; s
     const role = folderRoleByPath(box.path, box.specialUse, roles)
     if (!byPath.has(box.path)) {
       const defaults = defaultFolderPref(role)
-      const created = upsertFolderPref(accountId, box.path, defaults)
+      const created = writeFolderPref(accountId, box.path, defaults)
       byPath.set(created.folderPath, created)
       if (defaults.indexInSearch === false) {
         if (role === '\\Junk') autoDisabledByRole.junk++
@@ -4258,7 +5427,7 @@ function ensureFolderPrefs(accountId: number, mailboxes: Array<{ path: string; s
       // Previously typical folders defaulted to on_open; now they default to full.
       const existing = byPath.get(box.path)!
       if (existing.headerSyncMode === 'on_open' && isTypicalRole(role)) {
-        const updated = upsertFolderPref(accountId, box.path, { headerSyncMode: 'full' })
+        const updated = writeFolderPref(accountId, box.path, { headerSyncMode: 'full' })
         byPath.set(updated.folderPath, updated)
       }
     }
@@ -4329,8 +5498,8 @@ async function computeMailboxesAndRoles(id: number) {
     return { mailboxes: cached, detected: cachedRoles ?? {}, roles: cachedRoles ?? {}, prefs }
   }
 
-  const { meta, cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { meta, cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
   const mailboxes: Mailbox[] = await listMailboxes(id, cfg.imap)
   const detected = detectFolderRoles(mailboxes)
@@ -4383,7 +5552,7 @@ handleIpc('net:inboxSummaries', async (_e, accountId: unknown, folder?: unknown,
     const list = [...box]
       .sort((a, b) => b.uid - a.uid)
       .map(m => ({
-        ...displayFromParts(m.from),
+        ...senderPartsFromHeader(m.from),
         accountId: id,
         folder: parsedFolder,
         uid: m.uid,
@@ -4409,8 +5578,8 @@ handleIpc('net:inboxSummaries', async (_e, accountId: unknown, folder?: unknown,
 
   if (getSettings().workOffline) return []
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
   const result = await fetchInboxSummaries(cfg.imap, parsedFolder, 50, id, isLightweight)
 
@@ -4418,6 +5587,7 @@ handleIpc('net:inboxSummaries', async (_e, accountId: unknown, folder?: unknown,
   processMailRules(id, parsedFolder).catch(err =>
     logRules.error('Background processMailRules (inboxSummaries) failed:', err)
   )
+  noteFolderSynced(id, parsedFolder)
 
   // §2.7: drop UIDs the renderer has optimistically moved out (undo window).
   return filterPendingMoves(result)
@@ -4435,7 +5605,7 @@ handleIpc('net:folderPage', async (_e, accountId: unknown, folder: unknown, limi
       ? sorted.filter(m => m.uid < beforeUid).slice(0, lim)
       : sorted.slice(0, lim)
     const list = page.map(m => ({
-      ...displayFromParts(m.from),
+      ...senderPartsFromHeader(m.from),
       accountId: id,
       folder: parsedFolder,
       uid: m.uid,
@@ -4459,9 +5629,19 @@ handleIpc('net:folderPage', async (_e, accountId: unknown, folder: unknown, limi
     return filterPendingMoves(list)
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
-  const page = await fetchFolderSummariesPage(cfg.imap, parsedFolder, lim, beforeUid, id)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
+  // §2.17 Phase 1 — the tier is honest (a person is scrolling), but INERT here
+  // and knowingly so: `fetchFolderSummariesPage` runs on a dedicated connection
+  // (`withDedicatedImapRetry`), which bypasses both op locks and the pool
+  // semaphore, so there is no queue for a tier to order. Kept rather than
+  // deleted because the connection family is a property of the net function,
+  // not of this call: `fetchSummariesByUids` and `imapSearchFolder` — the same
+  // kind of user-facing read — do go through the singleton lock, and if
+  // pagination ever joins them the tag must already be right. A bare call here
+  // would read as "pagination is deliberately not interactive", which is the
+  // opposite of true.
+  const page = await imapInteractive(() => fetchFolderSummariesPage(cfg.imap, parsedFolder, lim, beforeUid, id))
 
   // This path persists headers too (fetchFolderSummariesPage → upsertMessages),
   // so it used to raise `MAX(uid)` above messages the rule pipeline had never
@@ -4484,6 +5664,10 @@ function purgeVirtualFolderRefs(accountId: number, folder: string, uids: number[
     removeReadLaterByUid(accountId, folder, uid)
     removeSnoozeByUid(accountId, folder, uid)
   }
+  // §2.99 (review H3) — mail left this folder locally (move / archive / delete
+  // / trash). This is the one place every such path passes through, and the
+  // unread total must follow without waiting for the next sync.
+  invalidateUnreadBadge()
 }
 
 // --- Static mail rules ---
@@ -4510,13 +5694,63 @@ try {
   captureException(err, { source: 'seedMailRulesStateFromCache' })
 }
 
+// --- §2.99 tray / background operation / new-mail notifications -------------
+//
+// Everything below the window handles lives in services/backgroundMail.ts: the
+// adapters onto the cache, the settings store and the OS are its job, this is
+// the wiring main.ts alone can provide.
+
+/** Bring the app back into view, creating the window if it is running headless. */
+function showMainWindow(): void {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore()
+    if (!win.isVisible()) win.show()
+    win.focus()
+    return
+  }
+  createWindow()
+}
+
+/**
+ * A new-mail notification was clicked. The renderer receives IDENTIFIERS only
+ * (`mail:openRef`) and looks the message up in the local cache itself — the
+ * subject the OS toast displayed never crosses the bridge.
+ */
+function openMailRef(ref: MailRef): void {
+  showMainWindow()
+  const target = win
+  if (!target || target.isDestroyed()) return
+  const send = () => { if (!target.isDestroyed()) target.webContents.send('mail:openRef', ref) }
+  if (target.webContents.isLoading()) target.webContents.once('did-finish-load', send)
+  else send()
+}
+
+initBackgroundMail({
+  isE2E: IS_E2E,
+  onNotificationActivated: openMailRef,
+  // Round 3 — `launchAtLoginStatus` is written by the service AFTER this
+  // handler's own `settings:changed` has gone out (and at startup, outside any
+  // save), so the service pushes the settings again once the outcome is
+  // recorded. Fresh from the store, never the payload that triggered it.
+  broadcastSettings: () => { broadcastSettingsChanged(getSettings()) },
+})
+
 /**
  * Execute a single rule action on a message via IMAP.
  * Folder-role based actions (archive, trash, spam) resolve target folder from cached roles.
  */
 async function executeRuleAction(accountId: number, folder: string, uid: number, action: RuleAction): Promise<void> {
-  const { cfg } = await requireAccountConfig(accountId)
-  assertImapAuth(accountId, cfg.imap)
+  // §2.17 Phase 1 — static rules fire from the sync pipeline on newly arrived
+  // mail, not from a click. Background tier: the rule must run, but a rule pass
+  // over a fresh batch must not delay the message being opened right now.
+  //
+  // The scope wraps the body in place rather than delegating to a second
+  // function: the refusal branches below are pinned by a source-mirror test
+  // that slices THIS function, and moving them out of it would satisfy the
+  // slice while leaving the guarantee untested.
+  return imapBackground(async () => {
+  const { cfg, accountGeneration } = await requireAccountConfig(accountId)
+  assertImapAuth(accountId, cfg.imap, accountGeneration)
   const roles = getCachedFolderRoles(accountId) as Record<string, string | undefined> | null
 
   switch (action.type) {
@@ -4548,7 +5782,15 @@ async function executeRuleAction(accountId: number, folder: string, uid: number,
       break
     }
     case 'move': {
-      if (action.folder && action.folder !== folder) {
+      // Depth for a row written before `parseMailRuleParts` required the
+      // target (§2.162). A blank target used to fall straight through to
+      // `break`, so the executor reported success and the caller logged the
+      // move as applied — the same "the log says work that never happened"
+      // defect as an unknown action type, and refused the same way.
+      if (!action.folder || !action.folder.trim()) {
+        throw new Error('mail rule move action has no target folder')
+      }
+      if (action.folder !== folder) {
         await moveMessages(cfg.imap, folder, action.folder, [uid], accountId)
         deleteEmls(accountId, folder, [uid])
         purgeVirtualFolderRefs(accountId, folder, [uid])
@@ -4563,7 +5805,21 @@ async function executeRuleAction(accountId: number, folder: string, uid: number,
       await setFlagged(cfg.imap, folder, [uid], true, accountId)
       break
     }
+    default: {
+      // Unreachable for a rule stored since `parseMailRuleParts` began checking
+      // the action type (§2.162), and reachable only for a row written before
+      // it. Falling through silently is what made this worth closing: the
+      // callers log a `rule_log` row after this resolves, so an action nobody
+      // performed was recorded as applied — an audit trail that reports work
+      // that never happened. Throwing keeps the case distinguishable from
+      // success: the runner counts it as a failed action (bounded retries, then
+      // a synthetic PII-free report) and `rules:applyToFolder` does not count
+      // it as applied. The value is not interpolated — it is stored text, and
+      // the rule id is already in the caller's log line.
+      throw new Error('unsupported mail rule action type')
+    }
   }
+  })
 }
 
 /**
@@ -4624,7 +5880,19 @@ function buildMailRulesDeps(): MailRulesRunnerDeps {
  */
 async function processMailRules(accountId: number, folder: string): Promise<void> {
   try {
-    await runMailRules(accountId, folder, buildMailRulesDeps())
+    // §2.17 Phase 1 — this pass is started DETACHED (`processMailRules(...).catch()`)
+    // from every sync path, and one of those paths (the periodic timer) runs
+    // inside an ambient `sync` scope. A detached child inherits the ambient tier
+    // and keeps it after the parent scope settles, so without this line the same
+    // rule pass would be `sync` when the timer noticed the mail and `other` when
+    // an IPC handler did — a tier decided by who happened to be first, not by
+    // what the work is. Stated here, at the child's own boundary, which is the
+    // rule for detached work (imapScheduler header, "What a scope does NOT
+    // promise"). `executeRuleAction` states the same tier again at the leaf,
+    // deliberately: it is also reached from the follow-up path, which has no
+    // scope of its own. Today the two agree, so this is a guarantee, not a
+    // behaviour change.
+    await imapBackground(() => runMailRules(accountId, folder, buildMailRulesDeps()))
   } catch (err) {
     logRules.error(`processMailRules error for ${folder}:`, err)
     // No folder name in the Sentry payload — a mailbox name is user data and
@@ -4751,6 +6019,8 @@ handleIpc('net:syncFolderHeaders', async (_e, accountId: unknown, folder: unknow
   const runPromise = runSyncFolderHeaders(id, parsedFolder, opts)
   inflightSyncs.set(syncKey, runPromise)
   try {
+    // §2.165: no credentials verdict is reported from here — the IMAP calls
+    // inside `runSyncFolderHeaders` report their own, at the boundary.
     return await runPromise
   } finally {
     // Clear only if still pointing at this run — defensive against a race where
@@ -4800,8 +6070,13 @@ async function runSyncFolderHeaders(
     upsertMessages(id, parsedFolder, list.map(m => ({
       uid: m.uid,
       subject: m.subject,
-      fromAddr: m.from,
-      fromName: undefined,
+      // §2.172 — the same split every other seeding site uses. This branch used
+      // to write the raw `From:` string into `from_addr` (and clear `from_name`),
+      // and `upsertMessages` overwrites both columns unconditionally, so running
+      // a header sync after a summaries fetch silently replaced a correct split
+      // with a display string. `from_address` rules then matched on data the
+      // production parser cannot produce.
+      ...senderPartsFromHeader(m.from),
       toAddr: m.to,
       date: m.date,
       unread: m.unread,
@@ -4814,8 +6089,8 @@ async function runSyncFolderHeaders(
     return { ok: true as const, fetched: list.length, completed: true }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
   // Mark folder as crawling before starting sync — but only for first-time crawls.
   // For already-covered folders doing incremental sync, keep their covered status
@@ -4867,6 +6142,13 @@ async function runSyncFolderHeaders(
     // while the newly discovered UIDs were NOT actually fetched.
     // Codex §2.15 wave-3 Medium #2.
     let newResultWasSkipped = false
+    // Same gate, other failure mode: the inner fetch ran but could not store
+    // every header it pulled. This branch is the third `fetchAllFolderHeaders`
+    // call site, and one of the two whose 'covered_full' write has no
+    // crawled-vs-exists check to fall back on (the periodic background loop is
+    // the other; only the interactive path below derives its status from
+    // `trulyComplete`). So the flag has to be read here explicitly.
+    let newResultHeadersIncomplete = false
     logSync.info(`${parsedFolder} account ${id}: priorModseq=${liveModseq ?? 'none'} priorExists=${liveServerCount ?? 'none'}`)
 
     const resumeWatermark = (mode === 'full' && priorCrawl?.watermarkUid && !resumingPartialCrawl)
@@ -4972,6 +6254,7 @@ async function runSyncFolderHeaders(
             )
             liveModseq = newResult.highestModseq ?? liveModseq
             newResultWasSkipped = Boolean(newResult.skipped)
+            newResultHeadersIncomplete = Boolean(newResult.headersIncomplete)
             logSync.info(`Header sync ${parsedFolder} account ${id}: fetched=${fetched} (new messages only)${newResultWasSkipped ? ' — fetch skipped by stale_wipe_guard' : ''}`)
           } else {
             logSync.info(`Header sync ${parsedFolder} account ${id}: no new messages (FLAGS-only sync)`)
@@ -4990,13 +6273,25 @@ async function runSyncFolderHeaders(
           //      new UIDs was skipped via stale_wipe_guard on the full-header
           //      path (rare but possible when mailbox state flips between
           //      the two mailboxOpen calls).
-          // Codex §2.15 wave-4 Medium.
+          //   3. The inner fetch stored only part of what it pulled
+          //      (`headersIncomplete`). The write below pins
+          //      watermark = getMaxUidForFolder, i.e. the highest UID that
+          //      LANDED — above the one that did not. This branch survives
+          //      that because `newUids` is rediscovered from the cache diff
+          //      each run, but the watermark it leaves is read as `sinceUid`
+          //      by the full-sync path whenever this branch is not taken
+          //      (FLAGS-only sync throws → fallthrough below; or the server
+          //      starts advertising CONDSTORE), and there the hole is filtered
+          //      for good. 'covered_full' would also be a false claim to
+          //      search coverage while the message is absent.
           const stateAdvanceSafe = !flagResult.stalewipeGuardTripped
             && !(flagResult.newUids.length > 0 && newResultWasSkipped)
+            && !newResultHeadersIncomplete
           completed = stateAdvanceSafe
           broadcast('sync:folderProgress', { accountId: id, account: syncAccountEmail, folder: parsedFolder, fetched, total: serverTotal, done: true })
           if (!stateAdvanceSafe) {
-            logSync.warn(`Header sync ${parsedFolder} account ${id}: new-UIDs fetch returned skipped — NOT advancing crawl state`)
+            const reason = newResultHeadersIncomplete ? 'a header response carried no usable UID' : 'new-UIDs fetch returned skipped'
+            logSync.warn(`Header sync ${parsedFolder} account ${id}: ${reason} — NOT advancing crawl state`)
           }
 
           // Update crawl state — only when state advance is safe.
@@ -5036,6 +6331,9 @@ async function runSyncFolderHeaders(
           processMailRules(id, parsedFolder).catch(err =>
             logRules.error('Background processMailRules (FLAGS-only sync) failed:', err)
           )
+          // Flags changed on the server (another device read something) — the
+          // unread surfaces must follow even though no mail arrived.
+          noteFolderSynced(id, parsedFolder)
           return { ok: true as const, fetched, completed }
         }
       } catch (err) {
@@ -5145,7 +6443,17 @@ async function runSyncFolderHeaders(
     //     completed = false so downstream does not promote the folder
     //     to 'covered_full' with a stale snapshot.
     const stalewipeSuspect = Boolean(result.skipped) && !(typeof result.exists === 'number' && result.exists > 0)
-    completed = !stalewipeSuspect
+    // A run that could not store every header it fetched is not a completed
+    // crawl either. `completed` is what promotes the folder to 'covered_full',
+    // and that status makes the next sync pass `sinceUid = maxUid` — which
+    // filters out exactly the UID that failed to land, since a neighbour with
+    // a higher UID stored fine and carried the watermark past it. Staying on
+    // 'covered_recent' keeps the descent (beforeUid, no sinceUid) that
+    // re-requests it.
+    completed = !stalewipeSuspect && !result.headersIncomplete
+    if (result.headersIncomplete) {
+      logSync.warn(`Header sync ${parsedFolder} account ${id}: a header response carried no usable UID — NOT advancing crawl state to covered_full`)
+    }
     if (stalewipeSuspect) {
       logSync.warn(`Header sync ${parsedFolder} account ${id}: stale_wipe_guard tripped (exists=${String(result.exists)}) — NOT advancing crawl state`)
     } else if (result.skipped) {
@@ -5255,6 +6563,29 @@ async function runSyncFolderHeaders(
     processMailRules(id, parsedFolder).catch(err =>
       logRules.error('Background processMailRules failed:', err)
     )
+    noteFolderSynced(id, parsedFolder)
+    // §2.115 — tell the body indexer its idle backoff is stale.
+    //
+    // The indexer stretches its tick 2s → … → 2min while it finds nothing to
+    // do. Rows we just committed carry no body_text, so they are exactly the
+    // work that curve was backing away from; without this the ramp keeps
+    // climbing and a body that just landed can stay unsearchable for minutes.
+    //
+    // Guarded by `fetched > 0`, NOT by "a sync ran": an incremental sync that
+    // matched no new UIDs, and the FLAGS-only branch (which changes flags on
+    // already-indexed rows and leaves `fetched` at 0), must not reset the
+    // curve — resetting on every sync tick is how the backoff gets defeated.
+    // `fetched` is assigned as batches are committed, so it is also correct on
+    // the path that throws afterwards, which is why this sits in `finally`
+    // alongside the rule trigger.
+    //
+    // try/catch because a sync must never fail on account of a scheduling
+    // hint (same contract as `certRecovery.noteSyncSuccess` below). The call
+    // re-arms the indexer's pending timeout (clearTimeout + setTimeout): no
+    // I/O, no await, nothing to queue.
+    if (fetched > 0) {
+      try { resetBodyIndexerBackoff() } catch { /* never break sync */ }
+    }
   }
 
   syncSucceeded = true
@@ -5271,6 +6602,10 @@ async function runSyncFolderHeaders(
       // triggers the one-time TLS interception-notice probe (dedup, host
       // persistence and error containment live inside the service).
       try { certRecovery.noteSyncSuccess(id) } catch { /* never break sync */ }
+      // §2.165: the "credentials still work" verdict is NOT reported here. The
+      // fetches this function performed already reported it at the connection
+      // boundary — and did so for every account, not only for the ones whose
+      // folders are on automatic sync.
       try {
         // Legacy-safe gate: only accounts that were observed created by
         // the accounts:save handler AFTER telemetry shipped have an entry
@@ -5332,19 +6667,23 @@ handleIpc('net:setSeen', async (_e, accountId: unknown, mailbox: unknown, uids: 
     return { ok: true as const }
   }
 
+  // §2.99 (review H3) — every branch below that reaches the cache changes what
+  // is unread, so the badge is recounted from one place at the end rather than
+  // per branch. Debounced in the tray service.
   if (getSettings().workOffline) {
     setUnread(id, parsedMailbox, parsedUids, !parsedSeen)
     const uidVal = getSyncState(id, parsedMailbox)?.uidValidity ?? null
     for (const uid of parsedUids) {
       upsertOfflineOp(id, parsedMailbox, uid, 'flag_seen', { seen: parsedSeen }, uidVal)
     }
+    invalidateUnreadBadge()
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   try {
-    await setSeen(cfg.imap, parsedMailbox, parsedUids, parsedSeen, id)
+    await imapInteractive(() => setSeen(cfg.imap, parsedMailbox, parsedUids, parsedSeen, id))
   } catch (err) {
     if (isTransientNetworkError(err)) {
       logMail.warn(`net:setSeen transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
@@ -5353,10 +6692,12 @@ handleIpc('net:setSeen', async (_e, accountId: unknown, mailbox: unknown, uids: 
       for (const uid of parsedUids) {
         upsertOfflineOp(id, parsedMailbox, uid, 'flag_seen', { seen: parsedSeen }, uidVal)
       }
+      invalidateUnreadBadge()
       return { ok: true as const, queued: true as const }
     }
     throw unwrapAggregate(err)
   }
+  invalidateUnreadBadge()
   return { ok: true as const }
 })
 
@@ -5385,10 +6726,10 @@ handleIpc('net:setFlagged', async (_e, accountId: unknown, mailbox: unknown, uid
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   try {
-    await setFlagged(cfg.imap, parsedMailbox, parsedUids, parsedFlagged, id)
+    await imapInteractive(() => setFlagged(cfg.imap, parsedMailbox, parsedUids, parsedFlagged, id))
   } catch (err) {
     if (isTransientNetworkError(err)) {
       logMail.warn(`net:setFlagged transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
@@ -5685,8 +7026,8 @@ handleIpc('net:saveDraft', async (_e, accountId: unknown, draftsMailbox: unknown
     return { ok: true as const, uid }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   // §2.16 — per-account mutex serializes saveDraft. Concurrent autosaves on
   // the same account cannot race against each other's APPEND/SEARCH/DELETE
   // triple, which is the failure mode that piled up 25 drafts on mail.ru.
@@ -5761,8 +7102,8 @@ handleIpc('net:deleteDraft', async (_e, accountId: unknown, draftsMailbox: unkno
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   // §2.16 iter4 (Medium) — share the per-account saveDraft mutex so a
   // delete cannot interleave with an in-flight autosave. Without this lock,
   // a saveDraft that started just before send/finalize could APPEND its
@@ -5835,6 +7176,45 @@ function estimateBodyBytes(details: MessageDetails | undefined | null): number {
   return Math.max(h, t)
 }
 
+/**
+ * §2.17 Phase 1 — tier helpers for the IMAP locks.
+ *
+ * The tier is a property of WHY the work is happening, which is known here, at
+ * the entry point, and nowhere below it. Everything the callback touches — the
+ * net function, its retry wrapper, the lock it queues on — inherits the tag
+ * through AsyncLocalStorage, so no signature in between has to carry it.
+ *
+ * `imapInteractive` means "a person is looking at this right now". Use it only
+ * for work a user is actually waiting on; tagging bulk work interactive is how
+ * a priority scheme quietly degrades back into FIFO.
+ *
+ * Two limits of the mechanism, spelled out because assuming the opposite is
+ * cheap and finding out is not (full statement in packages/net/imapScheduler):
+ *
+ *  1. A scope is a CONTEXT, not a wrapper around one awaited call. It may span a
+ *     whole pass, and anything detached inside it (`void f()`, `f().catch(...)`)
+ *     inherits the tier and keeps it after the scope settles. A detached child
+ *     that should not take its caller's tier must state its own — which is why
+ *     `processMailRules` pins itself to `background` instead of inheriting
+ *     `sync` from the periodic pass and `other` from the IPC handlers.
+ *  2. A scope around a DEDICATED-connection call is inert: dedicated connections
+ *     take no op lock and no pool slot, so there is no queue to order. Such call
+ *     sites are marked at the call site, not left to look effective.
+ */
+function imapInteractive<T>(fn: () => Promise<T>): Promise<T> {
+  return withImapPriority('interactive', fn)
+}
+
+/** §2.17 Phase 1 — periodic / queue-driven work nobody is watching land. */
+function imapBackground<T>(fn: () => Promise<T>): Promise<T> {
+  return withImapPriority('background', fn)
+}
+
+/** §2.17 Phase 1 — cache catch-up: header sync, offline body sync, replay. */
+function imapSync<T>(fn: () => Promise<T>): Promise<T> {
+  return withImapPriority('sync', fn)
+}
+
 /** §2.17 Phase 0 — IMAP fetch step gets a 10s AbortController timeout.
  *  Cache and DB tiers are not timed out (they are local and fast).
  *  imapflow does not support a real abort signal, so the timeout is
@@ -5871,7 +7251,10 @@ async function fetchMessageDetailsWithTimeout(
     }
   })
   try {
-    const fetchPromise = fetchMessageDetails(accountId, cfg, mailbox, uid, ac.signal)
+    // §2.17 Phase 1 — the open path is the interactive tier by definition:
+    // this budget expiring on our own queue is the defect the phase exists to
+    // fix (a 10 941 ms `net:setSeen` behind an offline-sync EML burst).
+    const fetchPromise = imapInteractive(() => fetchMessageDetails(accountId, cfg, mailbox, uid, ac.signal))
       .then((details): ImapFetchOutcome => ({ kind: 'ok', details }))
       .catch((err): ImapFetchOutcome => {
         // If the abort fired between awaits, fetchMessageDetails throws
@@ -5896,6 +7279,11 @@ async function fetchMessageDetailsWithTimeout(
 type RawMessageOutcome =
   | { kind: 'ok'; raw: Buffer | null }
   | { kind: 'timeout' }
+  // §2.145 wave 2.1 — the message was refused mid-stream for exceeding the
+  // hard ceiling. Distinct from 'timeout' (the network was too slow) and from
+  // 'ok' with a null raw (the server had nothing): here the server has plenty
+  // and we declined to hold it. `bytesSeen` is a lower bound on the true size.
+  | { kind: 'over_limit'; bytesSeen: number }
 
 async function downloadRawMessageWithTimeout(
   accountId: number,
@@ -5915,8 +7303,14 @@ async function downloadRawMessageWithTimeout(
     }
   })
   try {
-    const fetchPromise = downloadRawMessage(accountId, cfg, mailbox, uid, ac.signal)
-      .then((raw): RawMessageOutcome => ({ kind: 'ok', raw }))
+    // §2.17 Phase 1 — same tier as the body path: this is the per-folder
+    // offline-mode branch of the SAME user-initiated open.
+    const fetchPromise = imapInteractive(() => downloadRawMessage(accountId, cfg, mailbox, uid, ac.signal))
+      .then((result): RawMessageOutcome => (
+        result.kind === 'over_limit'
+          ? { kind: 'over_limit', bytesSeen: result.bytesSeen }
+          : { kind: 'ok', raw: result.kind === 'ok' ? result.raw : null }
+      ))
       .catch((err): RawMessageOutcome => {
         if (err instanceof Error && err.name === 'AbortError') return { kind: 'timeout' }
         throw err
@@ -5927,14 +7321,76 @@ async function downloadRawMessageWithTimeout(
   }
 }
 
+/**
+ * §2.145 wave 2.1 — the hard-cap placeholder for a message we never held.
+ *
+ * The parser-entry path builds this from the message's own header block
+ * (`parseEmlHeaderFacts`). Here there are no bytes at all: the download was
+ * refused mid-stream precisely so nothing would be allocated, and re-fetching
+ * a prefix to pretty up a placeholder would hand back part of the primitive we
+ * just removed. So the facts come from the row header sync already wrote —
+ * subject, sender and date are in `messages` for every message the folder has
+ * synced, which is every message that can be opened this way.
+ *
+ * `bytesSeen` is a LOWER BOUND — what we had counted when we stopped consuming,
+ * not the message's true size — and it is what the placeholder reports, because
+ * `messages` carries no size column to prefer over it. The renderer shows it as
+ * the message's size, so it under-reports by at most one chunk beyond the
+ * ceiling; against a number already past 100 MiB that is not a distinction the
+ * user can act on, and the alternative (fetching the real size) means going
+ * back to the server for a cosmetic figure.
+ *
+ * Shape is identical to the parser-entry placeholder, deliberately: the
+ * renderer must not be able to tell which doorway refused the message.
+ */
+function buildHardCapPlaceholder(
+  accountId: number,
+  folder: string,
+  uid: number,
+  bytesSeen: number,
+): MessageDetails {
+  const cached = getMessageByUid(accountId, folder, uid)
+  return {
+    uid,
+    envelope: {
+      subject: cached?.subject ?? undefined,
+      date: cached?.date ?? undefined,
+      from: cached?.fromAddr
+        ? [{ name: cached.fromName ?? undefined, address: cached.fromAddr }]
+        : undefined,
+      to: cached?.toAddr ? cached.toAddr.split(',').map(a => ({ address: a.trim() })) : undefined,
+      messageId: cached?.messageId ?? undefined,
+    },
+    internalDate: cached?.date ?? undefined,
+    flags: [
+      ...(cached?.unread ? [] : ['Seen']),
+      ...(cached?.flagged ? ['Flagged'] : []),
+    ],
+    parseCap: {
+      kind: 'hard',
+      rawBytes: bytesSeen,
+      limitBytes: MAX_EML_PARSE_BYTES,
+    },
+  }
+}
+
 /** Build the offline-fallback envelope from cached headers. Used both by the
  *  workOffline branch and the IMAP-timeout / IMAP-error branches so the
- *  renderer sees one consistent shape. */
+ *  renderer sees one consistent shape.
+ *
+ *  §2.17 Phase 1 — `reason` is REQUIRED at every call site rather than
+ *  defaulting to `'offline'`. The default is exactly what produced the lie: a
+ *  branch that knows perfectly well the budget expired would keep silently
+ *  emitting "offline" simply by not mentioning it. Making the parameter
+ *  mandatory means a new fallback branch cannot be added without deciding what
+ *  to tell the user. */
 function buildOfflineFallback(
   cached: ReturnType<typeof getMessageByUid>,
+  reason: NonNullable<MessageDetails['offlineFallbackReason']>,
 ): MessageDetails | null {
   if (!cached) return null
   return {
+    offlineFallbackReason: reason,
     uid: cached.uid,
     envelope: {
       subject: cached.subject,
@@ -6026,6 +7482,123 @@ const inviteCacheStore = makeInviteCache()
  *  (e.g. a parse error in parseEmlBuffer, a DB write failure during the
  *  EML cache path, or an unexpected throw from IPC zod parsing) would
  *  leak the span. */
+/**
+ * §2.145 — the details cache is the one way a capped build can still serve an
+ * uncapped body, and `electron/cachedDetailGuard.ts` is where the decision
+ * lives (extracted so it can be unit-tested against real rows, and to keep this
+ * file from growing another predicate — CLAUDE.md §5 hotspot policy).
+ *
+ * Read that module for the derivation. The two things the CALLER is responsible
+ * for, both of them ordering properties that a test pins:
+ *
+ *  - the serialized gate runs BEFORE `JSON.parse`, and both gates run BEFORE
+ *    `putDetailsInCache`, so a refused row can neither cost an unbounded parse
+ *    nor be laundered into the in-memory LRU and served from there all session;
+ *  - a refused row is INVALIDATED on the spot. Falling through alone was not
+ *    enough: it self-heals only where something rewrites the row, and the
+ *    offline branch returns header facts WITHOUT writing the cache — so a
+ *    legacy 50 MB row would have been re-parsed, and re-refused, on every open
+ *    for as long as the user stayed offline. Emptying the column costs nothing
+ *    real (it is a cache, and the message still exists on the server or in the
+ *    on-disk EML) and makes the pathological parse a one-time event rather than
+ *    a recurring one.
+ */
+
+/**
+ * Drop a cached-detail row we have refused to serve.
+ *
+ * Writing the empty string rather than adding a delete to `packages/db`:
+ * `getCachedDetail` returns the column verbatim and the read branch treats a
+ * falsy value as "no row", so this is exactly "absent" to every reader, in one
+ * statement, with no schema surface added for a cache eviction. Failure is
+ * swallowed — being unable to tidy a cache row must not turn into a failed
+ * message open; the row simply gets refused again, which is the state we were
+ * already in.
+ */
+function invalidateCachedDetail(accountId: number, folder: string, uid: number): void {
+  try { setCachedDetail(accountId, folder, uid, '') } catch { /* cache tidy-up is best-effort */ }
+}
+
+/**
+ * §2.145 — the shared tail of the two EML branches of `net:messageDetails`:
+ * index the body text, then cache the result. One helper because the two
+ * branches had drifted-by-copy code that has to make the same decisions, and
+ * getting any of them wrong is silent.
+ *
+ * WHAT IS WITHHELD, AND WHAT IS NOT (fix wave 0.1 — the first version of this
+ * helper withheld the body text for BOTH caps, on a premise that turned out to
+ * be false; the reasoning is written out because the false version was
+ * plausible):
+ *
+ *  - A SOFT-capped result IS indexed, exactly like an uncapped one. The
+ *    withheld version argued that the first megabyte of a body must not be
+ *    stored as if it were the whole one — but `updateMessageBodyText`
+ *    (packages/db/index.ts) has always sliced every body to 200 000 characters
+ *    before storing it, and the soft cap is 1 MiB of BYTES, i.e. at least
+ *    262 144 characters even for 4-byte UTF-8. For any message with a
+ *    text/plain part the withheld row would therefore have been byte-identical
+ *    to the uncapped one: the withholding bought nothing and cost real
+ *    behaviour (see below).
+ *
+ *    The one narrow window where the two differ, stated honestly rather than
+ *    waved away: an HTML-ONLY message whose markup-to-text ratio exceeds about
+ *    5:1, where 1 MiB of HTML can reduce to fewer than 200 000 characters of
+ *    plain text and the row then holds slightly less than an uncapped parse
+ *    would have produced. That is a smaller version of a cliff that already
+ *    exists — the body indexer's own IMAP path caps each part at 2 MiB
+ *    (`MAX_BODY_BYTES`, packages/net/message.ts) — so this is not a new class
+ *    of loss, only the same one 2x sooner on a path that also shows the user a
+ *    banner saying the body was clipped.
+ *
+ *    What the withholding actually cost, and why it is gone: only these two EML
+ *    branches route through this helper, so whether a large message was
+ *    searchable NOW or only after the next indexer pass depended on a per-folder
+ *    offlineMode toggle; in a folder excluded from search (Spam, Trash) the
+ *    indexer never drains the row at all (`listFoldersWithPendingBodies`
+ *    filters by `getIndexInSearchCached`), so `body_text` would have stayed NULL
+ *    forever — instant reply refusing with `no_provider` and `query_db` seeing
+ *    NULL, permanently; and in an offline-mode folder the full EML sits on disk
+ *    precisely so the message works without the network, while its body stayed
+ *    unsearchable until IMAP came back.
+ *
+ *  - A HARD-capped result is NOT indexed, for a much simpler reason than the
+ *    one above: there is nothing to write. No body was decoded, so
+ *    `getSearchableBodyText` returns null, and the row correctly stays NULL and
+ *    therefore stays in the body indexer's queue. Skipping the call also avoids
+ *    firing the FTS trigger for a write that would change nothing. The hard
+ *    capped RESULT is still cached — the placeholder is the correct answer for
+ *    that message, and re-deriving it means re-reading the header block off
+ *    disk.
+ *
+ *  - A `full` re-parse is not written to either DETAILS cache (the in-memory
+ *    LRU or `messages.cached_detail`). It exists for one click; persisting it
+ *    would hand the raised-tier body to every later open of that message, and
+ *    write it to disk, quietly making a one-off cost permanent. The clipped
+ *    entry stays, so the next ordinary open is still a cache hit.
+ *
+ *    It MAY, deliberately, seed `body_text` — the indexing branch stands above
+ *    the `wantFull` return. That is the good outcome and the contract is stated
+ *    here rather than left to the reader: the user asked for the fuller parse,
+ *    we already have it in hand, and letting it fill a NULL row takes the
+ *    message out of the indexer queue with better content than the first tier
+ *    would have supplied. Only ever a fill, never an overwrite —
+ *    `hasBodyTextIndexed` still gates it.
+ */
+function cacheMessageDetails(
+  accountId: number,
+  folder: string,
+  uid: number,
+  details: MessageDetails,
+  wantFull: boolean,
+): void {
+  if (details.parseCap?.kind !== 'hard' && !hasBodyTextIndexed(accountId, folder, uid)) {
+    updateMessageBodyText(accountId, folder, uid, getSearchableBodyText(details))
+  }
+  if (wantFull) return
+  putDetailsInCache(accountId, folder, uid, details)
+  try { setCachedDetail(accountId, folder, uid, JSON.stringify(details)) } catch { /* non-critical */ }
+}
+
 function makeMessageDetailsFinalizer(
   span: ReturnType<typeof startMetricSpan>,
   t0: number,
@@ -6061,10 +7634,19 @@ function makeMessageDetailsFinalizer(
   return { finalize, ensureClosed }
 }
 
-handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown, uid: unknown) => {
+handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown, uid: unknown, options: unknown) => {
   const id = accountIdSchema.parse(accountId)
   const parsedMailbox = mailboxSchema.parse(mailbox)
   const parsedUid = uidSchema.parse(uid)
+  // §2.145 — an explicit "show full message" click, and nothing else, sets
+  // this. Two consequences, both deliberate: the caches are BYPASSED on the way
+  // in (they hold the clipped result, which is the thing the user is asking to
+  // get past) and NOT WRITTEN on the way out (a cache entry holding a body up
+  // to the raised tier would silently hand that body to every later open,
+  // turning a one-off request into a persistent cost — and would persist it to
+  // SQLite besides). The clipped entry therefore survives the click, which is
+  // what makes the next ordinary open cheap again.
+  const wantFull = messageDetailsOptionsSchema.parse(options)?.full === true
 
   // Onboarding funnel closing step: the first time the user opens any
   // message after connecting an account. One-shot install-wide.
@@ -6106,7 +7688,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
 
   try {
     // Check in-memory cache first (instant — no disk I/O or parsing)
-    const cached = getDetailsFromCache(id, parsedMailbox, parsedUid)
+    const cached = wantFull ? null : getDetailsFromCache(id, parsedMailbox, parsedUid)
     if (cached) {
       logMail.info(`messageDetails memory cache hit: uid=${parsedUid} ${Date.now() - t0}ms`)
       finalizer.finalize('memory', cached)
@@ -6115,18 +7697,46 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
 
     // Check DB cache — survives app restarts, avoids re-parsing large EML files
     try {
-      const dbJson = getCachedDetail(id, parsedMailbox, parsedUid)
-      if (dbJson) {
+      const dbJson = wantFull ? null : getCachedDetail(id, parsedMailbox, parsedUid)
+      if (dbJson && isServableCachedDetailJson(dbJson)) {
         const details = JSON.parse(dbJson) as MessageDetails
-        putDetailsInCache(id, parsedMailbox, parsedUid, details)
-        logMail.info(`messageDetails DB cache hit: uid=${parsedUid} ${Date.now() - t0}ms`)
-        finalizer.finalize('db', details)
-        return details
+        if (isServableCachedDetail(details)) {
+          putDetailsInCache(id, parsedMailbox, parsedUid, details)
+          logMail.info(`messageDetails DB cache hit: uid=${parsedUid} ${Date.now() - t0}ms`)
+          finalizer.finalize('db', details)
+          return details
+        }
+        logMail.info(`messageDetails DB cache row refused (pre-cap body): uid=${parsedUid}`)
+        invalidateCachedDetail(id, parsedMailbox, parsedUid)
+      } else if (dbJson) {
+        logMail.info(`messageDetails DB cache row refused (oversized row): uid=${parsedUid}`)
+        invalidateCachedDetail(id, parsedMailbox, parsedUid)
       }
     } catch { /* corrupted cache — fall through to normal path */ }
 
-    if (IS_E2E) {
-      const msg = e2eBox(id, parsedMailbox).find(m => m.uid === parsedUid) ?? e2eFindInAnyBox(id, parsedUid)
+    // §2.145 — an EML-BACKED e2e fixture deliberately does NOT take the
+    // synthetic branch below.
+    //
+    // The synthetic branch answers from `E2E_BOXES` before `readEml()` is ever
+    // reached, so under `IS_E2E` the whole parse pipeline — readEml,
+    // parseEmlBuffer, the hard/soft caps, `cacheMessageDetails` — is
+    // unreachable, and the parse-cap viewer had no end-to-end coverage at all.
+    // A fixture injected WITH raw bytes (`e2e:injectMail` + `emlBase64` /
+    // `emlPadToBytes`, which writes them through `saveEml`) therefore falls
+    // through to the production path below and is served by the real code,
+    // `{ full: wantFull }` passthrough included.
+    //
+    // Opt-in per fixture, never global: every existing spec keeps the synthetic
+    // branch, because a fixture that was never given bytes has no `.eml` on
+    // disk and would fall through to an IMAP fetch that does not exist here.
+    // The discriminator is the marker set at injection time, not "is there a
+    // file" — a missing file is then a loud failure in the spec that asked for
+    // this path, rather than a silent switch back to synthetic content.
+    const e2eFixture = IS_E2E
+      ? (e2eBox(id, parsedMailbox).find(m => m.uid === parsedUid) ?? e2eFindInAnyBox(id, parsedUid))
+      : undefined
+    if (IS_E2E && !e2eFixture?.emlFixture) {
+      const msg = e2eFixture
       const acc = E2E_ACCOUNTS.find(a => a.id === id)
 
       const addrList = (raw?: string) => {
@@ -6137,12 +7747,16 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
         return emails.length > 0 ? emails.map(address => ({ address })) : undefined
       }
 
+      // §2.172 — one verdict for the whole fixture: the envelope address handed
+      // to the renderer is the exact `fromAddr` the list rows were seeded with.
+      const sender = senderPartsFromHeader(msg?.from || 'alice@example.test')
+
       const details: MessageDetails = {
         uid: parsedUid,
         envelope: {
           subject: msg?.subject || 'E2E',
           date: msg?.date || new Date().toISOString(),
-          from: [parseDisplayAddress(msg?.from || 'alice@example.test')],
+          from: [{ name: sender.fromName, address: sender.fromAddr || undefined }],
           to: addrList(msg?.to) ?? [{ address: acc?.imap.user || `e2e${id}@example.test` }],
           cc: addrList(msg?.cc),
           bcc: addrList(msg?.bcc),
@@ -6173,10 +7787,27 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
     }
 
     // 1. Check local EML on disk (instant offline access)
-    const localEml = readEml(id, parsedMailbox, parsedUid)
+    //
+    // §2.145 wave 2.1 — bounded: an oversized file is stat'd, never loaded, and
+    // answered with a placeholder built from its header window alone. The
+    // unbounded `readFileSync` this replaces meant the parse-entry cap was
+    // being handed bytes that were already resident — the check ran, correctly,
+    // after the allocation it was supposed to prevent.
+    const emlRead = readEmlBounded(id, parsedMailbox, parsedUid)
+    if (emlRead.kind === 'over_limit') {
+      logMail.info(`EML over hard cap on disk: uid=${parsedUid} size=${emlRead.bytes}`)
+      recordHardParseCapTrip(emlRead.bytes)
+      // The prefix is the header window; `emlRead.bytes` is the file's true
+      // size, which is what the placeholder must report — not the prefix's.
+      const placeholder = await parseEmlHeaderFacts(parsedUid, emlRead.prefix, emlRead.bytes)
+      cacheMessageDetails(id, parsedMailbox, parsedUid, placeholder, wantFull)
+      finalizer.finalize('eml', placeholder)
+      return placeholder
+    }
+    const localEml = emlRead.kind === 'ok' ? emlRead.raw : null
     if (localEml) {
       const t1 = Date.now()
-      const parsedDetails = await parseEmlBuffer(parsedUid, localEml)
+      const parsedDetails = await parseEmlBuffer(parsedUid, localEml, { full: wantFull })
       // §2.22 Wave A — parseEmlBuffer skips attachment content for speed, so
       // recover any text/calendar payload from the raw buffer here. Cheap
       // (one mailparser pass on the bytes already in memory).
@@ -6186,11 +7817,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
         localEml,
       )
       logMail.info(`EML hit: uid=${parsedUid} size=${localEml.length} parse=${Date.now() - t1}ms total=${Date.now() - t0}ms`)
-      if (!hasBodyTextIndexed(id, parsedMailbox, parsedUid)) {
-        updateMessageBodyText(id, parsedMailbox, parsedUid, getSearchableBodyText(details))
-      }
-      putDetailsInCache(id, parsedMailbox, parsedUid, details)
-      try { setCachedDetail(id, parsedMailbox, parsedUid, JSON.stringify(details)) } catch { /* non-critical */ }
+      cacheMessageDetails(id, parsedMailbox, parsedUid, details, wantFull)
       finalizer.finalize('eml', details)
       return details
     }
@@ -6201,7 +7828,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
       const cached = getMessageByUid(id, parsedMailbox, parsedUid)
       if (cached) {
         logMail.info(`Work-offline fallback for uid=${parsedUid}`)
-        const fallback = buildOfflineFallback(cached)
+        const fallback = buildOfflineFallback(cached, 'offline')
         if (fallback) {
           // Cache-tier signal: workOffline returns headers-only DB data, same
           // as the IMAP-error path. Tag as `db` to share the dashboard slice.
@@ -6215,8 +7842,8 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
 
     // 2. Download from IMAP (with offline fallback to cached headers)
     try {
-      const { cfg } = await requireAccountConfig(id)
-      assertImapAuth(id, cfg.imap)
+      const { cfg, accountGeneration } = await requireAccountConfig(id)
+      assertImapAuth(id, cfg.imap, accountGeneration)
 
       // If per-folder offline mode is enabled — download full EML and cache on disk
       const folderPref = getFolderPref(id, parsedMailbox)
@@ -6225,7 +7852,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
         if (rawOutcome.kind === 'timeout') {
           logMail.warn(`Offline-mode raw download timed out (${IMAP_FETCH_TIMEOUT_MS}ms) for uid=${parsedUid}, returning cached headers`)
           const cached = getMessageByUid(id, parsedMailbox, parsedUid)
-          const fallback = buildOfflineFallback(cached)
+          const fallback = buildOfflineFallback(cached, 'timeout')
           if (fallback) {
             finalizer.finalize('imap_timeout', fallback)
             return fallback
@@ -6235,9 +7862,23 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
             envelope: {},
             flags: [],
             offlineFallback: true,
+            offlineFallbackReason: 'timeout',
           }
           finalizer.finalize('imap_timeout', minimalFallback)
           return minimalFallback
+        }
+        if (rawOutcome.kind === 'over_limit') {
+          // §2.145 wave 2.1 — the message was never held, so the placeholder is
+          // built from what header sync already put in the database rather than
+          // from bytes. Same `MessageParseCap` shape the parser-entry path
+          // produces, so the renderer needs no knowledge of where the refusal
+          // happened.
+          logMail.info(`Offline-mode raw download over hard cap for uid=${parsedUid} (stopped at ${rawOutcome.bytesSeen})`)
+          recordHardParseCapTrip(rawOutcome.bytesSeen)
+          const placeholder = buildHardCapPlaceholder(id, parsedMailbox, parsedUid, rawOutcome.bytesSeen)
+          cacheMessageDetails(id, parsedMailbox, parsedUid, placeholder, wantFull)
+          finalizer.finalize('imap', placeholder)
+          return placeholder
         }
         const raw = rawOutcome.raw
         if (raw) {
@@ -6253,7 +7894,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
             // Remember the size so background sync doesn't try to download again.
             setBodyDownloaded(id, parsedMailbox, parsedUid, false, raw.length)
           }
-          const parsedDetails = await parseEmlBuffer(parsedUid, raw)
+          const parsedDetails = await parseEmlBuffer(parsedUid, raw, { full: wantFull })
           // §2.22 Wave A — same as the EML hit branch: re-scan the raw buffer
           // for a text/calendar part so the renderer's RSVP card lights up.
           const details = await enrichDetailsWithCalendarInvite(
@@ -6261,11 +7902,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
             { accountId: id, folder: parsedMailbox, uid: parsedUid },
             raw,
           )
-          if (!hasBodyTextIndexed(id, parsedMailbox, parsedUid)) {
-            updateMessageBodyText(id, parsedMailbox, parsedUid, getSearchableBodyText(details))
-          }
-          putDetailsInCache(id, parsedMailbox, parsedUid, details)
-          try { setCachedDetail(id, parsedMailbox, parsedUid, JSON.stringify(details)) } catch { /* non-critical */ }
+          cacheMessageDetails(id, parsedMailbox, parsedUid, details, wantFull)
           finalizer.finalize('imap', details)
           return details
         }
@@ -6278,7 +7915,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
       if (outcome.kind === 'timeout') {
         logMail.warn(`IMAP fetch timed out (${IMAP_FETCH_TIMEOUT_MS}ms) for uid=${parsedUid}, returning cached headers`)
         const cached = getMessageByUid(id, parsedMailbox, parsedUid)
-        const fallback = buildOfflineFallback(cached)
+        const fallback = buildOfflineFallback(cached, 'timeout')
         if (fallback) {
           finalizer.finalize('imap_timeout', fallback)
           return fallback
@@ -6291,6 +7928,7 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
           envelope: {},
           flags: [],
           offlineFallback: true,
+          offlineFallbackReason: 'timeout',
         }
         finalizer.finalize('imap_timeout', minimalFallback)
         return minimalFallback
@@ -6309,18 +7947,56 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
       try { setCachedDetail(id, parsedMailbox, parsedUid, JSON.stringify(details)) } catch { /* non-critical */ }
       finalizer.finalize('imap', details)
       return details
-    } catch (imapErr) {
-      // IMAP unavailable — fall back to cached headers from DB
+    } catch (bodyLoadErr) {
+      // Loading the body failed — fall back to cached headers from DB.
       const cached = getMessageByUid(id, parsedMailbox, parsedUid)
-      const fallback = buildOfflineFallback(cached)
+      // §2.17 Phase 1 fix wave — 'unavailable', NOT 'offline'. Everything the
+      // try block can throw arrives here: a rejected password, a TLS trust
+      // failure, a mailbox that no longer exists, `assertImapAuth` refusing
+      // before a socket was ever opened, and a genuinely dead network. Only
+      // the last of those makes "you are offline / only headers are cached"
+      // true, and telling the other four that story is the same lie this task
+      // exists to remove — most visibly for the expired-password case, where
+      // the §2.165 "sign in again" badge and a "you are offline" placeholder
+      // would contradict each other on one screen.
+      //
+      // The block is also WIDER than the transport, and the wording has to
+      // survive that: everything after the bytes arrive is inside the same
+      // try — saveEml, setBodyDownloaded, parseEmlBuffer, the invite
+      // enrichment, updateMessageBodyText, putDetailsInCache. A full disk is
+      // the ordinary way to reach this catch with the message already in hand,
+      // so neither the reason nor the sentence may say the server was at
+      // fault; both say only that the body could not be LOADED, which stays
+      // true whichever half failed. (Narrowing the catch to the transport
+      // calls is a behaviour change — a save failure would then escape to the
+      // renderer as a hard error instead of a headers-only placeholder — and
+      // is deliberately NOT done here; it needs its own decision.)
+      //
+      // Why ONE reason rather than one per class of `classifyImapError`:
+      //  - 'network' is that classifier's DEFAULT bucket (an unrecognised
+      //    error is 'network'), so it cannot carry a positive claim about the
+      //    network without inventing one;
+      //  - the local `assertImapAuth` refusal is deliberately kept OUT of the
+      //    classifier (it is a precondition, tagged with
+      //    IMAP_AUTH_NOT_CONFIGURED_CODE — see accountAuthState.ts), and would
+      //    be misfiled as 'network' if routed through it here;
+      //  - 'auth' and 'cert' already own more authoritative surfaces — the
+      //    re-auth badge, raised by the retry boundary only after
+      //    AUTH_FAILURE_THRESHOLD consecutive failures, and the
+      //    `cert:recoveryRequired` trust dialog. A per-message verdict off a
+      //    single classification would be a second, weaker source of truth
+      //    about the same fact, free to contradict the first.
+      // The classification is still useful for DIAGNOSIS, where a misfile
+      // costs nothing, so it goes in the log line below and nowhere else.
+      const fallback = buildOfflineFallback(cached, 'unavailable')
       if (fallback) {
-        logMail.warn(`IMAP unavailable for message uid=${parsedUid}, falling back to cached headers`)
+        logMail.warn(`Body load failed for message uid=${parsedUid} (class=${classifyImapError(bodyLoadErr)}), falling back to cached headers`)
         finalizer.finalize('db', fallback)
         return fallback
       }
       // No cached data — rethrow original error
       finalizer.finalize('db', null)
-      throw imapErr
+      throw bodyLoadErr
     }
   } finally {
     // Belt-and-braces: if any branch above threw before its explicit
@@ -6364,10 +8040,10 @@ handleIpc('net:saveAttachment', async (e, accountId: unknown, mailbox: unknown, 
     return { ok: true as const, path: filePath }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
-  const { content } = await downloadMessagePart(id, cfg.imap, parsedMailbox, parsedUid, parsedPart)
+  const { content } = await imapInteractive(() => downloadMessagePart(id, cfg.imap, parsedMailbox, parsedUid, parsedPart))
   if (!content) return { ok: false as const, error: 'Empty attachment content' }
 
   await new Promise<void>((resolve, reject) => {
@@ -6413,10 +8089,10 @@ handleIpc('net:attachmentBase64', async (_e, accountId: unknown, mailbox: unknow
     }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
-  const { content } = await downloadMessagePart(id, cfg.imap, parsedMailbox, parsedUid, parsedPart)
+  const { content } = await imapInteractive(() => downloadMessagePart(id, cfg.imap, parsedMailbox, parsedUid, parsedPart))
   if (!content) return { ok: false as const, error: 'Empty attachment content' }
 
   const buf = await readStreamToBuffer(content, MAX_BYTES)
@@ -6750,10 +8426,10 @@ handleIpc('net:move', async (_e, accountId: unknown, fromMailbox: unknown, toMai
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   try {
-    await moveMessages(cfg.imap, parsedFrom, parsedTo, parsedUids, id)
+    await imapInteractive(() => moveMessages(cfg.imap, parsedFrom, parsedTo, parsedUids, id))
   } catch (err) {
     // Transient network failure → queue via offline_ops instead of failing
     // the user's action (§2.14). Local state mirrors the workOffline branch
@@ -6804,10 +8480,10 @@ handleIpc('net:delete', async (_e, accountId: unknown, mailbox: unknown, uids: u
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   try {
-    await deleteMessagesRemote(cfg.imap, parsedMailbox, parsedUids, id)
+    await imapInteractive(() => deleteMessagesRemote(cfg.imap, parsedMailbox, parsedUids, id))
   } catch (err) {
     if (isTransientNetworkError(err)) {
       logMail.warn(`net:delete transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
@@ -6835,8 +8511,8 @@ handleIpc('net:createMailbox', async (_e, accountId: unknown, folderPath: unknow
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   await createMailbox(id, cfg.imap, parsedPath)
   return { ok: true as const }
 })
@@ -6857,12 +8533,12 @@ handleIpc('net:renameMailbox', async (_e, accountId: unknown, fromPath: unknown,
   }
 
   const prevPref = getFolderPref(id, parsedFrom)
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   await renameMailbox(id, cfg.imap, parsedFrom, parsedTo)
   try {
     if (prevPref) {
-      upsertFolderPref(id, parsedTo, {
+      writeFolderPref(id, parsedTo, {
         visible: prevPref.visible,
         includeInBadges: prevPref.includeInBadges,
         headerSyncMode: prevPref.headerSyncMode,
@@ -6872,7 +8548,7 @@ handleIpc('net:renameMailbox', async (_e, accountId: unknown, fromPath: unknown,
         icon: prevPref.icon,
       })
     }
-    removeFolderPref(id, parsedFrom)
+    dropFolderPref(id, parsedFrom)
   } catch {
     // ignore
   }
@@ -6890,10 +8566,10 @@ handleIpc('net:deleteMailbox', async (_e, accountId: unknown, folderPath: unknow
     return { ok: true as const }
   }
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
   await deleteMailbox(id, cfg.imap, parsedPath)
-  try { removeFolderPref(id, parsedPath) } catch { /* ignore */ }
+  try { dropFolderPref(id, parsedPath) } catch { /* ignore */ }
   return { ok: true as const }
 })
 
@@ -7031,8 +8707,8 @@ handleIpc('search:remoteSearch', async (_e, accountId: unknown, folder: unknown,
   if (getSettings().workOffline) return []
   if (IS_E2E) return []
 
-  const { cfg } = await requireAccountConfig(id)
-  assertImapAuth(id, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(id)
+  assertImapAuth(id, cfg.imap, accountGeneration)
 
   // Parse the query to extract IMAP-compatible search criteria
   const parsed = parseSearchQuery(parsedQ)
@@ -7062,11 +8738,11 @@ handleIpc('search:remoteSearch', async (_e, accountId: unknown, folder: unknown,
   if (Object.keys(criteria).length === 0) return []
 
   // Run IMAP SEARCH on the server
-  const uids = await imapSearchFolder(id, cfg.imap, parsedFolder, criteria, lim)
+  const uids = await imapInteractive(() => imapSearchFolder(id, cfg.imap, parsedFolder, criteria, lim))
   if (uids.length === 0) return []
 
   // Hydrate UIDs into full summaries (also upserts into local cache)
-  const summaries = await fetchSummariesByUids(cfg.imap, parsedFolder, uids, id)
+  const summaries = await imapInteractive(() => fetchSummariesByUids(cfg.imap, parsedFolder, uids, id))
 
   // §2.86 iter2, review finding 7: hydration persists messages, so this is a
   // message-persisting exit like the sync paths and owes the rule pipeline a
@@ -7122,7 +8798,6 @@ handleIpc('cache:bodyTrimPreview', (_e, days: unknown) => {
 handleIpc('settings:get', () => clampTelemetryForRenderer(getSettings()))
 
 handleIpc('settings:save', async (event, s: unknown) => {
-  const current = getSettings()
   // §3.10 P0: validate incoming renderer payload against the narrow writable
   // subset FIRST. `rendererWritableSettingsSchema` is `.strict()`, so any
   // main-only field (mcpEnableStdio, stdioApproved, mcpConnections) is
@@ -7133,37 +8808,208 @@ handleIpc('settings:save', async (event, s: unknown) => {
   // We audit-log the rejection so the attempt is visible even if the
   // response is swallowed. The raw forbidden field names are recorded — they
   // are not PII and are essential for incident triage.
+  //
+  // §2.167 — the SAME safeParse now feeds two different verdicts, and the
+  // order between them is the invariant: this gate (whole payload dies) runs
+  // first and unchanged, per-field refusal only on the path it did not take.
+  //
+  // §2.167 branch C (codex, medium) — the gate is a STRICT PREFIX of the
+  // handler: nothing at all runs before it, `getSettings()` included. That read
+  // used to be the first line for the §2.119 reason quoted at its new position,
+  // and it is not the pure lookup the name suggests — it runs
+  // `ensureMigratedSingleAccountToAccounts()`, and on a legacy record it
+  // sanitizes forbidden `mcpConnections[].env` keys, WRITES the store back and
+  // raises an audit notification, while an unrescuable record makes it THROW.
+  // A payload reaching for a main-only field therefore used to drive a
+  // migration, a disk write and a telemetry-carrying audit before being
+  // refused, and on the throwing path it lost the refusal — and its audit row —
+  // to an exception. The gate answers from the payload alone, so it needs no
+  // persisted state to answer with.
   const rendererParsed = rendererWritableSettingsSchema.safeParse(s)
-  if (!rendererParsed.success) {
-    const forbidden = rendererParsed.error.issues
-      .filter(issue => issue.code === 'unrecognized_keys')
-      .flatMap(issue => {
-        const keys = (issue as { keys?: unknown }).keys
-        return Array.isArray(keys) ? (keys as string[]) : []
-      })
-    const mainOnlyHit = forbidden.some(k =>
-      (MAIN_ONLY_SETTINGS_FIELDS as readonly string[]).includes(k),
-    )
-    if (mainOnlyHit) {
-      logMcpStdio.warn('settings:save rejected: forbidden main-only field attempt', forbidden)
-      appendMcpAuditEvent({
-        eventType: 'settings.forbidden_field',
-        reason: `fields:${forbidden.join(',')}`,
-      })
-      try {
-        recordEvent('mcp.stdio.connect_blocked', { reason: 'forbidden_field' })
-      } catch { /* telemetry must not block */ }
-      return { ok: false as const, reason: 'forbidden_field' as const, fields: forbidden }
-    }
-    // Non-forbidden validation errors (bad enum, wrong type) fall through to
-    // `.parse` below, which throws and produces a useful zod error. The
-    // explicit `return` above is only for the §3.10 P0 gate path.
+  //
+  // The payload is handed over so a per-field refusal can NAME the entries it
+  // refused (`values`). They go back to the window that submitted them and
+  // nowhere else — see the log and telemetry calls below, which stay on the
+  // closed `field`/`code` vocabulary.
+  const { forbidden, refusedFields, unhandledFields } = partitionRendererSettingsIssues(
+    rendererParsed.success ? [] : rendererParsed.error.issues,
+    s,
+  )
+  const mainOnlyHit = forbidden.some(k =>
+    (MAIN_ONLY_SETTINGS_FIELDS as readonly string[]).includes(k),
+  )
+  if (mainOnlyHit) {
+    logMcpStdio.warn('settings:save rejected: forbidden main-only field attempt', forbidden)
+    appendMcpAuditEvent({
+      eventType: 'settings.forbidden_field',
+      reason: `fields:${forbidden.join(',')}`,
+    })
+    try {
+      recordEvent('mcp.stdio.connect_blocked', { reason: 'forbidden_field' })
+    } catch { /* telemetry must not block */ }
+    return { ok: false as const, reason: 'forbidden_field' as const, fields: forbidden }
   }
+
+  // §2.218.f2 — THE WHOLE-SAVE REFUSAL IS STATED HERE, not inherited from the
+  // persisted schema further down.
+  //
+  // A known renderer-writable field whose VALUE failed the strict schema, and
+  // which is not on the §2.167 refusal allowlist, kills the entire save. That
+  // was always the documented contract, but it used to happen by accident: the
+  // payload was merged and handed to `settingsSchema.parse`, which threw only
+  // because the persisted schema rejected the same value. The two schemas exist
+  // for different reasons, so that agreement was never guaranteed — and it
+  // broke. `aiProvider` gained `.catch(undefined)` on the persisted side so a
+  // removed provider sitting on DISK could not brick the settings load (§2.218);
+  // the side effect was that a renderer PAYLOAD carrying the same removed value
+  // stopped throwing and started silently resolving to "unset". Net effect
+  // before this gate: a stale or compromised window could send
+  // `aiProvider: 'subscription'`, CLEAR the user's configured provider, land
+  // every other field of the payload and receive `{ ok: true }`.
+  //
+  // Placed after the §3.10 P0 main-only gate (which owns its own audit row and
+  // reason code) and before ANY merge or write, so a refusal here leaves the
+  // stored settings untouched.
+  //
+  // Deliberately a THROW rather than a new `reason` code or a per-field refusal:
+  // `handleIpc` already turns a throw into a logged, PII-free-reported, tagged
+  // rejection, and this is the behaviour every such payload had before the
+  // coupling broke. Adding `aiProvider` to `REFUSABLE_FIELDS` was the tempting
+  // alternative and is wrong: that list is an enumerated set of failures we have
+  // reasoned about individually, and partial application is a courtesy to an
+  // honest renderer — not something to extend to a payload naming a provider
+  // this build does not have.
+  //
+  // Only field NAMES are logged (they come from our own schema); the offending
+  // values never leave the payload (CLAUDE.md §8).
+  if (unhandledFields.length > 0 && !rendererParsed.success) {
+    logMain.warn(
+      `settings:save rejected: unsupported value for renderer-writable field(s): ${unhandledFields.join(',')}`,
+    )
+    throw rendererParsed.error
+  }
+
+  // §2.167 — per-field refusal, and ONLY once the gate above found nothing.
+  // A payload reaching for a main-only field is refused whole (above); a
+  // payload whose single field carries an out-of-domain value (an export tool
+  // name this build no longer exports, round-tripped out of the persisted
+  // settings) loses that field and keeps the rest.
+  //
+  // Stripping happens BEFORE the merge below, which is what makes the refusal
+  // non-destructive in both directions: `{ ...current, ...payload }` keeps the
+  // PERSISTED value (no reset to a schema default), and the submitted value is
+  // never activated. See electron/settingsSaveRefusal.ts for why the set of
+  // refusable failures is an allowlist.
+  //
+  // Everything downstream reads `accepted`, not `s` — including the §2.119
+  // destination resolution, so there is no path on which the raw payload can
+  // reintroduce a field this handler decided to drop.
+  //
+  // §2.167 branch C (codex, high) — and a key that is PRESENT with `undefined`
+  // is read as omitted for the fields whose absence widens a surface. Without
+  // that, "leave the stored whitelist alone" spelled as `{ mcpExportWhitelist:
+  // undefined }` erased it: the field is optional, so the schema is happy, the
+  // merge below writes the `undefined` over the persisted array, and the export
+  // server reads a nullish value as "no preference expressed" and serves its
+  // DEFAULT set. See dropErasingUndefined in electron/settingsSaveRefusal.ts
+  // for why this is an allowlist of two-line reach rather than a blanket
+  // "drop every undefined" — an explicit `undefined` is load-bearing on this
+  // same channel for the fields a save is supposed to be able to CLEAR.
+  const accepted = dropErasingUndefined(stripRefusedFields(s, refusedFields))
+  // The refusal is REPORTED (log + telemetry) only once the save below has
+  // actually happened — see the emission site after `saveSettings`. Stripping
+  // here and announcing there is deliberate: a payload can carry an unknown
+  // export tool name AND a second field this handler still refuses whole
+  // (`settingsSchema.parse` throws), in which case nothing is written at all
+  // and "rest of the payload applied" would be a lie told to the log file and
+  // counted in Sentry.
+  //
+  // Validation errors that are neither of the two above (bad enum on another
+  // field, wrong type) still fall through to `.parse` below, which throws and
+  // produces a useful zod error.
+
+  // §2.119 — moving `aiOpenAiBaseUrl` / `aiProxyUrl` moves the address the
+  // user's AI API key is delivered to, and this channel is one of the two
+  // routes a renderer can do that through (the other is the `ai:checkAuth`
+  // override — same guard, see below). The gate runs BEFORE anything is
+  // merged or written: the guard only answers, it never writes settings, so a
+  // refusal leaves the stored address exactly as it was.
+  //
+  // The values judged are the EFFECTIVE post-merge ones: a payload that omits
+  // a field keeps the persisted value (so no prompt), a payload that carries
+  // it — including an explicit `undefined`, which the settings window sends
+  // for a cleared input — is a request to move to that value. `accepted` keeps
+  // that distinction: neither address field is in `UNERASABLE_SETTINGS_FIELDS`
+  // (pinned by a test), so the normalisation above cannot turn a clear into a
+  // no-op here.
+  //
+  // §2.119 — `let`, not `const`: the AI-destination gate below can block on a
+  // native dialog, and everything after it must merge onto a snapshot taken
+  // AFTER that wait rather than one from before it. Read HERE rather than at
+  // the top of the handler: see the §3.10 P0 gate above, which must be able to
+  // refuse a payload without touching the persisted store at all.
+  let current = getSettings()
+  const requestedDestination = resolveRequestedAiDestination(accepted, current)
+  const destinationVerdict = await ensureAiDestinationApproved(requestedDestination, event?.sender)
+  // §2.103 — the same construction, one field over: a language whose
+  // dictionary would have to be fetched from a third-party CDN needs a human,
+  // and the gate is a native dialog main draws. It reads the consent record
+  // itself (inside the service) rather than from `current`, so the decision is
+  // never made against a baseline this handler read before an earlier dialog.
+  //
+  // The gate WRITES NOTHING — it answers. What it approves is folded into the
+  // save below by `applySpellcheckDecision`, which is also what makes a refusal
+  // non-destructive: the stored language list and the stored consent record are
+  // untouched on every path through here.
+  //
+  // A payload that carries no `spellcheckLanguages` key asks for no change, and
+  // the service short-circuits on an empty request — so an ordinary save (a
+  // theme flip, an account edit) never raises a dialog.
+  //
+  // `undefined` (no key) and `[]` ("check nothing") are DIFFERENT requests, and
+  // only the first one leaves the persisted list alone. Deriving the request
+  // from the merged object instead would re-decide the stored list on every
+  // unrelated save, and an unreadable availability list would then quietly
+  // erase the user's dictionaries — a fail-closed answer is right for ARMING
+  // the checker, never for rewriting what they chose.
+  const requestedSpellcheckLanguages =
+    Array.isArray((accepted as { spellcheckLanguages?: unknown }).spellcheckLanguages)
+      ? (accepted as { spellcheckLanguages: string[] }).spellcheckLanguages
+      : undefined
+  const spellcheckVerdict = await ensureSpellcheckDictionariesApproved(
+    requestedSpellcheckLanguages,
+    event?.sender,
+  )
+  // Re-read unconditionally: the gate may have blocked on a native dialog the
+  // user spent a minute on (whichever way they answered), and merging onto the
+  // pre-dialog snapshot would resurrect whatever another window saved
+  // meanwhile. When nothing was asked this is the same object contents.
+  current = getSettings()
 
   // Merge incoming payload with current settings so that fields absent from the
   // save payload (e.g. aiPrivacyConsent) retain their persisted value instead of
   // being reset to schema defaults.
-  const merged = { ...current, ...(s as Record<string, unknown>) }
+  //
+  // §2.119 — refusal is non-destructive and partial: `applyAiDestinationDecision`
+  // puts the two address fields back to what is stored, and everything else in
+  // this save is still applied. Dropping the user's unrelated edits because
+  // they declined one prompt would be a second, self-inflicted failure. The
+  // renderer is told about the refusal in the return value below.
+  //
+  // The two address fields of the object about to be written are (re)written by
+  // `applyAiDestinationOverrides`, i.e. by the same `resolveRequestedAiDestination`
+  // rule that produced the values the guard judged. It is the plain spread's
+  // own result today — that is the point: the equality is now held by shared
+  // code instead of by two places agreeing, which is how `ai:checkAuth` drifted.
+  // The rule is what is pinned, not the baseline: `current` was re-read after
+  // the dialog, so a field this payload omits can carry a value another window
+  // saved meanwhile (which needed its own confirmation to move) — see the same
+  // note on `ai:checkAuth`.
+  const merged = applyAiDestinationDecision(
+    applyAiDestinationOverrides({ ...current, ...(accepted as Record<string, unknown>) }, accepted),
+    current,
+    destinationVerdict.ok,
+  )
   // Force main-only fields back to their persisted values — defense-in-depth
   // against a spread that smuggled them past the schema check above (e.g. a
   // future regression that relaxes .strict()).
@@ -7205,9 +9051,28 @@ handleIpc('settings:save', async (event, s: unknown) => {
     // No sender identity, no payload echo — both are renderer-derived (CLAUDE.md §8).
     logMain.warn('settings:save: telemetry enable ignored — sender is not the settings window')
   }
+  // §2.103 — fold the consent answer in AFTER the main-only fields were forced
+  // back: `spellcheckDictionaryConsent` is one of them, and the loop above
+  // (rightly) restores the persisted value, so a grant written before it would
+  // be discarded. The pure half decides what the two fields become —
+  // approved-or-already-granted languages only, and a grant record that is a
+  // UNION with what was granted before.
+  const spellcheckDecision = requestedSpellcheckLanguages === undefined
+    ? {}
+    : applySpellcheckDecision({
+      requested: normalizeSpellcheckLanguages(
+        requestedSpellcheckLanguages,
+        spellcheckVerdict.availability.languages,
+      ),
+      approvedNow: spellcheckVerdict.approved,
+      previousConsent: current.spellcheckDictionaryConsent,
+      platformOwned: spellcheckVerdict.availability.platformOwned,
+      now: new Date().toISOString(),
+    })
   const next = {
     ...parsed,
     mcpConnections: current.mcpConnections,
+    ...spellcheckDecision,
     ...applyAboutToggleFromOrigin(
       current,
       requestedSentryEnabled,
@@ -7226,6 +9091,33 @@ handleIpc('settings:save', async (event, s: unknown) => {
   if (!wasEnabled && willBeEnabled) {
     setSentryUserId(getInstallIdHash())
   }
+  // §2.167 — the refusal is announced HERE, after `saveSettings` returned:
+  // "rest of the payload applied" is a claim about a write that has happened,
+  // and everything between the strip above and this point can still end the
+  // handler by throwing (`settingsSchema.parse` on a second, non-refusable bad
+  // field is the reachable case). Emitting at strip time meant a compromised
+  // renderer could pair an unknown export tool name with any other invalid
+  // field and have main log — and count in Sentry — a save that never landed.
+  //
+  // Runs once per request, on the single path that reaches it: both success
+  // returns below are downstream of this line, so neither can double-count.
+  // After `setSentryUserEnabled`, so the event obeys the consent state THIS
+  // save just wrote rather than the one it replaced (§2.82 — the gate stops
+  // collection, not just delivery).
+  for (const refused of refusedFields) {
+    // CLAUDE.md §8: both values come from our own closed vocabulary
+    // (settingsSaveRefusal.ts) — no renderer input, no zod message text.
+    logMain.warn('settings:save: field refused, rest of the payload applied', {
+      field: refused.field,
+      code: refused.code,
+    })
+    // Usage counter for the refusal itself — how often installs carry a value
+    // this build cannot accept. Fire-and-forget and swallowed: telemetry may
+    // not decide whether a save completes.
+    try {
+      recordEvent('settings.field_refused', { field: refused.field, code: refused.code })
+    } catch { /* telemetry must not block */ }
+  }
   // Register/unregister as default mailto: handler based on user preference.
   if (next.defaultMailApp && !app.isDefaultProtocolClient('mailto')) {
     app.setAsDefaultProtocolClient('mailto')
@@ -7236,7 +9128,53 @@ handleIpc('settings:save', async (event, s: unknown) => {
   broadcastSettingsChanged(next)
   // Trigger main-process reactions (offline replay, periodic sync restart)
   onSettingsChangedMain(next)
-  return { ok: true as const }
+  // §2.167 — `ok: true`, because the save DID happen: everything except the
+  // named field was written. What the renderer must not do is treat this like
+  // a plain success, so the refusal travels alongside: our own machine codes
+  // plus the offending entries of the array the renderer just sent — no
+  // sentence, no zod text. The values are what lets the settings window drop
+  // the stale tool names from what it sends next without holding a copy of the
+  // export ceiling; rendering the refusal is the renderer's half of this item.
+  const refusal: { refused?: RefusedSettingsField[] } = refusedFields.length > 0
+    ? { refused: refusedFields }
+    : {}
+  // §2.103 — the dictionary download was declined (or could not be asked
+  // about), so those languages were not enabled. Say so instead of reporting a
+  // plain success the window would render as "saved": the person picked a
+  // language and it is not on. Only a COUNT travels — the language codes stay
+  // out of the reply for the same reason they stay out of telemetry, and the
+  // authoritative list has already been pushed to every window by
+  // `broadcastSettingsChanged` above, which is what the picker re-renders from.
+  //
+  // Spread into BOTH success replies below, like `refusal`: the two gates are
+  // independent, and a save can lose the address move AND a dictionary in the
+  // same round trip.
+  const spellcheckRejected = spellcheckVerdict.declined.length > 0
+    ? {
+      spellcheckDeclined: {
+        count: spellcheckVerdict.declined.length,
+        message: spellcheckDeclinedMessage(next.language),
+      },
+    }
+    : {}
+  // §2.119 — the address change was NOT applied: say so rather than reporting
+  // a plain success the renderer would render as "saved". `message` is already
+  // localized (main reads the same locale resources as the renderer — see
+  // electron/services/aiDestinationGuard.ts), and `broadcastSettingsChanged`
+  // above has already pushed the unchanged address back to every window.
+  if (!destinationVerdict.ok) {
+    return {
+      ok: true as const,
+      aiDestinationRejected: {
+        reason: destinationVerdict.reason,
+        fields: destinationVerdict.fields,
+        message: aiDestinationRejectionMessage(destinationVerdict.reason, next.language),
+      },
+      ...refusal,
+      ...spellcheckRejected,
+    }
+  }
+  return { ok: true as const, ...refusal, ...spellcheckRejected }
 })
 
 // §2.82 — seed the consent record for installs that had already opted out, then
@@ -7350,6 +9288,20 @@ handleIpc('e2e:injectMail', (_e, payload: unknown) => {
     flagged: z.boolean().default(false),
     text: z.string().optional(),
     html: z.string().optional(),
+    // §2.145 — EML-backed fixture, the two ways to ask for one. Either gives
+    // the message real bytes on disk and makes `net:messageDetails` serve it
+    // from the production parse pipeline; neither is reachable outside e2e
+    // (`assertE2EHandlerAllowed` above).
+    //
+    // `emlBase64` — exact bytes, for a fixture whose CONTENT matters (a
+    // specific MIME shape, an attachment, a known body). Bounded so the payload
+    // itself cannot be the resource exhaustion.
+    emlBase64: z.string().max(E2E_MAX_FIXTURE_EML_BASE64_CHARS).optional(),
+    // `emlPadToBytes` — a valid message of an exact SIZE, synthesised in main.
+    // This is how a cap fixture is expressed: a soft-cap spec wants a body past
+    // 1 MiB and a hard-cap spec wants a message past 100 MiB, and neither is
+    // something to move across an IPC boundary as base64.
+    emlPadToBytes: z.number().int().positive().max(E2E_MAX_FIXTURE_EML_BYTES).optional(),
   }).parse(payload)
   const box = e2eBox(p.accountId, p.folder)
   const existing = box.findIndex(m => m.uid === p.uid)
@@ -7365,6 +9317,13 @@ handleIpc('e2e:injectMail', (_e, payload: unknown) => {
     flagged: p.flagged,
     text: p.text,
     html: p.html,
+  }
+  // §2.145 — give the fixture real bytes on disk, so the message-open path
+  // exercises readEml → parseEmlBuffer → the caps → cacheMessageDetails rather
+  // than the synthetic branch. See `writeE2EFixtureEml`.
+  if (p.emlBase64 !== undefined || p.emlPadToBytes !== undefined) {
+    writeE2EFixtureEml(p.accountId, p.folder, p.uid, mail, p.emlBase64, p.emlPadToBytes)
+    mail.emlFixture = true
   }
   if (existing >= 0) box[existing] = mail
   else box.unshift(mail)
@@ -7387,38 +9346,46 @@ const WINDOW_TITLES: Record<string, Record<string, string>> = {
   it: { settings: 'Impostazioni', account: 'Collega e-mail', compose: 'Nuovo messaggio', mailWindow: 'Messaggio' },
 }
 
-type ChildWindowKind = 'settings' | 'account' | 'compose' | 'mailWindow'
-
 function uiWindowTitle(kind: ChildWindowKind): string {
   const lang = getSettings().language ?? 'en'
   const titles = WINDOW_TITLES[lang] ?? WINDOW_TITLES.en
-  return `${titles[kind]} — MailCopilot Beta`
+  return `${titles[kind]} — MailCopilot`
 }
 
-/** Child window factory — eliminates BrowserWindow configuration duplication */
+/**
+ * Child window factory — eliminates BrowserWindow configuration duplication.
+ *
+ * The option shape (including whether this kind gets a WM `parent`) is built
+ * by the pure `buildChildWindowOptions()`; see `childWindowOptions.ts` for the
+ * Compose/message-window unparenting rationale (§3.3.B4.f6). Standalone kinds
+ * additionally get explicit placement over the main window and join the
+ * registry that reproduces the parent-teardown lifetime.
+ */
 function createChildWindow(kind: ChildWindowKind, width: number, height: number, hash: string): BrowserWindow {
-  const child = new BrowserWindow({
+  const standalone = isStandaloneWindowKind(kind)
+  const placement = standalone ? centerOverMainWindow(width, height) : {}
+  const child = new BrowserWindow(buildChildWindowOptions<BrowserWindow>({
+    kind,
     width,
     height,
-    frame: false,
-    show: false,
-    backgroundColor: themeBg(),
+    x: placement.x,
+    y: placement.y,
     title: uiWindowTitle(kind),
-    icon: path.join(process.env.VITE_PUBLIC, 'icon.png'),
-    parent: win ?? undefined,
-    modal: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.mjs'),
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      additionalArguments: childBrowserArgs(),
-    },
-  })
+    backgroundColor: themeBg(),
+    iconPath: path.join(process.env.VITE_PUBLIC, 'icon.png'),
+    preloadPath: path.join(__dirname, 'preload.mjs'),
+    additionalArguments: childBrowserArgs(),
+    cornerOptions: framelessCornerOptions(),
+    parent: win,
+  }))
+  if (standalone) registerStandaloneChildWindow(child)
   child.once('ready-to-show', () => child.show())
   child.on('maximize', () => { if (!child.isDestroyed()) child.webContents.send('win:maximizeChanged', true) })
   child.on('unmaximize', () => { if (!child.isDestroyed()) child.webContents.send('win:maximizeChanged', false) })
-  configureExternalLinks(child)
+  // Settings / Account / Compose: no `mail:link` subscriber (useMailLinkClick
+  // lives in App.tsx and MailWindow.tsx only), so the context menu there
+  // offers editing and "copy link address" but not "open link in browser".
+  configureExternalLinks(child, { routesMailLinks: false })
   if (VITE_DEV_SERVER_URL) child.loadURL(VITE_DEV_SERVER_URL + '#' + hash)
   else child.loadFile(path.join(RENDERER_DIST, 'index.html'), { hash })
   return child
@@ -7466,7 +9433,35 @@ handleIpc('ui:openAccount', (_e: unknown, mode?: string, editId?: number) => ope
 
 // --- Compose window ---
 let composeWin: BrowserWindow | null = null
-let composeCtx: { accountId: number; init: ComposeInit | null } | null = null
+/**
+ * §3.3 B6 (draft side): the compose context carries a PENDING suggestion, not a
+ * value. `ui:openCompose` must stay synchronous — opening the window may not
+ * wait on an advisory caption — so it STARTS the detection and parks the promise
+ * here; both delivery paths settle it through the one helper
+ * (`settleTargetLangSuggestion`), which gives up after a ceiling and hands over
+ * `null`. Losing the suggestion costs an empty target picker and nothing else.
+ */
+let composeCtx: {
+  accountId: number
+  init: ComposeInit | null
+  suggestion: PendingTargetLangSuggestion
+} | null = null
+/**
+ * §3.3.B6.f2: the ticket every `ui:openCompose` claims, so a delivery that had
+ * to wait for a suggestion can tell whether the user has since opened something
+ * else. The rule and the reason it exists live in `createComposeOpenSequence`
+ * (services/composeTranslate.ts); this is the wiring.
+ */
+const composeOpenSeq = createComposeOpenSequence()
+
+/** Attach a settled suggestion to an init payload. Absent init (a blank new
+ *  message) stays absent — there is no reply whose language could be read. */
+function withSuggestedTargetLang(
+  init: ComposeInit | null,
+  suggested: TranslateLanguageCode | null,
+): ComposeInit | null {
+  return init ? { ...init, suggestedTargetLang: suggested } : init
+}
 
 function openComposeWindow() {
   if (composeWin && !composeWin.isDestroyed()) { composeWin.focus(); return }
@@ -7493,26 +9488,50 @@ handleIpc('ui:openCompose', (_e, accountIdOrInit?: unknown, maybeInit?: unknown)
       ? composeInitSchema.parse(accountIdOrInit)
       : (maybeInit ? composeInitSchema.parse(maybeInit) : null)
 
+  // §3.3 B6 (draft side): start the local language detection now, deliver it
+  // later. `parsedInit.suggestedTargetLang` cannot arrive from the renderer —
+  // the schema above is `.strict()` and does not name the field, so a renderer
+  // that sends one gets this whole request rejected rather than having the value
+  // stripped. Main is the only minter.
+  const suggestion = startTargetLangSuggestion(parsedInit?.replyRef ?? null)
+  // Claimed AFTER the parse (a rejected request supersedes nothing) and BEFORE
+  // any await, which is what makes the check inside `deliverIfStillCurrent`
+  // mean anything.
+  const openTicket = composeOpenSeq.next()
+
   if (composeWin && !composeWin.isDestroyed()) {
     // Window already exists — always reset the form via compose:init.
     // If parsedInit === null — this is "Compose" (new empty message).
     // If the page is still loading (window just created) — wait for did-finish-load.
     composeWin.focus()
-    const send = () => {
-      if (composeWin && !composeWin.isDestroyed()) {
-        composeWin.webContents.send('compose:init', { accountId, init: parsedInit })
-      }
-    }
+    // The SAME ceiling as the `compose:getInit` path, and the supersession check
+    // this path needs and that one does not (§3.3.B6.f2 — see
+    // `createComposeOpenSequence`): the arrival of a reused window's new init is
+    // what resets the remembered target language, so it must carry the new
+    // letter's suggestion with it, and it must not arrive after a newer letter's.
+    const send = () => deliverIfStillCurrent(
+      composeOpenSeq,
+      openTicket,
+      suggestion,
+      (suggested) => {
+        if (composeWin && !composeWin.isDestroyed()) {
+          composeWin.webContents.send('compose:init', {
+            accountId,
+            init: withSuggestedTargetLang(parsedInit, suggested),
+          })
+        }
+      },
+    )
     if (composeWin.webContents.isLoading()) {
-      composeWin.webContents.once('did-finish-load', send)
+      composeWin.webContents.once('did-finish-load', () => { void send() })
     } else {
-      send()
+      void send()
     }
     return
   }
 
   // New window — save init for compose:getInit (called on first render of Compose.tsx)
-  composeCtx = { accountId, init: parsedInit }
+  composeCtx = { accountId, init: parsedInit, suggestion }
   openComposeWindow()
 })
 
@@ -7534,10 +9553,14 @@ handleIpc('ui:domainToUnicode', (_e, rawHost: unknown) => {
   return { unicode: domainToUnicode(host), ascii: host }
 })
 
-handleIpc('compose:getInit', () => {
+handleIpc('compose:getInit', async () => {
   const ctx = composeCtx
   composeCtx = null
-  return ctx
+  if (!ctx) return ctx
+  // Bounded wait, then `null` — see `composeCtx`. The renderer sees the same
+  // shape it always did, with one more optional field on `init`.
+  const suggested = await settleTargetLangSuggestion(ctx.suggestion)
+  return { accountId: ctx.accountId, init: withSuggestedTargetLang(ctx.init, suggested) }
 })
 
 // --- IPC: Mail-in-window (uiaudit.3 PR B4) ---
@@ -7564,27 +9587,6 @@ const mailOpenInWindowSchema = z.object({
   mailKey: z.string().min(1).max(MAIL_WINDOW_KEY_MAX_LEN),
 }).strict()
 
-/** Position offset relative to the main window so the mail window does
- *  not exactly stack on top of it. Matches the Compose-window UX. */
-function offsetFromMainWindow(width: number, height: number): { x?: number; y?: number } {
-  if (!win || win.isDestroyed()) return {}
-  const main = win.getBounds()
-  // Try to position the mail window to the right of main. If it would
-  // not fit on the same display, fall back to a small inset offset.
-  const screens = screen.getAllDisplays()
-  const display = screens.find(d => {
-    const wa = d.workArea
-    return main.x >= wa.x && main.y >= wa.y && main.x < wa.x + wa.width && main.y < wa.y + wa.height
-  }) ?? screen.getPrimaryDisplay()
-  const wa = display.workArea
-  const inset = 40
-  const candidateX = main.x + main.width + 8
-  const x = candidateX + width <= wa.x + wa.width ? candidateX : main.x + inset
-  const candidateY = main.y
-  const y = candidateY + height <= wa.y + wa.height ? candidateY : Math.max(wa.y, wa.y + wa.height - height - inset)
-  return { x, y }
-}
-
 /**
  * Per-message dedup map for `mail:openInWindow`. Keyed by the canonical
  * `${accountId}::${folder}::${uid}` triple so opening the same message twice
@@ -7607,8 +9609,20 @@ handleIpc('mail:openInWindow', (_e, rawInput: unknown) => {
   // Reject opening a mail for an account that does not exist — keeps the
   // surface area of the IPC tight (accountIds from a compromised renderer
   // cannot conjure ghost windows).
-  const account = listAccounts().find(a => a.id === input.accountId)
-  if (!account) throw new Error('Unknown accountId')
+  //
+  // The roster consulted is the same one `accounts:list` serves, which under
+  // `MAILCOPILOT_E2E=1` is the in-memory `E2E_ACCOUNTS` fixture (mirroring
+  // `pendingMoveAccountExists` and the `accountExists` predicate wired into
+  // `initAccountAuthState`). Checking the config store instead made this the
+  // only account lookup in main.ts that disagreed with the rest of the app: in
+  // e2e the guard rejected every id the renderer could legitimately hold, so
+  // the handler never created a window and its behaviour was untestable
+  // end-to-end. The check is not weakened — the accepted ids are exactly the
+  // ones the renderer already receives from `accounts:list`.
+  const accountKnown = IS_E2E
+    ? E2E_ACCOUNTS.some(a => a.id === input.accountId)
+    : listAccounts().some(a => a.id === input.accountId)
+  if (!accountKnown) throw new Error('Unknown accountId')
 
   // Dedup: focus the existing window for this exact message if any, instead
   // of spawning a duplicate. See `openMailWindows` doc for rationale.
@@ -7629,27 +9643,28 @@ handleIpc('mail:openInWindow', (_e, rawInput: unknown) => {
   })
   const hash = `/mail-window?${params.toString()}`
 
-  const offset = offsetFromMainWindow(width, height)
-  const child = new BrowserWindow({
+  // §3.3.B4.f6 — 'mailWindow' is a standalone kind: buildChildWindowOptions
+  // attaches no `parent`, so GNOME/Mutter keeps the maximize function on this
+  // window (a transient window is a dialog and cannot be maximized). Being
+  // standalone it also owns its placement, and it uses the same policy as
+  // Compose — see `centerOverMainWindow`, which superseded this handler's own
+  // `offsetFromMainWindow()` (unclamped horizontally, wrong display pick).
+  const placement = centerOverMainWindow(width, height)
+  const child = new BrowserWindow(buildChildWindowOptions<BrowserWindow>({
+    kind: 'mailWindow',
     width,
     height,
-    x: offset.x,
-    y: offset.y,
-    frame: false,
-    show: false,
-    backgroundColor: themeBg(),
+    x: placement.x,
+    y: placement.y,
     title: uiWindowTitle('mailWindow'),
-    icon: path.join(process.env.VITE_PUBLIC, 'icon.png'),
-    parent: win ?? undefined,
-    modal: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.mjs'),
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      additionalArguments: childBrowserArgs(),
-    },
-  })
+    backgroundColor: themeBg(),
+    iconPath: path.join(process.env.VITE_PUBLIC, 'icon.png'),
+    preloadPath: path.join(__dirname, 'preload.mjs'),
+    additionalArguments: childBrowserArgs(),
+    cornerOptions: framelessCornerOptions(),
+    parent: win,
+  }))
+  registerStandaloneChildWindow(child)
   child.once('ready-to-show', () => child.show())
   child.on('maximize', () => { if (!child.isDestroyed()) child.webContents.send('win:maximizeChanged', true) })
   child.on('unmaximize', () => { if (!child.isDestroyed()) child.webContents.send('win:maximizeChanged', false) })
@@ -7675,7 +9690,9 @@ handleIpc('mail:openInWindow', (_e, rawInput: unknown) => {
     if (openMailWindows.get(dedupKey) === child) openMailWindows.delete(dedupKey)
   })
   openMailWindows.set(dedupKey, child)
-  configureExternalLinks(child)
+  // Standalone message window: MailWindow.tsx mounts useMailLinkClick, so
+  // `mail:link` has a consumer here too.
+  configureExternalLinks(child, { routesMailLinks: true })
   if (VITE_DEV_SERVER_URL) child.loadURL(VITE_DEV_SERVER_URL + '#' + hash)
   else child.loadFile(path.join(RENDERER_DIST, 'index.html'), { hash })
   return { ok: true as const }
@@ -7823,6 +9840,7 @@ import {
   selectSummaryProvider,
   generateQuickActionRewrite,
   generateInstantReplyDrafts,
+  generateProofreadCheck,
   type QuickActionRewriteResult,
   type InstantReplyDraftsResult,
 } from './services/ai'
@@ -7835,7 +9853,32 @@ import {
 import type {
   ThreadSummaryGenerateRequest,
   ThreadSummaryResult,
+  ProofreadResult,
+  TranslateMessageResult,
+  TranslateDraftResult,
+  TranslateLanguageCode,
 } from '@mailcopilot/types'
+
+/**
+ * §2.218 — THE ONE PLACE main.ts spells the AI provider set.
+ *
+ * Every IPC entry point that accepts a provider from the renderer parses
+ * against this schema: `ai:chat`, `ai:checkAuth`, `ai:saveApiKey`,
+ * `ai:deleteApiKey` and `aiSession:create`. It was five hand-written copies of
+ * the same `z.enum([...])` literal, which is exactly the shape that lets a
+ * removed member survive in one forgotten call site — `aiSession:create` was
+ * the forgotten one, and it took `z.string().min(1)`, so a stale or
+ * compromised renderer could keep minting NEW session rows labelled with the
+ * removed `subscription` provider long after the provider itself was gone.
+ *
+ * WRITERS ONLY. Historical READS stay opaque strings by design: the
+ * append-only audit log, the cost ledger and persisted session rows
+ * legitimately carry ids that are no longer selectable, and validating that
+ * history against this enum would blank the user's own records (see
+ * `AiPrivacyPanel` and `aggregateAiUsage`). The asymmetry is the contract —
+ * strict on the way in, opaque on the way out.
+ */
+const aiProviderSchema = z.enum(['anthropic-api', 'openai-api', 'gemini-api'])
 
 // §3.10 P2: wire the internet-tool interceptor broadcaster. The renderer
 // listens on `ai:internet-tool-pending` for the inline confirm UI in the AI
@@ -7859,11 +9902,20 @@ setDraftCallback((data) => {
   logAI.info(`draftCallback accountId=${data.accountId} to=${data.to} subject="${(data.subject || '').slice(0, 60)}"`)
   // Use existing flow: ui:openCompose with ComposeInit
   const init = { to: data.to, cc: data.cc, bcc: data.bcc, subject: data.subject, text: data.text }
-  composeCtx = { accountId: data.accountId, init }
+  // No `replyRef` on an AI-authored draft either — nothing to suggest.
+  composeCtx = { accountId: data.accountId, init, suggestion: null }
   openComposeWindow()
 })
 
-setMailActionCallback(async (input: MailActionApplyRequest) => {
+// §2.17 Phase 1 — the scope covers the WHOLE callback, not the two net calls
+// inside it. This runs only from an `mail_action_apply` the user just confirmed
+// in the chat, so the tier belongs to the REASON — a person is waiting on the
+// answer — and every IMAP call the callback makes on the way there deserves it,
+// including `listMailboxes`, which is not a leaf anybody would think to tag.
+// The inner `imapInteractive` calls are gone: the ambient tier already covers
+// them, and leaving them would suggest the untagged calls between them are
+// deliberately lower.
+setMailActionCallback(async (input: MailActionApplyRequest) => imapInteractive(async () => {
   logAI.info(`mailActionCallback action=${input.action} fromFolder=${input.fromFolder} refs=${input.refs?.length ?? 0}`)
   if (!Array.isArray(input.refs) || input.refs.length === 0) {
     logAI.warn(`mailActionCallback → no messages for action`)
@@ -7881,8 +9933,8 @@ setMailActionCallback(async (input: MailActionApplyRequest) => {
   let affected = 0
   const affectedFolders: { accountId: number; folder: string }[] = []
   for (const group of grouped.values()) {
-    const { id, meta, cfg } = await requireAccountConfig(group.accountId)
-    assertImapAuth(id, cfg.imap)
+    const { id, meta, cfg, accountGeneration } = await requireAccountConfig(group.accountId)
+    assertImapAuth(id, cfg.imap, accountGeneration)
     const uniqueUids = [...new Set(group.uids)].filter(u => Number.isFinite(u) && u > 0)
     if (uniqueUids.length === 0) continue
 
@@ -7934,7 +9986,7 @@ setMailActionCallback(async (input: MailActionApplyRequest) => {
     message: `Action "${input.action}" applied to ${affected} messages`,
     affected,
   }
-})
+}))
 
 setUnsubscribeCallback(async (input: UnsubscribeApplyRequest) => {
   logAI.info(`unsubscribeCallback fromFolder=${input.fromFolder} refs=${input.refs?.length ?? 0}`)
@@ -7950,7 +10002,7 @@ setUnsubscribeCallback(async (input: UnsubscribeApplyRequest) => {
     let cfg = cfgByAccount.get(ref.accountId)
     if (!cfg) {
       const loaded = await requireAccountConfig(ref.accountId)
-      assertImapAuth(loaded.id, loaded.cfg.imap)
+      assertImapAuth(loaded.id, loaded.cfg.imap, loaded.accountGeneration)
       cfg = loaded.cfg
       cfgByAccount.set(ref.accountId, cfg)
     }
@@ -8083,16 +10135,27 @@ setSendEmailCallback(async (input: SendEmailApplyRequest) => {
   }
 })
 
-setListAttachmentsCallback(async (accountId, folder, uid) => {
+// §2.17 Phase 1 — a person asked the assistant about this message and is waiting
+// on the reply, so the whole callback is interactive. Scoping the callback rather
+// than the `fetchMessageDetails` line inside it is the point: the tier is a
+// property of the reason, and the local-EML branch above may yet grow an IMAP
+// call of its own.
+setListAttachmentsCallback(async (accountId, folder, uid) => imapInteractive(async () => {
   logAI.info(`listAttachmentsCallback accountId=${accountId} folder=${folder} uid=${uid}`)
   try {
     // First check local EML (offline)
     const localEml = readEml(accountId, folder, uid)
     if (localEml) {
       const details = await parseEmlBuffer(uid, localEml)
-      return { ok: true as const, attachments: details.attachments || [] }
+      // §2.145 — forward the cap verdict. `details.attachments` is `undefined`
+      // both for a message with no attachments and for a hard-capped message
+      // that was never decoded; without `parseCap` the AI layer cannot tell the
+      // two apart and would assert "no attachments" about a message nobody
+      // opened. See `AttachmentListResult` in services/ai.ts.
+      return { ok: true as const, attachments: details.attachments || [], parseCap: details.parseCap }
     }
-    // Otherwise — from IMAP
+    // Otherwise — from IMAP. This path walks BODYSTRUCTURE and knows no parse
+    // caps, so an empty list here really does mean "none".
     const { cfg } = await requireAccountConfig(accountId)
     const details = await fetchMessageDetails(accountId, cfg.imap, folder, uid)
     return { ok: true as const, attachments: details.attachments || [] }
@@ -8101,9 +10164,15 @@ setListAttachmentsCallback(async (accountId, folder, uid) => {
     logAI.error(`listAttachmentsCallback → ${message}`)
     return { ok: false as const, error: message }
   }
-})
+}))
 
-setDownloadAttachmentCallback(async (accountId, folder, uid, part) => {
+// §2.17 Phase 1 — same reason as `listAttachmentsCallback`, and here the scope
+// earns its keep twice over: the callback makes TWO pooled IMAP calls
+// (`downloadMessagePart` then `fetchMessageDetails` for the metadata), and only
+// the first one used to carry the tier. The second inherits it now instead of
+// entering as `other`, which is what made a person's own download queue behind
+// bulk work halfway through. The inner `imapInteractive` is dropped as redundant.
+setDownloadAttachmentCallback(async (accountId, folder, uid, part) => imapInteractive(async () => {
   logAI.info(`downloadAttachmentCallback accountId=${accountId} folder=${folder} uid=${uid} part=${part}`)
   const MAX_BYTES = 10 * 1024 * 1024
 
@@ -8138,7 +10207,7 @@ setDownloadAttachmentCallback(async (accountId, folder, uid, part) => {
     logAI.error(`downloadAttachmentCallback → ${message}`)
     return { ok: false as const, error: message }
   }
-})
+}))
 
 // --- GTD callbacks ---
 
@@ -8173,9 +10242,9 @@ setUnsnoozeCallback(async (input: UnsnoozeRequest) => {
 setFlagCallback(async (input: FlagRequest) => {
   logAI.info(`flagCallback accountId=${input.accountId} folder=${input.folder} uids=${input.uids.length} flagged=${input.flagged}`)
   try {
-    const { cfg } = await requireAccountConfig(input.accountId)
-    assertImapAuth(input.accountId, cfg.imap)
-    await setFlagged(cfg.imap, input.folder, input.uids, input.flagged, input.accountId)
+    const { cfg, accountGeneration } = await requireAccountConfig(input.accountId)
+    assertImapAuth(input.accountId, cfg.imap, accountGeneration)
+    await imapInteractive(() => setFlagged(cfg.imap, input.folder, input.uids, input.flagged, input.accountId))
     broadcast('mail:exists', { accountId: input.accountId, path: input.folder, force: true })
     return { ok: true, message: `${input.flagged ? 'Starred' : 'Unstarred'} ${input.uids.length} email(s)`, affected: input.uids.length }
   } catch (e) {
@@ -8188,9 +10257,9 @@ setFlagCallback(async (input: FlagRequest) => {
 setMoveCallback(async (input: MoveRequest) => {
   logAI.info(`moveCallback accountId=${input.accountId} from=${input.fromFolder} to=${input.toFolder} uids=${input.uids.length}`)
   try {
-    const { cfg } = await requireAccountConfig(input.accountId)
-    assertImapAuth(input.accountId, cfg.imap)
-    await moveMessages(cfg.imap, input.fromFolder, input.toFolder, input.uids, input.accountId)
+    const { cfg, accountGeneration } = await requireAccountConfig(input.accountId)
+    assertImapAuth(input.accountId, cfg.imap, accountGeneration)
+    await imapInteractive(() => moveMessages(cfg.imap, input.fromFolder, input.toFolder, input.uids, input.accountId))
     deleteEmls(input.accountId, input.fromFolder, input.uids)
     purgeVirtualFolderRefs(input.accountId, input.fromFolder, input.uids)
     broadcast('mail:exists', { accountId: input.accountId, path: input.fromFolder, force: true })
@@ -8247,7 +10316,7 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
   const p = z.string().min(1).parse(prompt)
   const ctx = context ? (context as EmailContext) : undefined
   const sid = typeof sessionId === 'string' ? sessionId : undefined
-  const provider = z.enum(['subscription', 'anthropic-api', 'openai-api', 'gemini-api']).optional().parse(
+  const provider = aiProviderSchema.optional().parse(
     typeof aiProvider === 'string' ? aiProvider : undefined
   ) as AiProvider | undefined
   // §3.10 P1: optional per-turn override of `Settings.aiEgressPolicy`. Coerced
@@ -8338,6 +10407,19 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
   logAI.info(`ai:chat requestId=${reqId} provider=${provider || 'auto'} prompt="${p.slice(0, 80)}"`)
 
   // Load conversation history for multi-turn (OpenAI/Gemini) or map Claude sessionId
+  //
+  // §2.218 — BOTH branches below are POSITIVE equality checks against live
+  // providers, and that is what makes a legacy session safe. After the
+  // `subscription` provider was removed, an affected user's `aiProvider` is
+  // dropped from settings on load, so `effectiveProvider` resolves to
+  // `undefined` and NEITHER branch fires: no history is loaded and, critically,
+  // the session's stored `claudeSessionId` is never substituted into
+  // `effectiveSid`. The turn then fails cleanly with "AI provider not
+  // configured" from `aiChat`. Note the decision reads the SETTINGS provider,
+  // never the session row's own `provider` column — a row labelled with a
+  // removed provider cannot steer this. Do not rewrite either check as a
+  // negative (`!== 'openai-api'`): that would make an unknown/legacy provider
+  // fall INTO a branch instead of out of all of them.
   let history: Array<{ role: 'user' | 'assistant'; content: string }> | undefined
   let effectiveSid = sid
   if (sid) {
@@ -8346,9 +10428,31 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
       const msgs = getLastAiMessages(sid, 40)
       if (msgs.length > 0) history = msgs.map(m => ({ role: m.role, content: m.content }))
     }
-    if (effectiveProvider === 'subscription' || effectiveProvider === 'anthropic-api') {
+    if (effectiveProvider === 'anthropic-api') {
       const session = getAiSession(sid)
-      if (session?.claudeSessionId) effectiveSid = session.claudeSessionId
+      // §2.218.f2 — THE ROW'S OWN PROVIDER MUST MATCH before its resume material
+      // is consumed. `claude_session_id` is provider-specific state minted by
+      // whichever provider created the row, and the removed `subscription`
+      // provider minted it against the user's CONSUMER Claude session. Gating on
+      // the CURRENT provider alone let that id cross into an `anthropic-api`
+      // request — reached by an honest user simply reopening an old chat, or by
+      // a compromised renderer passing an explicit provider override for a
+      // session it did not create. Resume material is not fungible across
+      // providers, so a mismatch starts a FRESH session instead: `effectiveSid`
+      // stays the app-level id and the SDK is given no `resume`.
+      //
+      // Compared as an opaque string on purpose. The row is HISTORY and may name
+      // a provider that no longer exists (that is the whole point here), so it
+      // must not be validated against the live provider union — only compared to
+      // the provider about to run. A row with no provider recorded fails the
+      // comparison and therefore does not resume, which is the safe direction.
+      if (session?.claudeSessionId && session.provider === effectiveProvider) {
+        effectiveSid = session.claudeSessionId
+      } else if (session?.claudeSessionId) {
+        logAI.info(
+          `ai:chat resume skipped: session provider does not match the provider for this turn (requestId=${reqId})`,
+        )
+      }
     }
   }
 
@@ -8505,16 +10609,17 @@ handleIpc('ai:internet-tool-deny', (_e, requestIdRaw: unknown) => {
   return ok ? { ok: true as const } : { ok: false as const, reason: 'not_found' as const }
 })
 
-handleIpc('ai:checkAuth', async (_e, providerOverride?: unknown, settingsOverrides?: unknown) => {
-  const parsedProvider = z.enum(['subscription', 'anthropic-api', 'openai-api', 'gemini-api']).optional().parse(
+handleIpc('ai:checkAuth', async (event, providerOverride?: unknown, settingsOverrides?: unknown) => {
+  const parsedProvider = aiProviderSchema.optional().parse(
     typeof providerOverride === 'string' ? providerOverride : undefined
   ) as AiProvider | undefined
 
-  // Optional settings overrides (proxy, aiOpenAiBaseUrl) not yet saved
-  const overrides = z.object({
-    aiProxyUrl: z.string().trim().optional(),
-    aiOpenAiBaseUrl: z.string().trim().optional(),
-  }).optional().parse(typeof settingsOverrides === 'object' && settingsOverrides ? settingsOverrides : undefined)
+  // Optional settings overrides (proxy, aiOpenAiBaseUrl) not yet saved.
+  // The schema lives next to the merge rule that consumes it — see
+  // electron/services/aiDestination.ts.
+  const overrides = aiDestinationOverridesSchema.parse(
+    typeof settingsOverrides === 'object' && settingsOverrides ? settingsOverrides : undefined
+  )
 
   if (IS_E2E) {
     const settings = getSettings()
@@ -8523,7 +10628,65 @@ handleIpc('ai:checkAuth', async (_e, providerOverride?: unknown, settingsOverrid
     return { status: 'authenticated' as const, email: 'e2e@mock.local' }
   }
 
-  const settings = { ...getSettings(), ...overrides }
+  // §2.119 — THE SECOND WRITE PATH. These overrides are never persisted, but
+  // persistence was never what mattered: the OpenAI check does
+  // `GET ${base}/v1/models` with `Authorization: Bearer <the user's key>`, so
+  // an unguarded endpoint override hands the key to an attacker-chosen host on
+  // one IPC call — without leaving a trace in the settings the user could
+  // inspect afterwards — and a proxy override puts a chosen party on the path
+  // of every AI request. Same guard, same comparison as `settings:save`; a
+  // destination already confirmed there (or here) is not asked about twice.
+  //
+  // ONE MERGE RULE, and it is a shared function rather than a rule written
+  // twice: `resolveRequestedAiDestination` produces the values judged here AND
+  // (through `applyAiDestinationOverrides`) the values the request below is
+  // built from. This path previously composed its own `overrides?.x ?? persisted.x`,
+  // which silently disagreed with the spread that followed it: zod keeps a key
+  // sent as an explicit `undefined` as an own property, so `??` read a CLEAR as
+  // "unchanged" while the spread performed it — the endpoint reverted to the
+  // vendor default, carrying the key, with no dialog. Judged and used must be
+  // the same code.
+  //
+  // `withEffectiveProvider` carries the provider this call will actually run
+  // under — it arrives as a separate argument, and the request below uses it —
+  // because the warning text describes a composite state (provider × endpoint
+  // scheme × proxy). Without it the dialog would describe the stored provider
+  // while the request tests another one.
+  const persisted = getSettings()
+  const requestedDestination = withEffectiveProvider(
+    resolveRequestedAiDestination(overrides, persisted),
+    parsedProvider,
+  )
+  const destinationVerdict = await ensureAiDestinationApproved(requestedDestination, event?.sender)
+  if (!destinationVerdict.ok) {
+    // Not "authenticated", and not a verdict about the key either: the check
+    // simply did not run. Falling back to the persisted address instead would
+    // report success for an endpoint the user never asked about.
+    return {
+      status: 'error' as const,
+      message: aiDestinationRejectionMessage(destinationVerdict.reason, persisted.language),
+    }
+  }
+
+  // Re-read: the gate above can block on a native dialog. Any settings save
+  // that landed meanwhile either left the address alone or was itself refused
+  // while a confirmation was open, so the fresh values cannot carry a
+  // destination this call did not have confirmed.
+  //
+  // The overrides are applied by the SAME resolver the verdict was formed
+  // from, so the MERGE RULE can no longer be a source of divergence.
+  //
+  // What that does NOT guarantee, stated plainly because an overstated comment
+  // is worse than none: the baseline underneath it can still move. A
+  // `settings:save` that lands during the dialog can change a field this
+  // payload omits, and the pair used below is then not literally the pair the
+  // dialog named. The guarantee is narrower — every address in that pair was
+  // approved by a human: the field this payload asked for, just now, and the
+  // omitted one on its own save path (a save that moved it during an open
+  // dialog is refused as `busy`, so it either predates this call or carried
+  // its own confirmation). No unapproved recipient can appear; an approved
+  // combination the user was not shown as a combination can.
+  const settings = applyAiDestinationOverrides(getSettings(), overrides)
   // If renderer passes a provider — use it (saves from race condition during save)
   if (parsedProvider) {
     return aiCheckAuth({ ...settings, aiProvider: parsedProvider })
@@ -8537,20 +10700,37 @@ handleIpc('ai:openProviderSetup', () => {
   return { ok: true as const }
 })
 
+// §2.122 — the provider is REQUIRED here for the same reason it is on
+// `ai:deleteApiKey`: an argument-less call must fail, not be reinterpreted.
+// This handler used to default a missing provider to Anthropic, so a caller
+// that simply forgot the argument — a compromised renderer, but far more
+// likely an honest maintenance slip — silently OVERWROTE the Anthropic key
+// with a key belonging to some other provider. The zod parse below is
+// non-optional, so such a call now rejects instead of destroying a credential.
 handleIpc('ai:saveApiKey', async (_e, key: unknown, provider?: unknown) => {
   const k = z.string().min(1).parse(key)
-  const p = z.enum(['anthropic-api', 'openai-api', 'gemini-api']).optional().parse(
+  const p = aiProviderSchema.parse(
     typeof provider === 'string' ? provider : undefined
-  ) as ApiKeyProvider | undefined
+  ) as ApiKeyProvider
   await aiSaveApiKey(k, p)
+  // §2.122 — saveApiKey stamps the non-secret "a key was saved" marker in
+  // settings; push the fresh record to the windows so their copy does not
+  // stay stale until the next restart.
+  broadcastSettingsChanged(getSettings())
   return { ok: true as const }
 })
 
+// §2.122 — the provider is REQUIRED here, and a call without one is rejected
+// rather than reinterpreted. The renderer used to invoke this channel with no
+// argument at all, and the service read that as "delete every provider's key":
+// one click on "change provider" destroyed three keys. The zod parse below is
+// non-optional, so the same call now fails loudly instead of destroying data.
 handleIpc('ai:deleteApiKey', async (_e, provider?: unknown) => {
-  const p = z.enum(['anthropic-api', 'openai-api', 'gemini-api']).optional().parse(
+  const p = aiProviderSchema.parse(
     typeof provider === 'string' ? provider : undefined
-  ) as ApiKeyProvider | undefined
+  ) as ApiKeyProvider
   await aiDeleteApiKey(p)
+  broadcastSettingsChanged(getSettings())
   return { ok: true as const }
 })
 
@@ -8670,8 +10850,8 @@ function buildThreadSummaryDeps(accountId: string, provider: string): ThreadSumm
     // the reservation insert run inside ONE `BEGIN IMMEDIATE` transaction, so
     // concurrent summaries (or a summary racing a chat / quick action / instant
     // reply) can no longer all read an under-cap total and all spend. Only the
-    // generator's paid path reaches here: subscription is refused upstream, so
-    // no reservation is ever booked for a provider that reports no cost.
+    // generator's paid path reaches here: a missing provider is refused upstream,
+    // so no reservation is ever booked for a call that will not be made.
     //
     // The reservation is attributed to `accountId` — the String(numericAccountId)
     // form the handler already normalised, the same scoping deleteAccountData
@@ -8749,7 +10929,7 @@ function buildThreadSummaryDeps(accountId: string, provider: string): ThreadSumm
       // Fire-and-forget span; wrapped so a broken sink never blocks generation.
       try {
         const span = startMetricSpan('ai.thread_summary.generate', {
-          provider: (['subscription', 'anthropic-api', 'openai-api', 'gemini-api', 'local'] as const)
+          provider: (['anthropic-api', 'openai-api', 'gemini-api', 'local'] as const)
             .includes(attrs.provider as never) ? attrs.provider : 'unknown',
           was_local: attrs.wasLocal,
           tokens_in: attrs.tokensIn ?? 0,
@@ -8937,6 +11117,44 @@ handleIpc('ai:quickAction:rewrite', async (_e, payload: unknown): Promise<QuickA
   return generateQuickActionRewrite(req)
 })
 
+// §3.3 B7 AI Proofread — same thin shape: validate, forward, return the
+// discriminated union verbatim. The generator (services/composeAi.ts, wired
+// through services/ai.ts) owns the opt-in gate, the §2.78 re-split, the
+// untrusted wrap, budget, audit, span and the whole refusal ladder. Note what
+// is deliberately absent: nothing in the send path (`mail:send`, the send
+// queue, Compose) consults this handler or its result — the corrector is
+// informational and can never block sending (§3.3 B7 AC-f).
+handleIpc('ai:proofread:check', async (_e, payload: unknown): Promise<ProofreadResult> => {
+  const req = proofreadCheckSchema.parse(payload)
+  return generateProofreadCheck(req)
+})
+
+// §3.3 B6 AI Translate — the same thin shape: validate, forward, return the
+// discriminated union verbatim. The generator (services/aiTranslate.ts) owns the
+// per-account opt-in gate, the cache-sourced message text, the local language
+// detection, the untrusted wrap, budget, cache, audit, span and the whole
+// refusal ladder. Note what is deliberately absent here: no automatic call on
+// message open — a translation only ever happens because the user asked for one.
+handleIpc('ai:translate:message', async (_e, payload: unknown): Promise<TranslateMessageResult> => {
+  // Parse drops anything the shape does not name; there is no free-text field
+  // on this channel at all, so no message body can arrive from the renderer.
+  const req = translateMessageSchema.parse(payload)
+  return translateMessage(req)
+})
+
+// §3.3 B6 AI Translate, DRAFT side — same thin shape. The generator
+// (services/composeTranslate.ts) owns the opt-in gate, the §2.78 re-split, the
+// untrusted wrap, budget, audit, span and the whole refusal ladder. Note what is
+// deliberately absent: nothing calls this on window open, on the suggested
+// language arriving, or on the user changing it — a draft translation only ever
+// happens because the user pressed the button.
+handleIpc('ai:translate:draft', async (_e, payload: unknown): Promise<TranslateDraftResult> => {
+  // Parse drops anything the shape does not name; the only free text on this
+  // channel is the draft itself, which the generator re-splits and wraps.
+  const req = translateDraftSchema.parse(payload)
+  return translateDraft(req)
+})
+
 handleIpc('ai:instantReply:generate', async (_e, payload: unknown): Promise<InstantReplyDraftsResult> => {
   // Parse strips the renderer's `messageId` (not in the shape). Only the
   // cache-derived (accountId, folder, uid) triple reaches the generator, which
@@ -9077,8 +11295,14 @@ handleIpc('ai:auditLog:export', async (e, opts: unknown) => {
 
 const aiSessionIdSchema = z.string().min(1)
 
+// §2.218 — the provider is validated against the live set, not merely required
+// to be a non-empty string. This was the one renderer-reachable WRITER that
+// still took free text, so it could mint NEW rows labelled with the removed
+// `subscription` provider — a stale Settings window mid-upgrade would do it by
+// accident, and a compromised renderer on purpose. Reading such rows stays
+// tolerant (see `aiProviderSchema`); creating them does not.
 handleIpc('aiSession:create', (_e, data: unknown) => {
-  const parsed = z.object({ id: z.string().min(1), provider: z.string().min(1) }).parse(data)
+  const parsed = z.object({ id: z.string().min(1), provider: aiProviderSchema }).parse(data)
   return createAiSession(parsed.id, parsed.provider)
 })
 
@@ -9196,7 +11420,7 @@ async function syncOfflineBodies() {
         try {
           const result = await requireAccountConfig(account.id)
           cfg = result.cfg
-          assertImapAuth(account.id, cfg.imap)
+          assertImapAuth(account.id, cfg.imap, result.accountGeneration)
         } catch (e) {
           logSync.debug(`Skipping account ${account.id}: ${e instanceof Error ? e.message : 'config error'}`)
           return // Skip account on configuration error
@@ -9221,8 +11445,34 @@ async function syncOfflineBodies() {
             }
             try {
               // Use main connection to avoid deadlocking per-account pool with header sync
-              const raw = await downloadRawMessage(account.id, cfg.imap, pref.folderPath, uid)
-              if (raw) {
+              //
+              // §2.145 wave 2.1 — the budget goes DOWN to the download, which
+              // stops consuming when it is exceeded. Previously the whole
+              // message was buffered and only then measured, so this loop was
+              // an unbounded allocation primitive a remote sender could aim at
+              // any offline-mode folder. Note which budget: the folder's own
+              // limit when it has one, and the hard ceiling when it does not —
+              // `maxSizeBytes <= 0` means "no per-file limit", which used to
+              // mean "no limit at all" and let an oversized message be written
+              // to disk.
+              const budget = maxSizeBytes > 0 ? Math.min(maxSizeBytes, MAX_EML_PARSE_BYTES) : MAX_EML_PARSE_BYTES
+              // §2.17 Phase 1 — THE call site from the incident: this loop takes
+              // the singleton lock once per EML (31 of them in the logged
+              // window), which is what an interactive open and a `net:setSeen`
+              // were queued behind. Sync tier — it yields to the open, and the
+              // overtake counter still guarantees it drains.
+              const outcome = await imapSync(() => downloadRawMessage(account.id, cfg.imap, pref.folderPath, uid, undefined, budget))
+              if (outcome.kind === 'over_limit') {
+                // Same bookkeeping as the old oversize branch — record a size
+                // so this uid is not retried on every sync — but reached
+                // WITHOUT ever holding the message. `bytesSeen` is a lower
+                // bound on the true size, which is all this row needs: it only
+                // has to exceed the limit that rejected it.
+                setBodyDownloaded(account.id, pref.folderPath, uid, false, outcome.bytesSeen)
+                logSync.debug(`Skipped uid=${uid} (over ${budget} byte budget, stopped at ${outcome.bytesSeen})`)
+                if (outcome.bytesSeen > MAX_EML_PARSE_BYTES) recordHardParseCapTrip(outcome.bytesSeen)
+              } else if (outcome.kind === 'ok') {
+                const raw = outcome.raw
                 if (maxSizeBytes <= 0 || raw.length <= maxSizeBytes) {
                   saveEml(account.id, pref.folderPath, uid, raw)
                   setBodyDownloaded(account.id, pref.folderPath, uid, true, raw.length)
@@ -9445,38 +11695,19 @@ app.whenReady().then(() => {
   // with other defensive timers in this file (FTS optimize, EML prune).
   walPassiveCheckpointTimer.unref()
 
-  // FTS5 segment merge: prevents bloat from accumulating one segment per upsert.
-  // Runs once shortly after startup and then every 6 hours. Idempotent and fast
-  // on tens of thousands of rows; only matters for cold-start search latency.
+  // FTS5 index maintenance: keeps segments from accumulating without ever
+  // holding the event loop. §2.156 replaced the blocking `optimize` pass that
+  // used to live here (4.3 s per call on a 110 MB index, eight times a
+  // session) with an incremental merge cycle; scheduling, budgets and the
+  // pause between steps live in electron/services/ftsMaintenance.ts.
   if (!IS_E2E) {
-    const runOptimize = () => {
-      // FTS optimize issues `INSERT INTO messages_fts(messages_fts)
-      // VALUES('optimize')` which writes SQLite state. Guard against
-      // shutdown so it doesn't run after WAL checkpoint.
-      if (shuttingDown) return
-      try {
-        const r = optimizeFts()
-        if (r.ok) {
-          const before = r.segmentsBefore != null ? r.segmentsBefore : '?'
-          const after = r.segmentsAfter != null ? r.segmentsAfter : '?'
-          logMain.info(`FTS optimize: ${before} → ${after} segments in ${r.durationMs}ms`)
-          recordHistogram('fts.optimize.duration_ms', r.durationMs, {
-            segments_before: r.segmentsBefore,
-            segments_after: r.segmentsAfter,
-            reduction: r.segmentsBefore != null && r.segmentsAfter != null
-              ? r.segmentsBefore - r.segmentsAfter
-              : undefined,
-          })
-        } else {
-          recordEvent('fts.optimize.failed')
-        }
-      } catch (e) {
-        logMain.warn(`FTS optimize failed: ${e instanceof Error ? e.message : String(e)}`)
-        recordEvent('fts.optimize.failed', { reason: e instanceof Error ? e.name : 'unknown' })
-      }
-    }
-    setTimeout(runOptimize, 30_000).unref()
-    setInterval(runOptimize, 6 * 60 * 60 * 1000).unref()
+    startFtsMaintenance({
+      mergeStep: mergeFtsIndexStep,
+      segmentCount: ftsSegmentCount,
+      // The merge writes SQLite state, so it must not run after the shutdown
+      // WAL checkpoint — the cycle re-checks this between every step.
+      shouldStop: () => shuttingDown,
+    })
   }
 
   // Background body indexer for Search Excellence
@@ -9484,9 +11715,21 @@ app.whenReady().then(() => {
     const fetchBodyForIndexer: FetchBodyFn = async (accountId, folder, uid) => {
       try {
         const { cfg } = await requireAccountConfig(accountId)
-        // Dedicated connection — not main singleton (blocks message open) or per-account pool (deadlocks header sync).
-        // Each body fetch creates its own short-lived connection, like Thunderbird's background body download.
-        return await fetchMessageBody(accountId, cfg.imap, folder, uid)
+        // Per-account pool (`withImapRetryPerAccount` + `connectImapPerAccount`,
+        // bounded by MAX_CONNECTIONS_PER_ACCOUNT=3) — deliberately NOT the main
+        // singleton, which interactive message open uses and which a background
+        // body fetch would block.
+        //
+        // The previous comment here claimed this call opened "its own
+        // short-lived dedicated connection"; it does not, and has not since
+        // fetchMessageBody was routed through the pool. Corrected because the
+        // isPaused decision below turns on which connection family this uses.
+        // §2.17 Phase 1 — the indexer is the lowest tier there is: it produces
+        // search coverage nobody is waiting on, and it is the single biggest
+        // producer of pool work (30 bodies per batch). It never overtakes an
+        // open, and the overtake counter in ./imapScheduler still bounds how
+        // long it can be held back.
+        return await withImapPriority('indexer', () => fetchMessageBody(accountId, cfg.imap, folder, uid))
       } catch (e) {
         const msg = String((e as Error)?.message || e)
         if (msg.includes('not found') || msg.includes('Could not load config')) return null
@@ -9495,10 +11738,33 @@ app.whenReady().then(() => {
     }
     startBodyIndexer({
       fetchBody: fetchBodyForIndexer,
+      // Live reads, not values captured at start: both toggles must take
+      // effect at runtime without a restart.
       isOffline: () => getSettings().workOffline === true,
-      // Body indexer uses per-account connection pool (connectImapPerAccount),
-      // not the main singleton or dedicated connections used by header sync.
-      // No deadlock risk — safe to run concurrently with header sync.
+      // §2.115 — pause while a header sync is running.
+      //
+      // This was previously left unwired, on the reasoning that the indexer
+      // borrows from the per-account pool while header sync opens dedicated
+      // connections (`withDedicatedImapRetry`), so the two cannot deadlock on
+      // each other. That reasoning is still correct — it just answers a
+      // different question. Pausing is not a deadlock guard, it is a
+      // contention guard, and dropping it left the indexer competing for IMAP
+      // and main-thread time with the one operation the user is actually
+      // waiting on. `isHeaderSyncActive()` is already the gate `syncOfflineBodies`
+      // and `runPeriodicSync` use for exactly this; the indexer was the odd
+      // one out.
+      //
+      // Wiring it can only REDUCE what the indexer does — it takes no lock by
+      // pausing — so it cannot reintroduce the hazard the old comment named.
+      // Starvation is bounded: `activeHeaderSyncs` counts only
+      // `runSyncFolderHeaders` calls, each decremented in an outer `finally`,
+      // and periodic sync neither increments it nor starts while it is set.
+      //
+      // Useful side effect: a paused tick is treated as "not now", so it
+      // re-arms at the base interval instead of backing off. A sync therefore
+      // leaves the indexer at ~2s cadence, and rows it just committed get
+      // picked up promptly rather than after the idle curve's ceiling.
+      isPaused: () => isHeaderSyncActive(),
     })
   }
 })
@@ -9726,8 +11992,27 @@ handleIpc('rules:list', async (_e, accountId: unknown) => {
   return listMailRules(aid)
 })
 
+/**
+ * §2.162 — refuse to store a rule whose firing cannot be justified.
+ *
+ * The whole decision (which fields, which actions) lives in
+ * `findEncodedMailRuleRefusal` in packages/core; everything here is the throw.
+ * The other save path — the MCP rule tools in services/ai.ts — calls that same
+ * core function rather than re-listing fields, so there is one list to keep
+ * right and one to get wrong.
+ */
+function assertMailRuleAllowed(conditionsJson: string, actionsJson: string): void {
+  const refusal = findEncodedMailRuleRefusal(conditionsJson, actionsJson)
+  // The error is built in core, not here: storage refuses the same rules as a
+  // last line (§2.162), and one factory is what keeps the two layers from
+  // producing two differently-worded refusals for one case. The code carries
+  // the offending field so the renderer can name it in the user's language.
+  if (refusal) throw mailRuleRefusalError(refusal)
+}
+
 handleIpc('rules:create', async (_e, data: unknown) => {
   const parsed = mailRuleCreateSchema.parse(data)
+  assertMailRuleAllowed(parsed.conditions, parsed.actions)
   const result = createMailRule(parsed)
   markFeatureUsed('rules')
   return result
@@ -9736,6 +12021,19 @@ handleIpc('rules:create', async (_e, data: unknown) => {
 handleIpc('rules:update', async (_e, id: unknown, data: unknown) => {
   const rid = mailRuleIdSchema.parse(id)
   const patch = mailRuleUpdateSchema.parse(data)
+  // Validate the rule as it will be AFTER the patch, not the patch alone: a
+  // patch that only swaps the actions to `trash` leaves the stored `from`
+  // condition in place, and checking the submitted half on its own would wave
+  // that through. A patch that touches neither half is left alone on purpose —
+  // renaming or DISABLING a rule stored before this check existed must stay
+  // possible, and neither makes it more dangerous.
+  if (patch.conditions !== undefined || patch.actions !== undefined) {
+    const existing = getMailRule(rid)
+    assertMailRuleAllowed(
+      patch.conditions ?? existing?.conditions ?? '[]',
+      patch.actions ?? existing?.actions ?? '[]',
+    )
+  }
   return updateMailRule(rid, patch)
 })
 
@@ -9756,12 +12054,12 @@ handleIpc('rules:test', async (_e, data: unknown) => {
     accountId: z.string().nullable().optional(),
   }).parse(data)
 
-  let conditions: RuleCondition[]
-  try {
-    conditions = JSON.parse(parsed.conditions) as RuleCondition[]
-  } catch {
-    return []
-  }
+  // Structural parse, not a cast: this is a dry run over cached mail, and a
+  // condition array that is not one (or whose entries lack operands) used to
+  // reach `matchRule` and throw. No matches is the honest answer for a rule
+  // that cannot be evaluated.
+  const parts = parseMailRuleParts(parsed.conditions, '[]')
+  if (!parts) return []
 
   const testRule: MailRule = {
     id: 'test',
@@ -9769,7 +12067,7 @@ handleIpc('rules:test', async (_e, data: unknown) => {
     name: 'test',
     enabled: true,
     priority: 0,
-    conditions,
+    conditions: parts.conditions,
     actions: [],
     stopProcessing: false,
   }
@@ -9807,14 +12105,31 @@ handleIpc('rules:applyToFolder', async (_e, ruleId: unknown) => {
   const ruleRow = listMailRules().find(r => r.id === rid)
   if (!ruleRow) return { applied: 0 }
 
+  // §2.162 — retroactive application is the most destructive path there is (it
+  // sweeps up to 1000 cached messages at once), so it asks the same core
+  // verdict the runner and the save paths ask, shape included: a stored row is
+  // JSON of unknown quality, and casting it here is what let a structurally
+  // broken rule reach `matchRule`. A rule stored before this check existed is
+  // refused rather than migrated.
+  const refuse = (refusal: MailRuleRefusal) => {
+    logRules.warn(`applyToFolder refused for rule ${ruleRow.id}: ${formatMailRuleRefusal(refusal)}`)
+    return { applied: 0, refused: refusal }
+  }
+
+  const refusal = findEncodedMailRuleRefusal(ruleRow.conditions, ruleRow.actions)
+  if (refusal) return refuse(refusal)
+  const parts = parseMailRuleParts(ruleRow.conditions, ruleRow.actions)
+  // Belt and braces: the call above already refuses everything this rejects.
+  if (!parts) return refuse({ reason: 'malformed_rule', field: 'unknown' })
+
   const rule: MailRule = {
     id: ruleRow.id,
     accountId: ruleRow.accountId,
     name: ruleRow.name,
     enabled: true,
     priority: ruleRow.priority,
-    conditions: JSON.parse(ruleRow.conditions),
-    actions: JSON.parse(ruleRow.actions),
+    conditions: parts.conditions,
+    actions: parts.actions,
     stopProcessing: ruleRow.stopProcessing,
   }
 
@@ -10417,8 +12732,8 @@ const logPeriodic = createLogger('PeriodicSync')
 
 /** Resolve IMAP config for an account (used by replay service) */
 async function getImapConfigForReplay(accountId: number) {
-  const { cfg } = await requireAccountConfig(accountId)
-  assertImapAuth(accountId, cfg.imap)
+  const { cfg, accountGeneration } = await requireAccountConfig(accountId)
+  assertImapAuth(accountId, cfg.imap, accountGeneration)
   return cfg.imap
 }
 
@@ -10434,6 +12749,8 @@ async function replayAllOfflineOps(): Promise<void> {
       logReplay.error(`Replay failed for account #${aid}:`, err)
     }
   }
+  // §2.99 (review H3) — queued flag/move/delete ops just landed; recount.
+  invalidateUnreadBadge()
 }
 
 // Trigger replay when going back online (workOffline: true → false)
@@ -10457,12 +12774,12 @@ function onSettingsChangedMain(next: { workOffline?: boolean; periodicSyncInterv
   // checkbox in Settings → About takes effect immediately. Skip in
   // dev/e2e — autoUpdater is not initialised there and writing to the
   // module-level singleton has no benefit.
-  // §2.19 iter3 — gate by updateCanSelfUpdate. Read-only installs (admin
-  // /opt, system package) cannot self-update; forcing autoDownload=false
-  // here keeps runtime behaviour aligned with the disabled checkbox in
-  // Settings → About (see SystemInfo.canSelfUpdate). Without this, a
-  // persisted autoUpdateEnabled=true would silently keep auto-downloading
-  // updates that can never be applied.
+  // §2.19 iter3 — gate by updateCanSelfUpdate: don't background-download
+  // artifacts we KNOW cannot be applied (an advisory verdict, not a proof —
+  // see `isDirWritable`). §2.58 — the user keeps the
+  // checkbox (it is no longer disabled in Settings → About), so this gate no
+  // longer traps a persisted `true`; it only suppresses the pointless
+  // download while the warning explains why.
   if (app.isPackaged && !IS_E2E) {
     const wantAutoDownload = next.autoUpdateEnabled === true && updateCanSelfUpdate
     if (autoUpdater.autoDownload !== wantAutoDownload) {
@@ -10470,6 +12787,23 @@ function onSettingsChangedMain(next: { workOffline?: boolean; periodicSyncInterv
       logUpdate.info(`autoDownload toggled at runtime: ${wantAutoDownload}`)
     }
   }
+
+  // §2.99 — tray and autostart follow the settings with no restart. Creating
+  // or destroying the icon also rebuilds its menu, which is what picks up a
+  // language change. Read from the STORE, not from the payload: the payload is
+  // whatever one window chose to send, the store is what was persisted.
+  const persisted = getSettings()
+  applyTrayEnabled(persisted.trayEnabled !== false)
+  // §2.99 (review H4 / round-2 HIGH-2) — edge-triggering and the retry rule
+  // both belong to the service, which is the only place that learns whether the
+  // registration actually happened. main just reports the desired state.
+  syncLaunchAtLogin(persisted.launchAtLogin === true)
+
+  // §2.103 — spellchecker follows the settings with no restart, from the STORE
+  // for the same reason as the two above: the payload is whatever one window
+  // chose to send, the store is what was persisted (and what the consent gate
+  // just filtered). The service re-applies to every live window's session.
+  reapplySpellcheck()
 
   // Restart periodic sync timer if interval changed
   const newInterval = next.periodicSyncIntervalMin
@@ -10550,7 +12884,7 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
   try {
     const result = await requireAccountConfig(aid)
     cfg = result.cfg
-    assertImapAuth(aid, cfg.imap)
+    assertImapAuth(aid, cfg.imap, result.accountGeneration)
   } catch (err) {
     logPeriodic.warn(`Cannot get config for account #${aid}, skipping:`, err)
     return
@@ -10562,6 +12896,10 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
   for (const folder of foldersToSync) {
     if (getSettings().workOffline) break
     if (isTimedOut()) break // per-account budget exhausted — stop starting new folders
+    // Rows this folder actually committed this pass. The periodic loop has no
+    // `fetched` counter of its own (unlike `runSyncFolderHeaders`), so we count
+    // in the batch callback — the single place where rows reach the cache.
+    let committedRows = 0
     try {
       const priorCrawl = getFolderCrawlState(aid, folder)
       const priorSync = getSyncState(aid, folder)
@@ -10587,6 +12925,10 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
             })),
             null,
           )
+          // Counted AFTER the commit returns: applyFolderSyncBatch is the
+          // transaction boundary, so a throw here means these rows are not in
+          // the cache and must not be reported as new indexer work.
+          committedRows += batch.length
         },
         {
           batchSize: 500,
@@ -10594,8 +12936,18 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
           knownUidValidity: priorSync?.uidValidity ?? undefined,
         },
       )
-      // Update sync state with latest modseq/uidValidity
-      if (!result.skipped) {
+      // §2.165: `fetchAllFolderHeaders` reported this outcome at the
+      // connection boundary already — including the case where it threw, which
+      // this loop only logs.
+      // Update sync state with latest modseq/uidValidity.
+      //
+      // `headersIncomplete` bars this block for the same reason it bars the
+      // interactive path: it pins 'covered_full' with a watermark taken from
+      // the highest UID that LANDED, and the UID that failed to land is below
+      // it — the next incremental sync would filter it out permanently.
+      // Leaving modseq unwritten too is deliberate: persisting it would let
+      // the next CONDSTORE pass skip the folder outright.
+      if (!result.skipped && !result.headersIncomplete) {
         try {
           upsertSyncState(aid, folder, result.highestModseq, result.uidValidity)
           const totalCrawled = getAccountMessageCount(aid, folder)
@@ -10614,6 +12966,10 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
       }
     } catch (err) {
       logPeriodic.warn(`Periodic sync failed for folder "${folder}" account #${aid}:`, err)
+      // §2.165: the failure verdict is not reported from here. The IMAP
+      // operation that failed reported it at the connection boundary, which
+      // sees the same failure plus every other one this loop never runs — and
+      // reports them for accounts whose folders this loop skips entirely.
     } finally {
       // §2.86 iter2, review finding 1: this loop is a SEPARATE sync path from
       // the `net:syncFolderHeaders` handler, it runs with no user present, and
@@ -10625,6 +12981,30 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
       processMailRules(aid, folder).catch(err =>
         logRules.error('Background processMailRules (periodic sync) failed:', err)
       )
+      // §2.99 — the path that runs with no user present: this is where mail
+      // that arrived while the app sat in the tray becomes a notification.
+      noteFolderSynced(aid, folder)
+      // §2.115 — same backoff hint as the `net:syncFolderHeaders` path, for
+      // the same reason: this loop commits rows with no body_text while no
+      // user is present, and it is the path by which mail that arrived
+      // overnight reaches the cache.
+      //
+      // Guarded by rows actually committed, not by "the pass visited this
+      // folder": a periodic pass walks every full/period folder on a fixed
+      // timer, so resetting per visit would peg the indexer near the periodic
+      // interval forever and undo §2.115. A folder with no changes produces no
+      // batches (CONDSTORE skip), so it does not reset anything.
+      //
+      // The counter can overstate — a CONDSTORE batch may carry only flag
+      // changes on rows that already have bodies. That asymmetry is deliberate:
+      // a false reset costs a few sub-millisecond ticks while the ramp
+      // re-climbs, a missed one costs minutes of unsearchable mail.
+      //
+      // In `finally` with the rule trigger: a fetch that threw may already have
+      // committed batches, and `committedRows` reflects them.
+      if (committedRows > 0) {
+        try { resetBodyIndexerBackoff() } catch { /* never break sync */ }
+      }
     }
   }
 }
@@ -10651,6 +13031,28 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
  * blocks nobody else.
  */
 async function runOneAccountPeriodicSync(aid: number): Promise<void> {
+  // §2.17 Phase 1 — timer-driven catch-up: `sync` is the tier for everything
+  // below. Tagging the TRIGGER rather than the helper is the point — the tier
+  // is a property of why the work runs, and only this frame knows that.
+  //
+  // Honest accounting of what the scope reaches TODAY, because the wrapper
+  // looks more effective than it is:
+  //   - `fetchAllFolderHeaders` (the bulk of the pass) runs on a DEDICATED
+  //     connection, which takes neither op lock nor pool slot — the tier is
+  //     inert there, by construction, not by oversight.
+  //   - `replayOfflineOps` does take the real locks, but sets `sync` itself at
+  //     its own boundary (services/offlineReplay.ts) and does not rely on this.
+  //   - the detached `processMailRules` below pins itself to `background`.
+  // So the scope currently decides nothing. It is kept, not deleted, for the
+  // direction of the failure it prevents: this is a multi-call pass that grows,
+  // and a pooled call added inside it without a scope would enter as `other` —
+  // rank 1, just behind `interactive` — which is exactly the wrong default for
+  // work a timer started. Deleting the scope makes that mistake silent; keeping
+  // it makes the correct tier the one you get for free.
+  return imapSync(() => runOneAccountPeriodicSyncPass(aid))
+}
+
+async function runOneAccountPeriodicSyncPass(aid: number): Promise<void> {
   periodicSyncInFlight.add(aid)
   const startedAt = Date.now()
   let timedOut = false
@@ -10752,4 +13154,10 @@ app.on('before-quit', () => {
     clearInterval(periodicSyncTimer)
     periodicSyncTimer = null
   }
+  // §2.99 — the tray is NOT touched here any more. Stopping unread refreshes
+  // (the L1 gate: a sync pass still draining must not re-arm the debounce
+  // mid-shutdown) and releasing the icon are now two separate acts owned by the
+  // draining `before-quit` handler above — `disarmTray()` as its first
+  // statement, `shutdownTray()` as its last. Doing either from here would put
+  // the outcome at the mercy of listener order.
 })

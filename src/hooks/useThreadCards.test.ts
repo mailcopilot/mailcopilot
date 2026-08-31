@@ -22,7 +22,7 @@ function makeMail(uid: number, date: string): MailSummary {
 function makeThread(items: MailSummary[]): ThreadRow {
   const lead = items[0]
   const key = `${lead.accountId}:${lead.folder}:${lead.uid}`
-  return { key, lead, items, count: items.length }
+  return { key, lead, items, count: items.length, unreadCount: items.filter(m => m.unread).length }
 }
 
 describe('useThreadCards', () => {

@@ -101,7 +101,7 @@ function makeMail(uid: number, overrides: Partial<MailSummary> = {}): MailSummar
 function makeThread(items: MailSummary[], overrides: Partial<ThreadRow> = {}): ThreadRow {
   const lead = items[0]
   const key = `${lead.accountId}:${lead.folder}:${lead.uid}`
-  return { key, lead, items, count: items.length, ...overrides }
+  return { key, lead, items, count: items.length, unreadCount: items.filter(m => m.unread).length, ...overrides }
 }
 
 function defaultProps(
@@ -508,7 +508,7 @@ describe('ThreadView', () => {
     // the component. useThreadCards returns [] for empty items, so zero
     // thread-card elements are expected.
     const lead = makeMail(1)
-    const thread: ThreadRow = { key: '1:INBOX:1', lead, items: [], count: 0 }
+    const thread: ThreadRow = { key: '1:INBOX:1', lead, items: [], count: 0, unreadCount: 0 }
     render(
       React.createElement(
         ThreadView,

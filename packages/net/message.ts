@@ -3,6 +3,8 @@ import { connectImap, withImapRetry, connectImapPerAccount, withImapRetryPerAcco
 import type { DownloadObject, ImapFlow } from 'imapflow'
 import type { ImapConfig, MessageDetails, MailAddress, AttachmentMeta } from './types'
 import type { MessageEnvelopeObject, MessageStructureObject } from 'imapflow'
+// §2.145 — one source for every size ceiling; see packages/net/limits.ts.
+import { MAX_EML_PARSE_BYTES, SERVER_DIRECT_MAX_BODY_BYTES } from './limits'
 
 /**
  * §2.22 Wave A — identify a MIME leaf carrying an iCalendar invite. Outlook,
@@ -297,7 +299,10 @@ export async function fetchMessageDetails(accountId: number, cfg: ImapConfig, ma
   const htmlPart = htmlNode?.part || (meta.bodyStructure?.type === 'text/html' ? '1' : undefined)
   const textPart = textNode?.part || (meta.bodyStructure?.type === 'text/plain' ? '1' : undefined)
 
-  const MAX_BODY_BYTES = 5 * 1024 * 1024
+  // §2.145 wave 2.1 — shared with electron/cachedDetailGuard.ts, which has to
+  // know exactly how large a cap-less cached row may legitimately be. It was a
+  // hand-copied literal there and drifted; see packages/net/limits.ts.
+  const MAX_BODY_BYTES = SERVER_DIRECT_MAX_BODY_BYTES
   let html: string | undefined
   let text: string | undefined
 
@@ -380,7 +385,96 @@ export async function downloadMessagePart(accountId: number, cfg: ImapConfig, ma
  *  logical boundaries when the timer fires. The underlying ImapFlow
  *  download stream does not natively support abort, so an in-flight
  *  socket read may complete; this is best-effort cancellation. */
-export async function downloadRawMessage(accountId: number, cfg: ImapConfig, mailbox: string, uid: number, signal?: AbortSignal): Promise<Buffer | null> {
+/**
+ * §2.145 wave 2.1 — the outcome of a bounded raw download.
+ *
+ * A UNION rather than `Buffer | null` because "too big" is a THIRD answer and
+ * has to be distinguishable from both "here it is" and "there is nothing here".
+ * It is a returned VALUE and not a thrown error on purpose: this runs inside
+ * `withImapRetry`, which retries what is thrown, and an oversized message is
+ * the one failure that retrying cannot fix — every attempt would re-stream the
+ * same bytes off the socket. It is also not a network error and must never be
+ * classified as one.
+ */
+export type RawDownloadResult =
+  | { kind: 'ok'; raw: Buffer }
+  | { kind: 'empty' }
+  | { kind: 'over_limit'; bytesSeen: number }
+
+/**
+ * Stream an IMAP body into memory, refusing to exceed `maxBytes`.
+ *
+ * THIS IS THE ALLOCATION BOUNDARY. Before §2.145 wave 2.1 the loop below pushed
+ * every chunk and concatenated at the end, so the ceiling that was supposed to
+ * protect us ran only once the entire attacker-controlled message was already
+ * resident — the parse was bounded, the ALLOCATION was not. A remote sender
+ * delivering a huge message to a folder in offline mode got it buffered in full
+ * before anything asked how big it was.
+ *
+ * On exceeding the bound we stop consuming, drop the chunks we are holding
+ * (`chunks.length = 0` — the point is to release the references immediately,
+ * not at the end of the function) and never call `Buffer.concat`, so peak
+ * residency is bounded by the ceiling plus one chunk.
+ *
+ * Destroying the stream is BEST-EFFORT, matching `readStreamToString` above:
+ * leaving the iteration is what stops the accumulation, which is the property
+ * that matters; whether ImapFlow tears the underlying stream down promptly is
+ * its business and not something correctness here depends on.
+ *
+ * `bytesSeen` is what we had counted when we stopped — a LOWER BOUND on the
+ * message's real size, not the size itself. Every consumer treats it as such.
+ *
+ * Exported for its own sake: this is THE allocation boundary, and a test that
+ * re-implemented the loop to describe it would be asserting against a copy —
+ * the copy would keep passing while the real one regressed. Driving it directly
+ * needs no IMAP connection, since it takes an async iterable.
+ */
+export async function collectRawBounded(
+  content: AsyncIterable<Buffer>,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<RawDownloadResult> {
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    for await (const chunk of content) {
+      throwIfAborted(signal)
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      total += buf.length
+      if (total > maxBytes) {
+        chunks.length = 0
+        return { kind: 'over_limit', bytesSeen: total }
+      }
+      chunks.push(buf)
+    }
+  } finally {
+    const stream = content as { destroy?: () => void }
+    if (typeof stream.destroy === 'function') {
+      try { stream.destroy() } catch { /* best-effort, see the note above */ }
+    }
+  }
+  return { kind: 'ok', raw: Buffer.concat(chunks) }
+}
+
+/**
+ * Download the full original message (RFC822), bounded.
+ *
+ * `maxBytes` defaults to `MAX_EML_PARSE_BYTES` rather than to "unlimited", and
+ * that default is the security property: a future caller that forgets to pass a
+ * bound gets the ceiling, not an unbounded allocation. Callers with a tighter
+ * budget of their own (a folder's per-file offline limit) pass the smaller of
+ * the two — but nothing can raise it above the ceiling, because the ceiling is
+ * applied again here regardless of what was asked for.
+ */
+export async function downloadRawMessage(
+  accountId: number,
+  cfg: ImapConfig,
+  mailbox: string,
+  uid: number,
+  signal?: AbortSignal,
+  maxBytes: number = MAX_EML_PARSE_BYTES,
+): Promise<RawDownloadResult> {
+  const ceiling = Math.min(maxBytes, MAX_EML_PARSE_BYTES)
   return withImapRetry(accountId, cfg, async () => {
     throwIfAborted(signal)
     const c = await connectImap(cfg)
@@ -388,75 +482,40 @@ export async function downloadRawMessage(accountId: number, cfg: ImapConfig, mai
     await c.mailboxOpen(mailbox)
     throwIfAborted(signal)
     const { content } = await c.download(uid, undefined, { uid: true })
-    if (!content) return null
-    const chunks: Buffer[] = []
-    for await (const chunk of content as AsyncIterable<Buffer>) {
-      throwIfAborted(signal)
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-    }
-    return Buffer.concat(chunks)
+    if (!content) return { kind: 'empty' as const }
+    return collectRawBounded(content as AsyncIterable<Buffer>, ceiling, signal)
   })
 }
 
 /**
  * §2.22 Wave A — extract a raw `text/calendar` part from a full RFC822 buffer.
- * Used by the local-EML cache path: `electron/main.ts` already loads the raw
- * message bytes from disk (`readEml`) and parses them via `parseEmlBuffer`,
- * which intentionally skips attachment content for speed. This helper does
- * a one-shot full parse so we can recover the ics payload without re-fetching
- * from IMAP. Layering note: this stays in `packages/net` because it is pure
- * MIME walking; ical.js parsing is one layer up in `inviteBridge.ts`.
  *
- * §2.22 fix iter4 — codex-security-review MEDIUM: cap returned ics at
- * `MAX_ICS_BYTES` to mirror the IMAP path (`fetchMessageDetails` line 324).
- * Without this guard, a maliciously oversized ics inside an offline-cached
- * EML would force unbounded `simpleParser` + `toString('utf8')` + downstream
- * `ICAL.parse` work, giving an attacker a cheap CPU/memory amplifier.
+ * §2.124 — the implementation moved to `./eml`, next to the other full-buffer
+ * MIME parse, so both can share the off-main-thread dispatch (a full parse of
+ * a large message costs one event-loop turn per line, which is ruinous on the
+ * Electron main loop). Re-exported here because `electron/main.ts` imports it
+ * from this module.
  */
-const MAX_ICS_BYTES = 1 * 1024 * 1024
+export { extractIcsFromRawEml, extractIcsFromRawEmlInline } from './eml'
 
-export async function extractIcsFromRawEml(raw: Buffer): Promise<string | undefined> {
-  try {
-    const parsed = await simpleParser(raw)
-    const atts = parsed.attachments ?? []
-    for (const att of atts) {
-      const contentType = (att.contentType || '').toLowerCase()
-      const filename = att.filename || ''
-      const isIcs =
-        contentType === 'text/calendar' ||
-        contentType === 'application/ics' ||
-        (contentType === 'application/octet-stream' && /\.ics$/i.test(filename))
-      if (!isIcs) continue
-      const content = att.content
-      if (Buffer.isBuffer(content)) {
-        if (content.length > MAX_ICS_BYTES) return undefined
-        return content.toString('utf8')
-      }
-      if (typeof content === 'string') {
-        // Byte-length guard via Buffer.byteLength (string `.length` counts
-        // UTF-16 code units, not bytes; an ics with multibyte UTF-8 chars
-        // could otherwise slip the cap on the byte side).
-        if (Buffer.byteLength(content, 'utf8') > MAX_ICS_BYTES) return undefined
-        return content
-      }
-    }
-    return undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** Downloads the full original message via per-account IMAP pool (for parallel sync) */
-export async function downloadRawMessagePerAccount(accountId: number, cfg: ImapConfig, mailbox: string, uid: number): Promise<Buffer | null> {
+/** Downloads the full original message via per-account IMAP pool (for parallel
+ *  sync). NO CALLER TODAY — bounded anyway, and deliberately: this is the same
+ *  unbounded-accumulation primitive §2.145 wave 2.1 removed from its sibling,
+ *  and leaving one copy of it intact would let the next caller reintroduce the
+ *  hole without touching any of the code that documents it. */
+export async function downloadRawMessagePerAccount(
+  accountId: number,
+  cfg: ImapConfig,
+  mailbox: string,
+  uid: number,
+  maxBytes: number = MAX_EML_PARSE_BYTES,
+): Promise<RawDownloadResult> {
+  const ceiling = Math.min(maxBytes, MAX_EML_PARSE_BYTES)
   return withImapRetryPerAccount(accountId, cfg, async () => {
     const c = await connectImapPerAccount(cfg)
     await c.mailboxOpen(mailbox)
     const { content } = await c.download(uid, undefined, { uid: true })
-    if (!content) return null
-    const chunks: Buffer[] = []
-    for await (const chunk of content as AsyncIterable<Buffer>) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-    }
-    return Buffer.concat(chunks)
+    if (!content) return { kind: 'empty' as const }
+    return collectRawBounded(content as AsyncIterable<Buffer>, ceiling)
   })
 }

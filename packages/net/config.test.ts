@@ -32,6 +32,7 @@ import {
   smtpSchema,
   accountSaveSchema,
   settingsSchema,
+  SPELLCHECK_MAX_LANGUAGES,
   listAccounts,
   saveAccount,
   getAccountMeta,
@@ -56,6 +57,7 @@ import {
   identitiesArraySchema,
   normalizeIdentities,
   rendererWritableSettingsSchema,
+  EXPORTABLE_MCP_TOOLS,
   mcpSaveConnectionSchema,
   mcpConnectionSchema,
   isAllowedMcpStdioCommand,
@@ -68,6 +70,7 @@ import {
   setMcpEnvSanitizationListener,
   __resetMcpEnvSanitizationAuditFlagForTest,
   setSecretBackend,
+  setAiApiKeySavedFlag,
   type KeytarGetter,
 } from './config'
 import type { Settings, SecretBackend, SecretSurface } from './config'
@@ -251,6 +254,24 @@ describe('packages/net/config', () => {
     it('settingsSchema — sentryEnabled accepts false', () => {
       const result = settingsSchema.parse({ theme: 'light', cacheDays: 30, sentryEnabled: false })
       expect(result.sentryEnabled).toBe(false)
+    })
+
+    // §2.99 — tray on by default (it is what makes closeToTray recoverable),
+    // the two behaviour changes it gates are opt-in.
+    it('settingsSchema — trayEnabled defaults to true, closeToTray and launchAtLogin default to false', () => {
+      const result = settingsSchema.parse({ theme: 'light', cacheDays: 30 })
+      expect(result.trayEnabled).toBe(true)
+      expect(result.closeToTray).toBe(false)
+      expect(result.launchAtLogin).toBe(false)
+    })
+
+    it('settingsSchema — accepts explicit values for trayEnabled/closeToTray/launchAtLogin', () => {
+      const result = settingsSchema.parse({
+        theme: 'light', cacheDays: 30, trayEnabled: false, closeToTray: true, launchAtLogin: true,
+      })
+      expect(result.trayEnabled).toBe(false)
+      expect(result.closeToTray).toBe(true)
+      expect(result.launchAtLogin).toBe(true)
     })
 
     // §2.82 — the raw settingsSchema shape for the consent record. The
@@ -628,6 +649,28 @@ describe('packages/net/config', () => {
       expect(result.success).toBe(false)
     })
 
+    // §2.99 — trayEnabled/closeToTray/launchAtLogin are user-facing switches
+    // owned by the Settings window, unlike their neighbours in this describe
+    // block; they must round-trip through the renderer-writable schema
+    // rather than being rejected as forbidden_field.
+    it('accepts trayEnabled/closeToTray/launchAtLogin from a renderer payload', () => {
+      const result = rendererWritableSettingsSchema.safeParse({
+        theme: 'dark', trayEnabled: false, closeToTray: true, launchAtLogin: true,
+      })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.trayEnabled).toBe(false)
+        expect(result.data.closeToTray).toBe(true)
+        expect(result.data.launchAtLogin).toBe(true)
+      }
+    })
+
+    it('none of the three §2.99 tray fields are in MAIN_ONLY_SETTINGS_FIELDS', () => {
+      for (const field of ['trayEnabled', 'closeToTray', 'launchAtLogin']) {
+        expect(MAIN_ONLY_SETTINGS_FIELDS as readonly string[]).not.toContain(field)
+      }
+    })
+
     it('MAIN_ONLY_SETTINGS_FIELDS matches the rejected-forbidden set', () => {
       // Regression guard: if someone adds a new main-only field, they must
       // also add it to MAIN_ONLY_SETTINGS_FIELDS, else the §3.10 P0 audit
@@ -679,6 +722,297 @@ describe('packages/net/config', () => {
       const result = rendererWritableSettingsSchema.safeParse({ theme: 'dark' })
       expect(result.success).toBe(true)
     })
+
+    // §2.103 — spell checking. The switch and the language list are ordinary
+    // preferences (the Settings window is the only place that moves them), so
+    // they are renderer-writable; the CONSENT record and main's availability
+    // report are not, and are covered by the MAIN_ONLY_SETTINGS_FIELDS sweep
+    // above. What this schema is responsible for is bounding the language list
+    // in COUNT and in SHAPE — an unknown code reaching
+    // `session.setSpellCheckerLanguages` throws, and an unbounded list is an
+    // unbounded set of dictionary downloads.
+    it('accepts a spellcheck switch and a bounded language list', () => {
+      const result = rendererWritableSettingsSchema.safeParse({
+        spellcheckEnabled: true,
+        spellcheckLanguages: ['en-US', 'ru-RU', 'sr-Cyrl'],
+      })
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts an explicit empty language list ("check nothing")', () => {
+      const result = rendererWritableSettingsSchema.safeParse({ spellcheckLanguages: [] })
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects more languages than the cap allows', () => {
+      const tooMany = Array.from({ length: SPELLCHECK_MAX_LANGUAGES + 1 }, (_, i) => `l${i}-XX`)
+      const result = rendererWritableSettingsSchema.safeParse({ spellcheckLanguages: tooMany })
+      expect(result.success).toBe(false)
+    })
+
+    // Exact-boundary pair (codex low finding): the tests around this one only
+    // ever exercise "well under" and "one past" the cap, so an off-by-one on
+    // the `.max()` bound itself would pass both without being caught.
+    it('accepts exactly the cap worth of languages', () => {
+      // Each entry must itself satisfy spellcheckLanguageCodeSchema's shape
+      // (letters-only primary subtag), unlike the "too many" case above, whose
+      // assertion holds regardless of per-item validity.
+      const exact = Array.from({ length: SPELLCHECK_MAX_LANGUAGES }, (_, i) => `xx-${i}A`)
+      const result = rendererWritableSettingsSchema.safeParse({ spellcheckLanguages: exact })
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects a value that is not shaped like a language tag', () => {
+      for (const bad of ['../../etc/passwd', 'en_US', 'https://evil.test/', '', 'e'.repeat(21)]) {
+        const result = rendererWritableSettingsSchema.safeParse({ spellcheckLanguages: [bad] })
+        expect(result.success, `should reject ${JSON.stringify(bad)}`).toBe(false)
+      }
+    })
+
+    it('rejects the main-only consent record and availability report', () => {
+      for (const field of ['spellcheckDictionaryConsent', 'spellcheckAvailable']) {
+        expect(MAIN_ONLY_SETTINGS_FIELDS as readonly string[]).toContain(field)
+      }
+      expect(rendererWritableSettingsSchema.safeParse({
+        spellcheckDictionaryConsent: { granted: ['ru-RU'], at: 'now' },
+      }).success).toBe(false)
+      expect(rendererWritableSettingsSchema.safeParse({
+        spellcheckAvailable: { languages: ['ru-RU'], platformOwned: false, at: 'now' },
+      }).success).toBe(false)
+    })
+  })
+
+  // §2.103 — the PERSISTED schema is lenient about the same field, for the
+  // reason spelled out on `mcpExportWhitelist`: rejecting a code an older build
+  // wrote (or one Chromium stopped offering) would fail the whole settings load
+  // rather than this field. Inert entries are filtered in
+  // electron/services/spellcheck.ts before anything reaches the session.
+  describe('settingsSchema — spell checking (§2.103)', () => {
+    it('defaults to OFF with no languages', () => {
+      const result = settingsSchema.safeParse({ theme: 'light' })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.spellcheckEnabled).toBe(false)
+        expect(result.data.spellcheckLanguages).toBeUndefined()
+        expect(result.data.spellcheckDictionaryConsent).toBeUndefined()
+      }
+    })
+
+    it('keeps a persisted language the current build would not accept on the payload path', () => {
+      const result = settingsSchema.safeParse({
+        theme: 'light',
+        spellcheckLanguages: ['en_US_legacy_value'],
+      })
+      expect(result.success).toBe(true)
+    })
+
+    it('round-trips the main-only consent record and availability report', () => {
+      const result = settingsSchema.safeParse({
+        theme: 'light',
+        spellcheckDictionaryConsent: { granted: ['ru-RU'], at: '2026-08-17T00:00:00.000Z' },
+        spellcheckAvailable: { languages: ['ru-RU'], platformOwned: false, at: '2026-08-17T00:00:00.000Z' },
+      })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data.spellcheckDictionaryConsent?.granted).toEqual(['ru-RU'])
+        expect(result.data.spellcheckAvailable?.platformOwned).toBe(false)
+      }
+    })
+  })
+
+  // §2.158 — settingsSchema.mcpExportWhitelist is DELIBERATELY not narrowed to
+  // EXPORTABLE_MCP_TOOLS, unlike its rendererWritableSettingsSchema twin
+  // (covered in electron/services/mcpExport.test.ts "mcpExportWhitelist
+  // settings schema"). A config persisted by an older build (or hand-edited)
+  // may carry a tool name that has since left the ceiling; out-of-ceiling
+  // entries are inert downstream — McpExportServer.start() intersects with
+  // the ceiling via resolveExportWhitelist before registering anything — but
+  // the settings LOAD must not fail over one stale array entry. If this test
+  // starts failing because someone copies the renderer schema's z.enum(...)
+  // onto the persisted field, the very next boot for an affected user throws
+  // out of getSettings() and the whole app fails to start.
+  // §2.218 — SILENT-RESET MIGRATION for the removed `subscription` AI provider.
+  //
+  // The stakes are not cosmetic. `getSettings()` is NOT lenient about the
+  // persisted schema: a `safeParse` failure that is not the mcpConnections-env
+  // case falls through to a terminal `settingsSchema.parse(raw)` that THROWS,
+  // and callers respond by falling back to fresh defaults. Without the
+  // `.catch(undefined)` on this one field, every user who had ever selected the
+  // Claude subscription would have had their ENTIRE settings record discarded on
+  // the first launch after the upgrade — accounts list pointer, sync intervals,
+  // signatures, the lot. The field is dropped instead, and an absent provider is
+  // the state every consumer already renders as "not configured".
+  //
+  // The asymmetry with the renderer schema is deliberate and is asserted below:
+  // leniency applies to reading OUR OWN DISK, never to accepting a payload.
+  describe('settingsSchema.aiProvider — removed provider is dropped, not fatal (§2.218)', () => {
+    it('drops the stale value instead of failing the parse', () => {
+      const result = settingsSchema.safeParse({
+        theme: 'light',
+        cacheDays: 30,
+        aiProvider: 'subscription',
+      })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        // The value is DROPPED (undefined), which is what every consumer reads
+        // as "no provider configured". The key may remain present with an
+        // undefined value — electron-store serialises that away on the next
+        // write, and `settings.aiProvider` is falsy either way.
+        expect(result.data.aiProvider).toBeUndefined()
+      }
+    })
+
+    it('getSettings() loads a record naming the removed provider without throwing, and reports it unset', () => {
+      storeData.set('settings', {
+        theme: 'dark',
+        cacheDays: 30,
+        aiProvider: 'subscription',
+        aiPrivacyConsent: true,
+        sendDelaySeconds: 17,
+      })
+      expect(() => getSettings()).not.toThrow()
+      const s = getSettings()
+      expect(s.aiProvider).toBeUndefined()
+      // The REST of the record survives — the whole point of dropping one field
+      // rather than letting the load throw into the fresh-defaults fallback.
+      expect(s.theme).toBe('dark')
+      expect(s.aiPrivacyConsent).toBe(true)
+      expect(s.sendDelaySeconds).toBe(17)
+    })
+
+    it('keeps every live provider intact', () => {
+      for (const provider of ['anthropic-api', 'openai-api', 'gemini-api'] as const) {
+        const result = settingsSchema.safeParse({ theme: 'light', cacheDays: 30, aiProvider: provider })
+        expect(result.success).toBe(true)
+        if (result.success) expect(result.data.aiProvider).toBe(provider)
+      }
+    })
+
+    // THE INVERSE, and the reason the `.catch` is placed on the FIELD rather
+    // than on the object: it must rescue exactly one stale enum member and
+    // nothing else. A `.catch` hung on the whole settings object would swallow
+    // every malformed field at once and hand back a silently-defaulted record —
+    // turning a corrupt store into a plausible-looking one. Here the removed
+    // provider is dropped while an unrelated invalid field still fails the
+    // parse, so the existing corrupted-settings fallback keeps its job.
+    it('does not rescue an unrelated malformed field alongside the dropped provider', () => {
+      const result = settingsSchema.safeParse({
+        theme: 'rainbow',            // invalid — must still fail the parse
+        cacheDays: 30,
+        aiProvider: 'subscription',  // removed — dropped, but rescues nothing else
+      })
+      expect(result.success).toBe(false)
+      // And the failure is attributed to the malformed field, NOT to aiProvider:
+      // the provider was tolerated, the theme was not.
+      const paths = result.success ? [] : result.error.issues.map(i => i.path.join('.'))
+      expect(paths).toContain('theme')
+      expect(paths).not.toContain('aiProvider')
+    })
+
+    it('getSettings() still falls back for a record that is corrupt beyond the dropped provider', () => {
+      storeData.set('settings', {
+        theme: 'rainbow',
+        cacheDays: 30,
+        aiProvider: 'subscription',
+      })
+      // Same behaviour as before §2.218 for a corrupt record: the terminal
+      // strict parse throws, and callers fall back to fresh defaults. The
+      // dropped provider does not turn a corrupt store into a loadable one.
+      expect(() => getSettings()).toThrow()
+    })
+
+    it('the renderer schema REFUSES the value the persisted schema drops', () => {
+      // A stale or hostile renderer must not be able to name a provider the
+      // registry does not carry; "drop it quietly" is a disk-read policy only.
+      expect(rendererWritableSettingsSchema.safeParse({ aiProvider: 'subscription' }).success).toBe(false)
+      expect(rendererWritableSettingsSchema.safeParse({ aiProvider: 'anthropic-api' }).success).toBe(true)
+    })
+  })
+
+  describe('settingsSchema.mcpExportWhitelist — persisted schema stays wide (§2.158)', () => {
+    it('a name outside the export ceiling is not itself in EXPORTABLE_MCP_TOOLS (sanity)', () => {
+      expect(EXPORTABLE_MCP_TOOLS as readonly string[]).not.toContain('snooze_email')
+    })
+
+    it('parses a de-listed tool name without throwing', () => {
+      const result = settingsSchema.safeParse({
+        theme: 'light',
+        cacheDays: 30,
+        mcpExportWhitelist: ['snooze_email', 'call_external_tool'],
+      })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        // Pass-through, not silently dropped — narrowing happens downstream,
+        // not on the persisted schema.
+        expect(result.data.mcpExportWhitelist).toEqual(['snooze_email', 'call_external_tool'])
+      }
+    })
+
+    it('getSettings() loads a full config carrying a de-listed whitelist entry', () => {
+      storeData.set('settings', {
+        theme: 'light',
+        cacheDays: 30,
+        mcpExportEnabled: true,
+        mcpExportWhitelist: ['snooze_email'],
+      })
+      expect(() => getSettings()).not.toThrow()
+      const s = getSettings()
+      expect(s.mcpExportEnabled).toBe(true)
+      expect(s.mcpExportWhitelist).toEqual(['snooze_email'])
+    })
+
+    it('rendererWritableSettingsSchema rejects the exact value the persisted schema tolerates', () => {
+      // The asymmetry is the point: renderer writes are bounded to the
+      // ceiling, disk reads of an older build's config are not.
+      const rendererResult = rendererWritableSettingsSchema.safeParse({
+        mcpExportWhitelist: ['snooze_email'],
+      })
+      const persistedResult = settingsSchema.safeParse({
+        theme: 'light',
+        cacheDays: 30,
+        mcpExportWhitelist: ['snooze_email'],
+      })
+      expect(rendererResult.success).toBe(false)
+      expect(persistedResult.success).toBe(true)
+    })
+
+    // `update_memory` was IN the ceiling until this change, so unlike
+    // `snooze_email` it can legitimately sit in a config written by a shipped
+    // build. Same asymmetry must hold for it: loading must survive, renderer
+    // writes must not.
+    it('tolerates update_memory on load even though it just left the ceiling', () => {
+      storeData.set('settings', {
+        theme: 'light',
+        cacheDays: 30,
+        mcpExportEnabled: true,
+        mcpExportWhitelist: ['get_email', 'update_memory'],
+      })
+      expect(() => getSettings()).not.toThrow()
+      expect(getSettings().mcpExportWhitelist).toEqual(['get_email', 'update_memory'])
+    })
+  })
+
+  // `update_memory` overwrites persisted AI memory with no preview/apply pair
+  // and no confirmation token. On the chat path the model is at least talking
+  // to a present user; an external MCP client authors the call itself, with no
+  // user turn behind it at all, and poisoned memory leaks into every later
+  // answer. Removed from the ceiling until a preview/apply pair exists.
+  describe('EXPORTABLE_MCP_TOOLS — update_memory is not exportable', () => {
+    it('is absent from the ceiling', () => {
+      expect(EXPORTABLE_MCP_TOOLS as readonly string[]).not.toContain('update_memory')
+    })
+
+    it('the other unpaired mutating tool, create_draft, is still there', () => {
+      // A draft cannot reach the wire without a human; memory is read back
+      // into prompts on its own. The two are not interchangeable.
+      expect(EXPORTABLE_MCP_TOOLS as readonly string[]).toContain('create_draft')
+    })
+
+    it('the renderer cannot re-add it through settings', () => {
+      expect(rendererWritableSettingsSchema.safeParse({
+        mcpExportWhitelist: ['get_email', 'update_memory'],
+      }).success).toBe(false)
+    })
   })
 
   describe('settingsSchema — aiInstantReplyEnabled default (§3.3 B4)', () => {
@@ -694,6 +1028,48 @@ describe('packages/net/config', () => {
 
     it('is NOT present in MAIN_ONLY_SETTINGS_FIELDS (renderer-writable, not a security gate)', () => {
       expect(MAIN_ONLY_SETTINGS_FIELDS).not.toContain('aiInstantReplyEnabled')
+    })
+  })
+
+  describe('settingsSchema — aiProofreadEnabled default (§3.3 B7)', () => {
+    it('defaults to an empty record (feature OFF for every account) when omitted', () => {
+      const parsed = settingsSchema.parse({ theme: 'light' })
+      expect(parsed.aiProofreadEnabled).toEqual({})
+    })
+
+    it('parses a populated per-account opt-in map', () => {
+      const parsed = settingsSchema.parse({ theme: 'light', aiProofreadEnabled: { '1': true, '2': false } })
+      expect(parsed.aiProofreadEnabled).toEqual({ '1': true, '2': false })
+    })
+
+    it('is NOT present in MAIN_ONLY_SETTINGS_FIELDS (renderer-writable UX preference, not a security gate)', () => {
+      expect(MAIN_ONLY_SETTINGS_FIELDS).not.toContain('aiProofreadEnabled')
+    })
+  })
+
+  describe('rendererWritableSettingsSchema — aiProofreadEnabled (§3.3 B7)', () => {
+    it('accepts a well-formed aiProofreadEnabled record from the renderer', () => {
+      const result = rendererWritableSettingsSchema.safeParse({
+        aiProofreadEnabled: { '1': true, '2': false },
+      })
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts an empty aiProofreadEnabled record (all accounts default OFF)', () => {
+      const result = rendererWritableSettingsSchema.safeParse({ aiProofreadEnabled: {} })
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects a non-boolean value inside aiProofreadEnabled', () => {
+      const result = rendererWritableSettingsSchema.safeParse({
+        aiProofreadEnabled: { '1': 'yes' },
+      })
+      expect(result.success).toBe(false)
+    })
+
+    it('omitting aiProofreadEnabled from a renderer payload is valid (field is optional here)', () => {
+      const result = rendererWritableSettingsSchema.safeParse({ theme: 'dark' })
+      expect(result.success).toBe(true)
     })
   })
 
@@ -1340,6 +1716,57 @@ describe('packages/net/config', () => {
       const settings = getSettings()
       // Should switch to the remaining account
       expect(settings.currentAccountId).toBe(2)
+    })
+  })
+
+  // --- §2.122 — setAiApiKeySavedFlag ---
+
+  describe('setAiApiKeySavedFlag', () => {
+    it('records a saved marker for the given provider only', () => {
+      setAiApiKeySavedFlag('anthropic-api', true)
+      const settings = getSettings()
+      expect(settings.aiApiKeySaved).toEqual({ 'anthropic-api': true })
+    })
+
+    it('keeps other providers untouched (mirrors the deleteApiKey per-provider fix)', () => {
+      setAiApiKeySavedFlag('anthropic-api', true)
+      setAiApiKeySavedFlag('openai-api', true)
+      setAiApiKeySavedFlag('anthropic-api', false)
+
+      const settings = getSettings()
+      expect(settings.aiApiKeySaved).toEqual({
+        'anthropic-api': false,
+        'openai-api': true,
+      })
+    })
+
+    it('clears the marker back to false', () => {
+      setAiApiKeySavedFlag('gemini-api', true)
+      expect(getSettings().aiApiKeySaved?.['gemini-api']).toBe(true)
+
+      setAiApiKeySavedFlag('gemini-api', false)
+      expect(getSettings().aiApiKeySaved?.['gemini-api']).toBe(false)
+    })
+
+    it('never carries key material — value is a boolean and nothing else', () => {
+      setAiApiKeySavedFlag('openai-api', true)
+      const raw = JSON.stringify(getSettings().aiApiKeySaved)
+      expect(raw).toBe('{"openai-api":true}')
+    })
+
+    it('is absent from getSettings() until the first call — distinguishable from "never saved"', () => {
+      expect(getSettings().aiApiKeySaved).toBeUndefined()
+    })
+
+    it('is rejected by rendererWritableSettingsSchema (main-only field)', () => {
+      const result = rendererWritableSettingsSchema.safeParse({
+        aiApiKeySaved: { 'anthropic-api': true },
+      })
+      expect(result.success).toBe(false)
+    })
+
+    it('is registered in MAIN_ONLY_SETTINGS_FIELDS', () => {
+      expect(MAIN_ONLY_SETTINGS_FIELDS).toContain('aiApiKeySaved')
     })
   })
 
@@ -3960,5 +4387,102 @@ describe('§2.82 — getRawPersistedSettings', () => {
       storeData.set('settings', bogus)
       expect(getRawPersistedSettings()).toBeUndefined()
     }
+  })
+})
+
+/**
+ * §2.132 — the direct-keytar default backend must refuse to run under
+ * `MAILCOPILOT_E2E=1`.
+ *
+ * In the app `electron/main.ts` injects the secretStore-backed backend, which
+ * serves e2e runs from the per-data-dir encrypted fallback. This suite pins the
+ * behaviour if that wiring is ever missed: keychain entries are addressed
+ * per-USER (`imap:<id>`, `oauth-refresh:gmail:<id>`), and e2e account ids start
+ * at 1, so falling through to keytar means a test overwrites or deletes real
+ * credentials — the failure mode that cost a live AI key on 2026-08-05.
+ */
+describe('§2.132 — default secret backend under MAILCOPILOT_E2E', () => {
+  // This block sits outside the main `packages/net/config` describe, so it does
+  // not inherit its beforeEach — without this, keytar mock call counts leak in
+  // from the previous case and a "was never called" assertion is meaningless.
+  beforeEach(() => {
+    storeData.clear()
+    keytarStore.clear()
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    setSecretBackend(null)
+    keytarStore.clear()
+  })
+
+  it('writes nothing to the user keychain when no backend was injected', async () => {
+    setSecretBackend(null) // direct keytar — the un-wired state
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    // This path swallows secret-backend failures by design (a keychain fault
+    // must not break a save flow), so the observable is the keychain itself.
+    await setOauthRefreshToken('gmail', 1, 'e2e-token')
+
+    expect(keytarStore.has('oauth-refresh:gmail:1')).toBe(false)
+  })
+
+  it('surfaces the refusal on a path that does not swallow it', async () => {
+    setSecretBackend(null)
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    await expect(
+      saveAccount({
+        name: 'e2e',
+        email: 'e2e@example.com',
+        imap: { host: 'imap.example.com', port: 993, secure: true, user: 'e2e', pass: 'secret' },
+        smtp: { host: 'smtp.example.com', port: 465, secure: true, user: 'e2e', pass: 'secret' },
+      }),
+    ).rejects.toThrow(/MAILCOPILOT_E2E/)
+
+    expect([...keytarStore.keys()]).toEqual([])
+  })
+
+  it('does not read a real credential out of the keychain either', async () => {
+    setSecretBackend(null)
+    keytarStore.set('oauth-refresh:gmail:1', 'live-user-token')
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    // The per-key swallow inside the new→legacy lookup turns the refusal into a
+    // clean null; what matters is that the live token is not handed out.
+    expect(await getOauthRefreshToken('gmail', 1)).toBeNull()
+    expect(keytarStore.get('oauth-refresh:gmail:1')).toBe('live-user-token')
+  })
+
+  it('is inert outside e2e: the same call still reaches keytar', async () => {
+    setSecretBackend(null)
+
+    await setOauthRefreshToken('gmail', 1, 'normal-token')
+    expect(keytarStore.get('oauth-refresh:gmail:1')).toBe('normal-token')
+  })
+
+  /**
+   * codex-security-review test-gap (§2.132, iteration 1): the tests above infer
+   * safety from map contents, which cannot distinguish "no call was made" from
+   * "a call was made and happened to write nothing". Assert the call counts of
+   * all three keytar methods directly, across the write, read and delete paths.
+   */
+  it('makes zero keytar calls under the flag — read, write and delete alike', async () => {
+    const keytarMock = (await import('keytar')).default as unknown as {
+      getPassword: ReturnType<typeof vi.fn>
+      setPassword: ReturnType<typeof vi.fn>
+      deletePassword: ReturnType<typeof vi.fn>
+    }
+    setSecretBackend(null)
+    vi.stubEnv('MAILCOPILOT_E2E', '1')
+
+    await setOauthRefreshToken('gmail', 1, 'e2e-token')
+    await getOauthRefreshToken('gmail', 1)
+    await setOauthRefreshToken('gmail', 1, null) // delete path
+
+    expect(keytarMock.getPassword).not.toHaveBeenCalled()
+    expect(keytarMock.setPassword).not.toHaveBeenCalled()
+    expect(keytarMock.deletePassword).not.toHaveBeenCalled()
   })
 })

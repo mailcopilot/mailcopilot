@@ -109,14 +109,13 @@ Les données sont envoyées **uniquement à votre demande explicite** — jamais
 | Fournisseur | Service |
 |---|---|
 | Anthropic | Claude API (api.anthropic.com) |
-| OpenAI | GPT API (api.openai.com) |
+| Compatible OpenAI | L'API OpenAI standard (api.openai.com) par défaut, ou un point de terminaison compatible configuré par vous (par exemple OpenRouter, LiteLLM, Azure OpenAI, ou un serveur auto-hébergé) si vous définissez une URL de base personnalisée |
 | Google | Gemini API |
-| Claude Code | Outil CLI local (abonnement) |
 
 Chaque fournisseur dispose de sa propre politique de confidentialité. Nous vous encourageons à consulter la politique de confidentialité du fournisseur que vous avez choisi :
 
 - [Politique de confidentialité d'Anthropic](https://www.anthropic.com/privacy)
-- [Politique de confidentialité d'OpenAI](https://openai.com/privacy)
+- [Politique de confidentialité d'OpenAI](https://openai.com/privacy) — s'applique lorsque vous utilisez l'API OpenAI standard ; si vous avez défini une URL de base personnalisée, consultez plutôt la politique de confidentialité de l'opérateur de ce point de terminaison.
 - [Politique de confidentialité de Google](https://policies.google.com/privacy)
 
 ### 5.4 Contrôle du budget AI

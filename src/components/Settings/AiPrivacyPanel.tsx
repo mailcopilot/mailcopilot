@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Shield, Download, Trash2, RefreshCw, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react'
+import { ERROR_PRESENTATION_I18N_KEYS, decodeErrorPresentation } from '@mailcopilot/core'
 import { captureException } from '../../sentry'
 
 /**
@@ -30,9 +31,14 @@ import { captureException } from '../../sentry'
  *      { cancelled: true } as a no-op.
  *
  * Design notes:
- *   - cost_usd null → "n/a" (subscription provider does not report
- *     per-request cost upstream). We deliberately do NOT fabricate
- *     estimates — see §3.3 B1 acceptance criteria.
+ *   - cost_usd null → "n/a" (no per-request price was reported for that row).
+ *     We deliberately do NOT fabricate estimates — see §3.3 B1 acceptance
+ *     criteria.
+ *   - `provider` is rendered as an OPAQUE STRING and is never checked against
+ *     the live provider union. The log is append-only history: it legitimately
+ *     holds ids that can no longer be selected (§2.218 removed `subscription`),
+ *     and validating history against the current enum would blank the user's
+ *     own audit trail — the artifact the privacy posture rests on.
  *   - Shield icon next to wrapped/blocked counts links the visible counter
  *     to the underlying privacy invariant in Settings tooltips.
  *   - All UI strings via t('...') in 6 locales (i18n merge gate, CLAUDE.md).
@@ -112,6 +118,14 @@ export default function AiPrivacyPanel() {
   const [loading, setLoading] = useState<boolean>(false)
   const [error, setError] = useState<string>('')
   const [collapsed, setCollapsed] = useState<boolean>(true)
+  // §2.127 — every catch below shows a sentence from the closed error
+  // vocabulary instead of the raw rejection text. These are local audit-log
+  // reads and writes: their failures have no server-side story to tell, and
+  // the old text was the bare IPC wrapper ("Error invoking remote method
+  // 'ai:auditLog:list': …"). Read through a ref so a language switch does not
+  // change `refresh`'s identity and re-run the effect that calls it.
+  const tRef = useRef(t)
+  tRef.current = t
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -128,8 +142,7 @@ export default function AiPrivacyPanel() {
       setRows(list.rows)
       setTotal(list.total)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg)
+      setError(tRef.current(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
       captureException(e, { source: 'AiPrivacyPanel.refresh' })
     } finally {
       setLoading(false)
@@ -146,8 +159,7 @@ export default function AiPrivacyPanel() {
       await window.api.invoke('ai:auditLog:softDelete', { id })
       void refresh()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg)
+      setError(tRef.current(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
       captureException(e, { source: 'AiPrivacyPanel.softDelete' })
     }
   }, [refresh])
@@ -166,8 +178,7 @@ export default function AiPrivacyPanel() {
       setPage(0)
       void refresh()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg)
+      setError(tRef.current(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
       captureException(e, { source: 'AiPrivacyPanel.clear' })
     }
   }, [refresh])
@@ -176,8 +187,7 @@ export default function AiPrivacyPanel() {
     try {
       await window.api.invoke<ExportResult>('ai:auditLog:export', { format })
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg)
+      setError(tRef.current(ERROR_PRESENTATION_I18N_KEYS[decodeErrorPresentation(e)]))
       captureException(e, { source: 'AiPrivacyPanel.export' })
     }
   }, [])

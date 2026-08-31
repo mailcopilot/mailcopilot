@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { quickActionRewriteSchema, instantReplyGenerateSchema } from './ipcSchemas'
+import { IPC_TEXT_TRANSPORT_CAP, quickActionRewriteSchema, instantReplyGenerateSchema } from './ipcSchemas'
 
 /**
  * §3.3 B4 Compose Quick Actions + Instant Reply — `ai:quickAction:rewrite` /
@@ -37,13 +37,12 @@ import { quickActionRewriteSchema, instantReplyGenerateSchema } from './ipcSchem
 // not a local copy — so schema drift is caught here.
 // ---------------------------------------------------------------------------
 
-type QuickActionRewriteResult =
-  | { ok: true; rewritten: string; provider: string }
-  | { ok: false; reason: 'budget' | 'no_provider' | 'provider_error' | 'empty_input' }
-
-type InstantReplyDraftsResult =
-  | { ok: true; drafts: Array<{ text: string; tone?: string }> }
-  | { ok: false; reason: 'budget' | 'no_provider' | 'provider_error' }
+// §2.78 — the result unions are IMPORTED from the production service, not
+// re-declared here. They used to be a hand-maintained copy, which is exactly
+// the drift that let a new refusal reason (`too_long`) exist in the generator
+// while the mirror still described the old four-reason union. `import type` is
+// erased at build time, so this pulls in no module side effects.
+import type { QuickActionRewriteResult, InstantReplyDraftsResult } from './services/ai'
 
 /** Mirrors the `ai:quickAction:rewrite` handler body verbatim, using the REAL schema. */
 async function mirrorQuickActionHandler(
@@ -96,6 +95,46 @@ describe('quickActionRewriteSchema — §3.3 B4 (real production schema)', () =>
   it('rejects a non-string text field', () => {
     const result = quickActionRewriteSchema.safeParse({ accountId: 1, preset: 'improve', text: 12345 })
     expect(result.success).toBe(false)
+  })
+
+  it('accepts an over-cap text so the generator can answer too_long (§2.78) — the schema must not reject it as malformed', () => {
+    // The length verdict belongs to the generator, which returns a structured
+    // `too_long` refusal the renderer can explain. A zod max() here would turn
+    // the same situation into a thrown IPC error with no actionable reason.
+    const result = quickActionRewriteSchema.safeParse({ accountId: 1, preset: 'improve', text: 'x'.repeat(200_000) })
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts a text exactly at the transport ceiling — the ceiling bounds the payload, it does not shrink the refusable range', () => {
+    const result = quickActionRewriteSchema.safeParse({
+      accountId: 1,
+      preset: 'improve',
+      text: 'x'.repeat(IPC_TEXT_TRANSPORT_CAP),
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects a text past the transport ceiling — same channel class as the B7 sibling, so the same bound applies', () => {
+    // Pins the drift fix: `text` here sat unbounded while the B7
+    // `proofreadCheckSchema.text` carried the ceiling, even though both are
+    // renderer free text crossing into main under the same threat model. The
+    // bound belongs to the channel class, not to one feature.
+    const result = quickActionRewriteSchema.safeParse({
+      accountId: 1,
+      preset: 'improve',
+      text: 'x'.repeat(IPC_TEXT_TRANSPORT_CAP + 1),
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('keeps the transport ceiling far above the 8000-char product cap, so the structured too_long refusal stays reachable', () => {
+    // Pins the RELATIONSHIP, not the ceiling itself: lowering it towards the
+    // generator's QUICK_ACTION_INPUT_CHAR_CAP would start converting legitimate
+    // long drafts from a `too_long` refusal into a thrown zod error. The 8000 is
+    // spelled out rather than imported on purpose — importing it would drag
+    // `services/ai.ts` (and the whole Electron module graph) into this file,
+    // which is exactly what the ipcSchemas.ts extraction exists to avoid.
+    expect(IPC_TEXT_TRANSPORT_CAP).toBeGreaterThan(8000 * 100)
   })
 })
 
@@ -171,6 +210,16 @@ describe('ai:quickAction:rewrite handler — forward-verbatim contract (real sch
     const generate = vi.fn(async (): Promise<QuickActionRewriteResult> => ({ ok: false, reason: 'budget' }))
     const result = await mirrorQuickActionHandler({ accountId: 1, preset: 'grammar', text: 'raw' }, generate)
     expect(result).toEqual({ ok: false, reason: 'budget' })
+  })
+
+  it('forwards the §2.78 too_long refusal verbatim, with the full draft still handed to the generator', async () => {
+    const generate = vi.fn(async (): Promise<QuickActionRewriteResult> => ({ ok: false, reason: 'too_long' }))
+    const longDraft = 'x'.repeat(200_000)
+    const result = await mirrorQuickActionHandler({ accountId: 1, preset: 'improve', text: longDraft }, generate)
+    // main forwards the draft untouched — it is the generator, not the IPC
+    // layer, that decides on the length (and it refuses rather than truncates).
+    expect(generate).toHaveBeenCalledWith({ accountId: 1, preset: 'improve', text: longDraft })
+    expect(result).toEqual({ ok: false, reason: 'too_long' })
   })
 
   it('throws (never reaches the generator) on a malformed payload', async () => {

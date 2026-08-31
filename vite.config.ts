@@ -110,6 +110,11 @@ export default defineConfig(({ mode }) => ({
               entry: {
                 main: 'electron/main.ts',
                 'search-worker': 'electron/search-worker.ts',
+                // §2.124 — off-main-thread MIME parsing. Emitted next to
+                // main*.cjs so packages/net/emlWorkerClient.ts can resolve it
+                // as `path.join(__dirname, 'eml-parse-worker.js')`, the same
+                // arrangement search-worker.js already uses.
+                'eml-parse-worker': 'packages/net/emlParseWorker.ts',
               },
               formats: ['cjs'],
               fileName: (_format, entryName) => `${entryName}.js`,

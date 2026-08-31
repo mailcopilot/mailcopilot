@@ -122,4 +122,42 @@ describe('packages/net/autoconfig', () => {
     const parsed = __private__.parseThunderbirdXml(xml, 'user@example.com')
     expect(parsed).toBeNull()
   })
+
+  // §2.110 — fast-xml-parser 5.5.8 -> 5.11.0. Pre-bump, an unmatched/mismatched
+  // closing tag threw a parse error, which parseThunderbirdXml's try/catch
+  // turned into a clean `null`. 5.11 no longer throws on this shape at all —
+  // it recovers silently and returns a PARTIAL object where the mismatched
+  // tag popped the element stack past its real parent, orphaning whatever
+  // followed. Below, `</bogus>` (which matches no open tag) pops past
+  // `emailProvider`, so `outgoingServer` ends up as a sibling of
+  // `emailProvider` under `clientConfig` instead of a child of it.
+  //
+  // This is the exact shape that would be dangerous to accept: an incoming
+  // server without its matching outgoing server. What's pinned here is not
+  // the parser's recovery (that's fast-xml-parser's business) but that
+  // parseThunderbirdXml's own pairing check — incoming AND outgoing must be
+  // found on the SAME provider element — still rejects it, because it never
+  // throws to hit the catch block anymore; it falls through the provider
+  // loop to the final `return null` instead.
+  it('rejects a malformed closing tag that silently detaches outgoingServer from its provider', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<clientConfig version="1.1">
+  <emailProvider id="example.com">
+    <incomingServer type="imap">
+      <hostname>imap.example.com</hostname>
+      <port>993</port>
+      <socketType>SSL</socketType>
+    </incomingServer>
+    </bogus>
+    <outgoingServer type="smtp">
+      <hostname>smtp.example.com</hostname>
+      <port>587</port>
+      <socketType>STARTTLS</socketType>
+    </outgoingServer>
+  </emailProvider>
+</clientConfig>`
+
+    const parsed = __private__.parseThunderbirdXml(xml, 'user@example.com')
+    expect(parsed).toBeNull()
+  })
 })

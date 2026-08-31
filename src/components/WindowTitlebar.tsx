@@ -16,9 +16,9 @@ import { useMaximized } from '../hooks/useMaximized'
  * This component is the single definition of that chrome. It replaces four
  * byte-identical copies that had drifted apart in small ways (only MailWindow
  * had tooltips) and would have become five with the consent screen. The main
- * window (src/App.tsx) keeps its own markup: it carries the app icon, a beta
- * marker and the unread badge inside the drag area, and uses `.titlebar`
- * rather than `.child-titlebar`.
+ * window (src/App.tsx) keeps its own markup: it carries the app icon and the
+ * unread badge inside the drag area, and uses `.titlebar` rather than
+ * `.child-titlebar`.
  *
  * Two structural rules, both already learned the hard way in this project:
  *   - the root element carries `-webkit-app-region: drag` via `.child-titlebar`

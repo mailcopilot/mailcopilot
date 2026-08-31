@@ -47,8 +47,8 @@ describe('ipcSingleFlight', () => {
     mockInvoke.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ status: 'authenticated' }), 10)))
 
     const [a, b] = await Promise.all([
-      singleFlightInvoke('ai:checkAuth', ['subscription']),
-      singleFlightInvoke('ai:checkAuth', ['subscription']),
+      singleFlightInvoke('ai:checkAuth', ['anthropic-api']),
+      singleFlightInvoke('ai:checkAuth', ['anthropic-api']),
     ])
 
     expect(mockInvoke).toHaveBeenCalledTimes(1)
@@ -60,8 +60,8 @@ describe('ipcSingleFlight', () => {
   it('(b) serves a cached result within the TTL window', async () => {
     mockInvoke.mockResolvedValue({ status: 'authenticated' })
 
-    const first = await singleFlightInvoke('ai:checkAuth', ['subscription'])
-    const second = await singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const first = await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
+    const second = await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
 
     expect(mockInvoke).toHaveBeenCalledTimes(1)
     expect(first).toEqual({ status: 'authenticated' })
@@ -73,9 +73,9 @@ describe('ipcSingleFlight', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     mockInvoke.mockResolvedValue({ status: 'authenticated' })
 
-    await singleFlightInvoke('ai:checkAuth', ['subscription'], { ttlMs: 10 })
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { ttlMs: 10 })
     vi.advanceTimersByTime(20)
-    await singleFlightInvoke('ai:checkAuth', ['subscription'], { ttlMs: 10 })
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { ttlMs: 10 })
 
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -90,7 +90,7 @@ describe('ipcSingleFlight', () => {
     // If auto-subscribe didn't run yet (resetForTests cleared the guard),
     // trigger it by calling invalidateCache — but the listener is installed
     // at module import, so we simulate by invoking invalidateCache directly.
-    await singleFlightInvoke('ai:checkAuth', ['subscription'])
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     expect(mockInvoke).toHaveBeenCalledTimes(1)
 
     if (onCalls.length > 0) {
@@ -100,7 +100,7 @@ describe('ipcSingleFlight', () => {
       invalidateCache()
     }
 
-    await singleFlightInvoke('ai:checkAuth', ['subscription'])
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
 
@@ -113,9 +113,9 @@ describe('ipcSingleFlight', () => {
     )
 
     // First background call goes in-flight.
-    const background = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const background = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     // User call mid-flight: must join the pending promise, not spawn a new IPC.
-    const user = singleFlightInvoke('ai:checkAuth', ['subscription'], { source: 'user' })
+    const user = singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { source: 'user' })
 
     expect(mockInvoke).toHaveBeenCalledTimes(1)
 
@@ -128,7 +128,7 @@ describe('ipcSingleFlight', () => {
     // After the first call resolves, a subsequent user call MUST bypass the
     // cache and issue a fresh IPC (the point of source: 'user').
     mockInvoke.mockResolvedValueOnce({ status: 'authenticated', fresh: true })
-    const user2 = await singleFlightInvoke<{ fresh?: boolean }>('ai:checkAuth', ['subscription'], { source: 'user' })
+    const user2 = await singleFlightInvoke<{ fresh?: boolean }>('ai:checkAuth', ['anthropic-api'], { source: 'user' })
     expect(mockInvoke).toHaveBeenCalledTimes(2)
     expect(user2.fresh).toBe(true)
   })
@@ -137,8 +137,8 @@ describe('ipcSingleFlight', () => {
     const boom = new Error('IPC failure')
     mockInvoke.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(boom), 10)))
 
-    const a = singleFlightInvoke('ai:checkAuth', ['subscription'])
-    const b = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const a = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
+    const b = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
 
     await expect(a).rejects.toBe(boom)
     await expect(b).rejects.toBe(boom)
@@ -146,7 +146,7 @@ describe('ipcSingleFlight', () => {
 
     // Rejected results are NOT cached — the next call must issue a fresh IPC.
     mockInvoke.mockResolvedValueOnce({ status: 'authenticated' })
-    const retry = await singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const retry = await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     expect(retry).toEqual({ status: 'authenticated' })
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -154,8 +154,8 @@ describe('ipcSingleFlight', () => {
   it('distinguishes different args as separate keys', async () => {
     mockInvoke.mockResolvedValue({ status: 'authenticated' })
 
-    await singleFlightInvoke('ai:checkAuth', ['subscription'])
     await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
+    await singleFlightInvoke('ai:checkAuth', ['openai-api'])
 
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -163,8 +163,8 @@ describe('ipcSingleFlight', () => {
   it('ttlMs=0 disables caching', async () => {
     mockInvoke.mockResolvedValue({ status: 'authenticated' })
 
-    await singleFlightInvoke('ai:checkAuth', ['subscription'], { ttlMs: 0 })
-    await singleFlightInvoke('ai:checkAuth', ['subscription'], { ttlMs: 0 })
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { ttlMs: 0 })
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { ttlMs: 0 })
 
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -186,7 +186,7 @@ describe('ipcSingleFlight', () => {
       }),
     )
 
-    const pending = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const pending = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
 
     // Simulate settings:changed broadcast while the call is in flight.
     invalidateCache()
@@ -200,7 +200,7 @@ describe('ipcSingleFlight', () => {
     // After the fix: the stale result was NOT cached (generation mismatch),
     // so the next call MUST spawn a fresh IPC — no cache poisoning.
     mockInvoke.mockResolvedValueOnce({ status: 'authenticated', fresh: true })
-    const next = await singleFlightInvoke<{ fresh?: boolean }>('ai:checkAuth', ['subscription'])
+    const next = await singleFlightInvoke<{ fresh?: boolean }>('ai:checkAuth', ['anthropic-api'])
     expect(next.fresh).toBe(true)
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -225,7 +225,7 @@ describe('ipcSingleFlight', () => {
       )
 
     // First call goes in-flight.
-    const first = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const first = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     expect(mockInvoke).toHaveBeenCalledTimes(1)
 
     // Settings change fires mid-flight: invalidate clears cache AND inflight.
@@ -233,7 +233,7 @@ describe('ipcSingleFlight', () => {
 
     // A second caller arriving now must NOT join the (now-stale) pending
     // promise — it must issue a fresh IPC.
-    const second = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const second = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     expect(mockInvoke).toHaveBeenCalledTimes(2)
 
     // Resolve in order; each waiter gets its own independent value.
@@ -257,7 +257,7 @@ describe('ipcSingleFlight', () => {
       }),
     )
 
-    const pending = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const pending = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
 
     // Bump generation mid-flight.
     invalidateCache()
@@ -272,7 +272,7 @@ describe('ipcSingleFlight', () => {
     // no cached entry was available. If the guard were broken, { v: 'stale' }
     // would be served from cache and mockInvoke would stay at 1 call.
     mockInvoke.mockResolvedValueOnce({ v: 'fresh' })
-    const next = await singleFlightInvoke<{ v: string }>('ai:checkAuth', ['subscription'])
+    const next = await singleFlightInvoke<{ v: string }>('ai:checkAuth', ['anthropic-api'])
     expect(next).toEqual({ v: 'fresh' })
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -283,13 +283,13 @@ describe('ipcSingleFlight', () => {
     // hit IPC because rejected results must never be cached.
     mockInvoke.mockRejectedValueOnce(new Error('transient failure'))
     await expect(
-      singleFlightInvoke('ai:checkAuth', ['subscription'], { ttlMs: 10_000 }),
+      singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { ttlMs: 10_000 }),
     ).rejects.toThrow('transient failure')
 
     // Within the (hypothetical) 10s TTL — but the rejection should not have
     // been cached, so this must trigger a real IPC.
     mockInvoke.mockResolvedValueOnce({ status: 'authenticated' })
-    const retry = await singleFlightInvoke('ai:checkAuth', ['subscription'], { ttlMs: 10_000 })
+    const retry = await singleFlightInvoke('ai:checkAuth', ['anthropic-api'], { ttlMs: 10_000 })
     expect(retry).toEqual({ status: 'authenticated' })
     expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
@@ -304,7 +304,7 @@ describe('ipcSingleFlight', () => {
     })
 
     // Must not throw synchronously.
-    const p = singleFlightInvoke('ai:checkAuth', ['subscription'])
+    const p = singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     await expect(p).rejects.toThrow(/window\.api\.invoke is not available/)
 
     // Restore for subsequent tests.
@@ -318,14 +318,14 @@ describe('ipcSingleFlight', () => {
   it('invalidateCache(channel) only clears the matching channel prefix', async () => {
     mockInvoke.mockResolvedValue({ status: 'ok' })
 
-    await singleFlightInvoke('ai:checkAuth', ['subscription'])
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     await singleFlightInvoke('folder:refreshCounts', [1])
     expect(mockInvoke).toHaveBeenCalledTimes(2)
 
     // Targeted invalidation — only ai:checkAuth should be wiped.
     invalidateCache('ai:checkAuth')
 
-    await singleFlightInvoke('ai:checkAuth', ['subscription'])
+    await singleFlightInvoke('ai:checkAuth', ['anthropic-api'])
     // This should have re-fetched.
     expect(mockInvoke).toHaveBeenCalledTimes(3)
 

@@ -19,7 +19,7 @@ Puo essere compressa in modalita solo icone. Le icone compresse mostrano suggeri
 
 ## Elenco messaggi
 
-Colonna centrale: mittente, oggetto, data, indicatori di non letto, stella, allegati e conteggio thread.
+Colonna centrale: mittente, oggetto, data, indicatori di non letto, stella, allegati e conteggio thread. Per un thread, la riga risulta non letta se **almeno un** messaggio al suo interno attualmente visualizzato nell'elenco e non letto, non solo il piu recente. Vedi [Thread di conversazione](./reading-emails#thread-di-conversazione).
 
 In modalita **Posta in arrivo unificata**, l'indirizzo e-mail dell'account viene mostrato accanto al nome del mittente per identificare quale account ha ricevuto il messaggio.
 
@@ -53,6 +53,12 @@ Colonna destra: intestazioni, corpo del messaggio, allegati e pulsanti di azione
 ## Colonne ridimensionabili
 
 Trascina il bordo tra le colonne. La tua preferenza viene salvata tra le sessioni.
+
+## Selezione e modifica del testo
+
+Fai clic destro in qualsiasi campo di testo -- la barra di ricerca, un messaggio che stai componendo, il campo del prompt dell'assistente IA o qualsiasi altra casella modificabile -- per aprire un piccolo menu contestuale con **Taglia**, **Copia**, **Incolla** e **Seleziona tutto**. Il clic destro su testo selezionato e non modificabile (per esempio un passaggio evidenziato nel corpo di un messaggio) offre solo **Copia**.
+
+Il clic destro su un link nel corpo di un messaggio apre un menu diverso con opzioni per aprire o copiare il link; vedi [Clic destro su un link](./reading-emails#clic-destro-su-un-link).
 
 ## Barra di stato
 

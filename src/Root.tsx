@@ -7,7 +7,7 @@ import Account from './windows/Account'
 import Compose from './windows/Compose'
 import MailWindow from './windows/MailWindow'
 import TelemetryConsentDialog from './components/TelemetryConsentDialog'
-import { useTelemetryConsent } from './hooks/useTelemetryConsent'
+import { useTelemetryConsent, reportConsentTreeError } from './hooks/useTelemetryConsent'
 
 /** Inline feedback form for ErrorBoundary fallback.
  * Does not use i18n provider (React tree has crashed), strings are determined by lang. */
@@ -196,10 +196,27 @@ export default function Root() {
 
   const childWindow = renderChildWindow(hash)
 
-  // §2.82 — first-run telemetry consent. Main-window only: child windows are
-  // opened from an already-running app, so their user has necessarily passed
-  // the gate already.
+  // §2.82 — first-run telemetry consent. Main-window only, and NOT because a
+  // child window's user has necessarily answered: since §2.236 the main UI can
+  // render `unresolved`, with no record written, and every window it opens is
+  // reachable from there. The reason is that a child window is not a separate
+  // owner of the question — there is one record per install, the screen belongs
+  // to the main window (main refuses `telemetry:setConsent` from anyone else),
+  // and asking from four windows at once would put four screens on screen for
+  // one answer. Not a bypass either: effective permission is main's, and main
+  // clamps `sentryEnabled` to false for the whole app while no record exists,
+  // so a child window rendering without the screen sends nothing.
   const consent = useTelemetryConsent({ enabled: childWindow === null })
+
+  // §2.236 AC1 — mirror the handshake onto `<html>`. Two attributes, no copy, no
+  // behaviour: `resolved` (main answered) and `unresolved` (nobody answered
+  // within the bound) both render the app, and this is what tells them apart
+  // afterwards — in DevTools on the machine that reproduces the defect, and in
+  // the e2e suite. Same mechanism as `dataset.theme` above.
+  useEffect(() => {
+    document.documentElement.dataset.telemetryConsent = consent.phase
+    document.documentElement.dataset.telemetryConsentAttempts = String(consent.attempts)
+  }, [consent.phase, consent.attempts])
 
   const content = (() => {
     if (childWindow) return childWindow
@@ -211,11 +228,27 @@ export default function Root() {
     if (consent.phase === 'required') {
       return <TelemetryConsentDialog submitting={consent.submitting} onDecide={consent.decide} />
     }
+    // `resolved` AND `unresolved` (§2.236). The app renders either way — mail is
+    // never held hostage behind a modal (GDPR art. 7(4)) — but the two are not
+    // the same state and are not allowed to become the same state: `unresolved`
+    // wrote no record, so telemetry stays off and the question returns next
+    // launch, while `resolved` means an answer exists. The difference is carried
+    // by the phase itself and by the `<html>` attributes above; nothing here may
+    // collapse `unresolved` into `resolved`.
     return <App />
   })()
 
   return (
-    <SentryErrorBoundary fallback={({ eventId }) => <FallbackUI eventId={eventId} />} showDialog={false}>
+    <SentryErrorBoundary
+      fallback={({ eventId }) => <FallbackUI eventId={eventId} />}
+      // §2.236 AC1(d) — a crash while the consent screen is up is the one crash
+      // the boundary's own report cannot deliver (telemetry is necessarily off
+      // while the question is open, so `beforeSend` drops it). The handler adds
+      // the local line that is not dropped. Instrumentation only: what renders
+      // on a crash is unchanged.
+      onError={(error) => reportConsentTreeError(consent.phase, error)}
+      showDialog={false}
+    >
       {content}
     </SentryErrorBoundary>
   )

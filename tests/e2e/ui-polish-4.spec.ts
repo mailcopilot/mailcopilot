@@ -127,10 +127,11 @@ test('polish-4: clicking open-in-window button is enabled and does not crash the
     await expect(btn).toBeEnabled()
 
     // Click the button — triggers window.api.invoke('mail:openInWindow', …).
-    // Note: in the e2e mock environment the main-process account guard
-    // (listAccounts() vs E2E_ACCOUNTS) prevents BrowserWindow creation.
-    // The fix for that guard is tracked separately (electron/main.ts is out of
-    // scope for this fix iteration). Here we verify that:
+    // The handler's account guard now consults the same roster `accounts:list`
+    // serves (E2E_ACCOUNTS under MAILCOPILOT_E2E=1), so a real standalone
+    // window does open here; its lifetime is covered by
+    // standalone-window-lifecycle.spec.ts. This test stays scoped to the main
+    // window and verifies that:
     //   (a) the button click does not throw a renderer-visible error / crash overlay
     //   (b) the main-window mail viewer remains intact after the click
     await btn.click()

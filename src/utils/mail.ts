@@ -1,5 +1,4 @@
 import DOMPurify from 'dompurify'
-import { normalizeCid as _normalizeCid } from '@mailcopilot/core/mail'
 import type { MailAddress, FolderRoles } from '../../packages/types'
 
 /**
@@ -555,15 +554,3 @@ export function buildMailIframeSrcDoc(bodyHtml: string, opts: { darkMode: boolea
   ].join('')
 }
 
-/** Extract `cid:<id>` references from email HTML. Returns unique normalized CIDs. */
-export function extractCidsFromHtml(html: string): string[] {
-  const s = html || ''
-  const res: string[] = []
-  const re = /cid:([^'">)\s]+)/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(s))) {
-    const cid = _normalizeCid(m[1] || '')
-    if (cid) res.push(cid)
-  }
-  return Array.from(new Set(res))
-}

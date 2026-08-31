@@ -5,10 +5,14 @@
  * - packages/db is layer-pure: it must not pull Sentry / electron-log /
  *   electron-store into its import graph. Tests in packages/db (and any
  *   future worker or CLI consumer) instantiate this module without an
- *   Electron runtime, so the default sink has to be a zero-dep no-op.
+ *   Electron runtime, so the default sink has to be zero-dep.
  * - The main process wires a real sink at startup via setDbTelemetrySink(),
- *   passing in `startMetricSpan` from electron/metrics.ts. When no sink is
- *   installed (tests, first moments of boot) we return a no-op handle.
+ *   passing in `startMetricSpan` from electron/metrics.ts. Until it does, the
+ *   default SPAN sink buffers (bounded) rather than discards — but ONLY while
+ *   the injected consent gate says collection is allowed. Closed gate, or no
+ *   gate at all, means nothing is retained. See `mayCollect` below.
+ * - Error reports raised before a reporter exists are NOT retained; they are
+ *   dropped on the spot. See reportDbError for why that is the honest shape.
  *
  * Contract for callers inside packages/db:
  * - Use withDbSpan(name, attrs, fn). It never throws from the telemetry
@@ -47,6 +51,51 @@ const NOOP_SPAN: DbSpanHandle = {
 }
 
 /**
+ * Consent gate (§2.82) — INJECTED, never imported: the gate lives in
+ * electron/telemetryGate.ts and packages/db must not look at electron.
+ *
+ * Closed by default, and "no gate installed" IS closed. docs/docs/privacy/
+ * telemetry.md promises that nothing is COLLECTED before the user answers —
+ * "MailCopilot does not quietly accumulate a backlog and flush it once you
+ * allow it" — which is exactly what a buffer that fills while the answer is
+ * pending and replays on sink installation would be.
+ *
+ * Consequence, stated rather than hidden: main.ts installs the gate only
+ * AFTER its hoisted imports finish, and packages/db migrates DURING them, so
+ * at cold start there is no gate, the span buffer stays empty, and anything
+ * an import-time migration would have reported is lost for every user —
+ * consenting or not. That is the promise ("whatever happened before you
+ * answered is simply gone"), not an accident; capturing cold start honestly
+ * needs the two-stage bootstrap main.ts already names, not a wider buffer.
+ */
+export type DbTelemetryCollectionGate = () => boolean
+let collectionGate: DbTelemetryCollectionGate | null = null
+
+function mayCollect(): boolean {
+  if (!collectionGate) return false
+  try { return collectionGate() === true } catch { return false }
+}
+
+/** Install the consent gate. Passing null returns to the fail-closed default. */
+export function setDbTelemetryCollectionGate(gate: DbTelemetryCollectionGate | null): void {
+  collectionGate = gate
+  if (!mayCollect()) resetDbTelemetryBuffer()
+}
+
+/**
+ * Drop everything retained so far. Wired to the gate's transition hook in
+ * main.ts: BOTH directions must leave nothing behind — off→on may not ship
+ * what predates the answer, on→off may not leave a backlog for a later
+ * re-opt-in to flush.
+ *
+ * Singular because the span buffer is the only thing this seam retains;
+ * error reports are dropped rather than held (see reportDbError).
+ */
+export function resetDbTelemetryBuffer(): void {
+  spanBuffer.length = 0
+}
+
+/**
  * Bounded ring buffer for spans recorded BEFORE a real sink is installed.
  *
  * Why this exists:
@@ -62,6 +111,13 @@ const NOOP_SPAN: DbSpanHandle = {
  *   Completed spans only — `(name, attributes, startMs, endMs, finalAttrs)`.
  *   We do not buffer "open" spans because there is nothing to do with one
  *   whose `end()` has not been called yet.
+ *
+ * Consent:
+ *   Nothing is retained unless the injected gate above allows collection —
+ *   see `mayCollect`. With today's bootstrap ordering that means the
+ *   cold-start capture described here does not actually happen; the buffer
+ *   only carries spans recorded between the gate being armed and the sink
+ *   being installed.
  *
  * Capacity:
  *   Bounded at BUFFER_CAP. If the buffer fills before a real sink is
@@ -94,6 +150,7 @@ interface BufferedSpan {
 const spanBuffer: BufferedSpan[] = []
 
 function pushBuffered(entry: BufferedSpan): void {
+  if (!mayCollect()) return
   if (spanBuffer.length >= BUFFER_CAP) {
     spanBuffer.shift()
   }
@@ -209,11 +266,6 @@ function drainBufferTo(starter: DbSpanStarter): void {
   }
 }
 
-/** Test-only: clear the in-flight buffer so tests start from a clean slate. */
-export function __resetDbTelemetryBufferForTest(): void {
-  spanBuffer.length = 0
-}
-
 /** Test-only: peek the buffer length. */
 export function __getDbTelemetryBufferSizeForTest(): number {
   return spanBuffer.length
@@ -222,18 +274,49 @@ export function __getDbTelemetryBufferSizeForTest(): number {
 /**
  * Wire an error reporter (typically electron/sentry.ts captureException).
  * Called by withDbSpan on fn() throws with a stable `source` tag like
- * 'db.upsert_messages'. Passing null resets to the no-op reporter.
+ * 'db.upsert_messages'. Passing null returns to the silent default.
+ *
+ * There is nothing to replay on installation: reports raised before this
+ * runs were dropped, not held — see reportDbError.
  */
 export function setDbErrorReporter(reporter: DbErrorReporter | null): void {
   errorReporter = reporter ?? defaultErrorReporter
 }
 
 function safeReport(source: string, err: unknown, context?: DbSpanAttributes): void {
+  // Before installation `errorReporter` is the no-op default, so this is the
+  // silent drop described on reportDbError — deliberate, not an oversight.
   try { errorReporter(source, err, context) } catch { /* telemetry must not throw */ }
 }
 
 function safeReportEvent(name: string, tags: Record<string, DbEventTagValue>): void {
   try { eventReporter(name, tags) } catch { /* telemetry must not throw */ }
+}
+
+/**
+ * Public helper for reporting a DB-layer defect that does NOT throw — the
+ * caller handled it (skipped a row, purged a row) and continues, but the
+ * occurrence still has to reach Sentry or it stays invisible forever.
+ *
+ * `withDbSpan` already reports throws; this is the seam for the swallowed
+ * ones. Same fire-and-forget contract: never throws.
+ *
+ * Before main.ts installs a reporter this call DOES NOTHING AT ALL — the
+ * report is dropped on the spot, nothing is held for later replay. That is
+ * the promise on docs/docs/privacy/telemetry.md ("whatever happened before
+ * you answered is simply gone"), and a buffer here would have been dead
+ * telemetry: the reports worth catching are raised at import time, the
+ * consent gate is only armed by a later statement in main.ts, and retention
+ * without an open gate is exactly what §2.82 forbids — so such a buffer
+ * could never hold anything, for a consenting user either. Reaching
+ * import-time failures needs the two-stage bootstrap (§ backlog).
+ *
+ * Context discipline is the CALLER's: only aggregates (counters, buckets)
+ * belong here. Subjects, addresses, folder names and server text must not
+ * be passed in — see CLAUDE.md §8 "PII не уходит".
+ */
+export function reportDbError(source: string, err: unknown, context?: DbSpanAttributes): void {
+  safeReport(source, err, context)
 }
 
 /** Public helper for discrete, low-cardinality events emitted from packages/db

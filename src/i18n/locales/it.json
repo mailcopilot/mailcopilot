@@ -96,6 +96,8 @@
       "load": "Errore di caricamento: {{error}}",
       "loadMessage": "Errore nel caricamento del messaggio: {{error}}",
       "bodyNotAvailableOffline": "Il contenuto del messaggio non è disponibile offline. Solo le intestazioni sono memorizzate nella cache.",
+      "bodyLoadTimedOut": "Il messaggio non è stato caricato entro il tempo previsto. Può succedere quando un'attività in background occupa la connessione, quando il server risponde lentamente o quando il messaggio è molto grande. Puoi riprovare.",
+      "bodyLoadFailed": "MailCopilot non è riuscito a caricare il contenuto di questo messaggio: vengono mostrate solo le sue intestazioni. Puoi riprovare.",
       "delete": "Errore di eliminazione: {{error}}",
       "archive": "Errore di archiviazione: {{error}}",
       "search": "Errore di ricerca: {{error}}",
@@ -106,7 +108,13 @@
       "pin": "Errore di fissaggio: {{error}}",
       "compose": "Errore di creazione: {{error}}",
       "attachment": "Errore dell'allegato: {{error}}",
-      "openExternal": "Errore nell'apertura del link: {{error}}"
+      "openExternal": "Errore nell'apertura del link: {{error}}",
+      "presented": {
+        "offline": "Nessuna connessione al server di posta. MailCopilot continuerà a riprovare.",
+        "timeout": "Il server di posta non ha risposto in tempo. MailCopilot continuerà a riprovare.",
+        "auth": "Accesso rifiutato. Controlla la password dell'account o riautorizzalo nelle impostazioni.",
+        "unknown": "Impossibile completare la richiesta. Riprova."
+      }
     },
     "authRecovery": {
       "googlePrompt": "L'autorizzazione Google per {{account}} è scaduta. Riconnettere ora?",
@@ -141,6 +149,11 @@
       "message": "Messaggio consegnato, ma non è stato possibile salvare una copia nella cartella Posta inviata",
       "messageWithFolder": "Messaggio consegnato, ma non è stato possibile salvare una copia in \"{{folder}}\"",
       "dismiss": "Chiudi"
+    },
+    "accountAuth": {
+      "message": "«{{account}}» non riceve più posta: l’accesso è scaduto. Accedi di nuovo per riprendere la sincronizzazione.",
+      "messageNoAccount": "Una casella non riceve più posta: l’accesso è scaduto. Accedi di nuovo per riprendere la sincronizzazione.",
+      "action": "Accedi di nuovo"
     },
     "certRecovery": {
       "title": "Il server ha presentato un certificato diverso",
@@ -360,6 +373,61 @@
       "imagesBlocked": "Le immagini esterne sono bloccate per proteggere la tua privacy.",
       "showImages": "Mostra immagini"
     },
+    "translate": {
+      "action": "Traduci",
+      "retry": "Riprova",
+      "loading": "Traduzione in corso…",
+      "showOriginal": "Mostra l'originale",
+      "showTranslation": "Mostra la traduzione",
+      "targetLabel": "Traduci in",
+      "sourceLabel": "Lingua dell'originale",
+      "sourcePlaceholder": "Scegli una lingua",
+      "sourceOffer": "Non è stato possibile identificare la lingua dell'originale, quindi la traduzione qui sopra non ne riporta l'indicazione. Indicarla è facoltativo: aggiorna solo l'indicazione e riutilizza la traduzione già ottenuta, senza chiederne una nuova al fornitore.",
+      "sourceApply": "Aggiorna l'indicazione",
+      "sourceRestate": "Non è questa la lingua?",
+      "sourceRestateHint": "Indica tu la lingua dell'originale. Cambia solo l'indicazione qui sopra: la traduzione che stai leggendo resta invariata e viene riutilizzata, senza chiederne una nuova al fornitore.",
+      "produced": "Traduzione automatica in {{target}}. L'originale è a un clic di distanza.",
+      "producedFrom": "Traduzione automatica dal {{source}} all'{{target}}. L'originale è a un clic di distanza.",
+      "textProjection": "La traduzione parte dalla versione testuale del messaggio, quindi la sua formattazione e le sue immagini non ne fanno parte.",
+      "refusal": {
+        "budget": "Il budget IA di questo periodo è esaurito. Aumentalo in Impostazioni → IA oppure attendi il periodo successivo.",
+        "no_provider": "Non è ancora configurato alcun fornitore IA. Aggiungine uno in Impostazioni → IA.",
+        "provider_error": "Il fornitore IA non ha restituito una traduzione. Riprova.",
+        "empty_input": "Il testo di questo messaggio non è ancora stato scaricato. Riprova quando il messaggio sarà caricato.",
+        "too_long": "Questo messaggio è troppo lungo per essere tradotto in una sola volta e non è possibile tradurne solo una parte: per il limite conta l'intero messaggio, compresa la corrispondenza precedente che potrebbe esservi citata.",
+        "opt_out": "La traduzione è disattivata per questo account. Attivala in Impostazioni → IA → Traduci i messaggi."
+      },
+      "languages": {
+        "en": "Inglese",
+        "ru": "Russo",
+        "uk": "Ucraino",
+        "de": "Tedesco",
+        "fr": "Francese",
+        "es": "Spagnolo",
+        "it": "Italiano",
+        "pt": "Portoghese",
+        "nl": "Olandese",
+        "pl": "Polacco",
+        "tr": "Turco",
+        "ar": "Arabo",
+        "zh": "Cinese (semplificato)",
+        "ja": "Giapponese",
+        "ko": "Coreano",
+        "hi": "Hindi"
+      }
+    },
+    "parseCap": {
+      "hard": {
+        "title": "Questo messaggio è troppo grande per essere aperto",
+        "body": "Supera {{limit}}, il massimo che MailCopilot può leggere in sicurezza, quindi il testo e gli allegati non sono stati aperti. Il messaggio resta intatto sul server: puoi aprirlo in un'altra applicazione di posta."
+      },
+      "soft": {
+        "banner": "È mostrato solo l’inizio di questo messaggio.",
+        "action": "Mostra il messaggio completo",
+        "loading": "Caricamento…",
+        "atLimit": "Questo è tutto ciò che MailCopilot può mostrare."
+      }
+    },
     "links": {
       "title": "Questo link sembra sospetto",
       "textLabel": "Testo del link",
@@ -373,7 +441,9 @@
     },
     "attachments": {
       "download": "Scarica allegato",
-      "unnamed": "Allegato"
+      "unnamed": "Allegato",
+      "showMore": "Mostra altri ({{hidden}})",
+      "showLess": "Mostra meno"
     },
     "list": {
       "filter": "Filtra",
@@ -430,6 +500,26 @@
   "settings": {
     "title": "Impostazioni",
     "unsavedWarning": "Ci sono modifiche non salvate. Chiudere senza salvare?",
+    "aiDestination": {
+      "declinedTitle": "Indirizzo invariato",
+      "invalidTitle": "Indirizzo non accettato",
+      "busyTitle": "Modifica dell'indirizzo non applicata",
+      "unchangedFields": "Resta in uso il valore precedente per: {{fields}}.",
+      "otherSettingsSaved": "Le altre modifiche accettate di questa schermata sono state salvate.",
+      "retry": "Riprova"
+    },
+    "mcpExport": {
+      "refusedTitle": "L'elenco degli strumenti dell'esportazione MCP non è stato salvato",
+      "refusedUnknownTool": "Contiene uno strumento che questa versione dell'applicazione non esporta, quindi resta in uso l'elenco salvato in precedenza.",
+      "refusedOther": "Non è stato accettato, quindi resta in uso l'elenco salvato in precedenza.",
+      "repairedTitle": "Sono stati rimossi dall'elenco nomi di strumenti obsoleti",
+      "repairedTools": "Rimosso dall'elenco degli strumenti dell'esportazione MCP: {{tools}}.",
+      "repairedExplain": "Questa versione non esporta quegli strumenti, quindi non avevano alcun effetto. Premi di nuovo Salva per salvare l'elenco corretto.",
+      "otherSettingsSaved": "Le altre modifiche accettate di questa schermata sono state salvate."
+    },
+    "saveRefusal": {
+      "unknownField": "Questa impostazione non è stata salvata: {{field}}."
+    },
     "hint": "Personalizza l'aspetto e il comportamento dell'applicazione",
     "tabs": {
       "accounts": "Account",
@@ -507,6 +597,27 @@
     "general": {
       "defaultMailApp": "Imposta come app di posta predefinita",
       "defaultMailAppHint": "Gestisci i link mailto: da browser e altre applicazioni"
+    },
+    "spellcheck": {
+      "title": "Controllo ortografico",
+      "enabled": "Controlla l’ortografia mentre scrivo",
+      "hint": "Disattivato per impostazione predefinita. Attivare una lingua scarica il suo dizionario da un server esterno e MailCopilot chiede prima il permesso, per ogni nuova lingua aggiunta.",
+      "languagesLabel": "Dizionari",
+      "addLanguage": "Aggiungi una lingua…",
+      "none": "Nessun dizionario scelto: il controllo resta disattivato.",
+      "remove": "Rimuovi",
+      "macOwned": "macOS controlla l’ortografia con i propri dizionari, scelti in Impostazioni di Sistema → Tastiera → Inserimento testo. MailCopilot non può cambiare quell’elenco e non scarica nulla.",
+      "unavailable": "Questa build non dichiara dizionari ortografici.",
+      "limit": "Fino a {{count}} dizionari alla volta."
+    },
+    "tray": {
+      "enabled": "Mostra icona nell'area di notifica",
+      "closeToTray": "Alla chiusura riduci nell'area di notifica",
+      "launchAtLogin": "Avvia all'accesso",
+      "linuxNoTrayNote": "Alcuni desktop Linux non mostrano icone nell'area di notifica. La finestra si nasconde comunque: riavvia MailCopilot per farla riapparire.",
+      "launchAtLoginUnsupported": "Questa versione o piattaforma non può registrare l'avvio automatico, quindi qui l'impostazione non ha effetto.",
+      "launchAtLoginFailed": "Non è stato possibile registrare l'avvio automatico. Verrà ritentato al prossimo salvataggio.",
+      "launchAtLoginDisableFailed": "Non è stato possibile rimuovere l'avvio automatico, quindi l'applicazione continuerà ad avviarsi all'accesso. Verrà ritentato al prossimo salvataggio."
     },
     "bodyRetentionDays": {
       "label": "Conserva la copia completa per",
@@ -646,11 +757,14 @@
       "conditions": "Condizioni",
       "actions": "Azioni",
       "field": {
-        "from": "Mittente",
+        "from_address": "Mittente — indirizzo",
+        "from_name": "Mittente — nome visualizzato",
+        "from": "Mittente — nome o indirizzo (obsoleto)",
         "to": "Destinatario",
         "cc": "Cc",
         "subject": "Oggetto",
-        "has_attachment": "Ha allegato"
+        "has_attachment": "Ha allegato",
+        "unknown": "Campo non riconosciuto"
       },
       "op": {
         "contains": "contiene",
@@ -685,9 +799,24 @@
       "addCondition": "Aggiungi condizione",
       "addAction": "Aggiungi azione",
       "folderPlaceholder": "Nome cartella",
+      "moveFolderRequired": "Indica la cartella in cui spostare i messaggi: senza di essa la regola non può essere salvata.",
       "saveFailed": "Impossibile salvare o applicare la regola. Riprova.",
       "conditionField": "Campo condizione",
       "conditionOp": "Operatore condizione",
+      "removeCondition": "Rimuovi condizione",
+      "malformedBadge": "Non applicabile",
+      "refusedBadge": "Non applicata",
+      "displayNameCaveat": "Il nome visualizzato lo sceglie il mittente e può essere quello di chiunque: le regole che spostano, archiviano, eliminano i messaggi o li contrassegnano come spam devono confrontare l’indirizzo.",
+      "unsupportedFieldCaveat": "MailCopilot non memorizza «{{field}}», quindi questa condizione non può mai essere verificata: la regola non corrisponde a nulla e non viene più eseguita. Rimuovi la condizione o scegli un altro campo.",
+      "unverifiableSenderCaveat": "Questa condizione confronta il nome visualizzato, che il mittente scrive da sé e che nessuno verifica, quindi non può giustificare «{{action}}». Confronta invece «{{suggestion}}»: altrimenti la regola non potrà essere salvata.",
+      "saveRefused": "La regola non è stata salvata. {{reason}}",
+      "applyRefused": "La regola è stata salvata, ma non applicata ai messaggi esistenti. {{reason}}",
+      "refusal": {
+        "malformedRule": "La regola non è scritta in una forma che MailCopilot possa applicare: alcune delle sue condizioni o azioni sono incomplete. Se l'ha configurata un assistente, chiedigli di ricrearla, oppure crea la regola qui, nell'editor.",
+        "unsupportedField": "MailCopilot non memorizza il campo «{{field}}», quindi una condizione su di esso non può mai essere verificata. Rimuovi quella condizione o usa un campo memorizzato dal client.",
+        "unverifiableSender": "La condizione «{{field}}» confronta il nome visualizzato, che il mittente scrive da sé e che nessuno verifica, quindi non può giustificare «{{action}}». Confronta invece «{{suggestion}}».",
+        "unknown": "Questa regola non può essere valutata così com'è."
+      },
       "actionType": "Tipo di azione"
     },
     "aiRules": {
@@ -713,7 +842,7 @@
       "website": "Sito web",
       "docs": "Documentazione",
       "sentryEnabled": "Invia dati diagnostici e di utilizzo",
-      "sentryHint": "Include rapporti sui crash, misurazioni delle prestazioni, eventi di utilizzo (quali funzioni vengono usate, quale fornitore e modello di IA, il costo stimato di una richiesta) e un identificatore casuale dell'installazione che collega le tue sessioni. Il contenuto dei messaggi, gli oggetti e i nomi delle cartelle non vengono raccolti: nulla di ciò che viene inviato si basa su di essi e gli indirizzi e i percorsi dei file vengono rimossi automaticamente dal testo di errore restituito dal tuo server di posta, nella misura in cui vengono riconosciuti. L'unico indirizzo che viene inviato è quello che scrivi tu stesso nel modulo di feedback qui sotto, così puoi ricevere una risposta.",
+      "sentryHint": "Include rapporti sui crash, misurazioni delle prestazioni, eventi di utilizzo (quali funzioni vengono usate, quale fornitore e modello di IA, il costo stimato di una richiesta) e un identificatore casuale dell'installazione che collega le tue sessioni. Il contenuto dei messaggi, gli oggetti e i nomi delle cartelle non vengono raccolti: nulla di ciò che viene inviato si basa su di essi, tranne un caso — quando un'azione rapida rifiuta una bozza perché troppo lunga, quel rifiuto viene conteggiato con una delle sei fasce di lunghezza dichiarate, mai il testo né la sua lunghezza esatta. Gli indirizzi e i percorsi dei file vengono rimossi automaticamente dal testo di errore restituito dal tuo server di posta, nella misura in cui vengono riconosciuti. L'unico indirizzo che viene inviato è quello che scrivi tu stesso nel modulo di feedback qui sotto, così puoi ricevere una risposta.",
       "sentryConsentPending": "La diagnostica resta disattivata finché non viene data una risposta alla richiesta di consenso. MailCopilot la porrà una volta al prossimo avvio; fino ad allora questo interruttore non ha effetto.",
       "debugLogging": "Attiva registrazione di debug",
       "debugLoggingHint": "Scrive registri dettagliati in un file per la risoluzione dei problemi. I registri vengono archiviati localmente e non vengono mai inviati automaticamente.",
@@ -737,7 +866,9 @@
         "title": "Aggiornamenti",
         "autoDownload": "Scarica automaticamente gli aggiornamenti in background",
         "autoDownloadHint": "Se attivo, le nuove versioni vengono scaricate silenziosamente e ti viene chiesto di riavviare. Se disattivo, scegli tu se scaricare ogni aggiornamento.",
-        "cannotSelfUpdateHint": "Questa installazione è di sola lettura (installazione di sistema). Gli aggiornamenti richiedono un amministratore.",
+        "cannotSelfUpdateHint": "La cartella che contiene l'app non è scrivibile, quindi l'aggiornamento non può essere installato sul posto. Scarica manualmente la nuova versione o sposta l'app in una cartella tua.",
+        "cannotSelfUpdateNoTarget": "Questa build non può sostituirsi sul posto (non è in esecuzione come AppImage né come pacchetto di sistema). Scarica manualmente la nuova versione dal sito.",
+        "cannotSelfUpdateUnknown": "Questa installazione non può aggiornarsi automaticamente. Scarica manualmente la nuova versione dal sito.",
         "checkNow": "Controlla aggiornamenti",
         "checking": "Verifica…",
         "upToDate": "Hai l'ultima versione",
@@ -760,12 +891,13 @@
       "versions": "La versione di MailCopilot, il tuo sistema operativo e la sua versione",
       "performance": "La durata delle operazioni: sincronizzazione della posta, ricerca, invio, richieste all'IA",
       "usage": "Quali funzioni hai usato e con quale frequenza — ricerca, scrittura dei messaggi, IA, regole, modelli, posticipo — oltre al fornitore e al modello di IA utilizzati e al costo stimato di una richiesta",
+      "aiKeyStore": "Gli accessi all'archivio in cui sono conservate le tue chiavi dell'IA: quale fornitore, se la chiave veniva letta, salvata o eliminata, e come è andata, compreso se una chiave fosse presente. La chiave stessa non viene mai inviata.",
       "setup": "Informazioni generali sulla configurazione: quanti account hai, il tipo di servizio di posta (per esempio Gmail o Outlook), il metodo di accesso, la lingua dell'interfaccia e il tema",
       "installId": "Un identificatore casuale di questa installazione, creato al primo avvio. Non è collegato al tuo indirizzo di posta, ma collega i dati delle tue diverse sessioni alla stessa installazione."
     },
     "neverTitle": "MailCopilot non invia mai:",
     "never": {
-      "bodies": "Il testo dei messaggi, gli oggetti e i nomi delle tue cartelle non vengono raccolti: nulla di ciò che viene inviato si basa su di essi e nei dati compare solo il tipo di cartella, per esempio Posta in arrivo o Cestino. L'unico testo che non scriviamo noi è il messaggio di errore di un server di posta; gli indirizzi e i percorsi dei file vengono rimossi automaticamente prima dell'invio, nella misura in cui vengono riconosciuti",
+      "bodies": "Il testo dei messaggi, gli oggetti e i nomi delle tue cartelle non vengono raccolti: nei dati compare solo il tipo di cartella, per esempio Posta in arrivo o Cestino, e nulla di ciò che viene inviato si basa sul tuo testo, tranne in un caso circoscritto. Quando un'azione rapida della finestra di scrittura rifiuta una bozza perché supera la lunghezza consentita, quel rifiuto viene conteggiato insieme a una delle sei fasce di dimensione dichiarate, per esempio da 8.000 a 12.000 caratteri: non la lunghezza in sé, non una sola parola della bozza e solo nel momento di quel rifiuto. L'unico testo che non scriviamo noi è il messaggio di errore di un server di posta; gli indirizzi e i percorsi dei file vengono rimossi automaticamente prima dell'invio, nella misura in cui vengono riconosciuti",
       "addresses": "Gli indirizzi e-mail, né i tuoi né quelli di altri. L'unica eccezione è il modulo di feedback in Impostazioni → Informazioni: l'indirizzo che scrivi lì tu stesso viene inviato insieme al tuo messaggio, così puoi ricevere una risposta",
       "attachments": "Gli allegati e i nomi dei loro file",
       "searchQueries": "Ciò che digiti nella ricerca: vengono conteggiate solo la lunghezza della richiesta e il numero di risultati",
@@ -854,6 +986,8 @@
       "enterPassword": "Inserisci le password IMAP e SMTP per testare la connessione",
       "enterEmailPassword": "Inserisci e-mail e password",
       "imapSmtp": "IMAP: {{imap}}, SMTP: {{smtp}}",
+      "imapOnly": "IMAP: {{error}}",
+      "smtpOnly": "SMTP: {{error}}",
       "enterEmailForAutoconfig": "Inserisci l'e-mail per eseguire la configurazione automatica",
       "autoconfigNotFound": "Impossibile rilevare automaticamente le impostazioni del server",
       "autoconfigFailed": "Errore di configurazione automatica: {{error}}",
@@ -896,7 +1030,19 @@
       },
       "smtpSeparate": "Login/password SMTP è diverso",
       "imapDetected": "IMAP: {{host}}:{{port}}",
-      "smtpDetected": "SMTP: {{host}}:{{port}}"
+      "smtpDetected": "SMTP: {{host}}:{{port}}",
+      "oauthWaiting": {
+        "title": "Connessione a {{provider}}",
+        "stage": {
+          "browser": "In attesa dell’autorizzazione nel browser…",
+          "token": "Recupero dell’accesso…",
+          "imap": "Verifica del server di posta…",
+          "smtp": "Verifica del server di invio…",
+          "saving": "Salvataggio dell’account…"
+        },
+        "browserHint": "Dovrebbe essersi aperta una finestra del browser. Autorizza l’accesso e torna qui.",
+        "appHint": "Quasi fatto. Con una connessione lenta i controlli possono richiedere fino a un minuto."
+      }
     },
     "confirm": {
       "remove": "Rimuovere l'account {{label}}? La cache locale verrà eliminata.",
@@ -1071,8 +1217,6 @@
         "digest": "Riepilogo giornaliero"
       },
       "chooseProvider": "Scegli il metodo di connessione:",
-      "subscription": "Abbonamento Claude",
-      "subscriptionHint": "Pro/Max — se sei già autorizzato tramite CLI",
       "apiKey": "Chiave API",
       "apiKeyHint": "Fatturazione per token",
       "configure": "Configura nelle Impostazioni"
@@ -1217,9 +1361,12 @@
       "errorPrefix": "Errore",
       "notConfigured": "Il fornitore IA non è configurato. Configuralo nelle Impostazioni.",
       "invalidKey": "Chiave API non valida. Verifica la chiave in Impostazioni → IA.",
-      "noSubscription": "Autorizzati tramite `claude login` nel terminale.",
+      "noKey": "Per questo provider non è impostata alcuna chiave API. Inseriscila in Impostazioni → IA.",
+      "keyMissing": "Per questo provider era stata salvata una chiave API, ma non è più presente nel portachiavi. Inseriscila di nuovo in Impostazioni → IA.",
+      "storeUnavailable": "Il portachiavi di sistema non ha risposto, non è stato possibile leggere la chiave API. Non abbiamo eliminato nulla, ma al momento non possiamo verificare se la chiave sia ancora presente. Riprova più tardi o riavvia l'applicazione.",
       "quotaExceeded": "Limite di messaggi raggiunto. Riprova più tardi o passa a una chiave API.",
       "requestBudgetStopped": "Richiesta interrotta: è stato raggiunto il limite di costo per richiesta. Modificalo in Impostazioni → IA.",
+      "actionNotPrepared": "Nessuna azione è stata preparata: non c'è alcun pulsante di conferma e nulla è stato modificato. Chiedi di nuovo indicando le email interessate.",
       "offline": "L'assistente IA non è disponibile offline.",
       "timeout": "Timeout della richiesta. Riprova.",
       "changeProvider": "Cambia provider"
@@ -1247,7 +1394,6 @@
     "settings": {
       "tab": "IA",
       "provider": "Fornitore",
-      "providerSubscription": "Abbonamento Claude",
       "providerApi": "Chiave API Anthropic",
       "providerOpenAI": "Chiave API OpenAI",
       "providerGemini": "Chiave API Google Gemini",
@@ -1287,7 +1433,7 @@
       "chooseProvider": "Scegli il metodo di connessione:",
       "back": "Indietro",
       "resetProvider": "Reimposta configurazione",
-      "resetConfirm": "Reimpostare la configurazione AI? La chiave API verrà eliminata.",
+      "resetConfirm": "Reimpostare la configurazione AI? La chiave API di questo provider verrà eliminata. Le chiavi degli altri provider vengono mantenute.",
       "checkRequired": "Prima verifica la connessione",
       "memory": {
         "title": "Memoria IA",
@@ -1304,6 +1450,16 @@
         "title": "Risposta immediata",
         "label": "Suggerisci bozze di risposta con l'IA",
         "help": "Aggiunge un pulsante Risposta immediata al messaggio aperto che redige due o tre risposte pronte da modificare. Nulla viene inviato automaticamente. Disattivato per impostazione predefinita; abilitabile per account."
+      },
+      "proofread": {
+        "title": "Correzione IA",
+        "label": "Controlla gli errori nelle bozze con l'IA",
+        "help": "Aggiunge nella finestra di composizione un pulsante Controlla il testo che elenca le correzioni suggerite per il testo che hai scritto. Accetti ogni correzione separatamente e nulla viene modificato o inviato da solo. Il controllo non blocca né ritarda mai l'invio. Disattivato per impostazione predefinita; si attiva per account."
+      },
+      "translate": {
+        "title": "Traduzione con IA",
+        "label": "Consenti la traduzione dei messaggi ricevuti e delle tue bozze con l’IA",
+        "help": "Aggiunge un pulsante Traduci sopra il messaggio che stai leggendo. Nulla viene tradotto da solo: il fornitore viene contattato solo quando lo premi e l’originale resta a un clic di distanza. La traduzione è mostrata come testo semplice e non sostituisce mai il messaggio memorizzato. Lo stesso pulsante compare nella finestra di scrittura per la bozza che stai scrivendo: MailCopilot invia solo il testo che hai scritto tu — una citazione, un’intestazione di inoltro o una firma che riconosce non entrano nella richiesta e tornano invariate. Questo riconoscimento non è completo: alcuni stili di citazione di altri programmi di posta non portano alcun segno individuabile da MailCopilot e in quel caso viene inviata l’intera bozza. Anche qui nulla viene tradotto da solo: il risultato compare in un pannello di confronto accanto alla bozza e la sostituisce solo se lo decidi tu. Disattivata per impostazione predefinita, si attiva per singolo account."
       }
     },
     "threadSummary": {
@@ -1329,15 +1485,75 @@
         "title": "Rivedi la riscrittura IA",
         "before": "Prima",
         "after": "Dopo",
+        "changeCount_one": "{{count}} modifica",
+        "changeCount_other": "{{count}} modifiche",
+        "noChanges": "La riscrittura corrisponde al tuo testo: non c’è nulla da cambiare.",
+        "editsHeading": "Modifiche",
+        "unchangedLines_one": "{{count}} riga invariata",
+        "unchangedLines_other": "{{count}} righe invariate",
+        "plainText": "Testo semplice",
         "replace": "Sostituisci",
         "insert": "Inserisci al cursore",
-        "cancel": "Annulla"
+        "cancel": "Annulla",
+        "staleWarning": "Hai modificato la bozza mentre l'IA lavorava, quindi la sostituzione annullerebbe quelle modifiche. Inserisci al cursore oppure esegui di nuovo l'azione.",
+        "staleReplaceHint": "La sostituzione non è disponibile perché la bozza è cambiata dopo la richiesta di questa riscrittura."
       },
       "refusal": {
         "budget": "Budget IA giornaliero raggiunto: la riscrittura è in pausa fino al ripristino.",
         "noProvider": "Configura un provider IA nelle impostazioni per riscrivere le bozze.",
         "providerError": "Impossibile riscrivere questa bozza in questo momento.",
-        "emptyInput": "Scrivi prima del testo, poi scegli un'azione rapida."
+        "emptyInput": "Scrivi prima del testo, poi scegli un'azione rapida.",
+        "tooLong": "Questa bozza è troppo lunga per essere riscritta in una sola volta e non è possibile riscrivere solo una selezione: MailCopilot prende sempre tutto il tuo testo. Accorcia la bozza, oppure taglia via una parte, riscrivi quello che resta e reincolla la parte tagliata. Se il tuo testo sembra breve, MailCopilot potrebbe non aver riconosciuto dove inizia un messaggio citato e averlo conteggiato insieme al tuo.",
+        "noOwnText": "Le azioni rapide riscrivono solo il tuo testo: il messaggio citato e la tua firma restano intatti. Scrivi prima qualcosa sopra la citazione."
+      },
+      "proofread": {
+        "button": "Controlla il testo",
+        "checking": "Controllo in corso…",
+        "title": "Correzioni suggerite",
+        "editCount_one": "{{count}} suggerimento",
+        "editCount_other": "{{count}} suggerimenti",
+        "noEdits": "Nessun errore trovato: il testo si legge bene.",
+        "dropped_one": "{{count}} suggerimento non è stato collocato nel testo ed è stato scartato.",
+        "dropped_other": "{{count}} suggerimenti non sono stati collocati nel testo e sono stati scartati.",
+        "accept": "Accetta",
+        "accepted": "Accettato",
+        "undo": "Ripristina",
+        "acceptAll": "Accetta tutti",
+        "apply": "Applica selezionati",
+        "cancel": "Annulla",
+        "category": {
+          "spelling": "Ortografia",
+          "grammar": "Grammatica",
+          "punctuation": "Punteggiatura",
+          "wording": "Formulazione",
+          "clarity": "Chiarezza"
+        },
+        "refusal": {
+          "notEnabled": "Attiva la correzione con IA per questo account nelle impostazioni per controllare il testo.",
+          "noOwnText": "La correzione controlla solo il tuo testo: il messaggio citato e la tua firma restano intatti. Scrivi prima qualcosa sopra la citazione.",
+          "emptyInput": "Scrivi prima del testo, poi avvia il controllo.",
+          "tooLong": "Questa bozza è troppo lunga per essere controllata in una sola volta e non è possibile controllare solo una selezione: MailCopilot prende sempre tutto il tuo testo. Accorcia la bozza, oppure taglia via una parte, controlla quello che resta e reincolla la parte tagliata. Se il tuo testo sembra breve, MailCopilot potrebbe non aver riconosciuto dove inizia un messaggio citato e averlo conteggiato insieme al tuo.",
+          "budget": "Budget IA giornaliero raggiunto: la correzione è in pausa fino al ripristino.",
+          "noProvider": "Configura un provider IA nelle impostazioni per correggere le bozze.",
+          "providerError": "Impossibile controllare questa bozza in questo momento."
+        },
+        "staleWarning": "Hai modificato la bozza mentre il controllo era in corso, quindi questi suggerimenti non corrispondono più. Esegui di nuovo il controllo."
+      },
+      "translate": {
+        "button": "Traduci",
+        "loading": "Traduzione…",
+        "targetLabel": "Traduci la bozza in",
+        "targetPlaceholder": "Scegli una lingua",
+        "diffLabel": "Traduzione",
+        "refusal": {
+          "budget": "Il budget IA per questo periodo è esaurito. Aumentalo in Impostazioni → IA oppure attendi il periodo successivo.",
+          "noProvider": "Nessun fornitore di IA è ancora configurato. Aggiungine uno in Impostazioni → IA.",
+          "providerError": "Il fornitore di IA non ha restituito una traduzione. Riprova.",
+          "emptyInput": "Non c'è ancora nulla da tradurre: scrivi prima un testo.",
+          "tooLong": "Questa bozza è troppo lunga per essere tradotta in una volta sola e non è possibile tradurre solo una selezione: MailCopilot prende sempre tutto il tuo testo. Accorcia la bozza, oppure taglia via una parte, traduci quello che resta e reincolla la parte tagliata. Se il tuo testo sembra breve, MailCopilot potrebbe non aver riconosciuto dove inizia un messaggio citato e averlo conteggiato insieme al tuo.",
+          "optOut": "La traduzione è disattivata per questo account. Attivala in Impostazioni → IA → Traduci i messaggi.",
+          "noOwnText": "La bozza contiene solo testo citato e una firma. Scrivi il tuo testo sopra la citazione: citazioni e firme non vengono mai tradotte."
+        }
       }
     },
     "instantReply": {
@@ -1372,7 +1588,6 @@
     "disabledHint": "L'invio di segnalazioni è disattivato. Visita il nostro sito per assistenza."
   },
   "attachments": {
-    "previewAvailable": "Anteprima disponibile",
     "downloadAction": "Scarica allegato: {{name}}",
     "iconLabel": {
       "pdf": "Documento PDF",
@@ -1409,5 +1624,44 @@
     "maximize": "Ingrandisci",
     "restore": "Ripristina",
     "close": "Chiudi"
+  },
+  "contextMenu": {
+    "openLink": "Apri il link nel browser",
+    "copyLinkAddress": "Copia indirizzo del link",
+    "cut": "Taglia",
+    "copy": "Copia",
+    "paste": "Incolla",
+    "selectAll": "Seleziona tutto",
+    "addToDictionary": "Aggiungi al dizionario"
+  },
+  "spellcheck": {
+    "consentTitle": "Scaricare un dizionario ortografico?",
+    "consentMessage": "Per controllare l’ortografia in questa lingua serve un file di dizionario.",
+    "consentDetail": "Il file viene scaricato da {{origin}}, che non fa parte di MailCopilot. Quella richiesta gli rivela quale lingua hai scelto e da quale indirizzo di rete ti colleghi. Nulla di ciò che scrivi viene inviato: il controllo avviene su questo computer. Scegli Annulla e la lingua resterà disattivata.",
+    "consentLanguages": "Lingue",
+    "consentButton": "Scarica",
+    "cancelButton": "Annulla",
+    "declined": "Il download del dizionario è stato rifiutato, quindi quella lingua non è stata attivata. Tutte le altre modifiche sono state salvate."
+  },
+  "aiDestination": {
+    "confirmTitle": "Cambiare l'indirizzo a cui vengono inviate le richieste IA?",
+    "confirmMessage": "Le richieste IA passeranno da un indirizzo diverso.",
+    "confirmDetail": "Prosegui solo se hai inserito tu stesso questo indirizzo. Se non hai appena modificato le impostazioni IA, scegli Annulla.",
+    "endpointLabel": "Indirizzo del servizio IA",
+    "proxyLabel": "Proxy per le richieste IA",
+    "endpointRisk": "Ogni richiesta IA verso questo indirizzo contiene la tua chiave API: chi gestisce l'indirizzo riceve quindi la chiave e tutto ciò che l'assistente invia.",
+    "endpointRiskCleartext": "Ogni richiesta IA verso questo indirizzo contiene la tua chiave API: chi gestisce l'indirizzo riceve quindi la chiave e tutto ciò che l'assistente invia. L'indirizzo inizia con http:// e non con https://, quindi quelle richieste non sono cifrate: può leggerle chiunque si trovi lungo il percorso di rete, proxy compresi.",
+    "endpointRiskInactive": "Questo indirizzo viene usato solo quando il provider IA è un servizio compatibile con OpenAI, che al momento non è il provider in uso. Se in seguito verrà selezionato quel provider, ogni richiesta IA verso questo indirizzo conterrà la tua chiave API: chi gestisce l'indirizzo riceverebbe quindi la chiave e tutto ciò che l'assistente invia.",
+    "endpointRiskInactiveCleartext": "Questo indirizzo viene usato solo quando il provider IA è un servizio compatibile con OpenAI, che al momento non è il provider in uso. Se in seguito verrà selezionato quel provider, ogni richiesta IA verso questo indirizzo conterrà la tua chiave API: chi gestisce l'indirizzo riceverebbe quindi la chiave e tutto ciò che l'assistente invia. Inoltre l'indirizzo inizia con http:// e non con https://, quindi quelle richieste non sarebbero cifrate: potrebbe leggerle chiunque si trovi lungo il percorso di rete, proxy compresi.",
+    "proxyRisk": "Tutte le richieste IA passeranno da questo proxy: chi lo gestisce vede quali indirizzi contatti, quanto e con quale frequenza. Può leggere la tua chiave API e il contenuto dei messaggi solo se il proxy intercetta le connessioni cifrate con un certificato considerato attendibile da questo computer.",
+    "proxyRiskCleartext": "Tutte le richieste IA passeranno da questo proxy e l'indirizzo del servizio IA inizia con http:// e non con https://, quindi quelle richieste non sono cifrate. Chi gestisce il proxy può perciò leggere la tua chiave API e il contenuto dei messaggi, non solo vedere quali indirizzi contatti.",
+    "currentValue": "Ora",
+    "newValue": "Nuovo",
+    "directValue": "senza proxy (connessione diretta)",
+    "confirmButton": "Cambia indirizzo",
+    "cancelButton": "Annulla",
+    "declined": "Il nuovo indirizzo per le richieste IA non è stato confermato: resta in uso quello precedente.",
+    "invalid": "Questo indirizzo non è utilizzabile per le richieste IA. Inserisci un indirizzo completo che inizi con http:// o https://; l'indirizzo del servizio IA non deve contenere una stringa di query né un #frammento.",
+    "busy": "È già aperta una conferma dell'indirizzo per le richieste IA. Rispondi e riprova."
   }
 }

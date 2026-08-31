@@ -348,6 +348,65 @@ describe('microsoftOAuth', { timeout: 30_000 }, () => {
       expect(result.email).toBe('alice@live.com')
     })
 
+    // §2.94 — we request the `profile` scope, so the name claim is available;
+    // before this it was discarded and freshly connected accounts had no name.
+    it('extracts the display name from the id_token name claim', async () => {
+      const idToken = mockJwt({ email: 'user@outlook.com', name: 'Ada Lovelace', sub: '12345' })
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({
+          access_token: 'ms-access-token',
+          refresh_token: 'ms-refresh-token',
+          expires_in: 3600,
+          id_token: idToken,
+        })),
+      })
+
+      const result = await runMicrosoftOAuthFlow({
+        clientId: 'test-client',
+        openExternal: (url) => {
+          const parsed = new URL(url)
+          const redirectUri = parsed.searchParams.get('redirect_uri')!
+          const stateParam = parsed.searchParams.get('state')!
+          simulateCallback(new URL(redirectUri).port, `code=test-code&state=${stateParam}`)
+        },
+        timeoutMs: 20_000,
+        loopbackPort: 0,
+      })
+
+      expect(result.displayName).toBe('Ada Lovelace')
+    })
+
+    it('leaves the display name empty when no name claim is present', async () => {
+      const idToken = mockJwt({ email: 'user@outlook.com', sub: '12345' })
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({
+          access_token: 'ms-access-token',
+          refresh_token: 'ms-refresh-token',
+          expires_in: 3600,
+          id_token: idToken,
+        })),
+      })
+
+      const result = await runMicrosoftOAuthFlow({
+        clientId: 'test-client',
+        openExternal: (url) => {
+          const parsed = new URL(url)
+          const redirectUri = parsed.searchParams.get('redirect_uri')!
+          const stateParam = parsed.searchParams.get('state')!
+          simulateCallback(new URL(redirectUri).port, `code=test-code&state=${stateParam}`)
+        },
+        timeoutMs: 20_000,
+        loopbackPort: 0,
+      })
+
+      // Never invent a name — the caller decides the fallback.
+      expect(result.displayName).toBe('')
+    })
+
     it('falls back to MS Graph /me when id_token has no email', async () => {
       const idToken = mockJwt({ sub: '12345' }) // no email, no preferred_username
 
@@ -378,6 +437,7 @@ describe('microsoftOAuth', { timeout: 30_000 }, () => {
         text: () => Promise.resolve(JSON.stringify({
           mail: 'graphuser@outlook.com',
           userPrincipalName: 'graphuser@contoso.com',
+          displayName: 'Graph User',
         })),
       })
 
@@ -395,6 +455,8 @@ describe('microsoftOAuth', { timeout: 30_000 }, () => {
       })
 
       expect(result.email).toBe('graphuser@outlook.com')
+      // §2.94 — on this path the name comes from Graph's own displayName.
+      expect(result.displayName).toBe('Graph User')
 
       // Verify the graph API was called with the Graph-audience token
       // (at-graph, NOT at-exchange — mixing audiences would fail AADSTS50013).

@@ -307,8 +307,12 @@ test('delayed send: email goes to Outbox and sends via Send now', async () => {
 
     // Enable send delay (Undo Send / queue path).
     await page.evaluate(async () => {
-      const s = await window.api.invoke('settings:get') as Record<string, unknown>
-      await window.api.invoke('settings:save', { ...s, sendDelaySeconds: 10 })
+      // Only the field this test needs. `settings:save` merges its payload into
+      // the persisted settings, so echoing the whole object back adds nothing —
+      // and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, leaving the send delay unset.
+      await window.api.invoke('settings:save', { sendDelaySeconds: 10 })
     })
 
     await page.getByTestId('sidebar-compose').click()
@@ -352,8 +356,12 @@ test('delayed send: undo bar cancels queued send and restores compose', async ()
     const browser = ctx.browser!
 
     await page.evaluate(async () => {
-      const s = await window.api.invoke('settings:get') as Record<string, unknown>
-      await window.api.invoke('settings:save', { ...s, sendDelaySeconds: 10 })
+      // Only the field this test needs. `settings:save` merges its payload into
+      // the persisted settings, so echoing the whole object back adds nothing —
+      // and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, leaving the send delay unset.
+      await window.api.invoke('settings:save', { sendDelaySeconds: 10 })
     })
 
     await page.getByTestId('sidebar-compose').click()
@@ -1316,8 +1324,13 @@ test('AI panel: GTD chips visible in email context', async () => {
 
     // Configure AI provider so the panel shows the chat UI (not onboarding)
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
-      await window.api.invoke('settings:save', { ...current, aiProvider: 'subscription', aiPrivacyConsent: true })
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
+      await window.api.invoke('settings:save', { aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1', aiPrivacyConsent: true })
     })
 
     // Open first email
@@ -1356,8 +1369,13 @@ test('AI panel: responds without error when email has attachments', async () => 
 
     // Configure AI provider so the panel shows the chat UI (not onboarding)
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
-      await window.api.invoke('settings:save', { ...current, aiProvider: 'subscription', aiPrivacyConsent: true })
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
+      await window.api.invoke('settings:save', { aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1', aiPrivacyConsent: true })
     })
 
     // Open the HTML email (uid 100) which has an inline image attachment
@@ -1417,10 +1435,14 @@ test('AI panel resize: email stays visible after drag-resize', async () => {
 
     // Configure AI provider
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
       await window.api.invoke('settings:save', {
-        ...current,
-        aiProvider: 'subscription',
+        aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
         aiPrivacyConsent: true,
       })
     })

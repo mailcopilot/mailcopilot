@@ -393,3 +393,123 @@ describe('§2.51 — db.ai_reserve_denied schema', () => {
     expect(METRIC_EVENTS[NAME].aggregate).toBe(true)
   })
 })
+
+// --- §2.122 — ai.api_key_store_op schema hardening --------------------------
+//
+// Emitted from electron/services/ai.ts (journalAiKeySecretOp) on every read/
+// write/delete of an AI provider's stored key. The question it answers: do
+// stored keys stay stored? Three invariants must hold:
+//
+//   1. kind=event, aggregate=true — a read happens on every AI request, so
+//      per-call envelopes would flood the sink; counts are what get acted on.
+//   2. mainOnly=true — the renderer bridge must reject a forged storage
+//      history (tested in ipc.test.ts).
+//   3. All three tags are closed enum domains, never free-form strings — the
+//      key material structurally cannot ride along even as a mistake, because
+//      there is no 'string' tag type here to misuse.
+
+describe('§2.122 — ai.api_key_store_op schema hardening', () => {
+  const NAME = 'ai.api_key_store_op' as const
+
+  it('is registered in METRIC_EVENTS as an event', () => {
+    expect(METRIC_EVENTS[NAME]).toBeDefined()
+    expect(METRIC_EVENTS[NAME].kind).toBe('event')
+  })
+
+  it('mainOnly is true — renderer bridge must reject this event', () => {
+    expect(METRIC_EVENTS[NAME].mainOnly).toBe(true)
+  })
+
+  it('aggregates — a read fires on every AI request', () => {
+    expect(METRIC_EVENTS[NAME].aggregate).toBe(true)
+  })
+
+  it('carries ONLY op / provider / outcome — no key, no key id, no free text', () => {
+    expect(METRIC_EVENTS[NAME].tags).toEqual({
+      op: 'ai_key_op',
+      provider: 'ai_key_provider',
+      outcome: 'ai_key_outcome',
+    })
+  })
+
+  it('ai_key_provider is closed to the three providers with a stored key', () => {
+    expect(DOMAINS.ai_key_provider).toEqual(['anthropic-api', 'openai-api', 'gemini-api'])
+  })
+
+  it('ai_key_op is closed to the three secret-store operations', () => {
+    expect(DOMAINS.ai_key_op).toEqual(['read', 'write', 'delete'])
+  })
+
+  it('ai_key_outcome is closed to the four outcomes — "found"/"absent" split the read, "store_error" is the previously-invisible fault', () => {
+    expect(DOMAINS.ai_key_outcome).toEqual(['found', 'absent', 'ok', 'store_error'])
+  })
+})
+
+// --- §2.228.f3 — the desktop-side close-to-tray gate was removed -----------
+
+/**
+ * The gate asked the desktop whether it had taken our tray icon before a
+ * close was allowed to hide the window. It was removed (backgroundMail.ts,
+ * main.backgroundMail.test.ts) because reopening restores a hidden window
+ * regardless of the icon's state — relaunching on Linux/Windows, the dock icon
+ * on macOS. These pin the schema half of that removal,
+ * which the source-mirror checks in main.backgroundMail.test.ts do not reach
+ * (they read main.ts, not metricsSchema.ts) — a revert that restored the
+ * event here without touching main.ts would pass every existing check.
+ *
+ * Named keys alone are not enough of a pin: a second attempt at the same idea
+ * would arrive under a different name, and a check that only knew the one name
+ * it happened to be written against would pass it through. The backing check is
+ * therefore an ALLOWLIST of the live tray surface rather than a vocabulary of
+ * banned shapes. The previous version matched /^tray[._].*(verdict|host|gate)/,
+ * i.e. only the words the removed gate happened to use — `tray.desktop_acceptance`
+ * or a tag named `accepted_by_desktop` walk straight past it, and guessing the
+ * next author's nouns is a race that cannot be won by construction (the
+ * §2.228.f2 draft alone went through three names). An allowlist inverts the
+ * burden: it breaks on ANY new tray event, tag or domain, gate-shaped or not,
+ * and a breaking test is exactly the moment at which the author has to state
+ * what they are adding. Paying a deliberate edit here for a legitimate addition
+ * is the feature, not the cost.
+ *
+ * Scope, stated honestly: this covers the `tray.` event namespace and `tray_`
+ * domains. A gate re-registered under a name with no tray in it at all
+ * (`desktop.icon_verdict`) is outside anything this file can assert and is
+ * caught by review.
+ */
+describe('§2.228.f3 — the close-to-tray gate stays removed from the schema', () => {
+  /** Every tray event that legitimately exists, with its exact tag → domain map. */
+  const LIVE_TRAY_EVENTS: Record<string, Record<string, string>> = {
+    'tray.created': { outcome: 'tray_outcome', platform: 'platform' },
+    'tray.menu_action': { action: 'tray_action' },
+  }
+  /** Every `tray_`-prefixed domain that legitimately exists. */
+  const LIVE_TRAY_DOMAINS = ['tray_action', 'tray_outcome']
+  const EVENTS = METRIC_EVENTS as Record<string, { tags?: Record<string, string> }>
+
+  it('does not re-register the tray_host_verdict domain', () => {
+    expect(Object.prototype.hasOwnProperty.call(DOMAINS, 'tray_host_verdict')).toBe(false)
+  })
+
+  it('does not re-register the tray.close_gate event', () => {
+    expect(Object.prototype.hasOwnProperty.call(METRIC_EVENTS, 'tray.close_gate')).toBe(false)
+  })
+
+  it('registers exactly the live tray events and nothing else', () => {
+    expect(Object.keys(EVENTS).filter(k => k.startsWith('tray.')).sort())
+      .toEqual(Object.keys(LIVE_TRAY_EVENTS).sort())
+  })
+
+  it('gives every live tray event exactly its allowlisted tags — a new tag has to be added here first', () => {
+    // Covers the gate returning as a tag bolted onto an event that already
+    // exists (`tray.created` with an `accepted` tag, say), which no key-level
+    // check above would see.
+    for (const [name, tags] of Object.entries(LIVE_TRAY_EVENTS)) {
+      expect(EVENTS[name]?.tags, name).toEqual(tags)
+    }
+  })
+
+  it('registers exactly the live tray_ domains and nothing else', () => {
+    expect(Object.keys(DOMAINS).filter(k => k.startsWith('tray_')).sort())
+      .toEqual([...LIVE_TRAY_DOMAINS].sort())
+  })
+})

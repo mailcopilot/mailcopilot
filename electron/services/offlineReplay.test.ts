@@ -46,6 +46,7 @@ vi.mock('../metrics', () => ({
   startMetricSpan: (name: string, attrs?: Record<string, unknown>) => startMetricSpan(name, attrs),
 }))
 
+import { currentImapPriority } from '../../packages/net/imapScheduler'
 import { replayOfflineOps, captureOnce, resetOfflineReplayCaptureGate } from './offlineReplay'
 import { getOfflineOps, deleteOfflineOp, deleteOfflineOpsForFolder } from '../../packages/db'
 import { setSeen, setFlagged, moveMessages, deleteMessagesRemote, getMailboxStatus } from '../../packages/net/imap'
@@ -85,6 +86,22 @@ describe('offlineReplay', () => {
     expect(deleteOfflineOp).toHaveBeenCalledTimes(2)
     expect(deleteOfflineOp).toHaveBeenCalledWith(1)
     expect(deleteOfflineOp).toHaveBeenCalledWith(2)
+  })
+
+  // §2.17 Phase 1 — the tier is what keeps a replay burst from pushing the
+  // message the user is opening behind a queue of STORE/MOVE commands. It is
+  // ambient, so the only honest way to observe it is from inside the net call.
+  it('runs its IMAP work at the `sync` tier', async () => {
+    const tiers: string[] = []
+    vi.mocked(setSeen).mockImplementation(async () => { tiers.push(currentImapPriority()) })
+    vi.mocked(getOfflineOps).mockReturnValue([
+      { id: 1, accountId: 1, folder: 'INBOX', uid: 100, opType: 'flag_seen', payload: { seen: true }, uidValidity: 42, createdAt: '2026-01-01' },
+    ])
+
+    await replayOfflineOps(1, getImapConfig)
+
+    expect(tiers).toEqual(['sync'])
+    vi.mocked(setSeen).mockResolvedValue(undefined)
   })
 
   it('replays flag_flagged ops with mixed true/false', async () => {

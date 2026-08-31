@@ -53,9 +53,39 @@
  *      pick).
  *   4. The per-account "Instant Reply" Settings toggle persists across a
  *      Settings window close/reopen cycle (UI + settings.json round-trip).
+ *   5. §2.78: on a REAL localized reply draft (attribution + quoted original
+ *      built by the real reply flow), an untouched draft refuses locally with
+ *      the "your own text only" copy — the quoted message never reaches the
+ *      IPC channel, let alone a provider.
  */
+import { createRequire } from 'node:module'
 import { test, expect } from '@playwright/test'
 import { launchApp, cleanupApp, clickMailItem, waitForPage, EXPECT_TIMEOUT, CLOSE_TIMEOUT, type AppContext } from './helpers'
+
+/**
+ * Interface copy asserted by this spec, read straight from the EN locale.
+ *
+ * The two languages in an e2e run are INDEPENDENT, and conflating them is what
+ * broke this spec once already:
+ *   - Mail fixtures are localized by `E2E_LANGUAGE` (`electron/main.ts`,
+ *     currently 'ru') — it only picks subjects/bodies for `buildE2EBoxes`.
+ *   - The interface is NOT: `src/i18n/index.ts` initializes i18next with
+ *     `lng: DEFAULT_LANGUAGE` ('en') and nothing in `tests/e2e/helpers.ts`
+ *     overrides it. Every rendered string is therefore English.
+ * So: Russian mail, English UI. Assert UI copy from `en.json`.
+ *
+ * Read via `createRequire` — the same pattern `helpers.ts` uses for `electron`.
+ * This package is `"type": "module"`, so a plain `import ... from '*.json'`
+ * would need an ESM import attribute, and pulling i18next into a Node-side spec
+ * just to resolve two keys would be far more machinery than one JSON read.
+ * Reading the locale instead of inlining a literal also keeps the assertion
+ * honest if the copy is reworded: the test then still checks the RIGHT key.
+ */
+const QUICK_ACTION_REFUSAL = (
+  createRequire(import.meta.url)('../../src/i18n/locales/en.json') as {
+    ai: { quickAction: { refusal: { noOwnText: string; noProvider: string } } }
+  }
+).ai.quickAction.refusal
 
 test('quick actions: toolbar renders in Compose and a preset click reaches a graceful no_provider refusal', async () => {
   const ctx: Partial<AppContext> = {}
@@ -86,6 +116,11 @@ test('quick actions: toolbar renders in Compose and a preset click reaches a gra
     await expect(compose.getByTestId('compose-quick-action-formal')).toBeVisible()
     await expect(compose.getByTestId('compose-quick-action-grammar')).toBeVisible()
 
+    // A fresh reply draft is nothing but the attribution + quoted original, so
+    // the §2.78 boundary detector reports "no own text" and never fires IPC.
+    // Type something of our own above the quote to reach the real channel.
+    const replyBody = await compose.getByTestId('compose-text').inputValue()
+    await compose.getByTestId('compose-text').fill(`Спасибо, отправлю сегодня.${replyBody}`)
     const bodyBefore = await compose.getByTestId('compose-text').inputValue()
 
     // Click "Improve" — reaches the real ai:quickAction:rewrite IPC channel.
@@ -95,6 +130,80 @@ test('quick actions: toolbar renders in Compose and a preset click reaches a gra
     await expect(compose.getByTestId('compose-quick-actions-refusal')).toBeVisible({ timeout: EXPECT_TIMEOUT })
 
     // No diff preview ever appears, and the body is never auto-substituted.
+    await expect(compose.getByTestId('quick-action-diff')).toHaveCount(0)
+    await expect(compose.getByTestId('compose-text')).toHaveValue(bodyBefore)
+  } finally {
+    await cleanupApp(ctx)
+  }
+})
+
+/**
+ * §2.78 — the quoted original and the signature are never handed to the model.
+ *
+ * A successful Replace (rewrite applied, quote + signature verifiably intact)
+ * is NOT e2e-reachable for the reason in the file header: no provider is
+ * configured for e2e fixtures, so every rewrite resolves `no_provider` before a
+ * model call. That half of the AC is covered where the model output can be
+ * controlled — `src/components/ComposeQuickActions.test.tsx` ("Replace keeps
+ * the quoted original and the signature intact") and
+ * `packages/core/composeBody.test.ts` (round-trip).
+ *
+ * What IS deterministic here, and only here, is the boundary detector running
+ * against a REAL reply body built by the real reply flow (`src/App.tsx`
+ * `t('compose.templates.replyIntro')` attribution + `quoteText()` over the RU
+ * fixture body): an untouched reply draft has nothing of the user's own, so the
+ * toolbar refuses locally with its own copy instead of shipping the
+ * correspondent's quoted words to a provider. That is the regression this task
+ * exists to prevent.
+ *
+ * The refusal copy is the discriminator and must stay exact: a "some refusal is
+ * visible" assertion would pass on the provider-side `no_provider` refusal too,
+ * i.e. on the very path where the quoted original DID reach the IPC channel —
+ * which would gut the test. See the `QUICK_ACTION_REFUSAL` note at the top of
+ * this file for why the expected string is read from `en.json` while the mail
+ * fixtures are Russian.
+ */
+test('quick actions: an untouched reply draft refuses locally instead of sending the quoted original', async () => {
+  const ctx: Partial<AppContext> = {}
+  try {
+    Object.assign(ctx, await launchApp('mailcopilot-e2e-quickaction-quote-'))
+    const page = ctx.page!
+    const browser = ctx.browser!
+
+    // Fixture language is 'ru' (electron/main.ts E2E_LANGUAGE), so the subject
+    // filter must use the localized string — see the test above.
+    const baseMail = page.getByTestId('mail-item').filter({ hasText: 'E2E1: первое письмо' }).first()
+    await expect(baseMail).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await clickMailItem(baseMail)
+    await expect(page.getByTestId('mail-action-reply')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await page.getByTestId('mail-action-reply').click()
+
+    const compose = await waitForPage(browser, p => p.url().includes('#/compose'))
+    await compose.waitForLoadState('domcontentloaded')
+    compose.on('dialog', d => d.accept())
+
+    await expect(compose.getByTestId('compose-quick-actions')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    // Premise: the reply draft really does carry a quoted block.
+    await expect
+      .poll(async () => (await compose.getByTestId('compose-text').inputValue()).includes('>'), { timeout: EXPECT_TIMEOUT })
+      .toBe(true)
+    const bodyBefore = await compose.getByTestId('compose-text').inputValue()
+
+    await compose.getByTestId('compose-quick-action-formal').click()
+
+    // The local refusal copy, not the provider one: the draft never left the
+    // renderer, so the quoted original was never sent anywhere. Exact text, and
+    // an explicit negative against the `no_provider` copy — the refusal element
+    // carries one test id for every reason, so the string IS the discriminator.
+    // (`refusalMessageKey`'s `default:` arm falls back to the provider-error
+    // copy, so a lost `no_own_text` arm would silently look like a remote
+    // refusal here — this pair is what catches that.)
+    const refusal = compose.getByTestId('compose-quick-actions-refusal')
+    await expect(refusal).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(refusal).toHaveText(QUICK_ACTION_REFUSAL.noOwnText)
+    await expect(refusal).not.toHaveText(QUICK_ACTION_REFUSAL.noProvider)
+
+    // Body untouched, no preview.
     await expect(compose.getByTestId('quick-action-diff')).toHaveCount(0)
     await expect(compose.getByTestId('compose-text')).toHaveValue(bodyBefore)
   } finally {

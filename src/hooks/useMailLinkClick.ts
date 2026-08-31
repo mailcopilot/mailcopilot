@@ -10,8 +10,58 @@ function stripWww(host: string): string {
 }
 
 /**
+ * Characters a host-like token may be built from: the label alphabet
+ * `[a-zA-Z0-9-]` plus the label separator. Anything else (space, `@`, `/`, `_`,
+ * punctuation, non-ASCII) ends the token — exactly the alphabet the previous
+ * regex accepted, so token boundaries land where its matches used to.
+ */
+function isHostTokenChar(ch: string): boolean {
+  return (ch >= 'a' && ch <= 'z')
+    || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9')
+    || ch === '-'
+    || ch === '.'
+}
+
+/**
+ * First host-like substring inside one token, or `null`.
+ *
+ * "Host-like" is two or more non-empty dot-separated labels, taken greedily —
+ * the same shape `[a-z0-9-]+(?:\.[a-z0-9-]+)+` described, evaluated in one pass.
+ * Leading dots and empty labels are skipped exactly as the regex's leftmost-match
+ * search skipped them: `".evil.com"` → `evil.com`, `"a..b"` → no match,
+ * `"a.b..c"` → `a.b`, `"today."` → no match.
+ */
+function firstHostInToken(token: string): string | null {
+  const labels = token.split('.')
+  let start = -1
+  for (let i = 0; i + 1 < labels.length; i++) {
+    if (labels[i] !== '' && labels[i + 1] !== '') { start = i; break }
+  }
+  if (start === -1) return null
+  let end = start + 1
+  while (end + 1 < labels.length && labels[end + 1] !== '') end++
+  return labels.slice(start, end + 1).join('.')
+}
+
+/**
  * Try to extract a domain/host from visible link text.
  * Handles both full URLs ("https://evil.com/path") and plain host-like strings ("evil.com").
+ *
+ * LINEAR BY CONSTRUCTION (BACKLOG §2.133). This used to be
+ * `s.match(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i)` — unanchored, with a nested
+ * quantifier, so a text with no dot in it made the engine restart at every one
+ * of N offsets and rescan to the end from each: quadratic, and measured at
+ * 261 ms for 8 KB, 11.4 s for 50 KB, 76 s for 200 KB of renderer-main-thread
+ * freeze. `text` arrives from a mail body (see `parseRoutedMailLink`), so that
+ * was a remote-sender denial of service.
+ *
+ * The bound now enforced on `t` at the main-process boundary caps the input, but
+ * this function must not DEPEND on that: the next caller would not know to. So
+ * the scan itself is single-pass — split the text into maximal host-character
+ * tokens and inspect each once, no backtracking anywhere — and stays linear for
+ * any input length, regardless of who calls it. Behaviour on real text is
+ * unchanged; the regression tests pin that.
  */
 function extractHostFromText(text: string): string | null {
   const s = (text || '').trim()
@@ -22,9 +72,19 @@ function extractHostFromText(text: string): string | null {
   } catch {
     // ignore
   }
-  // Domain-like text: google.com / google.com/path
-  const m = s.match(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i)
-  return m ? m[1] : null
+  // Domain-like text: google.com / google.com/path / "... visit evil.com now".
+  // One pass: walk maximal host-character runs left to right and return the
+  // first that contains a host shape — the leftmost match, as before.
+  let i = 0
+  while (i < s.length) {
+    if (!isHostTokenChar(s[i])) { i++; continue }
+    let j = i
+    while (j < s.length && isHostTokenChar(s[j])) j++
+    const found = firstHostInToken(s.slice(i, j))
+    if (found) return found
+    i = j
+  }
+  return null
 }
 
 export interface UseMailLinkClickReturn {

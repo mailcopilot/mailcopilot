@@ -4,25 +4,32 @@ import {
   setDbErrorReporter,
   setDbEventReporter,
   reportDbEvent,
+  reportDbError,
   withDbSpan,
   startDbSpan,
-  __resetDbTelemetryBufferForTest,
   __getDbTelemetryBufferSizeForTest,
+  setDbTelemetryCollectionGate,
+  resetDbTelemetryBuffer,
 } from './telemetry'
 
 beforeEach(() => {
-  __resetDbTelemetryBufferForTest()
+  // Retention is consent-gated (§2.82) and fail-closed. The suites below
+  // assert what the span buffer does WHEN allowed; the gate's own behaviour
+  // has its own describe block, which installs its own gate.
+  setDbTelemetryCollectionGate(() => true)
+  resetDbTelemetryBuffer()
 })
 
 afterEach(() => {
   setDbTelemetrySink(null)
   setDbErrorReporter(null)
   setDbEventReporter(null)
-  __resetDbTelemetryBufferForTest()
+  resetDbTelemetryBuffer()
+  setDbTelemetryCollectionGate(null)
 })
 
 describe('packages/db/telemetry — span seam', () => {
-  it('no-op default: withDbSpan runs fn and returns its value without sink installed', () => {
+  it('buffering default: withDbSpan runs fn and returns its value without sink installed', () => {
     const result = withDbSpan('db.upsert_messages', { folder_role: 'inbox' }, () => 42)
     expect(result).toBe(42)
   })
@@ -171,6 +178,36 @@ describe('packages/db/telemetry — span seam', () => {
     expect(() =>
       withDbSpan('db.upsert_messages', {}, () => { throw new Error('real failure') }),
     ).toThrow('real failure')
+  })
+
+  it('drops pre-reporter error reports outright — installing one replays nothing', () => {
+    // Errors are NOT retained: the window before installation cannot be
+    // consented to (the gate arrives later still), so holding them could
+    // never be lawful. The report is gone, and that is the documented shape.
+    expect(() =>
+      reportDbError('db.migrate_purge_uidless_messages', new Error('messages.uid_unstorable_rows_purged'), { purged_count: 3 }),
+    ).not.toThrow()
+
+    const reporter = vi.fn()
+    setDbErrorReporter(reporter)
+    expect(reporter).not.toHaveBeenCalled()
+  })
+
+  it('a live report reaches the installed reporter unchanged', () => {
+    const reporter = vi.fn()
+    setDbErrorReporter(reporter)
+    const err = new Error('no such table: messages')
+    reportDbError('db.upsert_messages', err, { skipped_count: 1 })
+    // The scrubbing boundary for live reports is electron/sentry.ts.
+    expect(reporter).toHaveBeenCalledWith('db.upsert_messages', err, { skipped_count: 1 })
+  })
+
+  it('setDbErrorReporter(null) returns to the silent default', () => {
+    const reporter = vi.fn()
+    setDbErrorReporter(reporter)
+    setDbErrorReporter(null)
+    expect(() => reportDbError('db.upsert_messages', new Error('x'), {})).not.toThrow()
+    expect(reporter).not.toHaveBeenCalled()
   })
 
   it('startDbSpan returns a safe handle even without a sink', () => {
@@ -333,6 +370,76 @@ describe('packages/db/telemetry — span seam', () => {
   })
 
   it('setDbEventReporter(null) resets to silent no-op', () => {
+    const reporter = vi.fn()
+    setDbEventReporter(reporter)
+    reportDbEvent('db.mass_delete_messages', { reason: 'server_empty' })
+    expect(reporter).toHaveBeenCalledTimes(1)
+
+    setDbEventReporter(null)
+    reportDbEvent('db.mass_delete_messages', { reason: 'server_empty' })
+    // Reporter is no longer wired — still only the one call from before reset.
+    expect(reporter).toHaveBeenCalledTimes(1)
+  })
+})
+
+// §2.82 — the privacy page promises that nothing is COLLECTED before the user
+// answers, not merely that nothing is sent. These pin that the span buffer
+// above is part of "nothing".
+describe('packages/db/telemetry — consent gate on retention', () => {
+  it('retains nothing while no gate is installed (fail-closed default)', () => {
+    setDbTelemetryCollectionGate(null)
+
+    withDbSpan('db.upsert_messages', { folder_role: 'inbox' }, () => 1)
+
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(0)
+    const starter = vi.fn(() => ({ end: vi.fn() }))
+    setDbTelemetrySink(starter)
+    expect(starter).not.toHaveBeenCalled()
+  })
+
+  it('retains nothing while an installed gate says collection is refused', () => {
+    setDbTelemetryCollectionGate(() => false)
+
+    withDbSpan('db.upsert_messages', {}, () => 1)
+
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(0)
+  })
+
+  it('a throwing gate reads as refused, not as allowed', () => {
+    setDbTelemetryCollectionGate(() => { throw new Error('gate exploded') })
+
+    expect(() => withDbSpan('db.upsert_messages', {}, () => 1)).not.toThrow()
+
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(0)
+  })
+
+  it('a consent transition drops what was already retained', () => {
+    setDbTelemetryCollectionGate(() => true)
+    withDbSpan('db.upsert_messages', { folder_role: 'inbox' }, () => 1)
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(1)
+
+    // This is what main.ts registers as the gate's reset hook; it runs on
+    // off→on AND on→off, so neither direction can flush a stale backlog.
+    resetDbTelemetryBuffer()
+
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(0)
+    const starter = vi.fn(() => ({ end: vi.fn() }))
+    setDbTelemetrySink(starter)
+    expect(starter).not.toHaveBeenCalled()
+  })
+
+  it('closing the gate through the setter drops what was retained', () => {
+    setDbTelemetryCollectionGate(() => true)
+    withDbSpan('db.upsert_messages', {}, () => 1)
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(1)
+
+    setDbTelemetryCollectionGate(() => false)
+    expect(__getDbTelemetryBufferSizeForTest()).toBe(0)
+  })
+})
+
+describe('packages/db/telemetry — event seam tail', () => {
+  it('setDbEventReporter(null) resets to silent no-op (events have no buffer)', () => {
     const reporter = vi.fn()
     setDbEventReporter(reporter)
     reportDbEvent('db.mass_delete_messages', { reason: 'server_empty' })

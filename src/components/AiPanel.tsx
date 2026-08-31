@@ -9,6 +9,12 @@ import remarkGfm from 'remark-gfm'
 import { X, Plus, Send, Square, Sparkles, Loader2, ShieldCheck, Key, ExternalLink, History, Trash2, Mail, FolderOpen, AlertCircle } from 'lucide-react'
 import { normalizeMailrefs } from '../utils/normalizeMailrefs'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
+// §2.127 — `presentedError` lives in src/utils/errorPresentation.ts. Applies to
+// `invoke()` rejections only: the `{ ok: false, reason }` / stream-event
+// messages elsewhere in this panel are envelopes composed by our AI service and
+// carry no closed-vocabulary tag.
+import { presentedError } from '../utils/errorPresentation'
+import { isApiKeyProvider, type AiApiKeySavedMap } from '../utils/aiApiKey'
 import AiActionConfirmation, { type PendingActionSummary } from './AiActionConfirmation'
 
 // --- Types ---
@@ -38,14 +44,25 @@ type AiStreamEvent =
   // electron/services/ai.ts). The main process has no i18next instance, so it
   // sends a machine-readable `code` plus an English `message` fallback and the
   // renderer localizes the known codes.
-  | { type: 'notice'; requestId: string; code: 'request_budget_exceeded'; message: string }
+  | { type: 'notice'; requestId: string; code: 'request_budget_exceeded' | 'destructive_action_not_prepared'; message: string }
   | { type: 'status'; requestId: string; status: 'thinking' | 'using_tool' | 'streaming' | 'done' }
 
+/**
+ * Mirrors `AuthStatus` in electron/services/ai.ts. §2.122 split the single
+ * `invalid_key` verdict into three, because the panel was telling users their
+ * key was wrong in the two cases where nothing had been read at all:
+ *   - `no_key`            — the store answered and holds no key for this
+ *                           provider. Ask for one; do not blame the user.
+ *   - `store_unavailable` — the store itself failed. We do NOT know whether a
+ *                           key exists, so the copy must not imply it is gone.
+ *   - `invalid_key`       — a key WAS read and rejected.
+ */
 type AuthStatus =
   | { status: 'authenticated'; email?: string }
   | { status: 'not_configured' }
+  | { status: 'no_key' }
+  | { status: 'store_unavailable' }
   | { status: 'invalid_key' }
-  | { status: 'no_subscription' }
   | { status: 'error'; message: string }
 
 type AiMessage = {
@@ -114,6 +131,15 @@ export default function AiPanel({
   const [isStreaming, setIsStreaming] = useState(false)
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null)
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
+  /**
+   * §2.122 — our own recollection (`settings.aiApiKeySaved[provider]`, written
+   * by the main process only) that a key for the current provider was once
+   * saved. WORDING ONLY: it turns "no key is set" into "a key was saved but is
+   * gone — enter it again". It never gates anything, never triggers a delete or
+   * a re-auth, and is never consulted instead of a real store read — the OS
+   * secret store owns that truth (CLAUDE.md §5 "Кто владеет правдой").
+   */
+  const [keyPreviouslySaved, setKeyPreviouslySaved] = useState(false)
   const [streamStatus, setStreamStatus] = useState<string | null>(null)
   const [showPrivacy, setShowPrivacy] = useState(false)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -138,6 +164,13 @@ export default function AiPanel({
   // sendMessage to keep the wiring readable) can nudge the AI without a
   // circular `useCallback` dep. sendMessage assigns into this ref each render.
   const sendMessageRef = useRef<((text?: string) => void) | null>(null)
+  // Serializes everything written to `aiSession:addMessage` from the stream
+  // handler. Row order in the session history is the reading order the user
+  // gets back after a restart, and a `notice` must land AFTER the answer it
+  // corrects — chaining is what makes "after" true regardless of how the two
+  // IPC round-trips interleave. Every link swallows its own failure, so the
+  // chain can never reject and stall the ones behind it.
+  const sessionWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
 
   // Keep ref in sync with state for use inside callbacks
   useEffect(() => { activeSessionIdRef.current = activeSessionId }, [activeSessionId])
@@ -235,7 +268,7 @@ export default function AiPanel({
     } catch (e) {
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: `**${t('ai.errors.errorPrefix')}:** ${String((e as Error).message ?? e)}` },
+        { role: 'assistant', content: `**${t('ai.errors.errorPrefix')}:** ${presentedError(t, e)}` },
       ])
       return
     }
@@ -274,8 +307,10 @@ export default function AiPanel({
     if (!open) return
     if (!aiProvider) {
       setAuthStatus({ status: 'not_configured' })
+      setKeyPreviouslySaved(false)
       return
     }
+    let cancelled = false
     void (async () => {
       try {
         // Pass aiProvider explicitly — avoids race condition when saving settings.
@@ -283,11 +318,30 @@ export default function AiPanel({
         // cold start (AiPanel open-effect + aiProvider-settle effect +
         // StrictMode double-invoke in dev). §1.4 renderer dedup.
         const status = await singleFlightInvoke<AuthStatus>('ai:checkAuth', [aiProvider])
+        if (cancelled) return
         setAuthStatus(status)
+        // §2.122 — only the "the store answered and holds nothing" verdict has
+        // two possible readings for the user; ask for our marker only then, and
+        // only to pick the sentence.
+        if (status.status === 'no_key' && isApiKeyProvider(aiProvider)) {
+          let saved = false
+          try {
+            const s = await window.api.invoke('settings:get') as
+              { aiApiKeySaved?: AiApiKeySavedMap } | null
+            saved = s?.aiApiKeySaved?.[aiProvider] === true
+          } catch {
+            // No marker readable → fall back to the neutral "no key" wording.
+            saved = false
+          }
+          if (!cancelled) setKeyPreviouslySaved(saved)
+        } else if (!cancelled) {
+          setKeyPreviouslySaved(false)
+        }
       } catch {
-        setAuthStatus({ status: 'error', message: t('ai.errors.authCheck') })
+        if (!cancelled) setAuthStatus({ status: 'error', message: t('ai.errors.authCheck') })
       }
     })()
+    return () => { cancelled = true }
   }, [open, aiProvider, t])
 
   // Show privacy dialog on first use
@@ -379,7 +433,7 @@ export default function AiPanel({
             const sid = activeSessionIdRef.current
             const assistantText = event.text
             if (sid && assistantText) {
-              void (async () => {
+              sessionWriteQueueRef.current = sessionWriteQueueRef.current.then(async () => {
                 try {
                   await window.api.invoke('aiSession:addMessage', { sessionId: sid, role: 'assistant', content: assistantText, costUsd: event.costUsd ?? undefined })
                 } catch { /* ignore */ }
@@ -396,7 +450,7 @@ export default function AiPanel({
                   }
                 } catch { /* ignore */ }
                 void loadSessionList()
-              })()
+              })
             }
           }
           break
@@ -407,10 +461,39 @@ export default function AiPanel({
         // cost badge. Unknown future codes fall back to the English message from
         // main rather than rendering nothing.
         case 'notice': {
-          const noticeText = event.code === 'request_budget_exceeded'
-            ? t('ai.errors.requestBudgetStopped')
-            : event.message
+          // §2.123 added the second code: a turn that used the destructive tool
+          // machinery and armed nothing, so no confirmation block will appear
+          // below. Unknown future codes still fall back to main's English text.
+          const noticeKey: Record<string, string> = {
+            request_budget_exceeded: 'ai.errors.requestBudgetStopped',
+            destructive_action_not_prepared: 'ai.errors.actionNotPrepared',
+          }
+          const key = noticeKey[event.code]
+          const noticeText = key ? t(key) : event.message
           setMessages(prev => [...prev, { role: 'assistant', content: noticeText }])
+          // The notice belongs in the stored history too. Without this it lived
+          // on screen only: reopening the session showed the answer WITHOUT the
+          // correction, so a turn that armed nothing came back looking like a
+          // turn that had a confirmation button somewhere — the exact belief
+          // §2.123 exists to remove. Queued behind the `result` write (main
+          // emits `result` before any notice), so the order on disk is the order
+          // on screen. `assistant` is the role every service-side insert already
+          // uses; the IPC channel accepts no other, and no cost is attached —
+          // the notice is not a billable message.
+          //
+          // KNOWN codes only. An unrecognized code falls back to main's English
+          // `message`, and persisting that would freeze an untranslated string
+          // into the history forever; on screen it is transient and harmless.
+          if (key) {
+            const sid = activeSessionIdRef.current
+            if (sid) {
+              sessionWriteQueueRef.current = sessionWriteQueueRef.current.then(async () => {
+                try {
+                  await window.api.invoke('aiSession:addMessage', { sessionId: sid, role: 'assistant', content: noticeText })
+                } catch { /* ignore */ }
+              })
+            }
+          }
           break
         }
 
@@ -843,35 +926,10 @@ export default function AiPanel({
           </ul>
           <p className="ai-onboarding-choose">{t('ai.onboarding.chooseProvider')}</p>
           <div className="ai-onboarding-options">
-            <button
-              className="ai-onboarding-option"
-              onClick={async () => {
-                // Check CLI availability before switching to subscription.
-                // Explicit user action — source: 'user' bypasses the result
-                // cache but still joins any pending background request.
-                try {
-                  const result = await singleFlightInvoke<{ status: string; message?: string }>(
-                    'ai:checkAuth',
-                    ['subscription'],
-                    { source: 'user' },
-                  )
-                  if (result.status === 'error') {
-                    setAuthStatus({ status: 'error', message: result.message || 'CLI not found' })
-                    return
-                  }
-                } catch (e) {
-                  setAuthStatus({ status: 'error', message: String(e) })
-                  return
-                }
-                onSettingsChange?.('aiProvider', 'subscription')
-              }}
-            >
-              <Sparkles size={16} />
-              <div>
-                <strong>{t('ai.onboarding.subscription')}</strong>
-                <small>{t('ai.onboarding.subscriptionHint')}</small>
-              </div>
-            </button>
+            {/* §2.218 — the "Claude subscription" option was removed with the
+                provider. Every remaining provider is key-based, and the panel
+                offers the shortest path (Anthropic API key); the other two are
+                one click away through the Settings link below. */}
             <button
               className="ai-onboarding-option"
               onClick={() => onSettingsChange?.('aiProvider', 'anthropic-api')}
@@ -897,8 +955,12 @@ export default function AiPanel({
 
   // --- Authorization error ---
   if (authStatus && authStatus.status !== 'authenticated') {
+    // §2.122 — one sentence per storage outcome. "invalidKey" is reserved for
+    // the case where a key was actually read and rejected; an empty store and
+    // an unreachable store each get their own, non-accusing copy.
     const errorKey = authStatus.status === 'invalid_key' ? 'invalidKey'
-      : authStatus.status === 'no_subscription' ? 'noSubscription'
+      : authStatus.status === 'no_key' ? (keyPreviouslySaved ? 'keyMissing' : 'noKey')
+      : authStatus.status === 'store_unavailable' ? 'storeUnavailable'
       : 'notConfigured'
     return (
       <div className="ai-panel" data-testid="ai-panel">
@@ -918,14 +980,20 @@ export default function AiPanel({
             <button className="btn btn-primary" onClick={() => void window.api.invoke('ui:openSettings')}>
               {t('ai.onboarding.configure')}
             </button>
-            <button className="btn btn-secondary" onClick={async () => {
-              try {
-                await window.api.invoke('ai:deleteApiKey')
-                onSettingsChange?.('aiProvider', '')
-                setAuthStatus({ status: 'not_configured' })
-              } catch (e) {
-                setAuthStatus({ status: 'error', message: String(e) })
-              }
+            {/*
+              §2.122 — changing the provider is a SETTINGS change, nothing else.
+              This button used to call `ai:deleteApiKey` with no argument, which
+              the main process read as "delete every provider's key": one click
+              destroyed all three stored keys, with no confirmation, from a
+              screen the app reached by mistakenly claiming the key was invalid.
+              Providers do not conflict — keeping the keys costs nothing and
+              switching back has to just work. Deleting a key is a separate,
+              explicit, per-provider action behind a confirmation, and it lives
+              in Settings → AI ("Reset configuration").
+            */}
+            <button className="btn btn-secondary" onClick={() => {
+              onSettingsChange?.('aiProvider', '')
+              setAuthStatus({ status: 'not_configured' })
             }}>
               {t('ai.errors.changeProvider')}
             </button>
@@ -965,6 +1033,7 @@ export default function AiPanel({
             className={`btn-icon${showSessionList ? ' active' : ''}`}
             onClick={() => setShowSessionList(prev => !prev)}
             title={t('ai.sessions.history')}
+            data-testid="ai-sessions-toggle"
           >
             <History size={14} />
           </button>
@@ -996,6 +1065,7 @@ export default function AiPanel({
               <div
                 key={s.id}
                 className={`ai-session-item${s.id === activeSessionId ? ' active' : ''}`}
+                data-testid="ai-session-item"
                 onClick={() => void loadSession(s.id)}
               >
                 <div className="ai-session-info">

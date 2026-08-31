@@ -15,9 +15,107 @@ import {
   testImapConnection,
   testSmtpConnection,
 } from '../../packages/net/index'
+import { authNotConfiguredError } from './accountAuthState'
+import type { OAuthConnectStage, OAuthProgress } from '@mailcopilot/types'
 import { z } from 'zod'
 
 const log = createLogger('OutlookOAuth')
+
+// ---------------------------------------------------------------------------
+// "This account has no credentials" reporting seam (§2.165 fix wave 4)
+// ---------------------------------------------------------------------------
+// Same shape as the registries in packages/net/imap: the emitter owns the slot,
+// the main process fills it. It exists because this module cannot reach the
+// account-auth-state service — that service is instantiated in main.ts, which
+// this module must not import (main.ts imports it).
+//
+// What it closes: an OAuth account whose refresh token is gone from the secret
+// store throws below, while BUILDING the config. That is before
+// `assertImapAuth` inspects the credentials and before any wrapped IMAP
+// operation exists, so neither the local precondition report nor the connection
+// boundary ever saw it — the mailbox stopped syncing with nothing in the window
+// to say why. The report has to be made from the place that discovers the
+// missing token, and this is that place.
+
+/**
+ * Reports that an account cannot even attempt a login, and mints the stamp that
+ * says WHICH incarnation of the id the report is about.
+ *
+ * Two functions rather than one because the report is not synchronous with the
+ * discovery (§2.165 fix wave 5): the token path learns "there is no refresh
+ * token" only after awaiting the secret store, and account ids are reused, so a
+ * mailbox deleted inside that window hands its id to the next account created
+ * and the report lands on a brand-new, healthy mailbox. `currentGeneration` is
+ * therefore read BEFORE the first await and carried to `noteMissingCredentials`,
+ * which drops the verdict when the id has changed hands since.
+ *
+ * Neither may throw or block: both are called on a failure path the user is
+ * waiting on.
+ */
+export type MissingCredentialsReporter = {
+  /** Generation of the id right now, or `null` when it addresses no live
+   *  account. Read before the first await of the operation. */
+  currentGeneration: (accountId: number) => number | null
+  /** Raise "this account cannot even attempt a login" for the pair. */
+  noteMissingCredentials: (accountId: number, accountGeneration: number | null) => void
+}
+
+let missingCredentialsReporter: MissingCredentialsReporter | null = null
+
+/** Register the missing-credentials reporter. Last registration wins — there is
+ *  exactly one production wiring (`accountAuthState`, installed at module scope
+ *  in main.ts). */
+export function registerMissingCredentialsReporter(reporter: MissingCredentialsReporter): void {
+  missingCredentialsReporter = reporter
+}
+
+/** Remove the missing-credentials reporter. Idempotent. */
+export function unregisterMissingCredentialsReporter(): void {
+  missingCredentialsReporter = null
+}
+
+/**
+ * The generation of an account id, read synchronously before the awaits of a
+ * token fetch. `null` when no reporter is registered or the lookup throws —
+ * which the service treats as "unattributable" and drops, the same failure
+ * direction as everywhere else in this feature: a badge that does not move
+ * beats a badge that moves for the wrong mailbox.
+ */
+function readAccountGeneration(accountId: number): number | null {
+  const reporter = missingCredentialsReporter
+  if (!reporter) return null
+  try {
+    return reporter.currentGeneration(accountId)
+  } catch (err) {
+    const code = (err as { code?: unknown } | null | undefined)?.code
+    log.warn('account generation lookup failed', {
+      accountId,
+      code: typeof code === 'string' && code.length > 0 ? code : 'unknown',
+    })
+    captureException(err, { source: 'outlook_oauth', step: 'read_account_generation' })
+    return null
+  }
+}
+
+/** Fire-and-forget notification. A broken reporter may not change what the
+ *  token path throws — the caller's error is the user-visible outcome. */
+function reportMissingCredentials(accountId: number, accountGeneration: number | null): void {
+  const reporter = missingCredentialsReporter
+  if (!reporter) return
+  try {
+    reporter.noteMissingCredentials(accountId, accountGeneration)
+  } catch (err) {
+    // Code only, and only when it is a string: the reporter is ours, but a
+    // thrown value is not, and a log line must never carry text that could have
+    // come from a provider response (CLAUDE.md §8).
+    const code = (err as { code?: unknown } | null | undefined)?.code
+    log.warn('missing-credentials report failed', {
+      accountId,
+      code: typeof code === 'string' && code.length > 0 ? code : 'unknown',
+    })
+    captureException(err, { source: 'outlook_oauth', step: 'report_missing_credentials' })
+  }
+}
 
 /**
  * §2.82 iter2 — collapse an IMAP/SMTP connection-test failure into a closed set
@@ -115,13 +213,28 @@ export async function getOutlookAccessToken(accountId: number): Promise<string> 
     : undefined
   if (!MS_CLIENT_ID) throw new Error('MAILCOPILOT_MS_CLIENT_ID is not configured (required for Microsoft OAuth token refresh)')
 
+  // §2.165 fix wave 5 — the stamp, read HERE: this statement and everything
+  // above it in this call are synchronous, so the generation is the one the id
+  // holds at the moment the token fetch starts. Reading it later (inside the
+  // IIFE, after the secret-store await) would describe whichever mailbox holds
+  // the id by then, which is the stale-verdict bug itself.
+  const accountGeneration = readAccountGeneration(accountId)
+
   // Wrap in a holder so the async IIFE can compare `holder.p` after await
   // without the TS2454 "used before assigned" error that a direct `p` ref
   // inside its own initializer produces.
   const holder: { p?: Promise<OutlookTokenCacheEntry> } = {}
   holder.p = (async () => {
     const found = await getOauthRefreshTokenWithSource('outlook', accountId)
-    if (!found) throw new Error(`Microsoft refresh token for account #${accountId} not found (re-authorization required)`)
+    if (!found) {
+      // §2.165 fix wave 4 — raise the "needs signing in again" flag before the
+      // throw, and tag the error with OUR discriminator (never a match on
+      // Azure's response text, never a second classifier) so the verdict is
+      // still correct on the paths where this error travels to the service
+      // through the connection boundary instead.
+      reportMissingCredentials(accountId, accountGeneration)
+      throw authNotConfiguredError(`Microsoft refresh token for account #${accountId} not found (re-authorization required)`)
+    }
     const refreshToken = found.token
 
     // Refresh with Exchange-only scope subset — pre-2.2-E accounts may
@@ -197,10 +310,19 @@ export async function getOutlookGraphSendAccessToken(accountId: number): Promise
     : undefined
   if (!MS_CLIENT_ID) throw new Error('MAILCOPILOT_MS_CLIENT_ID is not configured (required for Microsoft Graph send)')
 
+  // Same stamp discipline as the Exchange path — read before the first await
+  // of this call (§2.165 fix wave 5).
+  const accountGeneration = readAccountGeneration(accountId)
+
   const holder: { p?: Promise<OutlookTokenCacheEntry> } = {}
   holder.p = (async () => {
     const found = await getOauthRefreshTokenWithSource('outlook', accountId)
-    if (!found) throw new Error(`Microsoft refresh token for account #${accountId} not found (re-authorization required)`)
+    if (!found) {
+      // Same verdict as the Exchange-token path above: no refresh token means
+      // no login is possible at all, whichever resource the caller wanted.
+      reportMissingCredentials(accountId, accountGeneration)
+      throw authNotConfiguredError(`Microsoft refresh token for account #${accountId} not found (re-authorization required)`)
+    }
 
     const result = await refreshMicrosoftAccessToken({
       clientId: MS_CLIENT_ID,
@@ -320,11 +442,21 @@ async function doConnectOutlookAccount(
 }> {
   const { openExternal, broadcast } = params
 
+  // Advisory only — a failure here must never abort the connect flow.
+  const emitStage = (stage: OAuthConnectStage) => {
+    try {
+      broadcast('oauth:progress', { provider: 'outlook', stage } satisfies OAuthProgress)
+    } catch {
+      /* progress is advisory */
+    }
+  }
+
   log.info('Starting Microsoft OAuth flow...')
   const tokens = await runMicrosoftOAuthFlow({
     clientId: MS_CLIENT_ID,
     clientSecret: MS_CLIENT_SECRET,
     openExternal,
+    onStage: emitStage,
   })
   log.info('Microsoft OAuth flow completed, got email:', tokens.email)
 
@@ -355,6 +487,7 @@ async function doConnectOutlookAccount(
   let tlsCertSmtp: { host: string; port: number } | undefined
 
   log.info('Testing Microsoft IMAP...')
+  emitStage('imap')
   try {
     const imapRes = await withTimeout(testImapConnection({ ...imapMeta, accessToken: tokens.accessToken }), 30_000, 'IMAP')
     log.info('Microsoft IMAP result:', JSON.stringify(imapRes))
@@ -386,6 +519,7 @@ async function doConnectOutlookAccount(
 
   // SMTP test -- non-critical. If IMAP passed, the token works and SMTP should too.
   log.info('Testing Microsoft SMTP...')
+  emitStage('smtp')
   try {
     const smtpRes = await withTimeout(testSmtpConnection({ ...smtpMeta, accessToken: tokens.accessToken }), 15_000, 'SMTP')
     log.info('Microsoft SMTP result:', JSON.stringify(smtpRes))
@@ -423,9 +557,15 @@ async function doConnectOutlookAccount(
     )
   }
 
+  emitStage('saving')
+
   const { id } = await saveAccount({
     id: existingId,
-    name: existingMeta?.name,
+    // A re-authorization must not overwrite a name the user has edited; the
+    // profile name fills in only where the record has none. `||` rather than
+    // `??` on purpose — see the Google counterpart in electron/main.ts: a
+    // legacy `name: ''` passes the read schema but fails the write schema.
+    name: existingMeta?.name?.trim() || tokens.displayName || undefined,
     authType: 'oauth2',
     providerId: 'outlook',
     transportType: 'imap-smtp',

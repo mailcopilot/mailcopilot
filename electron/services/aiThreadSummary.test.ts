@@ -11,7 +11,8 @@ import type {
 // ── ABI-safe self-skip probe ─────────────────────────────────────────────────
 //
 // better-sqlite3 is a native module. When node_modules were built for Electron's
-// ABI (NODE_MODULE_VERSION 143) but vitest runs on the system Node (127), loading
+// ABI (NODE_MODULE_VERSION 148 on Electron 43) but vitest runs on the system Node
+// (127), loading
 // packages/db crashes at import time because packages/db/index.ts unconditionally
 // runs `new Database(dbPath)` at module load.
 //
@@ -606,21 +607,22 @@ describe('provider pinning', () => {
   })
 })
 
-// ── Subscription provider (HIGH) ─────────────────────────────────────────────
+// ── Unusable provider selection (HIGH) ───────────────────────────────────────
 //
-// aiChatSimple cannot run a one-shot subscription completion. Rather than let it
-// silently return null and surface a generic provider_error, the generator
-// refuses subscription explicitly with `no_provider` BEFORE any provider call —
-// so a subscription selection is never recorded as a failed API call.
+// §2.218 — this block used to cover the `subscription` provider, which had no
+// one-shot Messages-API contour and was refused explicitly so it would never be
+// recorded as a FAILED API call. That provider is gone; the invariant it proved
+// is not, and it now rests on the only refusal left: a selection that resolves
+// to nothing must refuse BEFORE any provider call, reservation, audit row or
+// span. A config state is not a provider error.
 
-describe('subscription provider', () => {
-  testDb('refuses subscription with no_provider WITHOUT calling the provider or reserving budget', async () => {
+describe('unusable provider selection', () => {
+  testDb('refuses an unusable selection with no_provider WITHOUT calling the provider or reserving budget', async () => {
     const { deps, rec } = makeHarness()
-    const res = await generateThreadSummary(deps, baseOpts({ provider: 'subscription' }))
+    const res = await generateThreadSummary(deps, baseOpts({ provider: '' }))
     expect(res).toEqual({ ok: false, reason: 'no_provider' })
     expect(rec.chatCalls).toHaveLength(0)
     expect(rec.admits).toBe(0)
-    // No API failure recorded — subscription is a config state, not a provider error.
     expect(rec.audit).toHaveLength(0)
     expect(rec.spans).toHaveLength(0)
   })
@@ -688,14 +690,6 @@ describe('budget reservation ledger (§2.51)', () => {
     expect(rec.settled).toHaveLength(0)
     expect(rec.released).toHaveLength(0)
     expect(rec.order).toEqual(['admit', 'chat'])
-  })
-
-  testDb('the subscription refusal never reserves — no call was made', async () => {
-    const { deps, rec } = makeHarness()
-    const res = await generateThreadSummary(deps, baseOpts({ provider: 'subscription' }))
-    expect(res).toEqual({ ok: false, reason: 'no_provider' })
-    expect(rec.admits).toBe(0)
-    expect(rec.chatCalls).toHaveLength(0)
   })
 
   testDb('a no-provider refusal never reserves — no call was made', async () => {

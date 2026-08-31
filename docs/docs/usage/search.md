@@ -48,6 +48,8 @@ MailCopilot searches your local email cache. The completeness indicator below th
 
 Standard folders (Inbox, Sent, Archive, Drafts) are fully indexed by default. Junk, Spam, and Trash folders are excluded from full-text indexing by default to keep search results clean and reduce disk usage. You can change the indexing setting for any folder via right-click in the sidebar or in **Settings > Folders**.
 
+A message that opened normally -- including one whose body was clipped by the [1 MB soft limit](../usage/reading-emails#very-large-messages) -- is searchable with `body:` right away, like any other message: the first roughly 200,000 characters of its body are indexed. A message over the 100 MB hard limit (see the same section) is different: since its body was never decoded when you opened it, `body:` search only starts finding it once the background body indexer fetches and indexes it from the server, which can take longer than for an ordinary message.
+
 ## Server-Assisted Search
 
 When searching in a specific folder, MailCopilot may also query the IMAP server to find messages not yet in the local cache. Server results are marked with a "+N from server" badge.

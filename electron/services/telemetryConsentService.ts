@@ -173,19 +173,42 @@ function isE2EConsentBypass(deps: TelemetryConsentDeps): boolean {
   return true
 }
 
-/** Implementation behind `telemetry:consentState`. */
+/**
+ * Implementation behind `telemetry:consentState`.
+ *
+ * `evaluateConsent` is the sole authority; this only shapes its verdict into the
+ * reply and reports the one branch that cannot reach it at all.
+ *
+ * §2.236 stood here until 2026-08-28: a parallel classifier that mirrored
+ * `evaluateConsent` branch for branch, a diagnosis wrapper, an extra settings
+ * read at startup, request/reply timing, a per-registration counter and a
+ * 20-second "nobody asked" watchdog. It was built to explain a report of the
+ * first-run question never appearing. It cannot: the machine that reported it
+ * turned out to hold a valid grant from an earlier launch, correctly classified,
+ * so there was no defect for the instruments to catch — and they could not have
+ * reconstructed the launch in question anyway. What remained was a second copy
+ * of a §2.82 decision tree on the consent path, kept honest only by a truth
+ * table in the tests. Removed rather than kept "just in case": if the symptom
+ * ever reproduces, narrow instrumentation against a live case beats a permanent
+ * shadow of the real logic. Contrast §2.256, where the symptom repeats on demand
+ * and instruments are the right first step.
+ */
 export function getTelemetryConsentState(overrides?: Partial<TelemetryConsentDeps>): TelemetryConsentState {
   const deps = withDefaults(overrides)
-  if (isE2EConsentBypass(deps)) return { needed: false, version: TELEMETRY_CONSENT_VERSION }
+  const version = TELEMETRY_CONSENT_VERSION
+  if (isE2EConsentBypass(deps)) return { needed: false, version }
   let settings: Settings | undefined
   try {
     settings = deps.getSettings()
   } catch {
     // Settings unreadable: we cannot prove an answer exists, so ask. Telemetry
     // stays off either way (the preflight fails closed on the same condition).
-    return { needed: true, version: TELEMETRY_CONSENT_VERSION }
+    // Kept at warn: in a packaged build the console transport is warn-level, and
+    // this is the one branch that means "we could not read the answer at all".
+    log.warn('consent state: settings unreadable, asking again')
+    return { needed: true, version }
   }
-  return { needed: evaluateConsent(settings) === 'needed', version: TELEMETRY_CONSENT_VERSION }
+  return { needed: evaluateConsent(settings) === 'needed', version }
 }
 
 /**
@@ -222,6 +245,10 @@ export function applyTelemetryConsent(
     // are both closed states — the About switch, not this channel, is how a
     // recorded answer changes afterwards.
     if (evaluateConsent(current) !== 'needed') {
+      // A refusal worth a line: it means a write arrived for a question that is
+      // already answered. No detail about the record — the refusal itself is the
+      // fact, and the verdict label that used to ride along came from a parallel
+      // classifier that no longer exists (see getTelemetryConsentState).
       log.warn('setConsent rejected: no consent question is pending')
       return { ok: false, reason: 'not_pending' }
     }
@@ -321,6 +348,7 @@ export function migrateTelemetryConsent(
 /** Register the two consent IPC channels. */
 export function registerTelemetryConsentHandlers(overrides?: Partial<TelemetryConsentDeps>): void {
   handleIpc('telemetry:consentState', (): TelemetryConsentState => getTelemetryConsentState(overrides))
+
   handleIpc('telemetry:setConsent', (event, payload: unknown): SetConsentResult => {
     // WHO: the consent screen only ever renders in the main window, so a write
     // arriving from any other WebContents is not a click on it. Checked here

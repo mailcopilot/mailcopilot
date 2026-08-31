@@ -34,7 +34,6 @@ import {
   replaceExternalImages,
   buildExternalImageReplacementMap,
   buildMailIframeSrcDoc,
-  extractCidsFromHtml,
   sanitizeMailHtml,
 } from './mail'
 
@@ -637,24 +636,6 @@ describe('external image hardening', () => {
   it('buildMailIframeSrcDoc dark mode adds invert filter', () => {
     const doc = buildMailIframeSrcDoc('<p>x</p>', { darkMode: true })
     expect(doc).toContain('filter:invert(1)')
-  })
-
-  // --- extractCidsFromHtml ---
-
-  it('extractCidsFromHtml extracts cid references', () => {
-    const html = '<img src="cid:abc@x"><img src="cid:<def@y>">'
-    const cids = extractCidsFromHtml(html)
-    expect(cids).toContain('abc@x')
-    expect(cids).toContain('def@y')
-  })
-
-  it('extractCidsFromHtml returns unique cids', () => {
-    const html = '<img src="cid:dup@x"><img src="cid:dup@x">'
-    expect(extractCidsFromHtml(html)).toEqual(['dup@x'])
-  })
-
-  it('extractCidsFromHtml handles empty input', () => {
-    expect(extractCidsFromHtml('')).toEqual([])
   })
 
   // --- Composite pipeline: extract → buildMap → replace ----------------------

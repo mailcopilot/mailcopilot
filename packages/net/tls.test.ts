@@ -345,11 +345,44 @@ describe('packages/net/tls', () => {
 
       expect(getBundledCaCertificates()).toBeNull()
     })
+
+    it('the once-per-process fallback warning is shared across the combined AND bundled snapshots', () => {
+      // caFallbackWarned is a single module-level flag, not keyed per CaKind.
+      // If it were per-kind, the bundled snapshot failing for the first time
+      // (after the combined snapshot already warned) would warn again.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(tls, 'getCACertificates').mockImplementation((() => {
+        throw new Error('unavailable')
+      }) as typeof tls.getCACertificates)
+
+      expect(getCombinedCaCertificates()).toBeNull()
+      expect(getBundledCaCertificates()).toBeNull()
+      expect(warn).toHaveBeenCalledTimes(1)
+    })
   })
 
   describe('buildTlsOptions', () => {
+    /**
+     * §2.156 — the trust set now leaves `buildTlsOptions` as a prebuilt shared
+     * `secureContext` instead of a `ca` array, so the assertions about WHICH
+     * certificates are trusted read the array handed to `tls.createSecureContext`.
+     *
+     * Stubbing it is required, not merely convenient: these tests use sentinel
+     * strings ('D', 'S', 'PINNED-PEM') that real OpenSSL would reject as PEM.
+     */
+    let caPassedToContext: () => string[] | undefined
+    let contextCalls: () => number
+
     beforeEach(() => {
       __resetCombinedCaCacheForTest()
+      const seen: Array<string[] | undefined> = []
+      vi.spyOn(tls, 'createSecureContext').mockImplementation(((opts?: { ca?: string | string[] }) => {
+        const ca = opts?.ca
+        seen.push(typeof ca === 'string' ? [ca] : ca)
+        return { __stub: true } as unknown as tls.SecureContext
+      }) as typeof tls.createSecureContext)
+      caPassedToContext = () => seen[seen.length - 1]
+      contextCalls = () => seen.length
     })
 
     afterEach(() => {
@@ -364,7 +397,8 @@ describe('packages/net/tls', () => {
 
       const opts = buildTlsOptions({})
       expect(opts).toBeDefined()
-      expect(opts!.ca).toEqual(['D', 'S'])
+      expect(opts!.secureContext).toBeDefined()
+      expect(caPassedToContext()).toEqual(['D', 'S'])
       // Critical: verification is NOT weakened. rejectUnauthorized is stated
       // explicitly (no reliance on a transport library's default) and there is
       // no checkServerIdentity override on the no-pin path.
@@ -394,7 +428,7 @@ describe('packages/net/tls', () => {
       // entirely for self-signed / untrusted chains — pinning was fail-OPEN
       // exactly where it was supposed to protect.
       expect(opts!.rejectUnauthorized).toBe(true)
-      expect(opts!.ca).toEqual(['D', 'S'])
+      expect(caPassedToContext()).toEqual(['D', 'S'])
       expect(opts!.checkServerIdentity).toBeInstanceOf(Function)
 
       // Correct pin — no error
@@ -416,7 +450,7 @@ describe('packages/net/tls', () => {
       const opts = buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['PINNED-PEM'] })
       // Additive: the anchor only widens chain building, and the fingerprint
       // check still narrows acceptance to the pinned leaf.
-      expect(opts!.ca).toEqual(['D', 'S', 'PINNED-PEM'])
+      expect(caPassedToContext()).toEqual(['D', 'S', 'PINNED-PEM'])
       expect(opts!.rejectUnauthorized).toBe(true)
     })
 
@@ -427,7 +461,7 @@ describe('packages/net/tls', () => {
       }) as typeof tls.getCACertificates)
 
       const opts = buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['PINNED-PEM'] })
-      expect(opts!.ca).toEqual(['PINNED-PEM'])
+      expect(caPassedToContext()).toEqual(['PINNED-PEM'])
       expect(opts!.rejectUnauthorized).toBe(true)
     })
 
@@ -449,7 +483,7 @@ describe('packages/net/tls', () => {
       const opts = buildTlsOptions({ servername: 'smtp.gmail.com' })
       expect(opts).toBeDefined()
       expect(opts!.servername).toBe('smtp.gmail.com')
-      expect(opts!.ca).toEqual(['D', 'S'])
+      expect(caPassedToContext()).toEqual(['D', 'S'])
       expect(opts!.rejectUnauthorized).toBe(true)
     })
 
@@ -461,6 +495,233 @@ describe('packages/net/tls', () => {
 
       const opts = buildTlsOptions({ servername: 'smtp.gmail.com' })
       expect(opts).toEqual({ rejectUnauthorized: true, servername: 'smtp.gmail.com' })
+    })
+
+    // ─── §2.156 shared SecureContext ───────────────────────────────────────
+
+    it('reuses ONE SecureContext across connections to the same trust set', () => {
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      // The stall this fixes: `ca: string[]` made Node parse and index every
+      // certificate in the array before EVERY handshake, ~14ms for the ~240-cert
+      // combined store. The background pass opens one connection per folder, so
+      // that was ~630ms of main-thread work every five minutes.
+      const first = buildTlsOptions({})!
+      for (let i = 0; i < 43; i++) buildTlsOptions({})
+      expect(contextCalls()).toBe(1)
+      expect(buildTlsOptions({})!.secureContext).toBe(first.secureContext)
+    })
+
+    it('a CA snapshot refresh rebuilds the context — staleness stays bounded by the TTL', () => {
+      vi.useFakeTimers()
+      try {
+        const spy = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+          return type === 'default' ? ['D'] : ['S']
+        }) as typeof tls.getCACertificates)
+
+        const before = buildTlsOptions({})!
+        expect(contextCalls()).toBe(1)
+
+        // Admin removes the interception root. The whole point of CA_CACHE_TTL_MS
+        // is that this takes effect without a restart; a context cached for the
+        // process lifetime would have kept the removed root trusted, which is
+        // exactly the hole this test exists to keep closed.
+        spy.mockImplementation(((type?: string) => (type === 'default' ? ['D'] : [])) as typeof tls.getCACertificates)
+        vi.advanceTimersByTime(CA_CACHE_TTL_MS + 1)
+
+        const after = buildTlsOptions({})!
+        expect(contextCalls()).toBe(2)
+        expect(caPassedToContext()).toEqual(['D'])
+        expect(after.secureContext).not.toBe(before.secureContext)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('different pinned anchors get different contexts — no trust bleeds between endpoints', () => {
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const a = buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['ANCHOR-A'] })!
+      expect(caPassedToContext()).toEqual(['D', 'S', 'ANCHOR-A'])
+      const b = buildTlsOptions({ tlsPinsSha256: ['CC:DD'], tlsPinnedCertsPem: ['ANCHOR-B'] })!
+      expect(caPassedToContext()).toEqual(['D', 'S', 'ANCHOR-B'])
+      expect(a.secureContext).not.toBe(b.secureContext)
+      // An unpinned endpoint must not receive either anchored context.
+      const plain = buildTlsOptions({})!
+      expect(plain.secureContext).not.toBe(a.secureContext)
+      expect(plain.secureContext).not.toBe(b.secureContext)
+      // Same anchors again → the cached context, not a fourth build.
+      const callsBefore = contextCalls()
+      expect(buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['ANCHOR-A'] })!.secureContext)
+        .toBe(a.secureContext)
+      expect(contextCalls()).toBe(callsBefore)
+    })
+
+    it('a cache hit within the TTL does not bump the revision — repeated calls stay on ONE context', () => {
+      // Populate the shared 'combined' snapshot through the PUBLIC getter
+      // first, then drive buildTlsOptions() off the SAME cache entry. If a
+      // TTL hit minted a fresh revision on every read, every subsequent
+      // buildTlsOptions() call would get a different cache key and rebuild
+      // the context on every connection — exactly the cost this cache exists
+      // to remove (see the §2.156 comment above `secureContextCache`).
+      const spy = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      expect(getCombinedCaCertificates()).toEqual(['D', 'S'])
+      spy.mockClear()
+
+      const first = buildTlsOptions({})!
+      const second = buildTlsOptions({})!
+      expect(spy).not.toHaveBeenCalled() // still within the TTL — no recompute
+      expect(contextCalls()).toBe(1)
+      expect(second.secureContext).toBe(first.secureContext)
+    })
+
+    it('anchor sets that would collide under naive concatenation still get different context keys', () => {
+      // anchorsKey() hashes with a NUL separator between PEM bodies precisely
+      // so that ['AB', 'C'] and ['A', 'BC'] cannot hash to the same digest.
+      // Without the separator the second call below would hit the cache
+      // entry built for the FIRST (different) anchor set and silently reuse
+      // the wrong trust store.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['AB', 'C'] })
+      expect(contextCalls()).toBe(1)
+      buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['A', 'BC'] })
+      expect(contextCalls()).toBe(2)
+    })
+
+    it('a revision bump sweeps ALL stale-revision entries out of the cache, not just the one being looked up', () => {
+      // §2.156: without this sweep the cache would grow by (accounts ×
+      // revisions) for the whole process lifetime — a new root-store snapshot
+      // every CA_CACHE_TTL_MS orphans every context built from the previous
+      // one, and nothing else ever removes them.
+      vi.useFakeTimers()
+      try {
+        const spyCa = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+          return type === 'default' ? ['D'] : ['S']
+        }) as typeof tls.getCACertificates)
+
+        // Three distinct trust sets built in revision 1: two pinned accounts
+        // plus the plain unpinned one.
+        buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['ANCHOR-A'] })
+        buildTlsOptions({ tlsPinsSha256: ['CC:DD'], tlsPinnedCertsPem: ['ANCHOR-B'] })
+        buildTlsOptions({})
+        expect(contextCalls()).toBe(3)
+
+        // Admin removes a root; TTL expires — revision bumps.
+        spyCa.mockImplementation(((type?: string) => {
+          return type === 'default' ? ['D2'] : ['S']
+        }) as typeof tls.getCACertificates)
+        vi.advanceTimersByTime(CA_CACHE_TTL_MS + 1)
+
+        const originalDelete = Map.prototype.delete
+        const deleteSpy = vi.spyOn(Map.prototype, 'delete').mockImplementation(function (
+          this: Map<unknown, unknown>,
+          key: unknown,
+        ): boolean {
+          return originalDelete.call(this, key)
+        })
+
+        // ONE new-revision lookup must sweep all three stale entries.
+        buildTlsOptions({})
+        expect(deleteSpy).toHaveBeenCalledTimes(3)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('__resetCombinedCaCacheForTest also clears the SecureContext cache (test isolation)', () => {
+      // §2.156 extended the reset helper to clear secureContextCache alongside
+      // caCache. A regression that dropped that line would leak one context
+      // per test run for the lifetime of this suite (see the sweep test
+      // above for why the leak is otherwise invisible from the outside: the
+      // ever-climbing revision counter alone already prevents a stale HIT).
+      const originalClear = Map.prototype.clear
+      const clearSpy = vi.spyOn(Map.prototype, 'clear').mockImplementation(function (
+        this: Map<unknown, unknown>,
+      ): void {
+        return originalClear.call(this)
+      })
+
+      __resetCombinedCaCacheForTest()
+
+      expect(clearSpy).toHaveBeenCalledTimes(2) // caCache.clear() + secureContextCache.clear()
+    })
+
+    it('the once-per-process CA-fallback warning also covers buildTlsOptions() failures, verification stays strict', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(tls, 'getCACertificates').mockImplementation((() => {
+        throw new Error('unavailable')
+      }) as typeof tls.getCACertificates)
+
+      const noPins = buildTlsOptions({})
+      const withSni = buildTlsOptions({ servername: 'smtp.gmail.com' })!
+      const withPins = buildTlsOptions({ tlsPinsSha256: ['AA:BB'] })!
+
+      // No trust store to hand over: either the whole options object is
+      // omitted (Node's own default verification, still secure) or
+      // rejectUnauthorized is stated explicitly — never left unset/weakened.
+      expect(noPins).toBeUndefined()
+      expect(withSni.rejectUnauthorized).toBe(true)
+      expect(withSni.secureContext).toBeUndefined()
+      expect(withPins.rejectUnauthorized).toBe(true)
+      expect(withPins.secureContext).toBeUndefined()
+      // Warned exactly once across three independent buildTlsOptions() calls.
+      expect(warn).toHaveBeenCalledTimes(1)
+    })
+
+    it('sharing one SecureContext across two endpoints does not leak servername or pin identity between them', () => {
+      // The whole point of moving the trust store out of per-connection
+      // options and into a shared context: rejectUnauthorized, servername and
+      // checkServerIdentity MUST stay per-call, or one account's identity
+      // policy would silently apply to another account's connection.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const rendererPinB = 'AA:BB:CC:DD'
+      const a = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+        servername: 'account-a.example.com',
+      })!
+      const b = buildTlsOptions({
+        // Same anchor as `a` (same trust set → same shared context) PLUS an
+        // extra fingerprint-only pin that `a` does not have.
+        tlsPinsSha256: [SELF_SIGNED_FP, rendererPinB],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+        servername: 'account-b.example.com',
+      })!
+
+      // Same trust set → the underlying context IS shared, that is the
+      // feature this cache exists for...
+      expect(b.secureContext).toBe(a.secureContext)
+      // ...but every per-connection option is still built fresh from THIS
+      // call's cfg, not memoized alongside the context.
+      expect(a.servername).toBe('account-a.example.com')
+      expect(b.servername).toBe('account-b.example.com')
+      expect(a.checkServerIdentity).not.toBe(b.checkServerIdentity)
+
+      // Behavioural proof, not just reference inequality: a certificate
+      // matching B's extra renderer pin is accepted by B...
+      const rendererCert = {
+        fingerprint256: rendererPinB,
+        subjectaltname: 'DNS:account-b.example.com',
+      } as unknown as tls.PeerCertificate
+      expect(b.checkServerIdentity!('1.2.3.4', rendererCert)).toBeUndefined()
+      // ...but REJECTED by A as a pin mismatch — A never learned that pin;
+      // sharing the SecureContext did not smuggle it across.
+      const err = a.checkServerIdentity!('1.2.3.4', rendererCert)
+      expect(err).toBeInstanceOf(Error)
+      expect(err!.message).toContain('TLS pin mismatch')
     })
 
     it('servername + pins — servername is still sent as SNI', () => {
@@ -755,6 +1016,20 @@ describe('packages/net/tls', () => {
       __resetCombinedCaCacheForTest()
     })
 
+    /**
+     * Substitute the trust set of an options object produced by
+     * `buildTlsOptions`.
+     *
+     * §2.156: the trust set travels as a prebuilt shared `secureContext`, and
+     * `tls.connect` IGNORES `ca` when a context is supplied — so a test that
+     * wants OpenSSL to accept a different anchor set has to rebuild the context.
+     * Everything that decides identity (`rejectUnauthorized`, the pinned
+     * `checkServerIdentity` closure) is left exactly as produced.
+     */
+    function withTrust(opts: tls.ConnectionOptions, ca: string[]): tls.ConnectionOptions {
+      return { ...opts, secureContext: tls.createSecureContext({ ca }) }
+    }
+
     /** Dial by IP literal, no servername — the production shape of the bug. */
     function handshakeByIp(opts: tls.ConnectionOptions): Promise<{ ok: boolean; error?: Error }> {
       return new Promise((resolve) => {
@@ -780,7 +1055,7 @@ describe('packages/net/tls', () => {
       // endpoint (rejectUnauthorized: true, no checkServerIdentity override).
       const unpinned = buildTlsOptions({})!
       expect(unpinned.checkServerIdentity).toBeUndefined()
-      const r = await handshakeByIp({ ...unpinned, ca: [DNS_ONLY_CERT] })
+      const r = await handshakeByIp(withTrust(unpinned, [DNS_ONLY_CERT]))
       expect(r.ok).toBe(false)
       expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
       expect(isTlsTrustError(r.error)).toBe(true)
@@ -805,7 +1080,9 @@ describe('packages/net/tls', () => {
       // and the only thing standing between the user and a MITM is this
       // hostname check.
       const opts = buildTlsOptions({ tlsPinsSha256: [DNS_ONLY_FP] })!
-      const r = await handshakeByIp({ ...opts, ca: [...(opts.ca ?? []), DNS_ONLY_CERT] })
+      const r = await handshakeByIp(
+        withTrust(opts, [...(getCombinedCaCertificates() ?? []), DNS_ONLY_CERT]),
+      )
       expect(r.ok).toBe(false)
       expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
       expect(isTlsTrustError(r.error)).toBe(true)
@@ -818,7 +1095,9 @@ describe('packages/net/tls', () => {
         tlsPinsSha256: [SELF_SIGNED_FP, DNS_ONLY_FP],
         tlsPinnedCertsPem: [SELF_SIGNED_CERT],
       })!
-      const r = await handshakeByIp({ ...opts, ca: [...(opts.ca ?? []), DNS_ONLY_CERT] })
+      const r = await handshakeByIp(
+        withTrust(opts, [...(getCombinedCaCertificates() ?? []), SELF_SIGNED_CERT, DNS_ONLY_CERT]),
+      )
       expect(r.ok).toBe(false)
       expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
     })

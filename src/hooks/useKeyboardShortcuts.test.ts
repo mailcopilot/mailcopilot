@@ -39,6 +39,7 @@ function defaultParams(): UseKeyboardShortcutsParams {
     undoInfoRef: { current: null },
     qRef: { current: '' },
     viewMailsRef: { current: [] },
+    threadRowsRef: { current: [] },
     selectionAnchorKey: { current: null },
     rolesByAccount: { current: new Map([[1, { sent: 'Sent', drafts: 'Drafts' }]]) },
     virtuosoRef: { current: null },
@@ -385,7 +386,39 @@ describe('useKeyboardShortcuts', () => {
     params.viewMailsRef = { current: [mail] }
     renderHook(() => useKeyboardShortcuts(params))
     fireKey('x')
-    expect(params.setSelectedKeys).toHaveBeenCalled()
+    expect(params.setSelectedKeys).toHaveBeenCalledWith(new Set(['1:INBOX:1']))
+  })
+
+  it('x toggles the whole ROW when the active message sits mid-thread', () => {
+    // Same rule as Ctrl-click: the row may already be selected through its lead
+    // (or through any other message), so toggling the active message's own key
+    // would leave two keys of one row in the set and inflate the toolbar count.
+    const lead = makeMail(30)
+    const reply = makeMail(20)
+    params.active = reply
+    params.activeThread = { key: 't', lead, items: [lead, reply], count: 2, unreadCount: 0 }
+    params.viewMailsRef = { current: [lead] }
+    params.selectedKeys = new Set(['1:INBOX:30'])
+    renderHook(() => useKeyboardShortcuts(params))
+
+    fireKey('x')
+
+    expect(params.setSelectedKeys).toHaveBeenCalledWith(new Set())
+  })
+
+  it('x selects the row by its LEAD key when nothing of the row is selected', () => {
+    const lead = makeMail(30)
+    const reply = makeMail(20)
+    params.active = reply
+    params.activeThread = { key: 't', lead, items: [lead, reply], count: 2, unreadCount: 0 }
+    params.viewMailsRef = { current: [lead] }
+    renderHook(() => useKeyboardShortcuts(params))
+
+    fireKey('x')
+
+    // The lead, not the active reply: the Shift range walks the lead list.
+    expect(params.setSelectedKeys).toHaveBeenCalledWith(new Set(['1:INBOX:30']))
+    expect(params.selectionAnchorKey.current).toBe('1:INBOX:30')
   })
 
   it('v opens the move context menu', () => {
@@ -396,6 +429,84 @@ describe('useKeyboardShortcuts', () => {
     fireKey('v')
     expect(params.setCtxMenu).toHaveBeenCalled()
     expect(params.setSelectedKeys).toHaveBeenCalled()
+  })
+
+  describe('after `u` closes the viewer, keys resolve the selected ROW', () => {
+    // `u` clears the active message and deliberately leaves the selection alone,
+    // and what a selection holds after opening a thread is a MID-THREAD key.
+    // Scanning the lead-only list for it misses and silently falls back to the
+    // first row of the list — a message the user never picked.
+    const other = makeMail(10)
+    const lead = makeMail(30)
+    const reply = makeMail(20)
+    const otherRow = { key: '1:INBOX:10', lead: other, items: [other], count: 1, unreadCount: 0 }
+    const row = { key: '1:INBOX:30', lead, items: [lead, reply], count: 2, unreadCount: 0 }
+
+    beforeEach(() => {
+      params.active = null
+      params.activeThread = null
+      params.selectedKeys = new Set(['1:INBOX:20'])
+      params.viewMailsRef = { current: [other, lead] }
+      params.threadRowsRef = { current: [otherRow, row] }
+    })
+
+    it('Enter opens the selected row, not the first row of the list', () => {
+      renderHook(() => useKeyboardShortcuts(params))
+      fireKey('Enter')
+      expect(params.openMail).toHaveBeenCalledWith(lead)
+    })
+
+    it('o opens the selected row, not the first row of the list', () => {
+      renderHook(() => useKeyboardShortcuts(params))
+      fireKey('o')
+      expect(params.openMail).toHaveBeenCalledWith(lead)
+    })
+
+    it('v offers to move the selected row, not the first row of the list', () => {
+      renderHook(() => useKeyboardShortcuts(params))
+      fireKey('v')
+      expect(params.setCtxMenu).toHaveBeenCalledWith(expect.objectContaining({ mail: lead, moveOpen: true }))
+      expect(params.setSelectedKeys).toHaveBeenCalledWith(new Set(['1:INBOX:30']))
+    })
+
+    it('x toggles the selected row, not the first row of the list', () => {
+      // The old fallback toggled `list[0]` and ADDED its lead key next to the
+      // mid-thread key already in the set — two keys standing for two rows.
+      renderHook(() => useKeyboardShortcuts(params))
+      fireKey('x')
+      expect(params.setSelectedKeys).toHaveBeenCalledWith(new Set())
+    })
+
+    it('x clears the anchor when the last selected row goes', () => {
+      // The mouse path assigns the returned anchor unconditionally; keeping a
+      // stale one here made the next Shift-click draw its range from a row that
+      // is no longer selected.
+      params.selectionAnchorKey = { current: '1:INBOX:20' }
+      renderHook(() => useKeyboardShortcuts(params))
+      fireKey('x')
+      expect(params.selectionAnchorKey.current).toBeNull()
+    })
+  })
+
+  it('Shift+j draws the range from an anchor sitting mid-thread', () => {
+    // The mouse path maps the anchor onto its row lead lazily; the keyboard path
+    // looked it up in the lead list directly, got -1, and selected only the
+    // destination row instead of the range.
+    const lead = makeMail(30)
+    const reply = makeMail(20)
+    const other = makeMail(10)
+    const row = { key: '1:INBOX:30', lead, items: [lead, reply], count: 2, unreadCount: 0 }
+    const otherRow = { key: '1:INBOX:10', lead: other, items: [other], count: 1, unreadCount: 0 }
+    params.active = reply
+    params.activeThread = row
+    params.viewMailsRef = { current: [lead, other] }
+    params.threadRowsRef = { current: [row, otherRow] }
+    params.selectionAnchorKey = { current: '1:INBOX:20' }
+    renderHook(() => useKeyboardShortcuts(params))
+
+    fireKey('j', { shiftKey: true })
+
+    expect(params.setSelectedKeys).toHaveBeenCalledWith(new Set(['1:INBOX:30', '1:INBOX:10']))
   })
 
   it('Ctrl+A selects all visible messages', () => {

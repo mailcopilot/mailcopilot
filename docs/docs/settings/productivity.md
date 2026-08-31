@@ -9,7 +9,9 @@ The Productivity tab in Settings contains options to help you manage your inbox 
 
 ## Desktop Notifications
 
-Enable or disable desktop notifications for new incoming mail. When enabled, you will see a system notification for new unread messages in your Inbox, even when the MailCopilot window is in the background.
+Enable or disable desktop notifications for new incoming mail. When enabled, MailCopilot notifies you about new mail that arrives in a folder counted toward the [unread badge](general#unread-badge) -- by default your Inbox, plus any folder you have explicitly included in badges -- and only if that folder is set to full or periodic header synchronization. On top of that, MailCopilot skips a fixed set of folders by default -- Trash, Junk, Archive, and Drafts -- even if you have explicitly included one of them in the badge; this narrows notifications further and never widens them beyond the badge policy. Folders excluded from the badge, or synced on demand only, never produce a notification even when new mail arrives there.
+
+While the MailCopilot window is focused, no notification is shown for new mail: the badge and message list update as usual, but the arrival is not interrupted with a toast, since you are already looking at the app. If several messages arrive in a short window while the app is in the background, MailCopilot shows a single notification per account (for example, **5 new messages**) instead of one toast per message -- two accounts receiving mail at the same time still produce two separate notifications; clicking a notification opens that message. On unsigned macOS builds, the operating system may not allow notifications to be shown at all.
 
 ## IMAP IDLE (Push Updates)
 

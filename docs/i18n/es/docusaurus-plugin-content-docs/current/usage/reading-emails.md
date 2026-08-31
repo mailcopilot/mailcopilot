@@ -37,9 +37,17 @@ Si el mensaje no contiene texto citado, el control no aparece.
 
 Cuando el agrupamiento por conversaciones está activado (opción predeterminada), los mensajes relacionados se agrupan en hilos. En la lista de mensajes, los hilos con más de un mensaje muestran un distintivo `+N` junto al asunto — indica cuántos mensajes adicionales hay en el hilo; la información emergente muestra el total. Haga clic en el hilo de la lista de mensajes para abrirlo en el panel de lectura.
 
+### Estado de no leído de una fila de hilo
+
+Una fila de hilo en la lista de mensajes se muestra como no leída (en negrita) siempre que **cualquier** mensaje dentro del hilo que se muestra actualmente en la lista esté sin leer — no solo el más reciente. De esta forma, un mensaje sin leer enterrado en medio de una conversación nunca queda invisible en la lista, aunque el mensaje más reciente de ese mismo hilo ya se haya leído.
+
+Al hacer clic en un hilo no leído se abre el **mensaje no leído más antiguo** del hilo como la tarjeta activa expandida. Si todos los mensajes del hilo ya están leídos, al hacer clic se abre en su lugar el mensaje principal del hilo — con la ordenación por fecha, activa de forma predeterminada, es el mensaje más reciente.
+
+Abrir un mensaje de esta forma no marca el resto del hilo como leído. Marcar todos los mensajes de un hilo como leídos sigue siendo una acción independiente y explícita -- vea **Marcar hilo como leído** en [Acciones del hilo](#acciones-del-hilo) más abajo.
+
 ### Vista del hilo — pila de tarjetas
 
-Los hilos con dos o más mensajes se muestran como una pila vertical de tarjetas. De forma predeterminada, las tarjetas están ordenadas de **más reciente a más antigua**. El mensaje más reciente — el último recibido — es la tarjeta activa expandida; los mensajes más antiguos están contraídos debajo de él.
+Los hilos con dos o más mensajes se muestran como una pila vertical de tarjetas. De forma predeterminada, las tarjetas están ordenadas de **más reciente a más antigua**. La tarjeta activa expandida es la del mensaje que abriste — el mensaje no leído más antiguo si el hilo tiene mensajes sin leer, o el mensaje principal del hilo si está completamente leído; el resto permanece contraído.
 
 - Las **tarjetas contraídas** muestran el avatar del remitente, su nombre, la fecha en formato inteligente y un breve fragmento de texto. Si el mensaje no tiene texto previsualizable, la tarjeta muestra **«(sin vista previa)»**.
 - Haga clic en cualquier tarjeta contraída para expandirla. Haga clic de nuevo en una tarjeta expandida para contraerla. Solo puede haber una tarjeta expandida a la vez: abrir otro mensaje cierra el anterior.
@@ -65,7 +73,7 @@ Al ver un hilo con dos o más mensajes, la barra de herramientas única en la pa
 - **Responder a todos** -- responder a todos los participantes del mensaje más reciente, excluyendo la dirección principal de su cuenta.
 - **Reenviar** -- reenviar el mensaje más reciente del hilo a otra persona.
 - **Archivar hilo** -- mueve todo el hilo a la carpeta Archivo. Desactivado si no hay ninguna carpeta de Archivo configurada.
-- **Eliminar hilo** -- mueve todo el hilo a la Papelera si la cuenta dispone de una carpeta de Papelera. Si el hilo ya está en la Papelera, o la cuenta no tiene carpeta de Papelera, MailCopilot solicita confirmación antes de la eliminación permanente.
+- **Eliminar hilo** -- se decide por carpeta: todo mensaje que aún se pueda mover a la Papelera se mueve allí de inmediato. Todo mensaje que ya esté en la Papelera, o pertenezca a una cuenta sin carpeta de Papelera, queda cubierto en su lugar por un cuadro de diálogo de confirmación antes de la eliminación permanente. Un hilo confinado a una sola carpeta sigue, por tanto, exactamente uno de esos dos caminos, como antes; un hilo cuyos mensajes se extienden por más de una carpeta (por ejemplo, una respuesta ya archivada en la Papelera junto al resto de la conversación) puede seguir ambos a la vez -- los mensajes movibles se mueven, y el cuadro de diálogo de confirmación cubre solo lo que queda.
 - **Marcar hilo como leído** -- marca todos los mensajes del hilo como leídos. Este botón solo aparece cuando al menos un mensaje del hilo no está leído; se oculta cuando todos los mensajes ya están leídos.
 - **Posponer** -- oculta temporalmente **todo el hilo** y vuelve a mostrar todos sus mensajes en el momento elegido. El diálogo de posponer se ancla en el mensaje más reciente, pero todos los mensajes del hilo se posponen juntos. Mismas opciones que al posponer mensajes individuales. Oculto en la carpeta Borradores.
 - **Spam** -- en modo de hilo, abre un cuadro de diálogo de confirmación que pregunta si se debe marcar todo el hilo como spam. Deshacer una marca de spam es más difícil que deshacer un archivado; la confirmación adicional es intencional.
@@ -83,7 +91,7 @@ Los hilos mas cortos (menos de tres mensajes) nunca muestran la franja de resume
 
 Una vez que un hilo ha sido resumido, volver a abrirlo muestra el resumen en cache al instante -- MailCopilot no lo regenera a menos que cambien los mensajes del hilo.
 
-Si se ha alcanzado el presupuesto diario de IA, no hay ningun proveedor de IA configurado (esto incluye una **suscripcion de Claude** configurada, que no es compatible con el Resumen IA del hilo), o el proveedor devuelve un error transitorio, la franja muestra un mensaje explicativo en lugar de un resumen. Aparece un boton **Reintentar** cuando el fallo fue un error transitorio del proveedor.
+Si se ha alcanzado el presupuesto diario de IA, no hay ningun proveedor de IA configurado, o el proveedor devuelve un error transitorio, la franja muestra un mensaje explicativo en lugar de un resumen. Aparece un boton **Reintentar** cuando el fallo fue un error transitorio del proveedor.
 
 ### Respuesta instantanea
 
@@ -93,6 +101,41 @@ Haga clic en una opcion para abrirla en una **nueva ventana de redaccion**, prel
 
 La Respuesta instantanea esta **deshabilitada de forma predeterminada** y debe activarse **por cuenta** en **Configuracion > IA > Respuesta instantanea**. Consulte [Asistente IA](../ai-assistant#respuesta-instantanea) para saber como habilitarla y que se envia a su proveedor de IA.
 
+## Traducción del mensaje
+
+MailCopilot puede traducir el mensaje que está leyendo a un idioma de su elección.
+
+La Traducción del mensaje está **deshabilitada de forma predeterminada** y debe activarse **por cuenta** en **Configuración > IA > Traducción con IA** (marque «Permitir traducir los mensajes recibidos y tus propios borradores con IA»). El mismo ajuste también activa la [Traducción del borrador](../ai-assistant#traducción-del-borrador) en la ventana de redacción. Consulte [Asistente IA](../ai-assistant#traducción-del-mensaje) para saber cómo habilitarla y qué se envía a su proveedor de IA.
+
+### Cómo usarla
+
+Haga clic en **Traducir** encima del cuerpo del mensaje y elija un idioma de destino en la lista **Traducir al**. MailCopilot llama a su proveedor de IA configurado solo en ese momento -- no hay traducción automática al abrir un mensaje, así que abrir un correo en un idioma extranjero nunca consume su presupuesto de IA por sí solo.
+
+Una vez que se muestra la traducción, un interruptor **Ver el original** / **Ver la traducción** encima del cuerpo le permite alternar en cualquier momento. El mensaje guardado nunca se modifica -- la traducción solo es una vista superpuesta a él.
+
+**Los mensajes HTML se traducen a partir de su versión de texto.** La traducción siempre se muestra como texto plano, incluso para un mensaje HTML -- el formato, el diseño y las imágenes incrustadas no forman parte de ella. Una leyenda encima del texto traducido lo indica explícitamente: «La traducción se ha hecho sobre la versión de texto del mensaje, así que su formato y sus imágenes no forman parte de ella.»
+
+### Idioma de origen detectado
+
+Antes de traducir, MailCopilot intenta identificar el idioma original del mensaje en su dispositivo y, cuando lo consigue, lo indica en una leyenda encima de la traducción (por ejemplo: «Traducción automática del inglés al español. El original está a un clic.»). La detección es local y solo se usa como etiqueta -- nunca decide si el mensaje se puede traducir.
+
+La leyenda se puede corregir en ambos casos, no solo cuando la detección falla. Si el idioma no se puede identificar con suficiente confianza, MailCopilot traduce igualmente y simplemente no muestra ninguna leyenda, ofreciendo un selector **Idioma de este mensaje** (marcador de posición: **Elige un idioma**) para que lo indique usted mismo. Si SÍ se muestra una leyenda pero nombra el idioma equivocado -- la detección local puede confundir idiomas muy próximos con aparente seguridad --, aparece junto a ella un enlace **¿No es el idioma correcto?** que abre el mismo selector. En ambos casos, indicar el idioma es opcional y solo actualiza la leyenda de la traducción ya mostrada, tomada de la caché, sin volver a llamar al proveedor.
+
+### Caché de traducciones
+
+La traducción de un mensaje a un idioma determinado se almacena en caché localmente en su dispositivo, vinculada al propio contenido del mensaje, al idioma de destino y a la versión del contrato de traducción (proveedor, modelo y forma del prompt) con la que se generó -- volver a abrir el mismo mensaje y elegir de nuevo el mismo idioma reutiliza la traducción en caché en lugar de llamar de nuevo al proveedor, y un cambio posterior en cómo MailCopilot genera las traducciones queda registrado bajo una clave nueva en lugar de servir el resultado de un contrato antiguo como si fuera el actual. La caché sigue sin tener una caducidad propia; en su lugar, el límite indicado abajo hace que las entradas envejezcan. Cada cuenta conserva sus 500 traducciones más recientes; al alcanzar ese límite, se eliminan las traducciones más antiguas de esa cuenta para dejar sitio a las nuevas. Al eliminar una cuenta también se eliminan sus traducciones en caché.
+
+### Si la traducción no está disponible
+
+MailCopilot indica el motivo concreto por el que no se pudo producir la traducción, en lugar de mostrar un error genérico:
+
+- La traducción está desactivada para esta cuenta.
+- Todavía no hay ningún proveedor de IA configurado.
+- El proveedor de IA no ha devuelto ninguna traducción.
+- El texto del mensaje aún no se ha descargado.
+- El mensaje es demasiado largo para traducirlo de una sola vez, y no hay forma de traducir solo una parte: para el límite cuenta el mensaje entero, incluida la correspondencia anterior que pueda estar citada dentro.
+- El presupuesto de IA de este periodo se ha agotado.
+
 ## Adjuntos
 
 Cuando el mensaje activo tiene adjuntos, estos aparecen encima del cuerpo del mensaje. Para cada adjunto se muestra:
@@ -100,7 +143,10 @@ Cuando el mensaje activo tiene adjuntos, estos aparecen encima del cuerpo del me
 - Un **icono de tipo de archivo** elegido a partir del tipo MIME, con respaldo en la extension del nombre de archivo cuando el tipo MIME falta, es generico (`application/octet-stream`) o no se reconoce: PDF, imagen, archivo comprimido, documento, hoja de calculo, presentacion, texto plano, mensaje `.eml` incrustado, o un icono generico cuando no aplica nada mas especifico.
 - El **nombre del archivo**.
 - El **tamano del archivo**.
-- Un **distintivo «Vista previa disponible»** en los adjuntos que MailCopilot reconoce como previsualizables. El conjunto actual cubre imagenes PNG, JPEG, GIF, WebP y documentos PDF -- el distintivo aparece solo en estos tipos e indica que la funcion de previsualizacion esta planificada; la accion principal de la fila sigue siendo hoy el boton de descarga.
+
+Las imagenes de maquetacion que el cuerpo del mensaje ya muestra en linea -- por ejemplo un logotipo en una firma HTML -- nunca se eliminan de la lista. MailCopilot no puede determinar con fiabilidad, desde fuera del navegador, si una parte concreta llego a ser visible en pantalla -- eso lo deciden la maquetacion, el CSS y la seleccion dentro de una imagen adaptable --, asi que en vez de adivinar mantiene todas las partes accesibles: los adjuntos reales (los archivos que el remitente adjunto de verdad) se listan primero, y las imagenes en linea que el cuerpo renderizo se relegan al final de la lista, detras del mismo interruptor de expansion descrito mas abajo.
+
+Aparece un interruptor de expansion siempre que haya mas que mostrar de lo que cabe contraido -- mas de cuatro adjuntos reales, o cualquier imagen en linea relegada, incluso si hay cuatro adjuntos reales o menos. Haz clic en **Mostrar mas (N)**, donde N cuenta solo los elementos que no estan visibles ahora mismo, para revelarlo todo, y en **Mostrar menos** para volver a contraer la lista.
 
 Haz clic en el boton de descarga de la fila del adjunto para guardar el archivo en tu equipo. El boton de descarga tiene una etiqueta accesible explicita, de modo que los lectores de pantalla anuncian la accion junto con el nombre del archivo.
 
@@ -108,9 +154,18 @@ Haz clic en el boton de descarga de la fila del adjunto para guardar el archivo 
 
 MailCopilot verifica los enlaces: enlaces no coincidentes, HTTP y dominios IDN.
 
+### Clic derecho en un enlace
+
+Haz clic derecho en un enlace dentro del cuerpo de un mensaje para abrir un pequeno menu contextual con:
+
+- **Abrir enlace en el navegador** -- abre el enlace de la misma forma que un clic, incluidas las comprobaciones de seguridad anteriores (avisos de dominio no coincidente y de HTTP, deteccion de dominios IDN/punycode). Esta opcion solo aparece en la ventana principal y en la ventana de mensaje independiente (ver [Abrir en ventana](#abrir-en-ventana)) -- no se ofrece en las ventanas de Configuracion, Redactar o Cuenta, ya que ninguna de ellas muestra enlaces de correo.
+- **Copiar dirección del enlace** -- copia el destino real del enlace al portapapeles, no su texto visible, y nunca la forma interna de enrutamiento que MailCopilot usa para representar el enlace. Para una direccion web (`http:`/`https:`) con un nombre de dominio internacionalizado, la direccion se copia en su forma punycode (ASCII) -- la forma que su navegador usara realmente -- en lugar de la forma Unicode, de modo que una direccion copiada no pueda ocultar un dominio similar detras de caracteres legibles. Para una direccion `mailto:`, un dominio internacionalizado se codifica en porcentaje en su lugar, ya que los clientes de correo no lo resuelven como un host punycode. Las credenciales incrustadas en un enlace (`https://user:pass@host/…`) se copian tal cual, sin eliminarse -- si pega ese enlace en otro lugar, las credenciales lo acompanan.
+
+Ninguna de las dos opciones aparece para enlaces que no comiencen con `http:`, `https:` o `mailto:` (por ejemplo, un enlace `javascript:` o `data:` incrustado en un mensaje), ni para una direccion de enlace de mas de 8192 caracteres.
+
 ## Acciones
 
-Responder (**r**), Responder a todos (**a**), Reenviar (**f**), Destacar (**s**), Eliminar (**#**), Archivar (**e**), Spam (**!**), Leido/No leido (**Shift+I**/**Shift+U**), Mover (**v**), Posponer.
+Responder (**r**), Responder a todos (**a**), Reenviar (**f**), Destacar (**s**), Eliminar (**#**), Archivar (**e**), Spam (**!**), Leido/No leido (**Shift+I**/**Shift+U**), Mover (**v**) -- arrastrar un mensaje hasta una carpeta en la barra lateral funciona igual: cada mensaje se mueve desde su propia carpeta de origen, asi que arrastrar desde un resultado de una busqueda **Todas las carpetas**, o desde una conversacion cuyos mensajes viven en carpetas distintas, mueve cada mensaje desde donde realmente esta. Posponer.
 - **Fijar / Desfijar** -- fijar un mensaje en la parte superior de la lista. Los mensajes fijados siempre aparecen primero, independientemente del orden (atajo: **p**).
 - **Abrir en ventana** -- abrir el mensaje en una ventana independiente para leerlo junto a otro contenido.
 - **Imprimir** -- imprimir el correo actual (atajo: **Ctrl+P**).
@@ -176,13 +231,33 @@ Haga clic en cualquier mensaje de la carpeta «Leer mas tarde» para abrirlo y l
 
 Puede abrir la carpeta «Leer mas tarde» desde la barra lateral.
 
+## Mensajes muy grandes
+
+MailCopilot se protege del correo anormalmente grande, pero la protección exacta que se aplica depende de cómo se abre el mensaje.
+
+**El límite estricto de 100 MB protege cualquier lectura completa de un mensaje.** Siempre que MailCopilot necesita leer el contenido en bruto de un mensaje por completo -- ya sea que abras una copia ya almacenada en tu dispositivo, o que MailCopilot descargue un mensaje por completo para mantenerlo disponible sin conexión -- un mensaje de más de 100 MB (tamaño en bruto, tal como se almacena en el servidor) no se analiza en absoluto. Esto cubre el cuerpo del mensaje, sus archivos adjuntos y cualquier invitación de calendario incrustada. Al abrir uno de estos mensajes aparece una tarjeta de marcador de posición construida a partir de los datos de encabezado disponibles -- remitente, asunto y fecha cuando se conocen -- junto con un aviso de que el mensaje supera el límite de 100 MB, sin indicar el tamaño exacto; si la propia descarga fue rechazada a medio camino, esos datos proceden de tu lista de mensajes ya sincronizada en lugar del mensaje en sí, y pueden estar incompletos. Deliberadamente no hay ninguna opción de «abrir de todos modos»: es una protección contra bloqueos por falta de memoria y contra correo patológico o malicioso, no un tamaño que se espera encontrar en el uso normal. La mayoría de los proveedores de correo para particulares rechazan los mensajes de alrededor de 20-50 MB antes de que lleguen siquiera a tu bandeja de entrada, así que alcanzar este límite debería ser extremadamente raro -- aunque no imposible: algunos sistemas de correo empresariales (por ejemplo, Microsoft 365 con un límite organizativo ampliado) pueden dejar pasar mensajes más grandes. El mensaje en sí permanece intacto en el servidor -- puedes abrirlo en otra aplicación de correo.
+
+**El límite de «solo se muestra el principio» de 1 MB se aplica siempre que MailCopilot lee un mensaje mediante la ruta de lectura completa que se usa para el acceso sin conexión.** Esto incluye los mensajes abiertos desde una copia ya almacenada en tu dispositivo, y también la primerísima vez que abres un mensaje en una carpeta con acceso sin conexión activado, cuando MailCopilot descarga el mensaje completo para mostrarlo -- incluso si los límites de tu caché impiden después guardar esa copia en el disco. Este es el caso normal de tu bandeja de entrada, que mantiene disponibles sin conexión los mensajes recientes de forma predeterminada, y de cualquier otra carpeta para la que hayas activado el acceso sin conexión (**Configuración > Carpetas**, consulta [Modo sin conexión](../settings/folders-settings#offline-mode)). Para estos, si el cuerpo decodificado supera 1 MB, solo se muestra el principio: un aviso debajo del texto dice «Solo se muestra el principio de este mensaje.» Junto a él aparece el botón **Mostrar el mensaje completo**. Los archivos adjuntos siguen apareciendo por completo incluso en la vista truncada. Haz clic en el botón para releer el mensaje con un límite más alto, pero aún así finito (8 MB) -- MailCopilot solo hace esto cuando lo pides explícitamente. Si ni siquiera el límite ampliado basta para mostrar el mensaje completo, el aviso permanece, pero el botón se sustituye por una nota indicando que esto es todo lo que MailCopilot puede mostrar.
+
+**Los mensajes abiertos directamente desde el servidor no se ven afectados por el límite de 1 MB / 8 MB anterior.** Las carpetas en las que el acceso sin conexión está desactivado -- lo predeterminado para todas las carpetas salvo la bandeja de entrada -- obtienen el texto de un mensaje directamente del servidor cada vez que lo abres, sin descargar y almacenar antes el mensaje completo. Esa descarga tiene sus propios límites de tamaño, independientes, para cada parte que recupera, muy por debajo del límite estricto de 100 MB. Abrir un mensaje muy grande de esta manera no muestra ni la tarjeta de marcador de posición ni el aviso de «solo se muestra el principio»: simplemente puede mostrar menos contenido de un mensaje muy grande sin indicarlo.
+
 ## Cuando un mensaje no puede cargarse
 
-Si MailCopilot no puede recuperar el cuerpo del mensaje -- por ejemplo porque la conexion al servidor IMAP expiro (despues de 10 segundos) -- muestra un marcador de posicion en lugar de una pantalla en blanco:
+Si MailCopilot no puede recuperar el cuerpo del mensaje, muestra un marcador de posicion en lugar de una pantalla en blanco. Hay tres motivos distintos para esto, y MailCopilot los distingue en lugar de mostrar el mismo mensaje en todos los casos. La regla que sigue es que el marcador de posicion solo afirma lo que MailCopilot sabe de verdad, y no nombra una causa que solo esta suponiendo:
 
-> «El cuerpo del mensaje no esta disponible sin conexion. Solo se almacenan en cache las cabeceras.»
+**Usted pidio trabajar sin conexion.** Tiene activado «Trabajar sin conexión», de modo que nunca se contacto con el servidor y el cuerpo del mensaje nunca se descargo: en la cache local solo estan sus encabezados:
 
-Aparece un boton **Reintentar** debajo del mensaje. Haga clic para intentar recuperar el cuerpo de nuevo. Si la conexion se ha restablecido, el mensaje se cargara con normalidad.
+> «El contenido del mensaje no está disponible sin conexión. Solo se han guardado los encabezados.»
+
+**La solicitud se quedo sin tiempo.** MailCopilot concede 10 segundos a la recuperacion del cuerpo del mensaje antes de desistir. Ese plazo es un cronometro, no un diagnostico: vence sin haber averiguado por que la recuperacion iba lenta. La mayoria de las veces se debe a que, en el momento de abrir el mensaje, un trabajo en segundo plano -- la sincronizacion de otras carpetas, la indexacion de cuerpos de mensajes para la busqueda -- esta ocupando la conexion con el servidor de correo, pero un servidor lento, una conexion deficiente o un mensaje muy grande dan exactamente el mismo resultado. Es casi seguro que el mensaje existe en el servidor; MailCopilot simplemente no llego a tiempo:
+
+> «El mensaje no se cargó en el tiempo previsto. Esto puede ocurrir cuando una tarea en segundo plano ocupa la conexión, cuando el servidor responde con lentitud o cuando el mensaje es muy grande. Puedes reintentarlo.»
+
+**La carga fallo.** MailCopilot intento cargar el contenido del mensaje y finalmente no lo obtuvo. Aqui entra desde una red caida hasta una contrasena que el servidor ya no acepta, un certificado inesperado o un buzon que ya no existe -- y tambien entra lo que ocurre *despues* de que el mensaje llega, por ejemplo quedarse sin espacio en disco al guardarlo en la cache local. MailCopilot decide deliberadamente no adivinar cual de esos casos fue, porque el marcador de posicion se equivocaria mas veces de las que acertaria; por la misma razon no culpa al servidor de correo, que en el caso del disco lleno no hizo nada mal. Alli donde la causa *si* se conoce, la nombra el elemento de la interfaz que puede estar seguro de ella: el aviso **Iniciar sesión de nuevo** sobre la lista de mensajes cuando sus credenciales han dejado de funcionar, o el dialogo de seguridad de la conexion cuando no se pudo confiar en el certificado del servidor.
+
+> «MailCopilot no pudo cargar el contenido de este mensaje: solo se muestran sus encabezados. Puedes reintentarlo.»
+
+En los tres casos aparece un boton **Reintentar** debajo del marcador de posicion, tanto en la ventana principal como en una ventana de mensaje independiente. Haga clic para intentar recuperar el cuerpo de nuevo: en caso de tiempo de espera agotado, suele bastar con un segundo intento una vez que el trabajo en segundo plano ha terminado. Si el modo sin conexion esta activado o sus credenciales han caducado, reintentar seguira produciendo el mismo marcador hasta que desactive el modo sin conexion o vuelva a iniciar sesion.
 
 ## Invitaciones a reuniones
 
@@ -191,7 +266,7 @@ Cuando un mensaje contiene una invitación de calendario (un adjunto `.ics` que 
 La tarjeta muestra:
 
 - **Título del evento** — el resumen de la reunión.
-- **Cuándo** — la fecha y hora de inicio.
+- **Cuándo** — la fecha y hora de inicio. En la mayoría de los casos, la hora se convierte y se muestra en la zona horaria de su dispositivo, sin importar en qué zona horaria haya enviado la invitación el organizador; si la zona horaria de la invitación es distinta de la suya, debajo aparece un texto indicando la zona horaria original del organizador, para que pueda ver de un vistazo que se ha realizado una conversión. La conversión no es posible en dos casos, y en ambos se muestra la hora original del organizador tal como se envió: cuando la invitación especifica una zona horaria que MailCopilot no puede resolver (algunas invitaciones de Outlook/Exchange usan un nombre de zona horaria estilo Windows en lugar de uno estándar) — aquí el texto aparece de todos modos e indica de qué zona horaria se trata; y cuando la invitación no incluye ninguna información de zona horaria ni un desfase UTC explícito — aquí no hay nada que ese texto pueda indicar, así que no aparece ninguno, y la hora mostrada son simplemente los números del organizador tal cual, sin indicar a qué zona horaria pertenecen.
 - **Organizador** — el organizador indicado en la invitación de calendario (puede diferir del remitente del correo si la invitación se envió en nombre de otra persona).
 - **Lugar** — la sala de reuniones o el enlace de conferencia, si se ha proporcionado.
 
@@ -208,4 +283,4 @@ Los botones Aceptar / Tal vez / Rechazar solo aparecen para invitaciones de reun
 
 ## Deshacer
 
-En las vistas de carpeta de cuenta, archivar, marcar como spam o mover a la papelera muestra una barra de deshacer con cuenta regresiva. Haga clic en **Deshacer** antes de que expire el temporizador. Las eliminaciones permanentes y algunas acciones en la bandeja unificada o entre cuentas no muestran barra de deshacer.
+En las vistas de carpeta de cuenta, archivar, marcar como spam o mover a la papelera muestra una barra de deshacer con cuenta regresiva. Haga clic en **Deshacer** antes de que expire el temporizador. Lo que determina si se puede deshacer es qué mensajes mueve realmente la acción, no de qué carpetas procedía su selección original: los mensajes que ya están en la carpeta de destino, o que pertenecen a una cuenta sin carpeta para ese rol, se apartan y se tratan por separado en lugar de moverse. La barra de deshacer solo cubre una única carpeta de origen, por lo que aparece únicamente cuando todos los mensajes que realmente se mueven provienen de la carpeta que tiene abierta en ese momento. Una eliminación puede ser mixta: los mensajes que van a la papelera reciben una barra de deshacer si cumplen esa condición, mientras que los mensajes que ya están en la papelera, o que pertenecen a una cuenta sin carpeta de Papelera, se eliminan permanentemente -- MailCopilot le pide confirmación antes de hacerlo y espera su respuesta en lugar de actuar de inmediato. Las acciones entre cuentas, y cualquier acción cuyos mensajes movidos sigan extendiéndose por más de una carpeta de origen -- por ejemplo, una acción masiva sobre una selección procedente de una búsqueda **Todas las carpetas** -- no muestran barra de deshacer: esa parte de la acción se realiza igualmente de inmediato, carpeta por carpeta, simplemente ya no se puede deshacer en un solo paso.

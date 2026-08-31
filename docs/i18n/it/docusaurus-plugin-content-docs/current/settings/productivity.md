@@ -7,6 +7,12 @@ title: Produttivita
 
 Notifiche desktop, IMAP IDLE, intervallo di sincronizzazione (1–30 min), sincronizzazione bozze, caricare sempre le immagini esterne, foto dei mittenti (Gravatar), ordine di ordinamento, raggruppamento in conversazioni, preset scorciatoie (Gmail/Outlook), ritardo di invio e modalita offline.
 
+## Notifiche desktop
+
+Attiva o disattiva le notifiche desktop per la nuova posta in arrivo. Se attiva, MailCopilot ti avvisa della nuova posta che arriva in una cartella conteggiata nel [badge dei non letti](general#badge-dei-non-letti) -- per impostazione predefinita la Posta in arrivo, più qualsiasi cartella che hai incluso esplicitamente nel badge -- e solo se quella cartella è impostata su sincronizzazione completa o periodica delle intestazioni. Inoltre, MailCopilot esclude per impostazione predefinita un insieme fisso di cartelle -- Cestino, Spam, Archivio e Bozze -- anche se ne hai incluso esplicitamente una nel badge; questo restringe ulteriormente le notifiche e non le amplia mai oltre la politica del badge. Le cartelle escluse dal badge, o sincronizzate solo su richiesta, non generano mai una notifica anche se vi arriva nuova posta.
+
+Finché la finestra di MailCopilot è in primo piano, non viene mostrata alcuna notifica per la nuova posta: il badge e l'elenco messaggi si aggiornano normalmente, ma l'arrivo non viene interrotto da una notifica, dato che stai già guardando l'app. Se arrivano più messaggi in un breve intervallo di tempo mentre l'app è in background, MailCopilot mostra un'unica notifica per account (per esempio **«5 nuovi messaggi»**) invece di una notifica per messaggio -- se due account ricevono posta contemporaneamente, riceverai comunque due notifiche distinte; cliccando su una notifica si apre quel messaggio. Nelle build di macOS non firmate, il sistema operativo potrebbe non consentire affatto la visualizzazione delle notifiche.
+
 ## Modalita offline
 
 Scarica i messaggi per leggerli senza connessione a Internet. La modalita offline viene configurata **per cartella** nella scheda [Cartelle](folders-settings#offline-mode) — puoi abilitarla per Posta in arrivo, Inviata o qualsiasi altra cartella individualmente.

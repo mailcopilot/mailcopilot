@@ -12,7 +12,14 @@ import {
 const ACCOUNT = 5
 const FOLDER = 'INBOX'
 
-/** A rule that trashes everything from the given address. */
+/**
+ * A rule that trashes everything from the given address.
+ *
+ * Gated on `from_address`, not the legacy `from`: since §2.162 a destructive
+ * action on the legacy field is refused before evaluation (the sender writes
+ * that value about themselves), so a fixture written that way would be testing
+ * the refusal rather than the loop.
+ */
 function trashRule(overrides: Partial<MailRulesRunnerRule> = {}): MailRulesRunnerRule {
   return {
     id: 'rule-1',
@@ -20,7 +27,7 @@ function trashRule(overrides: Partial<MailRulesRunnerRule> = {}): MailRulesRunne
     name: 'trash spam sender',
     enabled: true,
     priority: 0,
-    conditions: JSON.stringify([{ field: 'from', op: 'equals', value: 'cp@mai.ru' }]),
+    conditions: JSON.stringify([{ field: 'from_address', op: 'equals', value: 'cp@mai.ru' }]),
     actions: JSON.stringify([{ type: 'trash' }]),
     stopProcessing: false,
     ...overrides,
@@ -810,5 +817,252 @@ describe('runMailRules — no work', () => {
 
     expect(result).toEqual({ evaluated: 0, matched: 0, baselined: false, skipped: false, aborted: false })
     expect(h.watermarkWrites).toEqual([])
+  })
+})
+
+describe('runMailRules — rules that cannot be justified (§2.162)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  /**
+   * Rule whose sole condition is on the given field, driving `type`.
+   *
+   * `move` gets a target folder: without one the rule is refused for its SHAPE
+   * (§2.162), and these tests are about the policy verdict, not the shape one.
+   */
+  function ruleOn(field: string, type: string): MailRulesRunnerRule {
+    return trashRule({
+      conditions: JSON.stringify([{ field, op: 'equals', value: 'cp@mai.ru' }]),
+      actions: JSON.stringify([type === 'move' ? { type, folder: 'Filed' } : { type }]),
+    })
+  }
+
+  it('does not execute a destructive action gated on the legacy from field (AC6)', async () => {
+    for (const type of ['move', 'trash', 'archive', 'mark_spam']) {
+      const h = harness({
+        rules: [ruleOn('from', type)],
+        uids: [10],
+        state: { watermarkUid: 9, uidValidity: 1 },
+      })
+
+      const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+      expect(h.executed, type).toEqual([])
+      expect(h.logged, type).toEqual([])
+      expect(result.matched, type).toBe(0)
+      // The message is still accounted for: the watermark advances past it and
+      // it reaches the AI-rules pipeline like any message no static rule matched.
+      expect(h.state?.watermarkUid, type).toBe(10)
+      expect(h.enqueuedForAi, type).toEqual([10])
+    }
+  })
+
+  it('records the skip with the reason and the field, without the rule name (AC6)', async () => {
+    const h = harness({
+      rules: [ruleOn('from', 'trash')],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+
+    await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    const line = h.warnings.find(w => w.includes('rule-1'))
+    expect(line).toContain('unverifiable_sender')
+    expect(line).toContain('from')
+    expect(line).toContain('trash')
+    // Rule names are user-authored text and routinely carry addresses.
+    expect(line).not.toContain('trash spam sender')
+  })
+
+  it('still executes mark_read and mark_starred on the legacy from field (AC7)', async () => {
+    for (const type of ['mark_read', 'mark_starred']) {
+      const h = harness({
+        rules: [ruleOn('from', type)],
+        uids: [10],
+        state: { watermarkUid: 9, uidValidity: 1 },
+      })
+
+      const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+      expect(h.executed, type).toEqual([{ uid: 10, action: type }])
+      expect(result.matched, type).toBe(1)
+    }
+  })
+
+  it('does not execute a rule conditioned on cc, whatever the action', async () => {
+    for (const type of ['trash', 'mark_read']) {
+      const h = harness({
+        rules: [ruleOn('cc', type)],
+        uids: [10],
+        state: { watermarkUid: 9, uidValidity: 1 },
+      })
+
+      await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+      expect(h.executed, type).toEqual([])
+      expect(h.warnings.some(w => w.includes('unsupported_field')), type).toBe(true)
+    }
+  })
+
+  it('refuses only the offending rule — siblings still run', async () => {
+    const h = harness({
+      rules: [
+        ruleOn('from', 'trash'),
+        trashRule({ id: 'rule-2', priority: 1, actions: JSON.stringify([{ type: 'mark_read' }]) }),
+      ],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+
+    const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([{ uid: 10, action: 'mark_read' }])
+    expect(result.matched).toBe(1)
+  })
+
+  it('does not execute a destructive action gated on the display name (from_name)', async () => {
+    // The AI tool contract always claimed this was enforced; until §2.162's
+    // review it was enforced by nothing but the wording of a prompt.
+    for (const type of ['move', 'trash', 'archive', 'mark_spam']) {
+      const h = harness({
+        rules: [ruleOn('from_name', type)],
+        uids: [10],
+        state: { watermarkUid: 9, uidValidity: 1 },
+      })
+
+      await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+      expect(h.executed, type).toEqual([])
+      expect(h.warnings.some(w => w.includes('unverifiable_sender')), type).toBe(true)
+    }
+  })
+
+  it('still executes reversible actions gated on from_name', async () => {
+    const h = harness({
+      rules: [ruleOn('from_name', 'mark_read')],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+    // The stored message has no display name of its own (from === fromAddr), so
+    // match on the value the fixture does carry.
+    h.store.set(10, { ...message(), from: 'Acme Support', fromAddr: 'billing@acme.test' })
+    h.deps.listMailRules = () => [trashRule({
+      conditions: JSON.stringify([{ field: 'from_name', op: 'equals', value: 'Acme Support' }]),
+      actions: JSON.stringify([{ type: 'mark_read' }]),
+    })]
+
+    const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([{ uid: 10, action: 'mark_read' }])
+    expect(result.matched).toBe(1)
+  })
+
+  it('drops a structurally broken stored rule instead of throwing on every message', async () => {
+    // Syntactically valid JSON of the wrong shape. Before the shape check,
+    // `parseRule` cast it through and `matchRule` threw on `.every`, which the
+    // per-message catch counted as a failed action: retried, then abandoned
+    // with a Sentry report — for a rule, not for a mail server problem.
+    for (const conditions of ['{}', '[42]', '[{"op":"contains","value":"x"}]']) {
+      const h = harness({
+        rules: [trashRule({ conditions, actions: JSON.stringify([{ type: 'trash' }]) })],
+        uids: [10],
+        state: { watermarkUid: 9, uidValidity: 1 },
+      })
+
+      const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+      expect(h.executed, conditions).toEqual([])
+      expect(h.captured, conditions).toEqual([])
+      expect(result.aborted, conditions).toBe(false)
+      // The message is not stuck: it advances and reaches the AI-rules queue.
+      expect(h.state?.watermarkUid, conditions).toBe(10)
+      expect(h.enqueuedForAi, conditions).toEqual([10])
+    }
+  })
+
+  it('drops a rule whose actions half is not an array', async () => {
+    const h = harness({
+      rules: [trashRule({ actions: '{"type":"trash"}' })],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+
+    const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([])
+    expect(h.captured).toEqual([])
+    expect(result.aborted).toBe(false)
+  })
+
+  it('drops a rule whose operator the engine has no branch for', async () => {
+    // Such a rule matches nothing anyway; dropping it makes the fact visible in
+    // the log instead of leaving the user with a filter that quietly does
+    // nothing.
+    const h = harness({
+      rules: [trashRule({
+        conditions: JSON.stringify([{ field: 'from_address', op: 'contain', value: 'cp@mai.ru' }]),
+      })],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+
+    await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([])
+    expect(h.warnings.some(w => w.includes('malformed'))).toBe(true)
+  })
+
+  it('drops a rule whose action type the executor has no branch for, before it can be logged as applied', async () => {
+    const h = harness({
+      rules: [trashRule({ actions: JSON.stringify([{ type: 'delete' }]) })],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+
+    await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([])
+    // The point of the finding: no rule_log row for an action nobody performed.
+    expect(h.logged).toEqual([])
+    expect(h.warnings.some(w => w.includes('malformed'))).toBe(true)
+  })
+
+  it('drops a move rule that names no target folder, before it can be logged as applied', async () => {
+    for (const actions of ['[{"type":"move"}]', '[{"type":"move","folder":"  "}]']) {
+      const h = harness({
+        rules: [trashRule({ actions })],
+        uids: [10],
+        state: { watermarkUid: 9, uidValidity: 1 },
+      })
+
+      await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+      expect(h.executed, actions).toEqual([])
+      // The finding: the executor moved nothing, and the row said "applied".
+      expect(h.logged, actions).toEqual([])
+      expect(h.warnings.some(w => w.includes('malformed')), actions).toBe(true)
+    }
+  })
+
+  it('keeps a move rule with a target working', async () => {
+    const h = harness({
+      rules: [trashRule({ actions: JSON.stringify([{ type: 'move', folder: 'Filed' }]) })],
+      uids: [10],
+      state: { watermarkUid: 9, uidValidity: 1 },
+    })
+
+    const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([{ uid: 10, action: 'move' }])
+    expect(h.logged).toEqual([10])
+    expect(result.matched).toBe(1)
+  })
+
+  it('keeps a well-formed destructive rule working', async () => {
+    const h = harness({ uids: [10], state: { watermarkUid: 9, uidValidity: 1 } })
+
+    const result = await runMailRules(ACCOUNT, FOLDER, h.deps)
+
+    expect(h.executed).toEqual([{ uid: 10, action: 'trash' }])
+    expect(result.matched).toBe(1)
   })
 })

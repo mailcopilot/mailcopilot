@@ -31,7 +31,7 @@
  * adapter in `ai.ts`) would be production-code surface added solely to make
  * one e2e assertion reachable — out of scope here, flagged as a followup.
  * The handler/generator behavior for every branch (too_short, no_provider,
- * cross-account isolation, budget, provider/subscription routing,
+ * cross-account isolation, budget, provider routing,
  * headers-only bodies) is thoroughly unit-tested with real deps:
  * `electron/services/aiThreadSummary.test.ts` (full generator:
  * wrapUntrusted, budget, exactly-5-bullets, audit, telemetry — all with a

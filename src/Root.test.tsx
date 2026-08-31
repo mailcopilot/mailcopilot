@@ -31,8 +31,16 @@ import type { ReactNode } from 'react'
 // `i18n.use(initReactI18next)` at module load, and every component that would
 // otherwise need useTranslation (Settings, TelemetryConsentDialog, ...) is
 // mocked below, so the real i18n init never needs to render anything.
+// The boundary is a pass-through, but its props are captured: §2.236 AC1(d)
+// wires `onError` to the consent reporter, and that wiring is what the crash
+// test below asserts (Sentry's own catching behaviour is Sentry's contract, not
+// Root's).
+const { boundaryProps } = vi.hoisted(() => ({ boundaryProps: { current: null as Record<string, unknown> | null } }))
 vi.mock('./sentry', () => ({
-  SentryErrorBoundary: ({ children }: { children: ReactNode }) => children,
+  SentryErrorBoundary: (props: { children: ReactNode }) => {
+    boundaryProps.current = props as unknown as Record<string, unknown>
+    return props.children
+  },
   sendFeedback: vi.fn(),
   isSentryActive: () => false,
 }))
@@ -56,9 +64,13 @@ vi.mock('./components/TelemetryConsentDialog', () => ({
   )),
 }))
 
-const { useTelemetryConsentMock } = vi.hoisted(() => ({ useTelemetryConsentMock: vi.fn() }))
+const { useTelemetryConsentMock, reportConsentTreeErrorMock } = vi.hoisted(() => ({
+  useTelemetryConsentMock: vi.fn(),
+  reportConsentTreeErrorMock: vi.fn(),
+}))
 vi.mock('./hooks/useTelemetryConsent', () => ({
   useTelemetryConsent: (...args: unknown[]) => useTelemetryConsentMock(...args),
+  reportConsentTreeError: (...args: unknown[]) => reportConsentTreeErrorMock(...args),
 }))
 
 import Root, { renderChildWindow } from './Root'
@@ -77,8 +89,12 @@ Object.defineProperty(window, 'api', {
   configurable: true,
 })
 
+function consentState(phase: string, extra: Record<string, unknown> = {}) {
+  return { phase, submitting: false, decide: vi.fn(), attempts: 1, ...extra }
+}
+
 function resolvedConsent() {
-  return { phase: 'resolved' as const, submitting: false, decide: vi.fn() }
+  return consentState('resolved')
 }
 
 beforeEach(() => {
@@ -86,6 +102,8 @@ beforeEach(() => {
   mockInvoke.mockResolvedValue({})
   useTelemetryConsentMock.mockReturnValue(resolvedConsent())
   window.location.hash = ''
+  delete document.documentElement.dataset.telemetryConsent
+  delete document.documentElement.dataset.telemetryConsentAttempts
 })
 
 afterEach(() => {
@@ -137,7 +155,7 @@ describe('renderChildWindow — hash routing', () => {
 
 describe('Root — telemetry consent gate (AC4)', () => {
   it('renders nothing while the consent state is being checked — App never mounts', () => {
-    useTelemetryConsentMock.mockReturnValue({ phase: 'checking', submitting: false, decide: vi.fn() })
+    useTelemetryConsentMock.mockReturnValue(consentState('checking', { attempts: 1 }))
     render(<Root />)
     expect(screen.queryByTestId('app-mounted')).not.toBeInTheDocument()
     expect(screen.queryByTestId('consent-dialog')).not.toBeInTheDocument()
@@ -145,7 +163,7 @@ describe('Root — telemetry consent gate (AC4)', () => {
   })
 
   it('shows the consent screen instead of mounting App while a decision is required (AC4)', () => {
-    useTelemetryConsentMock.mockReturnValue({ phase: 'required', submitting: false, decide: vi.fn() })
+    useTelemetryConsentMock.mockReturnValue(consentState('required'))
     render(<Root />)
     expect(screen.getByTestId('consent-dialog')).toBeInTheDocument()
     // The load-bearing assertion: App's mount effect (which lists accounts and
@@ -171,7 +189,7 @@ describe('Root — telemetry consent gate (AC4)', () => {
     window.location.hash = '#/settings'
     // Even if the hook reported "required", a child window must render its own
     // content, never the consent screen — the gate belongs to the main window.
-    useTelemetryConsentMock.mockReturnValue({ phase: 'required', submitting: false, decide: vi.fn() })
+    useTelemetryConsentMock.mockReturnValue(consentState('required'))
     render(<Root />)
     expect(useTelemetryConsentMock).toHaveBeenCalledWith({ enabled: false })
     expect(screen.getByTestId('settings-window')).toBeInTheDocument()
@@ -179,8 +197,77 @@ describe('Root — telemetry consent gate (AC4)', () => {
   })
 
   it('forwards submitting to the dialog', () => {
-    useTelemetryConsentMock.mockReturnValue({ phase: 'required', submitting: true, decide: vi.fn() })
+    useTelemetryConsentMock.mockReturnValue(consentState('required', { submitting: true }))
     render(<Root />)
     expect(screen.getByTestId('consent-dialog')).toHaveAttribute('data-submitting', 'true')
+  })
+})
+
+/**
+ * §2.236 — `unresolved` is a terminal state of its own.
+ *
+ * Both `resolved` and `unresolved` render the app: mail is never held hostage
+ * behind a modal. What must NOT happen is the two becoming indistinguishable —
+ * "we could not determine whether to ask" is not "we determined that no question
+ * is needed", and the difference is what decides whether the question comes back
+ * on the next launch. These tests are the ones that fail if a future change
+ * collapses the states again.
+ */
+describe('Root — unresolved consent state (§2.236)', () => {
+  it('renders the app when the consent state could not be resolved', () => {
+    useTelemetryConsentMock.mockReturnValue(consentState('unresolved', { attempts: 5 }))
+    render(<Root />)
+    expect(screen.getByTestId('app-mounted')).toBeInTheDocument()
+    // And no screen: we have no evidence the question is due, so we do not
+    // invent one — the next launch asks, because no record was written.
+    expect(screen.queryByTestId('consent-dialog')).not.toBeInTheDocument()
+  })
+
+  it('marks unresolved and resolved differently on <html>, so the two can be told apart', () => {
+    useTelemetryConsentMock.mockReturnValue(consentState('unresolved', { attempts: 5 }))
+    const first = render(<Root />)
+    expect(document.documentElement.dataset.telemetryConsent).toBe('unresolved')
+    expect(document.documentElement.dataset.telemetryConsentAttempts).toBe('5')
+    first.unmount()
+
+    useTelemetryConsentMock.mockReturnValue(consentState('resolved'))
+    render(<Root />)
+    expect(document.documentElement.dataset.telemetryConsent).toBe('resolved')
+    expect(document.documentElement.dataset.telemetryConsentAttempts).toBe('1')
+  })
+
+  it.each(['checking', 'required'] as const)('mirrors the %s phase onto <html> too', phase => {
+    useTelemetryConsentMock.mockReturnValue(consentState(phase))
+    render(<Root />)
+    expect(document.documentElement.dataset.telemetryConsent).toBe(phase)
+  })
+})
+
+// §2.236 AC1(d) — hypothesis 2 (the consent dialog throws and the error is
+// eaten) gets instrumentation. Root wires the boundary's onError to the hook's
+// reporter, which is where the policy lives; this asserts the wiring exists,
+// carrying the phase that tells a consent-screen crash from any other one.
+describe('Root — tree crash reporting', () => {
+  it('reports a render failure with the consent phase that was on screen', () => {
+    useTelemetryConsentMock.mockReturnValue(consentState('required'))
+    render(<Root />)
+
+    const onError = boundaryProps.current?.onError as ((e: unknown) => void) | undefined
+    expect(onError).toBeTypeOf('function')
+    const boom = new Error('consent dialog exploded')
+    onError?.(boom)
+    // `required` is the phase that matters: a crash there is the one the
+    // boundary's own Sentry report cannot deliver, because telemetry is
+    // necessarily off while the question is open.
+    expect(reportConsentTreeErrorMock).toHaveBeenCalledWith('required', boom)
+  })
+
+  it('carries the phase through, so a crash outside the screen is distinguishable', () => {
+    useTelemetryConsentMock.mockReturnValue(consentState('unresolved', { attempts: 5 }))
+    render(<Root />)
+    const onError = boundaryProps.current?.onError as ((e: unknown) => void) | undefined
+    const boom = new Error('app exploded')
+    onError?.(boom)
+    expect(reportConsentTreeErrorMock).toHaveBeenCalledWith('unresolved', boom)
   })
 })

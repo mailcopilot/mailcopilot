@@ -105,6 +105,7 @@ vi.mock('../../packages/db', () => ({
   clearAiActionLog: vi.fn(() => 0),
   exportAiActionLog: vi.fn(() => '[]'),
   listMailRules: vi.fn(() => []),
+  getMailRule: vi.fn(),
   createMailRule: vi.fn(),
   updateMailRule: vi.fn(),
   deleteMailRule: vi.fn(),

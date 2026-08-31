@@ -48,6 +48,8 @@ MailCopilot durchsucht Ihren lokalen E-Mail-Cache. Die Vollständigkeitsanzeige 
 
 Standardordner (Posteingang, Gesendet, Archiv, Entwürfe) werden standardmäßig vollständig indexiert. Junk-, Spam- und Papierkorb-Ordner sind standardmäßig von der Volltextindexierung ausgeschlossen, um Suchergebnisse sauber zu halten und Speicherplatz zu reduzieren. Sie können die Indexierungseinstellung für jeden Ordner über das Kontextmenü (Rechtsklick in der Seitenleiste) oder unter **Einstellungen > Ordner** ändern.
 
+Eine Nachricht, die normal geöffnet wurde -- einschließlich einer Nachricht, deren Text durch das [weiche 1-MB-Limit](../usage/reading-emails#sehr-große-nachrichten) abgeschnitten wurde -- ist sofort mit `body:` durchsuchbar, wie jede andere Nachricht: Die ersten rund 200.000 Zeichen ihres Texts werden indexiert. Eine Nachricht über dem harten 100-MB-Limit (siehe denselben Abschnitt) ist anders: Da ihr Text beim Öffnen nie decodiert wurde, findet die `body:`-Suche sie erst, nachdem der Hintergrund-Textindexer sie vom Server abgerufen und indexiert hat -- das kann länger dauern als bei einer gewöhnlichen Nachricht.
+
 ## Serverunterstützte Suche
 
 Bei der Suche in einem bestimmten Ordner kann MailCopilot auch den IMAP-Server abfragen. Serverergebnisse werden mit einem „+N vom Server"-Badge gekennzeichnet.

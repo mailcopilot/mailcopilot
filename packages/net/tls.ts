@@ -1,4 +1,4 @@
-import { X509Certificate } from 'node:crypto'
+import { createHash, X509Certificate } from 'node:crypto'
 import net from 'node:net'
 import tls from 'node:tls'
 
@@ -146,12 +146,30 @@ type GetCACertificatesFn = (type?: 'default' | 'system' | 'bundled' | 'extra') =
 export const CA_CACHE_TTL_MS = 10 * 60_000
 
 type CaKind = 'combined' | 'bundled'
-type CaCacheEntry = { value: string[] | null; at: number }
+type CaCacheEntry = { value: string[] | null; at: number; revision: number }
 
 /** `value === null` means `tls.getCACertificates` is unavailable/failed and
  *  callers must fall back to Node's own default verification. */
 const caCache = new Map<CaKind, CaCacheEntry>()
 let caFallbackWarned = false
+
+/**
+ * Dispenser of unique snapshot revisions: every (re)computed cache entry takes
+ * the next number and carries it, so anything derived from a snapshot can be
+ * keyed on that number instead of on the snapshot's contents.
+ *
+ * It is a counter, NOT a shared invalidator. Recomputing one kind advances the
+ * counter, but a live entry of the other kind keeps its OWN revision and keeps
+ * matching the contexts derived from it — derived values are compared against
+ * the revision of the entry they came from, never against the counter's current
+ * value. What the counter guarantees is that a recomputed entry never reuses
+ * the number of the snapshot it replaces, so recomputing a snapshot makes
+ * everything derived from its previous contents unreachable. That is what keeps
+ * the TTL meaningful for the derived value too: a root removed from the OS
+ * store stops being trusted at the same moment for `ca` arrays and for the
+ * OpenSSL contexts built from them.
+ */
+let caRevision = 0
 
 function dedupePem(list: string[]): string[] {
   const seen = new Set<string>()
@@ -173,19 +191,17 @@ function getCaFn(): GetCACertificatesFn {
   return fn
 }
 
-/** TTL-cached CA snapshot. Always returns a DEFENSIVE COPY: the array is
- *  handed to callers that merge it into TLS options, and a consumer mutating
- *  a shared cached array would corrupt the trust store for every later
- *  connection in the process. */
-function cachedCa(kind: CaKind, compute: (getCa: GetCACertificatesFn) => string[]): string[] | null {
+/** TTL-cached CA snapshot, entry form: the LIVE cached object, including the
+ *  revision the derived SecureContext cache is keyed on. Module-internal only —
+ *  the array it carries is never handed out (see `cachedCa` for the copy that
+ *  is), because a consumer mutating the shared array would corrupt the trust
+ *  store for every later connection in the process. */
+function cachedCaEntry(kind: CaKind, compute: (getCa: GetCACertificatesFn) => string[]): CaCacheEntry {
   const hit = caCache.get(kind)
-  if (hit && Date.now() - hit.at < CA_CACHE_TTL_MS) {
-    return hit.value ? hit.value.slice() : null
-  }
+  if (hit && Date.now() - hit.at < CA_CACHE_TTL_MS) return hit
+  let entry: CaCacheEntry
   try {
-    const value = dedupePem(compute(getCaFn()))
-    caCache.set(kind, { value, at: Date.now() })
-    return value.slice()
+    entry = { value: dedupePem(compute(getCaFn())), at: Date.now(), revision: ++caRevision }
   } catch (e) {
     if (!caFallbackWarned) {
       caFallbackWarned = true
@@ -195,9 +211,17 @@ function cachedCa(kind: CaKind, compute: (getCa: GetCACertificatesFn) => string[
         e instanceof Error ? e.message : String(e),
       )
     }
-    caCache.set(kind, { value: null, at: Date.now() })
-    return null
+    entry = { value: null, at: Date.now(), revision: ++caRevision }
   }
+  caCache.set(kind, entry)
+  return entry
+}
+
+/** TTL-cached CA snapshot, array form. Always a DEFENSIVE COPY — see
+ *  `cachedCaEntry`. */
+function cachedCa(kind: CaKind, compute: (getCa: GetCACertificatesFn) => string[]): string[] | null {
+  const entry = cachedCaEntry(kind, compute)
+  return entry.value ? entry.value.slice() : null
 }
 
 /**
@@ -205,9 +229,14 @@ function cachedCa(kind: CaKind, compute: (getCa: GetCACertificatesFn) => string[
  * uniform across Windows/macOS/Linux — no per-OS branching.
  *
  * Graceful fallback: on Node builds without `tls.getCACertificates` (or if
- * it throws) returns `null`, which makes `buildTlsOptions` omit the `ca`
- * option entirely — i.e. Node's default verification. The degradation is
+ * it throws) returns `null`, which makes `buildTlsOptions` omit the trust
+ * store entirely — i.e. Node's default verification. The degradation is
  * logged once per process.
+ *
+ * Kept as the array form for the interception probe and for callers that need
+ * the certificates themselves. `buildTlsOptions` does NOT go through here: it
+ * reads the cache entry directly so it can key the shared SecureContext on the
+ * snapshot revision.
  */
 export function getCombinedCaCertificates(): string[] | null {
   return cachedCa('combined', (getCa) => [...getCa('default'), ...getCa('system')])
@@ -225,16 +254,76 @@ export function getBundledCaCertificates(): string[] | null {
   return cachedCa('bundled', (getCa) => getCa('bundled'))
 }
 
+// ---------------------------------------------------------------------------
+// SecureContext cache (§2.156)
+// ---------------------------------------------------------------------------
+// Handing `ca: string[]` to `tls.connect` makes Node build a FRESH OpenSSL
+// trust store for every socket: it parses and indexes each PEM in the array
+// before the handshake starts, synchronously, on the main thread. With the
+// combined default+system list that is ~240 certificates, measured at ~14 ms
+// per connection on the reference machine.
+//
+// That cost is per CONNECTION, and the background sync path opens one dedicated
+// IMAP connection per folder — 44 per pass on the reference profile, six
+// accounts running concurrently. The resulting ~630 ms of main-thread work per
+// pass is what the event-loop watchdog reported as `Main blocked ~200-800ms`
+// every five minutes (§2.156). Nothing about the work was necessary: every one
+// of those connections was building the SAME trust store from the SAME bytes.
+//
+// A SecureContext is immutable once built and is designed to be shared across
+// sockets (that is precisely what `https.Agent` does), so we build one per
+// distinct trust set and reuse it. `rejectUnauthorized`, `servername` and
+// `checkServerIdentity` stay per-connection options and are NOT part of the
+// context — sharing the context therefore cannot leak pin or identity policy
+// from one endpoint to another.
+//
+// Keyed on the revision OF THE SNAPSHOT ENTRY the context was built from,
+// rather than on the certificate bytes, so the TTL that bounds snapshot
+// staleness bounds context staleness by exactly the same window: recomputing
+// that snapshot hands it a fresh revision number, and every context built from
+// the previous contents becomes unreachable. Anchors are part of the key
+// because a pinned endpoint's trust set is the snapshot PLUS its own anchors.
+type SecureContextEntry = { revision: number; context: tls.SecureContext }
+const secureContextCache = new Map<string, SecureContextEntry>()
+
+/** Digest of the pinned anchor bodies — small (0-2 certificates in practice)
+ *  and hashed rather than concatenated so the key stays bounded. */
+function anchorsKey(anchors: string[]): string {
+  if (anchors.length === 0) return '-'
+  const h = createHash('sha256')
+  for (const pem of anchors) h.update(pem).update('\0')
+  return h.digest('hex')
+}
+
+/** Shared SecureContext for a trust set, or `undefined` when the caller must
+ *  fall back to Node's implicit default context (no `ca` at all). */
+function secureContextFor(revision: number, ca: string[] | null, anchors: string[]): tls.SecureContext | undefined {
+  if (!ca) return undefined
+  const key = `${revision}|${anchorsKey(anchors)}`
+  const hit = secureContextCache.get(key)
+  if (hit && hit.revision === revision) return hit.context
+  // Entries carrying an older revision belong to snapshot contents that no
+  // lookup can ask for again; drop them rather than let the map grow for the
+  // lifetime of the process.
+  for (const [k, v] of secureContextCache) if (v.revision !== revision) secureContextCache.delete(k)
+  const context = tls.createSecureContext({ ca })
+  secureContextCache.set(key, { revision, context })
+  return context
+}
+
 /** @internal — test-only cache reset; not part of the public API. */
 export function __resetCombinedCaCacheForTest(): void {
   caCache.clear()
+  secureContextCache.clear()
   caFallbackWarned = false
 }
 
 export type TlsOptions = {
   rejectUnauthorized: boolean
   servername?: string
-  ca?: string[]
+  /** Prebuilt shared trust store. Replaces `ca` — see the SecureContext cache
+   *  note above for why the array form was removed from the hot path. */
+  secureContext?: tls.SecureContext
   checkServerIdentity?: (hostname: string, cert: tls.PeerCertificate) => Error | undefined
 }
 
@@ -269,17 +358,29 @@ export type TlsOptions = {
  *  Consequence to keep in mind: while `tlsPinnedCertsPem` is empty, a pinned
  *  SELF-SIGNED server fails closed (certificate error surfaced through the
  *  normal cert-error UX) instead of being silently accepted. That is a
- *  deliberate trade — silent acceptance was a MITM hole. */
+ *  deliberate trade — silent acceptance was a MITM hole.
+ *
+ *  The trust set is handed over as a SHARED, PREBUILT `secureContext` rather
+ *  than as a `ca` array (§2.156 — see the SecureContext cache above). This is a
+ *  performance change only, and deliberately touches nothing that decides
+ *  trust: the context carries the anchors, while `rejectUnauthorized`, the
+ *  pinned `checkServerIdentity` closure and `servername` remain per-connection
+ *  options built fresh from THIS cfg on every call. Endpoints with different
+ *  anchors get different contexts (anchors are part of the cache key), and a
+ *  CA-snapshot refresh orphans every context built from the previous one, so
+ *  removing a root takes effect within the same TTL as before. */
 export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
   const pins = (cfg.tlsPinsSha256 || []).map(normalizeFingerprintSha256).filter(Boolean)
   const sni = cfg.servername
-  const combined = getCombinedCaCertificates()
+  const snapshot = cachedCaEntry('combined', (getCa) => [...getCa('default'), ...getCa('system')])
+  const combined = snapshot.value
 
   if (pins.length === 0) {
     if (!combined && !sni) return undefined
+    const secureContext = secureContextFor(snapshot.revision, combined, [])
     return {
       rejectUnauthorized: true,
-      ...(combined && { ca: combined }),
+      ...(secureContext && { secureContext }),
       ...(sni && { servername: sni }),
     }
   }
@@ -318,9 +419,11 @@ export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
     }
   }
 
+  const secureContext = secureContextFor(snapshot.revision, ca, anchors)
+
   return {
     rejectUnauthorized: true,
-    ...(ca && { ca }),
+    ...(secureContext && { secureContext }),
     ...(sni && { servername: sni }),
     /**
      * Pin check first, then a per-certificate identity mode.

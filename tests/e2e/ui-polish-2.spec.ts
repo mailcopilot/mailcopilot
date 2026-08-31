@@ -45,8 +45,13 @@ test('polish-2: AI chip scope toggle switches between email and folder chip sets
 
     // Pre-configure AI provider and consent so chips panel renders (not privacy/onboarding screen)
     await page.evaluate(async () => {
-      const current = await window.api.invoke('settings:get') as Record<string, unknown>
-      await window.api.invoke('settings:save', { ...current, aiProvider: 'subscription', aiPrivacyConsent: true })
+      // Only the fields this test needs. `settings:save` merges its payload
+      // into the persisted settings, so echoing the whole object back adds
+      // nothing — and any MAIN-ONLY field caught in that echo (§2.103
+      // `spellcheckAvailable` is one) makes main refuse the WHOLE payload as
+      // `forbidden_field`, silently dropping the configuration below.
+      await window.api.invoke('settings:save', { aiProvider: 'openai-api',
+        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1', aiPrivacyConsent: true })
     })
 
     // Open the AI panel via sidebar-ai toggle button

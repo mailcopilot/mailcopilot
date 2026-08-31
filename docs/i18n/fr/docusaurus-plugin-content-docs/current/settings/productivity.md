@@ -7,7 +7,9 @@ title: Parametres de productivite
 
 ## Notifications de bureau
 
-Activez ou desactivez les notifications systeme pour les nouveaux e-mails.
+Activez ou desactivez les notifications systeme pour les nouveaux e-mails. Lorsque cette option est activée, MailCopilot vous avertit des nouveaux messages qui arrivent dans un dossier compté dans le [badge de messages non lus](general#badge-de-messages-non-lus) -- par défaut votre boîte de réception, plus tout dossier que vous avez explicitement inclus dans le badge -- et seulement si ce dossier est configuré en synchronisation complète ou périodique des en-têtes. En plus de cela, MailCopilot ignore par défaut un ensemble fixe de dossiers -- Corbeille, Indésirables, Archive et Brouillons -- même si vous en avez explicitement inclus un dans le badge ; cela restreint encore les notifications et ne les élargit jamais au-delà de la politique du badge. Les dossiers exclus du badge, ou synchronisés uniquement à la demande, ne produisent jamais de notification, même si du nouveau courrier y arrive.
+
+Tant que la fenêtre de MailCopilot est au premier plan, aucune notification n'est affichée pour le nouveau courrier : le badge et la liste des messages se mettent à jour comme d'habitude, mais l'arrivée n'est pas signalée par une notification, puisque vous regardez déjà l'application. Si plusieurs messages arrivent dans un court laps de temps pendant que l'application est en arrière-plan, MailCopilot affiche une seule notification par compte (par exemple **« 5 nouveaux messages »**) plutôt qu'une notification par message -- si deux comptes reçoivent du courrier en même temps, vous recevez tout de même deux notifications distinctes ; cliquer sur une notification ouvre ce message. Sur les versions macOS non signées, le système d'exploitation peut ne pas autoriser l'affichage des notifications du tout.
 
 ## IMAP IDLE
 

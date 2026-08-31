@@ -15,6 +15,9 @@
  *     Escape producing the exact same stored record as "don't allow"
  *   - AC7: a refusal survives a restart — the screen does not come back and
  *     telemetry stays off
+ *   - §2.236: a reply that arrives after the per-attempt timeout still asks the
+ *     question. A timeout ends an attempt, never the question — the one branch
+ *     of §2.82 that used to fail in the permissive direction
  *   - the grant path flips both the record and the About switch, without a
  *     restart
  *   - both answers are actually ON SCREEN, in all six locales, down to the
@@ -133,6 +136,81 @@ test.describe('§2.82 telemetry consent — first run', () => {
     expect(byEscape.telemetryConsent?.version).toBe(byButton.telemetryConsent?.version)
     expect(byEscape.sentryEnabled).toBe(false)
     expect(byButton.sentryEnabled).toBe(false)
+  })
+
+  /**
+   * §2.236 — a reply slower than the per-attempt timeout must still ask.
+   *
+   * The shipped defect was a single 3s timer that moved the gate to `resolved`,
+   * so a `needed: true` arriving at 3.1s skipped the question on a launch that
+   * afterwards looks exactly like a launch where consent was not required. The
+   * unit tests pin the state machine; what only this level can show is the real
+   * renderer, against the real main, over the real preload bridge.
+   *
+   * Slowing main down is not available to us here (the CDP channel and main's
+   * JS run on the same thread, so blocking one blocks the other). The relation
+   * that matters is "the attempt expires before the reply lands", and it is
+   * driven from the other side instead: the FIRST timer scheduled for
+   * `CONSENT_STATE_TIMEOUT_MS` is re-armed at 0ms, which no IPC round trip can
+   * beat. Attempt 1 therefore expires with the answer still in flight — the exact
+   * pre-§2.236 death condition — and the question must still appear.
+   *
+   * Two guards keep this honest rather than accidentally passing: the init
+   * script records that it actually intercepted a timer (if the constant in
+   * src/hooks/useTelemetryConsent.ts changes, this fails loudly instead of
+   * quietly testing nothing), and `<html data-telemetry-consent-attempts>` must
+   * show that a second attempt really was made.
+   */
+  test('a consent-state reply slower than the attempt timeout still asks the question', async () => {
+    ctx = await launchAppWithConsentGate()
+    const { page } = ctx
+
+    // Baseline: this profile does get asked, so a missing dialog after the
+    // reload is about the timing and nothing else.
+    await expect(page.getByTestId('telemetry-consent-dialog')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+    await page.addInitScript(() => {
+      // Mirrors CONSENT_STATE_TIMEOUT_MS in src/hooks/useTelemetryConsent.ts.
+      const ATTEMPT_TIMEOUT_MS = 3000
+      const w = window as unknown as { setTimeout: typeof setTimeout; __consentTimerHijacked?: boolean }
+      w.__consentTimerHijacked = false
+      const original = w.setTimeout
+      let done = false
+      w.setTimeout = function (this: unknown, handler: TimerHandler, delay?: number, ...args: unknown[]) {
+        if (!done && delay === ATTEMPT_TIMEOUT_MS) {
+          done = true
+          w.__consentTimerHijacked = true
+          return original.call(this, handler, 0, ...args)
+        }
+        return original.call(this, handler, delay, ...args)
+      } as typeof setTimeout
+    })
+
+    await page.reload()
+    await page.waitForLoadState('domcontentloaded')
+
+    // The question is asked despite the first attempt having expired first.
+    await expect(page.getByTestId('telemetry-consent-dialog')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+    expect(await page.evaluate(() =>
+      (window as unknown as { __consentTimerHijacked?: boolean }).__consentTimerHijacked)).toBe(true)
+    await expect
+      .poll(async () => Number(await page.evaluate(() =>
+        document.documentElement.dataset.telemetryConsentAttempts ?? '0')), { timeout: EXPECT_TIMEOUT })
+      .toBeGreaterThanOrEqual(2)
+
+    // And the expired attempt recorded nothing: a timeout is not an answer, so
+    // the profile is still unanswered and telemetry is still off.
+    const stored = await readSettings(ctx)
+    expect(stored.telemetryConsent).toBeUndefined()
+    expect(stored.sentryEnabled).toBe(false)
+
+    // The screen is still a working screen, not a leftover: answering it lands.
+    await page.getByTestId('telemetry-consent-deny').click()
+    await expect(page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect.poll(async () => (await readSettings(ctx!)).telemetryConsent?.granted, {
+      timeout: EXPECT_TIMEOUT,
+    }).toBe(false)
   })
 
   test('allowing turns telemetry on without a restart', async () => {
@@ -337,9 +415,10 @@ test.describe('§2.82 telemetry consent — both answers stay on screen', () => 
         .toBeLessThanOrEqual(1)
 
       // The disclosure itself is untouched by the layout fix: both lists are
-      // still complete (six sent categories, five never), just inside the
-      // scroller now. A future "make it fit" temptation lands here first.
-      expect(await page.getByTestId('telemetry-consent-sent').locator('li').count()).toBe(6)
+      // still complete (seven sent categories — §2.122 added `aiKeyStore` — and
+      // five never), just inside the scroller now. A future "make it fit"
+      // temptation lands here first.
+      expect(await page.getByTestId('telemetry-consent-sent').locator('li').count()).toBe(7)
       expect(await page.getByTestId('telemetry-consent-never').locator('li').count()).toBe(5)
       await expect(page.getByTestId('telemetry-consent-change-later')).not.toBeEmpty()
       await expect(page.getByTestId('telemetry-consent-privacy-link')).not.toBeEmpty()
@@ -377,5 +456,139 @@ test.describe('§2.82 telemetry consent — persistence across restarts (AC7)', 
     const settings = await readSettings(ctx)
     expect(settings.telemetryConsent?.granted).toBe(false)
     expect(settings.sentryEnabled).toBe(false)
+  })
+})
+
+/**
+ * §2.122 — TELEMETRY_CONSENT_VERSION bumped 1 -> 2 when the AI-key-store
+ * category (`ai.api_key_store_op`) was added to what is disclosed.
+ *
+ * `evaluateConsent` (electron/telemetryConsent.ts) already has a unit test for
+ * "version < TELEMETRY_CONSENT_VERSION collapses to needed"; what that test
+ * cannot see is the consequence a real upgrading installation experiences: a
+ * profile that has a v1 record on disk — from BEFORE this feature existed —
+ * must show the real first-run screen again on next launch, with the new
+ * category on it, and the fresh answer must stick (no third ask). That chain
+ * only exists once main, preload and the renderer are wired together, hence
+ * e2e rather than another unit test.
+ *
+ * Differentiation check performed for this file (not encoded as an assertion,
+ * since TELEMETRY_CONSENT_VERSION is a source constant, not runtime state):
+ * with `electron/telemetryConsent.ts` temporarily reverted to
+ * `TELEMETRY_CONSENT_VERSION = 1`, `evaluateConsent` reads the seeded v1
+ * record as `granted`/`denied` (not `needed`), so `telemetry-consent-dialog`
+ * never mounts and every test below times out waiting for it. Restoring `2`
+ * makes them pass again. See the test-gen report for the actual run log.
+ */
+test.describe('§2.122 telemetry consent — version bump re-ask (AI key store category)', () => {
+  let dataDir: string | undefined
+  let ctx: AppContext | undefined
+
+  test.afterEach(async () => {
+    if (ctx) await cleanupApp(ctx)
+    ctx = undefined
+    if (dataDir) await fs.rm(dataDir, { recursive: true, force: true })
+    dataDir = undefined
+  })
+
+  /**
+   * Seeds a profile as if a user had answered the FIRST-VERSION disclosure —
+   * the exact shape `makeConsentRecord`/`applyAboutToggle` would have written
+   * before the AI-key-store category existed.
+   *
+   * `theme` is required (no `.default()` in `settingsSchema`, packages/net/
+   * config.ts) — omitting it fails the whole settings load with a ZodError
+   * and the app never gets past bootstrap, which is why `seedLocale` above
+   * sets it too.
+   */
+  async function seedV1Consent(granted: boolean): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mailcopilot-e2e-consent-v1-'))
+    await fs.writeFile(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({
+        settings: {
+          theme: 'light',
+          telemetryConsent: { granted, version: 1, at: '2020-01-01T00:00:00.000Z' },
+          sentryEnabled: granted,
+        },
+      }),
+      'utf8',
+    )
+    return dir
+  }
+
+  test('a v1 grant is re-asked, shows the AI-key-store item among seven, and the fresh answer is not re-asked', async () => {
+    dataDir = await seedV1Consent(true)
+
+    // AC1 — a pre-existing v1 "allow" does not exempt this profile: the
+    // disclosure changed, so the gate treats it exactly like an unanswered one.
+    ctx = await launchAppWithConsentGate({ dataDir })
+    const dialog = ctx.page.getByTestId('telemetry-consent-dialog')
+    await expect(dialog).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+    // AC3 — the "sent" list now has seven items (six pre-existing categories
+    // plus aiKeyStore), not six. Catches a future locale edit dropping a
+    // <li>, not just this feature's own addition.
+    const sentItems = ctx.page.getByTestId('telemetry-consent-sent').locator('li')
+    await expect(sentItems).toHaveCount(7)
+
+    // AC2 — the new item is present and its own text says the key VALUE is
+    // never part of what is sent (electron/telemetryConsent.ts history entry
+    // 2 / src/i18n/locales/*.json `telemetryConsent.sent.aiKeyStore`).
+    const aiKeyStoreItem = sentItems.filter({ hasText: 'AI keys are kept' })
+    await expect(aiKeyStoreItem).toHaveCount(1)
+    await expect(aiKeyStoreItem).toContainText('The key itself is never sent')
+
+    // Answer again under the new disclosure.
+    await ctx.page.getByTestId('telemetry-consent-allow').click()
+    await expect(ctx.page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+    // AC4 — the record now carries the CURRENT version, not the one that was
+    // seeded.
+    const afterAnswer = await readSettings(ctx)
+    expect(afterAnswer.telemetryConsent?.granted).toBe(true)
+    expect(afterAnswer.telemetryConsent?.version).toBe(2)
+    expect(afterAnswer.telemetryConsent?.version).not.toBe(1)
+    expect(afterAnswer.sentryEnabled).toBe(true)
+
+    // Same profile, one more launch: must come straight up with no dialog —
+    // the re-ask happens exactly once, not on every start.
+    await cleanupApp(ctx)
+    ctx = await launchAppWithConsentGate({ dataDir })
+    await expect(ctx.page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(ctx.page.getByTestId('telemetry-consent-dialog')).toHaveCount(0)
+
+    const afterRestart = await readSettings(ctx)
+    expect(afterRestart.telemetryConsent?.version).toBe(2)
+    expect(afterRestart.telemetryConsent?.granted).toBe(true)
+  })
+
+  test('a v1 refusal is re-asked, and a fresh refusal under the new version is not re-asked', async () => {
+    dataDir = await seedV1Consent(false)
+
+    // AC1, for the "denied" branch — refusal alone does not exempt a profile
+    // from the re-ask either; only the composition version does.
+    ctx = await launchAppWithConsentGate({ dataDir })
+    await expect(ctx.page.getByTestId('telemetry-consent-dialog')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+    await ctx.page.getByTestId('telemetry-consent-deny').click()
+    await expect(ctx.page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+
+    // AC5 — the refusal is recorded under the new version, not silently
+    // dropped or left at the old one.
+    const afterAnswer = await readSettings(ctx)
+    expect(afterAnswer.telemetryConsent?.granted).toBe(false)
+    expect(afterAnswer.telemetryConsent?.version).toBe(2)
+    expect(afterAnswer.sentryEnabled).toBe(false)
+
+    // AC5 — and it is not asked a third time.
+    await cleanupApp(ctx)
+    ctx = await launchAppWithConsentGate({ dataDir })
+    await expect(ctx.page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(ctx.page.getByTestId('telemetry-consent-dialog')).toHaveCount(0)
+
+    const afterRestart = await readSettings(ctx)
+    expect(afterRestart.telemetryConsent?.version).toBe(2)
+    expect(afterRestart.telemetryConsent?.granted).toBe(false)
   })
 })

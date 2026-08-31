@@ -29,7 +29,7 @@ The middle column shows the list of messages in the currently selected folder. E
 - Sender name and avatar
 - Subject line
 - Date or time
-- Unread indicator (bold text for unread messages)
+- Unread indicator (bold text for unread messages) -- for a thread, the row is bold if **any** message in the thread that is currently shown in the list is unread, not only the newest one. See [Conversation Threading](./reading-emails#conversation-threading).
 - Star/flag indicator
 - Attachment indicator (paperclip icon)
 - Thread count (if conversation grouping is enabled)
@@ -76,6 +76,12 @@ The right column displays the content of the selected message:
 ## Resizable Columns
 
 You can resize the message list and reading pane by dragging the border between them. Your preferred width is remembered between sessions.
+
+## Text Selection and Editing
+
+Right-click inside any text field -- the search bar, a message you are composing, an AI chat prompt, or any other editable box -- to open a small context menu with **Cut**, **Copy**, **Paste**, and **Select All**. Right-clicking selected, non-editable text (for example a highlighted passage in a message body) offers **Copy** on its own.
+
+Right-clicking a link in a message body opens a different menu with options to open or copy the link; see [Right-Click a Link](./reading-emails#right-click-a-link).
 
 ## Status Bar
 

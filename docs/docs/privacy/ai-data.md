@@ -34,19 +34,22 @@ The AI assistant is entirely optional. If you do not configure a provider, no em
 - **Audited generations.** Each time a summary is actually generated (not served from cache), one entry is written to the [AI audit log](#the-audit-log) with `goal` set to the summary action. Reopening a thread that was already summarized reads the cached result and does not create a new audit entry or contact the AI provider again.
 - **Account-scoped cache.** A generated summary is cached and looked up per account: the cache key combines your account with the thread's identity, so a cached summary for one account is never reused or exposed for another account.
 - **Budget-aware.** If the daily AI budget has been reached, the summary is refused gracefully instead of being generated -- see [Thread AI Summary](../ai-assistant#thread-ai-summary) for what you see in that case.
-- **Provider selection.** Thread AI Summary uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini) -- a **Claude subscription is not supported for thread summary** and produces the same "no AI provider" refusal as having no provider configured at all. It is designed to prefer a local, on-device model once local-model support ships, so thread content would not need to leave your machine -- that support has not shipped yet, so today it always uses your configured remote API-key provider.
-- **Telemetry contains no message content.** The anonymous usage event recorded for each generation carries only the provider identifier, whether the model ran locally, input/output token counts, latency, and a bucketed error class -- never the thread's subject, body, or participant addresses.
+- **Provider selection.** Thread AI Summary uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini). It is designed to prefer a local, on-device model once local-model support ships, so thread content would not need to leave your machine -- that support has not shipped yet, so today it always uses your configured remote API-key provider.
+- **Telemetry contains no message content.** The pseudonymous usage event recorded for each generation carries only the provider identifier, whether the model ran locally, input/output token counts, latency, and a bucketed error class -- never the thread's subject, body, or participant addresses.
 
 ## Compose Quick Actions
 
-[Compose Quick Actions](../ai-assistant#compose-quick-actions) rewrites your current draft text (Improve / Shorter / Formal / Fix grammar) in the compose window. It follows the same protections as the rest of the AI assistant:
+[Compose Quick Actions](../ai-assistant#compose-quick-actions) rewrites the text you wrote yourself (Improve / Shorter / Formal / Fix grammar) in the compose window. It follows the same protections as the rest of the AI assistant:
 
+- **Only your own text leaves the device, on drafts MailCopilot composed.** MailCopilot separates your own text from the quoted message, forwarded-message header, and signature before sending anything, so only your own text reaches the AI provider and only your own text is ever replaced. This separation is dependable for replies, forwards and signatures that MailCopilot itself produced, and for the widespread conventions other clients follow -- `>`-prefixed quotes (including a nested `>>` quote or one indented with leading spaces), a dashed forwarded-message banner, a `--` or `-- ` signature separator. **A draft composed in a different mail client may quote in a style MailCopilot does not recognize** -- a `|` prefix, indentation alone with no `>`, a bare `From:` / `Sent:` / `To:` / `Subject:` header block, plain text converted from an HTML quote, an Outlook-style underscore separator, or "Begin forwarded message:" without a dashed banner. On such a draft no boundary is found, the whole body counts as your own text, and the quoted part is sent along with it. Your review still stands in the way of any change: the rewrite is only ever shown as a before/after comparison first. See [Compose Quick Actions](../ai-assistant#compose-quick-actions) for how the split is detected.
 - **No silent substitution.** A rewrite is only shown as a before/after comparison. Your draft body is changed only after you explicitly click **Replace** or **Insert at cursor** -- clicking **Cancel**, or dismissing the comparison, leaves your draft untouched and nothing further is sent.
-- **Wrapped content.** Your draft text is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider, the same protection described in [Prompt Injection Protection](#prompt-injection-protection) below -- this also protects against text you pasted from an untrusted source.
+- **No silent truncation.** If your own text is longer than 8,000 characters, MailCopilot refuses the rewrite instead of sending and replacing only part of it.
+- **Stale-edit protection.** If you keep typing while a rewrite is in flight, **Replace** is disabled once the rewrite comes back, so it cannot overwrite text you typed in the meantime; **Insert at cursor** stays available.
+- **Wrapped content.** Your own text is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider, the same protection described in [Prompt Injection Protection](#prompt-injection-protection) below -- this also protects against text you pasted from an untrusted source.
 - **Audited generations.** Each rewrite writes one entry to the [AI audit log](#the-audit-log) with `goal` set to `quick_action`; the specific preset used (Improve / Shorter / Formal / Fix grammar) is recorded in the telemetry span, not in the audit entry.
-- **Provider selection.** Quick Actions uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini) -- a **Claude subscription is not supported** and produces the same "no AI provider" refusal as having no provider configured. There is no separate on/off setting: Quick Actions is available whenever a supported provider is configured and the draft has text to rewrite.
+- **Provider selection.** Quick Actions uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini). There is no separate on/off setting: Quick Actions is available whenever a supported provider is configured and the draft has text to rewrite.
 - **Budget-aware.** If the daily AI budget has been reached, the rewrite is refused gracefully -- see [Compose Quick Actions](../ai-assistant#compose-quick-actions) for what you see in that case.
-- **Telemetry contains no message content.** The anonymous usage event recorded for each rewrite carries only the preset used, the provider identifier, whether the model ran locally, token counts, latency, and a bucketed error class -- never the draft text itself.
+- **Telemetry contains no message content.** The pseudonymous usage event recorded for each rewrite carries only the preset used, the provider identifier, whether the model ran locally, token counts, latency, and a bucketed error class -- never the draft text itself.
 
 ## Instant Reply
 
@@ -57,9 +60,40 @@ The AI assistant is entirely optional. If you do not configure a provider, no em
 - **Wrapped content.** The source email body is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider, the same protection described in [Prompt Injection Protection](#prompt-injection-protection) below.
 - **No auto-send, ever.** Selecting a drafted option only prefills a **new** compose window. Nothing is sent until you explicitly review the draft and press Send yourself.
 - **Audited generations.** Each time drafts are generated, one entry is written to the [AI audit log](#the-audit-log) with `goal` set to the instant-reply action.
-- **Provider selection.** Instant Reply uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini) -- a **Claude subscription is not supported** and produces the same "no AI provider" refusal as having no provider configured.
+- **Provider selection.** Instant Reply uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini).
 - **Budget-aware.** If the daily AI budget has been reached, drafting is refused gracefully -- see [Instant Reply](../ai-assistant#instant-reply) for what you see in that case.
-- **Telemetry contains no message content.** The anonymous usage event recorded for each generation carries only the provider identifier, whether the model ran locally, token counts, latency, and a bucketed error class -- never the email's subject, body, sender or recipient addresses, or the drafted reply text.
+- **Telemetry contains no message content.** The pseudonymous usage event recorded for each generation carries only the provider identifier, whether the model ran locally, token counts, latency, and a bucketed error class -- never the email's subject, body, sender or recipient addresses, or the drafted reply text.
+
+## Message Translation
+
+[Message Translation](../ai-assistant#message-translation) is a separate, opt-in feature that translates the message you are reading into a language of your choice. It follows the same protections as the rest of the AI assistant:
+
+- **Off by default, per account.** Nothing is sent for translation unless you enable **Settings > AI > AI Translate** for that specific account. When disabled, the Translate control is not shown and no request is made.
+- **On demand only.** A provider is called only when you click **Translate** -- there is no automatic translation when you open a message.
+- **Plain-text projection.** The provider only ever sees, and only ever returns, plain text: translation is generated from the message's plain-text version, never from HTML markup, even for an HTML message.
+- **Cache-sourced text only.** The message text comes from MailCopilot's local cache by account, folder, and message UID -- never from what happens to be rendered in the window.
+- **Wrapped content.** The message text is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider, the same protection described in [Prompt Injection Protection](#prompt-injection-protection) below.
+- **Cached, not re-sent.** A translation already produced for a message, target language, and translation contract version (provider, model, and prompt shape) is served from a local cache on later opens -- no request reaches the provider a second time for the same message, language, and contract. Cache entries have no separate expiry: a later change to how MailCopilot produces translations is addressed under a new key instead of an older contract's output being served as if it were current. Entries are capped at 500 per account, and are deleted together with the account.
+- **Audited generations.** Each time a translation is actually generated (not served from cache), one entry is written to the [AI audit log](#the-audit-log). A cache hit writes no audit row.
+- **Provider selection.** Message Translation uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini).
+- **Budget-aware.** If the daily AI budget has been reached, the translation is refused gracefully -- see [Message Translation](../ai-assistant#message-translation) for what you see in that case.
+- **Telemetry contains no message content.** The pseudonymous usage event recorded for each provider call carries only the provider identifier, whether the model ran locally, token counts, latency, a bucketed error class, whether a source language could be labeled (never which one), the chosen target language code, and whether the result came from cache -- never the message text, the translation, the subject, the addresses, the folder name, or the detected source language itself.
+
+## Draft Translation
+
+[Draft Translation](../ai-assistant#draft-translation) is the compose-side counterpart of Message Translation: it translates the text you wrote yourself into a language you choose, from the compose window. It shares Message Translation's opt-in setting and follows the same protections, plus the compose-specific ones Compose Quick Actions already uses:
+
+- **Off by default, per account -- no separate setting.** Draft Translation is gated by the same **Settings > AI > AI Translate** toggle as Message Translation; there is nothing extra to turn on.
+- **On demand only.** A provider is called only when you click **Translate**. Opening the compose window, a suggested target language appearing in the picker, or changing the picker's value never calls a provider by itself.
+- **Only your own text leaves the device, when a boundary is found.** Draft Translation reuses the same own-text boundary as Compose Quick Actions: the quoted message, forwarded-message header, and signature are excluded from what is sent and from what is ever replaced, for replies, forwards and signatures that MailCopilot itself produced, and for the widespread conventions other clients follow. On a draft that quotes in a style MailCopilot does not recognize, no boundary is found and the whole body -- quoted text included -- is sent to the AI provider and can be replaced. See [Compose Quick Actions](#compose-quick-actions) above for how that boundary is detected and the full list of quoting styles it misses.
+- **No silent substitution.** The translation is only ever shown as a before/after comparison in the same review panel Compose Quick Actions uses. Your draft body changes only after you explicitly click **Replace** or **Insert at cursor**.
+- **No cache.** Unlike Message Translation, a translated draft is not stored: a draft is expected to keep changing between requests, so a durable cache would mostly hold unsent writing without ever being reused.
+- **Wrapped content.** Your own text is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider, the same protection described in [Prompt Injection Protection](#prompt-injection-protection) below.
+- **Audited generations.** Each translation writes one entry to the [AI audit log](#the-audit-log).
+- **Provider selection.** Draft Translation uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini).
+- **Budget-aware.** If the daily AI budget has been reached, the translation is refused gracefully -- see [Draft Translation](../ai-assistant#draft-translation) for what you see in that case.
+- **The suggested language is a suggestion only.** When you are replying, MailCopilot may pre-fill the target-language picker from the language of the message you are replying to, detected locally on your device. It never starts a translation by itself, and it is never reported: no telemetry field records what language was suggested, or whether the language you picked came from that suggestion.
+- **Telemetry contains no message content.** The pseudonymous usage event recorded for each translation carries only the provider identifier, whether the model ran locally, token counts, latency, a bucketed error class, and the target language code you chose -- never the draft text, the translation, the recipients, the subject, or the suggested language.
 
 ## AI Egress Policy
 
@@ -102,12 +136,12 @@ MailCopilot maintains a local audit log of every AI action. The log is stored in
 | Field | Description |
 |-------|-------------|
 | **Timestamp** | Exact date and time when the action occurred. |
-| **Provider** | The AI provider used (e.g., Anthropic, OpenAI, Google). |
+| **Provider** | An attribution label for the entry, usually your configured AI provider (e.g., Anthropic, OpenAI, Google). It can also name an external client connected through [MCP Server Export](../ai-assistant#mcp-server-export) (`mcp-export`), and older entries can preserve a provider identifier that this version of MailCopilot no longer offers as a connection method. |
 | **Model** | The specific model version that handled the request. |
 | **Goal** | A brief description of what the assistant was asked to do. |
 | **Tool** | The MCP tool called, if any (e.g., `send_email`, `mail_action`, `move_email`). |
 | **Tokens in / out** | Input and output token counts for this action. Token counts are recorded when the AI provider exposes them through the SDK; columns may show **n/a** when the provider does not surface per-request counts. |
-| **Cost (USD)** | Estimated cost based on the provider's published pricing, or **n/a** for subscription providers. Cost is always recorded when available and is the primary signal for spending tracking. |
+| **Cost (USD)** | Estimated cost based on the provider's published pricing, or **n/a** when this entry has no named per-request price -- either because the provider did not report one, or because the entry itself never carries a per-call cost (for example an intercepted internet-tool call, or an action performed through an exported MCP session). **n/a** here does not mean the request bypassed spending limits: Thread AI Summary, Compose Quick Actions, and Instant Reply all count against the Daily / Monthly budget regardless of what this column shows. Cost is always recorded when available and is the primary signal for spending tracking. |
 | **Wrapped** | Number of `wrapUntrusted()` boundary marker invocations. Each invocation means a block of email content was sandboxed before being passed to the AI to prevent prompt injection. |
 | **Blocked** | Number of outbound egress attempts blocked by the security policy during this action. |
 | **Outcome** | Result of the action: **OK** (completed successfully), **Error** (failed), or **Aborted** (cancelled by you or the system). |
@@ -140,8 +174,6 @@ Click **Export JSON** or **Export CSV** to download the currently visible audit 
 
 The top of the Privacy & Audit panel shows per-provider token and cost totals. Select a period — **Today**, **Last 7 days**, or **Last 30 days** — to filter the aggregates. These are rolling windows (not calendar week or month). The totals are computed from the local audit log and are never sent to any server.
 
-For subscription-based providers, costs are shown as **n/a** because per-request pricing does not apply.
-
 ## Prompt Injection Protection
 
 Every block of email content passed to the AI is wrapped with `wrapUntrusted()` boundary markers. These markers instruct the AI to treat the enclosed content as untrusted user data — not as instructions — so a malicious email cannot hijack the assistant's behavior. The **Wrapped** column in the audit log lets you see exactly how many times this protection was applied in each request. The count is precise: if the same email is fetched more than once within a single request (for example, when the AI revisits it during a multi-step task), each fetch is counted separately, so the total accurately reflects the true number of email reads.
@@ -149,4 +181,4 @@ Every block of email content passed to the AI is wrapped with `wrapUntrusted()` 
 ## See Also
 
 - [AI Assistant](../ai-assistant) — full guide to using the AI assistant.
-- [Telemetry](./telemetry) — anonymous diagnostic data collected by MailCopilot (separate from the AI audit log).
+- [Telemetry](./telemetry) — pseudonymous diagnostic data collected by MailCopilot (separate from the AI audit log).

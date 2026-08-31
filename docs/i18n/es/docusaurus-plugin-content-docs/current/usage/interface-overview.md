@@ -19,7 +19,7 @@ Se puede contraer a modo de solo iconos. Los iconos contraidos muestran informac
 
 ## Lista de mensajes
 
-Columna central: remitente, asunto, fecha, indicadores de no leido, estrella, adjuntos y numero de mensajes en el hilo.
+Columna central: remitente, asunto, fecha, indicadores de no leido, estrella, adjuntos y numero de mensajes en el hilo. En un hilo, la fila se muestra como no leida si **cualquier** mensaje del hilo que se muestra actualmente en la lista esta sin leer, no solo el mas reciente. Vea [Hilos de conversación](./reading-emails#hilos-de-conversación).
 
 En el modo **Bandeja de entrada unificada**, la direccion de correo de la cuenta aparece junto al nombre del remitente para identificar que cuenta recibio el mensaje.
 
@@ -53,6 +53,12 @@ Columna derecha: encabezados, cuerpo del mensaje, adjuntos y botones de accion (
 ## Columnas redimensionables
 
 Arrastra el borde entre columnas. Tu preferencia se guarda entre sesiones.
+
+## Seleccion y edicion de texto
+
+Haz clic derecho en cualquier campo de texto -- la barra de busqueda, un mensaje que estas redactando, el campo de la petición del asistente IA, o cualquier otro cuadro editable -- para abrir un pequeno menu contextual con **Cortar**, **Copiar**, **Pegar** y **Seleccionar todo**. Un clic derecho sobre texto seleccionado y no editable (por ejemplo un pasaje resaltado en el cuerpo de un mensaje) ofrece solo **Copiar**.
+
+Un clic derecho en un enlace dentro del cuerpo de un mensaje abre un menu distinto con opciones para abrir o copiar el enlace; consulta [Clic derecho en un enlace](./reading-emails#clic-derecho-en-un-enlace).
 
 ## Barra de estado
 

@@ -19,7 +19,7 @@ Die Seitenleiste kann auf ein schmales Icon-Format reduziert werden. Eingeklappt
 
 ## Nachrichtenliste
 
-Mittlere Spalte: Absender, Betreff, Datum, Ungelesen-/Stern-/Anhangs-Indikatoren, Thread-Anzahl.
+Mittlere Spalte: Absender, Betreff, Datum, Ungelesen-/Stern-/Anhangs-Indikatoren, Thread-Anzahl. Bei einem Thread gilt die Zeile als ungelesen, sobald **irgendeine** in der Liste aktuell angezeigte Nachricht darin ungelesen ist, nicht nur die neueste. Siehe [Konversations-Threads](./reading-emails#konversations-threads).
 
 Im Modus **Vereinheitlichter Posteingang** wird die E-Mail-Adresse des Kontos neben dem Absendernamen angezeigt, damit Sie erkennen koennen, welches Konto die Nachricht erhalten hat.
 
@@ -53,6 +53,12 @@ Rechte Spalte: Kopfzeilen, Nachrichtentext, Anhaenge und Aktions-Buttons (Antwor
 ## Groessenanpassung
 
 Ziehen Sie die Spaltengrenze, um die Breite anzupassen.
+
+## Textauswahl und Bearbeitung
+
+Rechtsklick in ein beliebiges Textfeld -- die Suchleiste, eine Nachricht, die Sie gerade verfassen, das Eingabefeld des KI-Assistenten oder jedes andere bearbeitbare Feld -- oeffnet ein kleines Kontextmenue mit **Ausschneiden**, **Kopieren**, **Einfügen** und **Alles auswählen**. Rechtsklick auf ausgewaehlten, nicht bearbeitbaren Text (zum Beispiel eine markierte Passage im Nachrichtentext) bietet nur **Kopieren** an.
+
+Rechtsklick auf einen Link im Nachrichtentext oeffnet ein anderes Menue mit Optionen zum Oeffnen oder Kopieren des Links; siehe [Rechtsklick auf einen Link](./reading-emails#rechtsklick-auf-einen-link).
 
 ## Statusleiste
 

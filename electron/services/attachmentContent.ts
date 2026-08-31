@@ -3,6 +3,8 @@
  * MIME type classification, text extraction, PDF rendering.
  */
 
+import { pathToFileURL } from 'node:url'
+
 import { createLogger } from '../logger'
 
 const log = createLogger('AttachmentContent')
@@ -190,7 +192,20 @@ async function getPdfjs() {
   if (_pdfjsModule) return _pdfjsModule
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
   try {
-    pdfjs.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
+    // A file URL, not a filesystem path. `require.resolve` returns a path, and
+    // on Windows that is `C:\...`, which the ESM loader rejects outright:
+    // "Only URLs with a scheme in: file, data, and node are supported ...
+    // Received protocol 'c:'". POSIX paths happen to be accepted, which is why
+    // this only ever broke on Windows — measured on the Windows stand
+    // 2026-08-27, where every PDF attachment came back as "Failed to read PDF".
+    //
+    // The catch below does NOT cover that failure: it guards `require.resolve`
+    // (module missing), while the rejection happens later, when pdfjs loads the
+    // worker. So the "process in main thread" fallback never engaged and the
+    // error reached the user instead. pdf.js's own docs use the URL form
+    // (`new URL('./build/pdf.worker.mjs', import.meta.url)`).
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      pathToFileURL(require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')).href
   } catch {
     log.warn('Could not find pdf.worker.mjs — PDF will be processed in main thread')
   }
@@ -200,10 +215,20 @@ async function getPdfjs() {
 
 async function extractPdfText(buffer: Buffer): Promise<{ text: string; numPages: number }> {
   const pdfjs = await getPdfjs()
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise
+  // Tear down through the loading task, not the document: pdfjs 6 dropped the
+  // PDFDocumentProxy.destroy() shorthand that used to forward here. Releasing
+  // the worker is not optional — the bytes are an untrusted attachment.
+  //
+  // The load itself is awaited INSIDE the try. A document that fails to load
+  // still leaves a live transport behind: pdfjs attaches it to the task before
+  // it can hit a DocException, and rejects the promise without destroying
+  // anything. Awaiting outside would skip the teardown on exactly the input
+  // this teardown exists for.
+  const task = pdfjs.getDocument({ data: new Uint8Array(buffer) })
   const parts: string[] = []
 
   try {
+    const doc = await task.promise
     const pagesToRead = Math.min(doc.numPages, 50) // read up to 50 pages of text
     for (let i = 1; i <= pagesToRead; i++) {
       const page = await doc.getPage(i)
@@ -216,7 +241,7 @@ async function extractPdfText(buffer: Buffer): Promise<{ text: string; numPages:
     }
     return { text: parts.join('\n\n'), numPages: doc.numPages }
   } finally {
-    await doc.destroy()
+    await task.destroy()
   }
 }
 
@@ -230,16 +255,20 @@ async function extractPdfText(buffer: Buffer): Promise<{ text: string; numPages:
  */
 async function renderPdfAsImages(buffer: Buffer, filename?: string): Promise<ContentBlock[]> {
   const pdfjs = await getPdfjs()
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise
-  const pagesToProcess = Math.min(doc.numPages, MAX_PDF_RENDER_PAGES)
-
+  // See extractPdfText: teardown goes through the loading task in pdfjs 6, and
+  // the load is awaited inside the try so a rejected load is torn down too.
+  const task = pdfjs.getDocument({ data: new Uint8Array(buffer) })
   const content: ContentBlock[] = []
-  const header = filename
-    ? `[PDF scan: ${filename}, showing first ${pagesToProcess} pages]`
-    : `[PDF scan, showing first ${pagesToProcess} pages]`
-  content.push({ type: 'text' as const, text: header })
 
   try {
+    const doc = await task.promise
+    const pagesToProcess = Math.min(doc.numPages, MAX_PDF_RENDER_PAGES)
+
+    const header = filename
+      ? `[PDF scan: ${filename}, showing first ${pagesToProcess} pages]`
+      : `[PDF scan, showing first ${pagesToProcess} pages]`
+    content.push({ type: 'text' as const, text: header })
+
     const { createCanvas } = await import('@napi-rs/canvas')
 
     for (let i = 1; i <= pagesToProcess; i++) {
@@ -254,7 +283,7 @@ async function renderPdfAsImages(buffer: Buffer, filename?: string): Promise<Con
       }
     }
   } finally {
-    await doc.destroy()
+    await task.destroy()
   }
 
   return content

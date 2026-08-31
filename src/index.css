@@ -98,11 +98,28 @@ html, body, #root {
   margin: 0;
 }
 
+/*
+ * THE typographic baseline (§2.79). Every window (main, Compose, Settings,
+ * Account, MailWindow) is the same document shell routed by hash, so this one
+ * declaration is the single reference point for the whole renderer.
+ *
+ * It lives on `body`, not `:root`, on purpose: `:root` is what `rem` resolves
+ * against, and keeping the root at the browser default leaves that escape hatch
+ * intact for anything that later wants a scale independent of UI text. Do not
+ * duplicate a base size on `#root`, `.window-container` or any other shell
+ * container — see CLAUDE.md §5 "Dev environment gotchas".
+ *
+ * 13px matches the interface scale the app actually uses (11–13px). Before this
+ * existed, every element without an explicit size silently rendered at the
+ * browser's 16px default, which is why Settings showed 13px labels next to 16px
+ * values and hint paragraphs larger than the controls they described.
+ */
 body {
   min-width: 320px;
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
+  font-size: 13px;
 }
 
 a {

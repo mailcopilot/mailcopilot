@@ -167,3 +167,40 @@ export type AccountMeta = {
    */
   signature?: string
 }
+
+/**
+ * Coarse stage of an interactive OAuth account connection, broadcast from
+ * main on the `oauth:progress` channel so the account wizard can explain the
+ * wait instead of leaving the provider picker on screen.
+ *
+ * Payload carries no identity. The stages exist because the post-browser
+ * stretch is long and silent: Google probes IMAP (30s timeout) then SMTP (15s,
+ * plus a 15s STARTTLS retry on 587), Outlook probes IMAP (30s) then SMTP (15s)
+ * without that retry, and both then write to the keychain. Token exchange,
+ * profile lookup and keychain access carry no deadline of their own, so the
+ * total is bounded only in the typical case — the stage line reports what is
+ * happening now, never how much longer it will take.
+ */
+export type OAuthConnectStage =
+  /** Waiting for the user to approve access in the external browser. */
+  | 'browser'
+  /** Redirect received; exchanging the authorization code for tokens. */
+  | 'token'
+  /** Verifying the IMAP endpoint with the freshly minted token. */
+  | 'imap'
+  /** Verifying the SMTP endpoint (non-fatal — failure still saves). */
+  | 'smtp'
+  /** Persisting the account. On a password-to-OAuth transition the refresh
+   *  token is written just BEFORE this stage (an ordering constraint of the
+   *  save guard); on every other path it is written just after. */
+  | 'saving'
+
+/**
+ * `oauth:progress` payload. Deliberately free of addresses, names and tokens:
+ * it is broadcast to every open window, so it carries only the provider being
+ * connected and the current stage.
+ */
+export type OAuthProgress = {
+  provider: 'gmail' | 'outlook'
+  stage: OAuthConnectStage
+}

@@ -76,7 +76,7 @@ You can also use advanced search operators:
 
 ### Can I undo deleting a message?
 
-Yes. After deleting, archiving, or marking a message as spam, an undo bar appears at the bottom of the screen. Click **Undo** before the countdown expires to reverse the action.
+In most cases, yes. After deleting, archiving, or marking a message as spam, an undo bar appears at the bottom of the screen. Click **Undo** before the countdown expires to reverse the action. Undo depends on which messages the action is actually moving, not on which folders your original selection came from: messages that are already in the target folder, or belong to an account with no folder for that role, are set aside and handled separately. The undo bar only ever covers a single source folder, so it appears only when the messages being moved all come from the folder you currently have open -- acting on a single message found via an **All folders** search, for example, does not show an undo bar if that message lives in a different folder. A deletion can be mixed: messages already in Trash, or belonging to an account with no Trash folder, cannot be moved and are deleted permanently instead, and MailCopilot waits for your confirmation before doing so -- but if the rest of the same deletion can still move to Trash, that part gets its own undo bar regardless. Cross-account actions, and any action where the movable messages still span more than one source folder, such as a bulk action on an **All folders** search selection, don't offer undo either -- see [Undo Actions](./usage/reading-emails#undo-actions) for details.
 
 ### How does conversation threading work?
 
@@ -136,7 +136,12 @@ To check for an update manually at any time, open **Settings > About** and click
 
 To enable automatic background downloads, open **Settings > About** and check **Automatically download updates in the background**. When enabled, new versions download silently and you are prompted to restart when the update is ready.
 
-If MailCopilot was installed system-wide (for example, via a package manager), the auto-download checkbox is disabled and the Download / Restart controls are not available. Use your system package manager or administrator privileges to update instead. The **Check for updates** button still works in this mode.
+MailCopilot can normally update itself in place on every platform it supports: an AppImage install replaces the `.AppImage` file itself, and a `.deb`/`.rpm`/pacman install lets the update mechanism attempt the write by requesting administrator privileges (`pkexec`/`sudo`), the same way `apt`/`dnf`/`pacman` would -- the actual outcome is decided by that privilege prompt and the package manager, not by MailCopilot.
+
+Self-update can be unavailable in two different ways, and MailCopilot shows different controls for each:
+
+- **The build isn't packaged** -- a development or CI build. There is no updater at all: the **Check for updates** button and the status area do not appear, and a note reads **"Updates are disabled in this build"** instead.
+- **The build is packaged, but self-update is blocked** -- either because MailCopilot could not determine the directory it would need to update in place, or because that directory is not writable by your account. The first case happens on Linux when the app isn't running as a mounted AppImage (for example, an extracted AppImage or a raw `linux-unpacked` build) -- there is no directory to update. The second case means the folder holding a running AppImage isn't writable (a `.deb`/`.rpm`/pacman install is not affected, since those elevate privileges instead); on Windows and macOS it means the folder holding the installed executable isn't writable. In either case a warning explains why, the **Check for updates** button keeps working, and the auto-download checkbox stays available -- but the Download / Restart controls are hidden.
 
 ### Can I turn off automatic updates?
 
@@ -160,3 +165,9 @@ Try shortening the **Keep full message copy for** period in **Settings > General
 ### I cannot see some folders.
 
 Some folders may be hidden. Right-click in the sidebar and look for hidden folder options, or go to **Settings > Folders** and check the **Show in sidebar** option for each folder.
+
+### I closed the window and now I can't find MailCopilot.
+
+With **Close window to tray** enabled, closing the window hides it behind the tray icon (provided MailCopilot managed to create it) -- click the icon to bring the window back. On some Linux desktops the icon may not be drawn at all, in which case there is nothing to click.
+
+Either way, just start MailCopilot again. If it is still running with a hidden window, it brings that window back to the front instead of opening a second copy; if it had already quit, a fresh window opens.

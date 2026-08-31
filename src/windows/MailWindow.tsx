@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Loader2, AlertTriangle, WifiOff, Undo2 } from 'lucide-react'
+import { Loader2, AlertTriangle, Undo2 } from 'lucide-react'
 import type { AccountMeta, ComposeInit, FolderRoles, MessageDetails } from '@mailcopilot/types'
-import { addrListToString } from '@mailcopilot/core'
+import {
+  ERROR_PRESENTATION_I18N_KEYS,
+  addrListToString,
+  decodeErrorPresentation,
+  isErrorPresentationKey,
+} from '@mailcopilot/core'
 import RecipientList from '../components/RecipientList'
 import { computeReplyRecipients, prefixSubject, htmlToText, quoteText } from '../utils/mail'
 import WindowTitlebar from '../components/WindowTitlebar'
 import { sanitizeMailHtml } from '../utils/mail'
 import { rewriteMailHtmlLinks } from '../utils/mailLinks'
 import { useMailLinkClick } from '../hooks/useMailLinkClick'
+import { useShowFullMessage } from '../hooks/useShowFullMessage'
+import MailBodyFallbackNotice from '../components/MailBodyFallbackNotice'
+import MailParseCapNotice from '../components/MailParseCapNotice'
 import LinkWarningDialog from '../components/LinkWarningDialog'
 import MailActionsToolbar from '../components/MailActionsToolbar'
 
@@ -173,8 +181,38 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
   // Ref to restore focus when dialog closes.
   const focusBeforeDialogRef = useRef<Element | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  /**
+   * §2.17 Phase 1 fix wave — the body load is a named function, not an inline
+   * effect body, because the headers-only placeholder now offers Retry here
+   * exactly as the main window does, and Retry has to run the same load rather
+   * than a second, subtly different one.
+   *
+   * Staleness is tracked with a token instead of the previous `cancelled`
+   * closure flag: `cancelled` only ever guarded ONE in-flight call, which was
+   * enough while the effect was the only caller. With Retry there can be a
+   * second call in flight while the first is still waiting on a stalled
+   * connection, and the token makes the rule explicit — a reply is applied
+   * only if it belongs to the newest load.
+   *
+   * The token is claimed BEFORE the parameter check, not after, so that
+   * starting a load with invalid props still supersedes a reply in flight from
+   * the previous props — the case the old cleanup covered.
+   *
+   * The effect still needs a cleanup, for the one transition that begins no
+   * load at all: unmount. Without it the token of the in-flight call stays
+   * current, the check below passes, and the guarded block runs against a
+   * window that is gone. Today that block only calls setState, which React
+   * discards, so nothing is visible — but then the guard would be enforcing
+   * less than it claims, and the first side effect added next to those
+   * setState calls would run for a closed window. The cleanup BUMPS the token
+   * rather than zeroing it: zero is the initial value, so a reset would let
+   * the next load re-mint a number an older call is still holding, and the
+   * stale answer would pass the check. Monotonic means a token, once
+   * superseded, can never come back.
+   */
+  const loadTokenRef = useRef(0)
+  const loadDetails = useCallback(() => {
+    const token = ++loadTokenRef.current
     if (!Number.isFinite(accountId) || accountId <= 0 || !folder || !Number.isFinite(uid) || uid <= 0) {
       setError('invalid_params')
       setLoading(false)
@@ -185,7 +223,7 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
     void (async () => {
       try {
         const d = await window.api.invoke<MessageDetails>('net:messageDetails', accountId, folder, uid)
-        if (!cancelled) {
+        if (loadTokenRef.current === token) {
           setDetails(d ?? null)
           setLoading(false)
           if (d?.flags) {
@@ -194,14 +232,31 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
           }
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'fetch_failed')
+        if (loadTokenRef.current === token) {
+          // §2.127 — store the presentation KEY, not text. The raw message was
+          // never rendered (the branch below only tested `error` for
+          // truthiness), so the tag never leaked here; but keeping a key lets
+          // the empty state say *why* the message would not open — "no
+          // connection to the mail server" instead of only "Message not
+          // found". Storing the key rather than a translated string keeps `t`
+          // out of this function's dependencies.
+          setError(decodeErrorPresentation(err))
           setLoading(false)
         }
       }
     })()
-    return () => { cancelled = true }
   }, [accountId, folder, uid])
+
+  useEffect(() => {
+    loadDetails()
+    // Invalidate whatever this effect run started once it is over — see the
+    // token comment above for why this is `+= 1` and not `= 0`.
+    return () => { loadTokenRef.current += 1 }
+  }, [loadDetails])
+
+  /** Retry handler for the headers-only placeholder. Same load, no extra
+   *  state: a fresh token supersedes whatever the previous attempt returns. */
+  const retryLoad = useCallback(() => { loadDetails() }, [loadDetails])
 
   // Load cached folder roles for this account. Errors are non-fatal —
   // Archive will be disabled if the cache is unavailable.
@@ -266,6 +321,13 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
   // Phishing-check pipeline shared with App.tsx. mail:link IPC listener is
   // attached inside the hook — no separate useEffect needed here.
   const { linkPrompt, dismissPrompt, approvePrompt } = useMailLinkClick()
+
+  // §2.145 — "show full message" for a soft-capped body; see the hook. The
+  // standalone window shows exactly one message, so its identity is the props.
+  const { loadingFull, requestFullMessage } = useShowFullMessage(
+    Number.isFinite(accountId) && folder && Number.isFinite(uid) ? { accountId, folder, uid } : null,
+    setDetails,
+  )
 
   const env = details?.envelope
   const from = env?.from ? addrListToString(env.from) : ''
@@ -591,12 +653,25 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
             <div className="empty-state">
               <AlertTriangle size={24} />
               <p>{t('app.empty.messageNotFound.title')}</p>
+              {isErrorPresentationKey(error) && (
+                <p className="hint" data-testid="mail-window-error-reason">
+                  {t(ERROR_PRESENTATION_I18N_KEYS[error])}
+                </p>
+              )}
             </div>
           ) : details?.offlineFallback ? (
-            <div className="empty-state offline-fallback">
-              <WifiOff size={24} />
-              <p>{t('app.errors.bodyNotAvailableOffline')}</p>
-            </div>
+            /* §2.17 Phase 1 fix wave — the SAME component the main window's
+               reading pane renders, Retry included. This block used to be a
+               hand-copied twin that had lost the button, which turned a
+               timeout in a standalone window into a dead end. */
+            <MailBodyFallbackNotice
+              reason={details.offlineFallbackReason}
+              onRetry={retryLoad}
+            />
+          ) : details?.parseCap?.kind === 'hard' ? (
+            /* §2.145 — before the "no body" branch: the body exists, we
+               declined to read it, and "message not found" would be a lie. */
+            <MailParseCapNotice cap={details.parseCap} />
           ) : details && !details.html && !details.text ? (
             <div className="empty-state">
               <AlertTriangle size={24} />
@@ -613,6 +688,15 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
             />
           ) : (
             <pre className="mail-text">{details?.text || ''}</pre>
+          )}
+
+          {/* §2.145 — below the body, where the text stops. */}
+          {!loading && details?.parseCap?.kind === 'soft' && (
+            <MailParseCapNotice
+              cap={details.parseCap}
+              loading={loadingFull}
+              onShowFull={requestFullMessage}
+            />
           )}
         </div>
       </div>

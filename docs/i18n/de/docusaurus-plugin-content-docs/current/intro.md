@@ -6,10 +6,6 @@ title: Einfuehrung
 
 # Willkommen bei MailCopilot
 
-:::info Beta
-MailCopilot befindet sich derzeit in der **Beta**-Phase. Die Kernfunktionen sind stabil und fuer den taeglichen Einsatz bereit, aber gelegentlich koennen kleinere Unzulaenglichkeiten auftreten. Wir freuen uns ueber Ihr Feedback!
-:::
-
 MailCopilot ist ein AI-nativer Desktop-E-Mail-Client, der fuer Geschwindigkeit, Datenschutz und Einfachheit entwickelt wurde. Er verbindet sich ueber die Standardprotokolle IMAP/SMTP mit Ihren bestehenden E-Mail-Konten und behaelt Ihre Daten unter Ihrer Kontrolle. Mit einem integrierten KI-Assistenten im Kern hilft Ihnen MailCopilot, E-Mails schneller als je zuvor zu lesen, zu schreiben und zu verwalten.
 
 ## Hauptfunktionen

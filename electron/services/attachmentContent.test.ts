@@ -297,10 +297,10 @@ describe('buildPdfContent', () => {
     const mockDoc = {
       numPages: 1,
       getPage: vi.fn().mockResolvedValue(mockPage),
-      destroy: vi.fn().mockResolvedValue(undefined),
     }
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(mockDoc),
+      destroy: vi.fn().mockResolvedValue(undefined),
     } as never)
 
     const buf = Buffer.from('fake pdf content')
@@ -343,10 +343,10 @@ describe('buildPdfContent', () => {
     const mockDoc = {
       numPages: 2,
       getPage: vi.fn().mockResolvedValue(mockPage),
-      destroy: vi.fn().mockResolvedValue(undefined),
     }
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(mockDoc),
+      destroy: vi.fn().mockResolvedValue(undefined),
     } as never)
 
     // Configure canvas mock to create correct imageData
@@ -394,10 +394,10 @@ describe('buildPdfContent', () => {
     const mockDoc = {
       numPages: 1,
       getPage: vi.fn().mockResolvedValue(mockPage),
-      destroy: vi.fn().mockResolvedValue(undefined),
     }
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(mockDoc),
+      destroy: vi.fn().mockResolvedValue(undefined),
     } as never)
 
     mockCreateImageData.mockReturnValue({
@@ -447,10 +447,10 @@ describe('buildPdfContent', () => {
     const mockDoc = {
       numPages: 1,
       getPage: vi.fn().mockResolvedValue(mockPage),
-      destroy: vi.fn().mockResolvedValue(undefined),
     }
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(mockDoc),
+      destroy: vi.fn().mockResolvedValue(undefined),
     } as never)
 
     mockCreateImageData.mockReturnValue({
@@ -467,12 +467,20 @@ describe('buildPdfContent', () => {
     expect(vi.mocked(createCanvas).mock.calls).toContainEqual([w, h])
   })
 
-  it('returns error for invalid PDF', async () => {
+  // A PDF that fails to LOAD is the input the teardown exists for, and it is
+  // the one case where pdfjs cleans up nothing on its own: the transport is
+  // attached to the loading task before a DocException can be raised, and the
+  // task promise is rejected without destroying it. So the load is awaited
+  // inside the try — awaiting it outside would skip `finally` on exactly the
+  // attacker-supplied bytes that must not leak a worker.
+  it('returns error for invalid PDF and still tears down the loading task', async () => {
     const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+    const destroy = vi.fn().mockResolvedValue(undefined)
     const rejection = Promise.reject(new Error('Invalid PDF'))
     rejection.catch(() => {}) // prevent unhandled rejection
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: rejection,
+      destroy,
     } as never)
 
     const buf = Buffer.from('not a pdf')
@@ -481,6 +489,87 @@ describe('buildPdfContent', () => {
     expect(result).toHaveLength(1)
     expect(result[0].type).toBe('text')
     expect((result[0] as { text: string }).text).toContain('Failed to read PDF')
+    expect(destroy).toHaveBeenCalledTimes(1)
+  })
+
+  it('tears down the scan-rendering loading task when its own load rejects', async () => {
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+    // Empty text content routes buildPdfContent into renderPdfAsImages, which
+    // opens a SECOND loading task. That second load is the one that fails
+    // here, so the first task's teardown cannot stand in for the second's.
+    const extractDestroy = vi.fn().mockResolvedValue(undefined)
+    const scanDestroy = vi.fn().mockResolvedValue(undefined)
+    const emptyTextDoc = {
+      numPages: 1,
+      getPage: vi.fn().mockResolvedValue({
+        getTextContent: vi.fn().mockResolvedValue({ items: [] }),
+      }),
+    }
+    const rejection = Promise.reject(new Error('Invalid PDF on second open'))
+    rejection.catch(() => {}) // prevent unhandled rejection
+    vi.mocked(pdfjs.getDocument)
+      .mockReturnValueOnce({ promise: Promise.resolve(emptyTextDoc), destroy: extractDestroy } as never)
+      .mockReturnValueOnce({ promise: rejection, destroy: scanDestroy } as never)
+
+    const result = await buildPdfContent(Buffer.from('scan bytes'), 'bad-scan.pdf')
+
+    expect(result).toHaveLength(1)
+    expect((result[0] as { text: string }).text).toContain('Failed to read PDF')
+    expect(extractDestroy).toHaveBeenCalledTimes(1)
+    expect(scanDestroy).toHaveBeenCalledTimes(1)
+  })
+
+  // §2.110 — pdfjs 6 dropped PDFDocumentProxy.destroy(); attachmentContent.ts
+  // now tears down through the loading task's own `destroy()` inside a
+  // `finally`, on BOTH the text-extraction and scan-rendering paths. A
+  // `try { ... } catch` swap (or a `finally` that only runs on the happy
+  // path) would leak the worker on every attachment that fails mid-read —
+  // this pins that the task is torn down even when page processing throws
+  // AFTER the document has already loaded successfully.
+  it('tears down the loading task when text extraction fails after the document loads', async () => {
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+    const destroy = vi.fn().mockResolvedValue(undefined)
+    const mockDoc = {
+      numPages: 1,
+      getPage: vi.fn().mockRejectedValue(new Error('corrupt page')),
+    }
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(mockDoc),
+      destroy,
+    } as never)
+
+    const result = await buildPdfContent(Buffer.from('fake pdf'), 'broken.pdf')
+
+    expect(result).toHaveLength(1)
+    expect((result[0] as { text: string }).text).toContain('Failed to read PDF')
+    expect(destroy).toHaveBeenCalledTimes(1)
+  })
+
+  it('tears down the loading task when scan-page rendering fails after the document loads', async () => {
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+    ;(pdfjs as Record<string, unknown>).OPS = { paintImageXObject: 85 }
+    // Empty text content routes buildPdfContent into renderPdfAsImages, which
+    // opens its OWN loading task (a second getDocument() call) and then fails
+    // while fetching the page's operator list. Two distinct `destroy` spies
+    // isolate which task actually gets torn down.
+    const extractDestroy = vi.fn().mockResolvedValue(undefined)
+    const scanDestroy = vi.fn().mockResolvedValue(undefined)
+    const mockDoc = {
+      numPages: 1,
+      getPage: vi.fn()
+        .mockResolvedValueOnce({ getTextContent: vi.fn().mockResolvedValue({ items: [] }) })
+        .mockResolvedValueOnce({ getOperatorList: vi.fn().mockRejectedValue(new Error('operator list failure')) }),
+    }
+    vi.mocked(pdfjs.getDocument)
+      .mockReturnValueOnce({ promise: Promise.resolve(mockDoc), destroy: extractDestroy } as never)
+      .mockReturnValueOnce({ promise: Promise.resolve(mockDoc), destroy: scanDestroy } as never)
+
+    const result = await buildPdfContent(Buffer.from('fake scan pdf'), 'broken-scan.pdf')
+
+    expect(result).toHaveLength(1)
+    expect((result[0] as { text: string }).text).toContain('Failed to read PDF')
+    expect(extractDestroy).toHaveBeenCalledTimes(1)
+    expect(scanDestroy).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -554,10 +643,10 @@ describe('Context overflow protection', () => {
     const mockDoc = {
       numPages: 10,
       getPage: vi.fn().mockResolvedValue(mockPage),
-      destroy: vi.fn().mockResolvedValue(undefined),
     }
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(mockDoc),
+      destroy: vi.fn().mockResolvedValue(undefined),
     } as never)
 
     const result = await buildPdfContent(Buffer.from('pdf'), 'big.pdf')
@@ -594,10 +683,10 @@ describe('Context overflow protection', () => {
     const mockDoc = {
       numPages: 5, // MAX_PDF_RENDER_PAGES
       getPage: vi.fn().mockResolvedValue(mockPage),
-      destroy: vi.fn().mockResolvedValue(undefined),
     }
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(mockDoc),
+      destroy: vi.fn().mockResolvedValue(undefined),
     } as never)
     mockCreateImageData.mockReturnValue({ data: new Uint8ClampedArray(w * h * 4) })
     // Each page PNG = 10KB

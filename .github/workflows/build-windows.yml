@@ -14,12 +14,22 @@ name: Build Windows
 on:
   workflow_dispatch:
     inputs:
-      # A LABEL, not a checkout target: it names the run in the Actions UI and in
-      # the GitLab job log. Nothing is checked out by this name — service runs
+      # Not a checkout target: nothing is checked out by this name — service runs
       # (no CI_COMMIT_TAG) publish no tag at all, so there would be nothing to
-      # find under it.
+      # find under it. It names the run in the Actions UI and in the GitLab job
+      # log.
+      #
+      # It is no longer ONLY a label, and saying so here would be a lie: since
+      # §2.255 it is forwarded as CI_COMMIT_TAG (job env below) and therefore
+      # decides whether check-release-vars.mjs REFUSES on a missing delivery
+      # variable or merely warns. A manual dispatcher who types a
+      # non-release-looking value gets the softer tier. That is bounded on
+      # purpose — the GitLab trigger derives this from a verified tag, and a
+      # manual Actions artifact is published by nothing (`publish` in
+      # .gitlab-ci.yml is tag-only) — but it is a real property of this input,
+      # not an implementation detail.
       tag:
-        description: "Version tag / run id, for identification only (e.g. v1.14.0)"
+        description: "Version tag / run id (e.g. v1.14.0). A vX.Y.Z value makes this a RELEASE build: missing delivery variables then stop the build instead of warning."
         required: true
         type: string
       # Sentry DSN is NOT a secret — it ships inside every client bundle by
@@ -33,9 +43,10 @@ on:
       # The electron-updater feed, baked into app-update.yml at package time.
       # Not a secret either — it ships inside every installer by design, exactly
       # like the DSN — so it travels the same way: a plain dispatch input from
-      # scripts/trigger-github-build.sh. Empty falls back to the placeholder
-      # below, which is correct for a manual run of this workflow but produces
-      # an installer that CANNOT self-update.
+      # scripts/trigger-github-build.sh. Empty NO LONGER falls back to a
+      # placeholder (§2.255 hole (в) — that fallback is what shipped installers
+      # unable to self-update). An empty value now reaches the guard step, which
+      # refuses on every tier where this variable is required.
       update_url:
         description: "electron-updater feed URL baked into the installer"
         required: false
@@ -81,7 +92,9 @@ jobs:
       # electron-updater feed, baked into app-update.yml by electron-builder
       # (see the `publish.url` field in electron-builder.json5).
       #
-      # The placeholder is a FALLBACK for manual runs, not the production value.
+      # §2.255 hole (в): the placeholder FALLBACK is gone. It is passed through
+      # verbatim now, and an empty value is refused by the guard step below
+      # rather than silently replaced. History of why that matters:
       # It used to be the only value here, with a comment claiming it was
       # "overridden in production" — nothing overrode it, because the GitLab
       # trigger never sent one. Every Windows and macOS installer therefore
@@ -91,7 +104,76 @@ jobs:
       # Verified on the released 1.23.0 installer, not inferred: its
       # app-update.yml carried the placeholder. Linux was never affected — its
       # value comes from the CI variable in .gitlab-ci.yml.
-      MAILCOPILOT_UPDATE_URL: ${{ inputs.update_url != '' && inputs.update_url || 'https://placeholder.local/updates' }}
+      MAILCOPILOT_UPDATE_URL: ${{ inputs.update_url }}
+
+      # §2.255 — everything the release guard and the build both need lives at
+      # JOB level, so the guard step below judges the exact values the build
+      # will bake. Declaring them per-step let the guard pass on an env the
+      # build never saw.
+      #
+      # CI_COMMIT_TAG is forwarded verbatim from the dispatch. It is the only
+      # way this runner can know whether it is building a release: the variable
+      # is GitLab-only and is never set here, so before this line the guard
+      # classified EVERY dispatch — including a genuine vX.Y.Z release — as a
+      # nightly, and silently degraded the OAuth pair from "refuse" to "warn".
+      # That is the very failure shape §2.255 exists to remove, reproduced by
+      # the fix for it (found by pre-pr-gate, 2026-08-27).
+      #
+      # No new signal is invented and the guard is unchanged: a service run's
+      # tag (`v1.26.0-nightly.1-dev.<stamp>`) does not match the guard's
+      # anchored `^v\d+\.\d+\.\d+$`, so it still classifies as nightly on
+      # its own. Only a real release tag reads as a release.
+      CI_COMMIT_TAG: ${{ inputs.tag }}
+
+      # Gmail sign-in must work in the Windows and macOS installers, and before
+      # this it could not: these two were never forwarded anywhere, so
+      # vite.config.ts baked empty strings and every installer shipped with the
+      # Google provider unavailable. Not the 1.25.1 failure (a present ID with
+      # an empty secret) — worse in a quieter way, absent on both platforms
+      # since these builds existed.
+      #
+      # Repo SECRETS, not dispatch inputs, unlike sentry_dsn/update_url. Those
+      # two are public by design and ship in every artifact regardless; the
+      # OAuth client secret also ships in the binary (a Desktop client's secret
+      # is not confidential in the OAuth sense — PKCE is what protects the
+      # exchange), but a dispatch input is ALSO printed in this public mirror's
+      # Actions UI, which is a second, needless place for it to live. Secrets
+      # are created by hand on the mirror; scripts/mirror-github.sh recreates
+      # the repository and never carries them.
+      #
+      # ACCEPTED TRADE-OFF, stated because the file argues the opposite about
+      # SENTRY_AUTH_TOKEN a few lines down. Job-level env is visible to EVERY
+      # step, including `npm ci` lifecycle scripts of a checked-out ref that a
+      # dispatcher chose — so a malicious ref could read these. It is accepted
+      # here and not for the Sentry token because the two differ in what leaks:
+      # a Desktop OAuth client secret already ships inside every installer (PKCE
+      # is what protects the exchange), while SENTRY_AUTH_TOKEN would grant
+      # write access to our Sentry org and ships nowhere.
+      #
+      # The alternative — declaring the pair on the guard step and the build
+      # step instead — was rejected: it creates two copies that drift, which is
+      # exactly the "guard judged one environment, build baked another" defect
+      # this file was corrected for twice. Narrowing exposure by reopening that
+      # gap is a bad trade. The real fix is a protected GitHub Environment that
+      # only materialises secrets for approved refs; that needs repository
+      # configuration, so it is a followup (BACKLOG §2.255.f1), not a silent
+      # weakening here.
+      MAILCOPILOT_GOOGLE_CLIENT_ID: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_ID }}
+      MAILCOPILOT_GOOGLE_CLIENT_SECRET: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_SECRET }}
+
+      # vite.config.ts bakes __SENTRY_DSN__ from SENTRY_DSN at `vite build` time.
+      # Without it the bundled SDK starts with enabled:false and the release
+      # ships a silent zero of telemetry (the DSN-first lesson: always confirm
+      # the DSN reaches the bundle before touching capture code).
+      #
+      # Declared at job level rather than on the build step so the §2.255 guard
+      # below reads the same value the build bakes — a guard that reads a
+      # different environment than the build is the defect class this file was
+      # already fixed for twice. Priority unchanged: dispatch input from the
+      # GitLab trigger, else the repo secret for manual runs (secrets are created
+      # by hand on the mirror; scripts/mirror-github.sh recreates the repository
+      # and never carries them).
+      SENTRY_DSN: ${{ inputs.sentry_dsn != '' && inputs.sentry_dsn || secrets.SENTRY_DSN }}
 
     steps:
       # Builds the commit this run was dispatched on, and nothing else.
@@ -117,26 +199,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check release delivery variables (§2.255)
+        run: node scripts/check-release-vars.mjs
+
+      # Every variable this step needs is declared at job level above, so there
+      # is no step-level `env:` here — see the SENTRY_DSN comment there for why.
+      #
+      # Sourcemap upload is intentionally NOT wired in. This step executes
+      # vite.config.ts from an arbitrary workflow_dispatch ref (anyone able to
+      # dispatch chooses the ref, and the checkout above follows it), so
+      # attaching SENTRY_AUTH_TOKEN would let a malicious ref exfiltrate the
+      # token. vite.config.ts gates the upload on SENTRY_AUTH_TOKEN && SENTRY_DSN
+      # both being set, so without the token the upload is skipped and the build
+      # still passes. Wire it later via a protected GitHub Environment (required
+      # reviewers) or a separate trusted upload step.
       - name: Build (typecheck + bundle + package)
-        env:
-          # vite.config.ts bakes __SENTRY_DSN__ from SENTRY_DSN at `vite build`
-          # time. Without it the bundled SDK starts with enabled:false and the
-          # release ships a silent zero of telemetry (the DSN-first lesson:
-          # always confirm the DSN reaches the bundle before touching capture
-          # code). DSN priority: dispatch input from the GitLab trigger, else
-          # the SENTRY_DSN repo secret (fallback for manual runs; secrets must
-          # be created by hand on the GitHub mirror — the mirror is recreated
-          # by scripts/mirror-github.sh, which never carries secrets).
-          SENTRY_DSN: ${{ inputs.sentry_dsn != '' && inputs.sentry_dsn || secrets.SENTRY_DSN }}
-          # Sourcemap upload is intentionally NOT wired here. This build step
-          # executes vite.config.ts from an arbitrary workflow_dispatch ref
-          # (anyone able to dispatch chooses the ref, and the checkout above
-          # follows it), so attaching SENTRY_AUTH_TOKEN would let a malicious ref
-          # exfiltrate the token.
-          # vite.config.ts gates the upload on SENTRY_AUTH_TOKEN && SENTRY_DSN
-          # both being set, so without the token the upload is skipped and the
-          # build still passes. Wire it later via a protected GitHub
-          # Environment (required reviewers) or a separate trusted upload step.
         run: |
           npx tsc
           npx vite build

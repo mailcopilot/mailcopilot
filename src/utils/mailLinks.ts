@@ -10,13 +10,24 @@ export { normalizeExternalUrl, buildRoutedMailLink, isRoutedMailLink } from '@ma
  *
  * Covers every navigable href-bearing position the renderer iframe can produce:
  *   - `<a href>`       — primary anchor links
- *   - `<area href>`    — image-map links (codex-security-review HIGH B4 gap:
- *                        querySelectorAll('a[href]') alone missed `<map>` /
- *                        `<area>` elements, leaving raw http(s) hrefs in the
- *                        rendered DOM where will-frame-navigate would observe
- *                        them and the main-process fallback in
- *                        configureExternalLinks would call shell.openExternal
- *                        without phishing warning).
+ *   - `<area href>`    — image-map links (codex-security-review HIGH B4 gap)
+ *
+ * Why `<area>` is handled, and what has changed since. AT DISCOVERY,
+ * `querySelectorAll('a[href]')` alone missed `<map>` / `<area>` elements, so a
+ * raw http(s) href stayed in the rendered DOM; `will-frame-navigate` observed
+ * it and the main-process fallback in `configureExternalLinks` handed it
+ * straight to `shell.openExternal` — no phishing prompt anywhere on that path.
+ * TODAY that second half no longer holds: a link that escaped this rewriter
+ * comes back from `decideMailLinkAction` as `{ kind: 'raw', payload: { …,
+ * unsafeBypass: true } }`, and `useMailLinkClick` turns `unsafeBypass` into a
+ * forced prompt, so the fallback warns rather than opening silently.
+ *
+ * The rewrite here is therefore no longer the only thing between an image-map
+ * link and the browser, but it is still the FIRST one: it is what puts the
+ * destination in the element's tooltip, and what lets the click arrive at
+ * `useMailLinkClick` as an ordinary routed link. Dropping `<area>` again would
+ * demote every image-map link to the always-warn fallback — a prompt on every
+ * legitimate one, which is how prompts stop being read. Keep both layers.
  *
  * Defense-in-depth: even if a `<base href>` tag somehow survives
  * {@link sanitizeMailHtml} (which forbids it via FORBID_TAGS), this rewriter

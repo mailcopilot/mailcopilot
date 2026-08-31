@@ -4,6 +4,9 @@ import {
   quickActionLabelKey,
   insertAtCaret,
   hasRewritableText,
+  isPreviewStale,
+  isBlockedByOtherAction,
+  type ComposeAiActivity,
 } from './quickActions'
 
 describe('quickActions pure helpers', () => {
@@ -60,6 +63,51 @@ describe('quickActions pure helpers', () => {
       const r = insertAtCaret('abc', 'X', -5)
       expect(r.text).toBe('Xabc')
       expect(r.caret).toBe(1)
+    })
+  })
+
+  describe('isPreviewStale', () => {
+    it('is false while the body still matches the snapshot the rewrite used', () => {
+      expect(isPreviewStale({ sourceBody: 'Hello\n\n--\nSergey' }, 'Hello\n\n--\nSergey')).toBe(false)
+    })
+
+    it('is true after the user typed during generation', () => {
+      expect(isPreviewStale({ sourceBody: 'Hello' }, 'Hello and one more thing')).toBe(true)
+    })
+
+    it('is true for an edit inside the untouched tail too (the replacement carries it)', () => {
+      expect(isPreviewStale({ sourceBody: 'Hello\n\n--\nSergey' }, 'Hello\n\n--\nSergey P.')).toBe(true)
+    })
+
+    it('is true for a whitespace-only edit (exact comparison, no normalization)', () => {
+      expect(isPreviewStale({ sourceBody: 'Hello' }, 'Hello ')).toBe(true)
+    })
+  })
+
+  describe('isBlockedByOtherAction', () => {
+    const idle: ComposeAiActivity = { rewrite: false, proofread: false, translate: false }
+
+    it('blocks nobody while the draft is free', () => {
+      expect(isBlockedByOtherAction(idle, 'rewrite')).toBe(false)
+      expect(isBlockedByOtherAction(idle, 'proofread')).toBe(false)
+      expect(isBlockedByOtherAction(idle, 'translate')).toBe(false)
+    })
+
+    it('never blocks an action with its OWN activity — re-running over one\'s own panel stays allowed', () => {
+      expect(isBlockedByOtherAction({ ...idle, rewrite: true }, 'rewrite')).toBe(false)
+      expect(isBlockedByOtherAction({ ...idle, proofread: true }, 'proofread')).toBe(false)
+      expect(isBlockedByOtherAction({ ...idle, translate: true }, 'translate')).toBe(false)
+    })
+
+    it.each([
+      ['rewrite', 'proofread'],
+      ['rewrite', 'translate'],
+      ['proofread', 'rewrite'],
+      ['proofread', 'translate'],
+      ['translate', 'rewrite'],
+      ['translate', 'proofread'],
+    ] as const)('blocks %s while %s occupies the draft', (self, other) => {
+      expect(isBlockedByOtherAction({ ...idle, [other]: true }, self)).toBe(true)
     })
   })
 })

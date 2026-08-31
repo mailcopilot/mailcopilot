@@ -98,6 +98,21 @@ describe('sentryPreflight', () => {
     expect(readSentryEnabledPreflight()).toBe(false)
   })
 
+  // §2.258 — this is the reachable path the fix targets: this preflight reads
+  // the raw settings.json BEFORE zod validation, so a corrupt `sentryEnabled`
+  // that a schema would normally coerce or reject genuinely arrives here as
+  // written. `isTelemetryAllowed` used to admit anything other than literal
+  // `false` (null, 0, the string "false", ...) as permission to send; with a
+  // valid grant on disk, that meant a corrupt switch still enabled the SDK.
+  it('returns false when consent is granted and the raw switch value is corrupt, not literal false', async () => {
+    for (const corrupt of [null, 0, '', 'false', 'no', [], {}]) {
+      writeSettings({ telemetryConsent: GRANTED, sentryEnabled: corrupt })
+      const { readSentryEnabledPreflight } = await import('./sentryPreflight')
+      expect(readSentryEnabledPreflight()).toBe(false)
+      vi.resetModules()
+    }
+  })
+
   it('returns false when the record predates the current disclosure version', async () => {
     writeSettings({ telemetryConsent: { ...GRANTED, version: TELEMETRY_CONSENT_VERSION - 1 } })
     const { readSentryEnabledPreflight } = await import('./sentryPreflight')

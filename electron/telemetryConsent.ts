@@ -21,8 +21,19 @@
  * data, a new sink, a wider scope) — that is the single lawful reason to show
  * the consent screen to a user who has already answered (§2.82 AC (e)). Do NOT
  * bump it for refactors, wording tweaks, or bug fixes.
+ *
+ * History:
+ *   1 — initial disclosure (§2.82): errors, versions, durations, feature usage,
+ *       installation composition, installation id.
+ *   2 — §2.122 added `ai.api_key_store_op`, which reports OS-secret-store
+ *       operations on AI keys: the provider, the kind of operation, and its
+ *       outcome (`found` / `absent` / `ok` / `store_error`). "Whether you hold a
+ *       key in the OS keychain" is not covered by "which features you used", so
+ *       it is a NEW CATEGORY, not a wider reading of an existing one, and it
+ *       costs the one lawful re-ask (CLAUDE.md §5 "Telemetry consent": the
+ *       disclosure must match what is actually sent).
  */
-export const TELEMETRY_CONSENT_VERSION = 1
+export const TELEMETRY_CONSENT_VERSION = 2
 
 /** Persisted proof of the user's decision. Main-process writable only. */
 export interface TelemetryConsentRecord {
@@ -86,11 +97,37 @@ export function evaluateConsent(settings: TelemetryConsentCarrier | null | undef
  *
  * They are kept in sync (a toggle flip mirrors into the record, see
  * `syncConsentWithToggle`), so in practice they agree; requiring both means a
- * half-written state can only ever fail towards silence.
+ * half-written state fails towards silence — with one deliberate exception,
+ * spelled out at the switch check below: a grant plus an ABSENT switch is
+ * allowed, because absence is the schema's default rather than a decision, and
+ * a real withdrawal would have written `false` into the record as well.
  */
 export function isTelemetryAllowed(settings: TelemetryConsentCarrier | null | undefined): boolean {
   if (evaluateConsent(settings) !== 'granted') return false
-  return settings?.sentryEnabled !== false
+  // Only two shapes mean "the switch is not off": the field is genuinely absent,
+  // or it is literally `true`. Everything else is off.
+  //
+  // Why absence is allowed rather than refused, stated carefully because the
+  // obvious rationale is wrong: `sentryEnabled` is OLDER than `telemetryConsent`,
+  // not newer (see `migrateTelemetryConsent`), so "a profile from before the
+  // field existed" is not the case being served. The real reasons are that the
+  // schema's own default for an absent switch is `true`, and that a genuine
+  // withdrawal writes `false` into BOTH fields — so a profile that lost only its
+  // switch and had actually withdrawn still carries `granted: false` in the
+  // record, and the conjunction above already refuses it. Absence therefore
+  // cannot resurrect a withdrawal; it can only fall back to the default for a
+  // profile whose recorded answer was "allow".
+  //
+  // This used to read `!== false`, which admitted `null`, `0`, `"false"`, `"no"`
+  // and every other corrupt value as permission to send. That is not academic:
+  // `sentryPreflight.ts` DELIBERATELY reads the raw settings JSON before schema
+  // validation, because it has to decide whether to arm the SDK before normal
+  // settings load — so a corrupt value genuinely reaches this function, and the
+  // schema that would have rejected it runs too late to help. With a valid
+  // grant plus a corrupt switch, telemetry started. Every other branch of the
+  // consent path fails closed (§2.82); this one failed open.
+  const toggle = settings?.sentryEnabled
+  return toggle === undefined || toggle === true
 }
 
 /**

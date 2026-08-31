@@ -18,7 +18,7 @@ La barre laterale peut etre reduite en mode icones pour liberer de l'espace. Les
 
 ## Liste des messages
 
-La colonne centrale affiche les messages du dossier selectionne : expediteur, objet, date, indicateurs de non-lu, etoile, pieces jointes et nombre de messages dans le fil.
+La colonne centrale affiche les messages du dossier selectionne : expediteur, objet, date, indicateurs de non-lu, etoile, pieces jointes et nombre de messages dans le fil. Pour un fil, la ligne est affichee comme non lue des qu'**un seul** message du fil actuellement affiche dans la liste est non lu, pas uniquement le plus recent. Voir [Fils de discussion](./reading-emails#fils-de-discussion).
 
 En mode **Boite de reception unifiee**, l'adresse e-mail du compte apparait a cote du nom de l'expediteur pour identifier quel compte a recu le message.
 
@@ -52,6 +52,12 @@ La colonne droite affiche le contenu du message selectionne : en-tetes, corps du
 ## Colonnes redimensionnables
 
 Faites glisser la bordure entre les colonnes pour ajuster leur largeur. Votre preference est sauvegardee entre les sessions.
+
+## Selection et edition de texte
+
+Faites un clic droit dans n'importe quel champ de texte -- la barre de recherche, un message en cours de redaction, l'invite de l'assistant IA, ou toute autre zone editable -- pour ouvrir un petit menu contextuel avec **Couper**, **Copier**, **Coller** et **Tout sélectionner**. Un clic droit sur du texte selectionne mais non editable (par exemple un passage surligne dans le corps d'un message) propose uniquement **Copier**.
+
+Un clic droit sur un lien dans le corps d'un message ouvre un menu different avec des options pour ouvrir ou copier le lien ; voir [Clic droit sur un lien](./reading-emails#clic-droit-sur-un-lien).
 
 ## Barre d'etat
 

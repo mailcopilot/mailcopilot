@@ -51,6 +51,10 @@ interface Window {
         | 'accounts:getCurrent'
         | 'accounts:autoconfig'
         | 'accounts:removePreview'
+        // §2.157 — `accounts:authState` → { needsReauth: number[] }: account
+        // ids main currently believes need re-authentication. Read-only pull
+        // companion of the `accounts:authStateChanged` broadcast.
+        | 'accounts:authState'
         | 'oauth:google:connect'
         | 'oauth:microsoft:connect'
         | 'net:testImap'
@@ -169,6 +173,60 @@ interface Window {
         // shapes are added to @mailcopilot/types.
         | 'ai:quickAction:rewrite'
         | 'ai:instantReply:generate'
+        // §3.3 B7 AI Proofread. Renderer contract:
+        //   ai:proofread:check — request { accountId, text } →
+        //     { ok:true, edits, provider, dropped } | { ok:false, reason }.
+        // `text` is the user's OWN part of the draft only (splitComposeBody,
+        // §2.78 — a best-effort read of flat text, §2.173); every returned edit
+        // is a (offset, length) span into THAT exact string plus its
+        // replacement, already verified against it by main, and confined to
+        // main's own read of the own-text region. Every edit also carries an
+        // injective content-derived id (§2.251), which is what lets the panel
+        // carry an acceptance across a re-check without it landing on a
+        // different edit. Payload/result types are canonical in
+        // @mailcopilot/types and re-exported from src/utils/quickActions.ts —
+        // the shape B4 above still lacks (§3.3.B4.f3(c)). Read-only: nothing is
+        // written back to the draft, and the send path never consults it.
+        | 'ai:proofread:check'
+        // §3.3 B6 AI Translate (read side). Renderer contract:
+        //   ai:translate:message — request { accountId, folder, uid,
+        //     targetLang, sourceLang? } → { ok:true, translation } |
+        //     { ok:false, reason }. Payload/result types are canonical in
+        //     @mailcopilot/types.
+        // The renderer sends NO body text: main resolves the message from the
+        // local SQLite cache by (accountId, folder, uid) and wraps it with
+        // wrapUntrusted() before prompting, the same cache-derived-identity
+        // discipline the B4 instant-reply path uses. `targetLang` /
+        // `sourceLang` are members of a closed sixteen-value enum mapped to the
+        // prompt through a fixed table in packages/core/language.ts — the
+        // renderer never composes the model instruction. Gated on the
+        // per-account aiTranslateEnabled opt-in (fail-closed OFF), never
+        // automatic (an explicit click only), and read-only. The result carries
+        // `translatedText` and has NO html field: it is model output derived
+        // from untrusted mail and must be rendered as TEXT, never as markup.
+        | 'ai:translate:message'
+        // §3.3 B6 AI Translate (draft side). Renderer contract:
+        //   ai:translate:draft — request { accountId, text, targetLang } →
+        //     { ok:true, translation } | { ok:false, reason }. Payload/result
+        //     types are canonical in @mailcopilot/types.
+        // Unlike the reading-side sibling this channel DOES carry text: a draft
+        // exists only in the compose window, so there is no cached canonical
+        // copy for main to resolve — the same concession ai:proofread:check
+        // makes. `text` is expected to be splitComposeBody(body).own, but main
+        // does not trust that: it re-splits the payload (§2.78), prompts ONLY
+        // the part its own split calls the user's text, and returns that
+        // translation with any quote / forward banner / signature found in the
+        // payload restored byte-for-byte around it — so the result substitutes
+        // for exactly the string that was sent. The draft is wrapped with
+        // wrapUntrusted(); `targetLang` is a member of the same closed
+        // sixteen-value enum, so the renderer never composes the instruction and
+        // there is no free-form instruction field. Gated on the SAME per-account
+        // aiTranslateEnabled opt-in as the reading side (fail-closed OFF,
+        // enforced in main regardless of what the renderer draws), never
+        // automatic (an explicit press only), and read-only — nothing is written
+        // back to the draft and the send path never consults the result. The
+        // result carries `translatedText` and has NO html field.
+        | 'ai:translate:draft'
         | 'ai:setContext'
         | 'ai:checkAuth'
         | 'ai:openProviderSetup'
@@ -258,8 +316,12 @@ interface Window {
     //     fingerprintSha256: string; systemOnly: boolean; rawMessage: string }
     //     (server-derived strings are UNTRUSTED — render as text only).
     //   cert:interceptionNotice payload = { host: string; issuerCn: string }.
-    on: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice', listener: (...args: unknown[]) => void) => void
-    off: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice', listener: (...args: unknown[]) => void) => void
-    removeAll: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'cert:recoveryRequired' | 'cert:interceptionNotice') => void
+    // §2.94 — oauth:progress payload = { provider: 'gmail' | 'outlook';
+    //   stage: OAuthConnectStage } (no addresses, names or tokens).
+    // §2.99 — mail:openRef payload = { accountId: number; folder: string;
+    //   uid: number } — identifiers only, no subject/sender/body.
+    on: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'accounts:authStateChanged' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'mail:openRef' | 'cert:recoveryRequired' | 'cert:interceptionNotice' | 'oauth:progress', listener: (...args: unknown[]) => void) => void
+    off: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'accounts:authStateChanged' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'mail:openRef' | 'cert:recoveryRequired' | 'cert:interceptionNotice' | 'oauth:progress', listener: (...args: unknown[]) => void) => void
+    removeAll: (channel: 'main-process-message' | 'settings:changed' | 'accounts:changed' | 'accounts:authStateChanged' | 'compose:init' | 'mail:link' | 'mail:exists' | 'mail:queueChanged' | 'mail:queued' | 'offline:progress' | 'update:available' | 'update:downloaded' | 'update:downloadProgress' | 'update:checkResult' | 'update:downloadFailed' | 'ai:stream' | 'ai:status' | 'ai:internet-tool-pending' | 'mail:snoozeChanged' | 'mail:snoozeWake' | 'mail:followUpDue' | 'mail:sendFailed' | 'mail:sentCopyFailed' | 'mail:readLaterChanged' | 'mail:backgroundArchived' | 'win:maximizeChanged' | 'notifications:changed' | 'sync:folderProgress' | 'mail:print' | 'mail:openRef' | 'cert:recoveryRequired' | 'cert:interceptionNotice' | 'oauth:progress') => void
   }
 }

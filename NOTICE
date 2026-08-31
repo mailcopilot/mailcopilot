@@ -35,6 +35,10 @@ pdfjs-dist — Apache License 2.0
   Copyright (c) Mozilla Foundation
   https://github.com/mozilla/pdf.js
 
+diff (jsdiff) — BSD 3-Clause License
+  Copyright (c) 2009-2015 Kevin Decker
+  https://github.com/kpdecker/jsdiff
+
 @napi-rs/canvas — MIT License
   Copyright (c) 2020 lynweklm@gmail.com
   https://github.com/Brooooooklyn/canvas
@@ -133,6 +137,14 @@ fast-xml-parser — MIT License
   Copyright (c) Amit Gupta
   https://github.com/NaturalIntelligence/fast-xml-parser
 
+franc — MIT License
+  Copyright (c) Titus Wormer
+  https://github.com/wooorm/franc
+
+  Trigram-based language detection, used by the message translation feature to
+  label the source language of a message. Its transitive dependencies
+  trigram-utils, n-gram and collapse-white-space are also MIT, © Titus Wormer.
+
 @sentry/node — MIT License
   Copyright (c) Sentry
   https://github.com/getsentry/sentry-javascript
@@ -153,8 +165,9 @@ Special Notice: Anthropic Claude Agent SDK
   distributed under Anthropic's proprietary license (Commercial Terms / Consumer
   Terms). This SDK is NOT covered by the AGPL-3.0 license of MailCopilot.
 
-  The SDK provides the query() function used for Claude-based providers
-  (subscription and anthropic-api). MCP tools are defined using the standard
+  The SDK provides the query() function used for the Claude-based provider
+  (anthropic-api), which authenticates with the user's own Anthropic API key.
+  MCP tools are defined using the standard
   @modelcontextprotocol/sdk (MIT). OpenAI-compatible providers use the Vercel
   AI SDK (Apache-2.0) and do not depend on this proprietary SDK.
 

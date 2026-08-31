@@ -51,7 +51,8 @@
  * TRUST OFFER — the authorization gate for creating a TLS trust anchor.
  *
  * Storing a pinned certificate's PEM turns it into an OpenSSL trust anchor
- * (`buildTlsOptions` feeds it to `ca`). That is the power to grant trust, so
+ * (`buildTlsOptions` builds it into the shared `SecureContext` it hands the
+ * transport). That is the power to grant trust, so
  * it may not be exercised on the renderer's say-so: the renderer parses email,
  * i.e. compromise is inside the threat model. Re-probing the endpoint at pin
  * time proves "the server currently serves this certificate" — it does NOT

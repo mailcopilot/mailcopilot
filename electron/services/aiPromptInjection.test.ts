@@ -66,6 +66,7 @@ vi.mock('../../packages/db', () => ({
   listFolderStats: vi.fn(() => []),
   sumAiCostSince: vi.fn(() => 0),
   listMailRules: vi.fn(() => []),
+  getMailRule: vi.fn(),
   createMailRule: vi.fn(),
   updateMailRule: vi.fn(),
   deleteMailRule: vi.fn(),
