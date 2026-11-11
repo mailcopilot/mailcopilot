@@ -10,6 +10,11 @@ export default defineConfig({
   // silently reported "No tests found", and `npm run demo:oauth` could not run
   // its own spec. The scripts that own these specs set PW_DEMO=1.
   testIgnore: process.env.PW_DEMO === '1' ? [] : ['**/demo-*.spec.ts', '**/marketing.*.spec.ts'],
+  // Tag every app a run launches and kill whatever a torn-down worker left
+  // behind. Without it, a run where tests time out leaks one full app per
+  // timed-out test (see tests/e2e/runMarker.ts).
+  globalSetup: './tests/e2e/global-setup.ts',
+  globalTeardown: './tests/e2e/global-teardown.ts',
   timeout: isCI ? 120_000 : 60_000,
   expect: { timeout: isCI ? 30_000 : 10_000 },
   // Local retries: 1 absorbs residual transient launch flakes (Electron CDP-port

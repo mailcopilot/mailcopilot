@@ -25,6 +25,16 @@ When you use the AI assistant, MailCopilot transmits the following to your chose
 
 The AI assistant is entirely optional. If you do not configure a provider, no email data is ever transmitted to any external service.
 
+Loading the model list in **Settings > AI** sends one request to the provider's endpoint with your stored API key, through the same proxy and certificate trust settings as chat. The request carries no mail content. MailCopilot reads the key from the system key store in its main process.
+
+The list above describes the AI panel. The AI features that run outside it have their own data flows, described in the sections below.
+
+The links to messages in an answer, and the **Sources** list under it, are marked as confirmed only for messages that were actually passed to the assistant in the conversation; a link to any other message is shown as plain text with an **unconfirmed** mark. Confirmed means only that the message was passed to the assistant, not that the answer restates it correctly. See [Sources and Unconfirmed Links](../ai-assistant#sources-and-unconfirmed-links).
+
+## The Four Per-Mailbox AI Consents
+
+Four AI features need your separate consent, given per mailbox in the **AI features per mailbox** table in **Settings > AI**: [Thread AI Summary](#thread-ai-summary), [Instant Reply](#instant-reply), [AI Proofread](#ai-proofread) and [Message Translation and Draft Translation](#message-translation) (one shared **AI Translate** consent). All four are off by default. Each column of the table is its own purpose: there is one checkbox per mailbox and feature, a checkbox in a column header acts on that one feature across all mailboxes, and no control turns everything on everywhere. Withdrawing a consent costs one click, the same as giving it, and takes effect for the next request. Every consent is always listed in the table, whether it is on or off. In the app, the controls of AI Proofread and Draft Translation stay visible when their consent is off -- greyed out, with a hint saying where to turn them on; clicking one sends nothing, and the main process refuses the request on its own as well. The controls of Thread AI Summary, Instant Reply and Message Translation are not shown while their consent is off. See [AI Features per Mailbox](../ai-assistant#ai-features-per-mailbox).
+
 ## Thread AI Summary
 
 [Thread AI Summary](../ai-assistant#thread-ai-summary) is a separate, opt-in feature that generates a short summary of an open thread. It follows the same protections as the rest of the AI assistant:
@@ -83,11 +93,12 @@ The AI assistant is entirely optional. If you do not configure a provider, no em
 
 - **Off by default, per account.** Nothing is sent for translation unless you enable **Settings > AI > AI Translate** for that specific account. When disabled, the Translate control is not shown and no request is made.
 - **On demand only.** A provider is called only when you click **Translate** -- there is no automatic translation when you open a message.
-- **Plain-text projection.** The provider only ever sees, and only ever returns, plain text: translation is generated from the message's plain-text version, never from HTML markup, even for an HTML message.
+- **Plain text.** The provider sees and returns only plain text, never HTML markup, even for an HTML message. Formatting and images are not translated.
+- **Long messages are sent in several requests.** A message over 3000 characters is split into pieces of at most 3000 characters (at paragraph breaks, then sentence ends, then whitespace), and each piece is sent as its own request, three at a time. Each request is billed to your provider. If any piece fails or comes back cut off, nothing is shown and nothing is cached. A message over 60 000 characters (up to about 40 requests in the worst case) is refused. Draft Translation is not split and keeps its 3000-character limit. The pieces already translated are kept in the app's memory for up to one hour, so after a failure a retry sends only the missing pieces. Leaving the message does not stop a translation that has started: it finishes, is saved in the cache and is ready when you return. Turning translation off for the mailbox stops it. Pieces are translated without the neighbouring text, so terms and forms of address can differ between parts of a long message. A piece with no letters (digits, separator lines) is left as it is. The kept pieces exist only in the app's memory and are dropped when the account is removed.
 - **Cache-sourced text only.** The message text comes from MailCopilot's local cache by account, folder, and message UID -- never from what happens to be rendered in the window.
 - **Wrapped content.** The message text is wrapped with `wrapUntrusted()` boundary markers before it reaches the AI provider, the same protection described in [Prompt Injection Protection](#prompt-injection-protection) below.
-- **Cached, not re-sent.** A translation already produced for a message, target language, and translation contract version (provider, model, and prompt shape) is served from a local cache on later opens -- no request reaches the provider a second time for the same message, language, and contract. Cache entries have no separate expiry: a later change to how MailCopilot produces translations is addressed under a new key instead of an older contract's output being served as if it were current. Entries are capped at 500 per account, and are deleted together with the account.
-- **Audited generations.** Each time a translation is actually generated (not served from cache), one entry is written to the [AI audit log](#the-audit-log). A cache hit writes no audit row.
+- **Cached, not re-sent.** A translation already produced for a message, target language, and translation contract version (provider, model, and prompt shape) is served from a local cache on later opens -- no request reaches the provider a second time for the same message, language, and contract. Cache entries have no separate expiry: a later change to how MailCopilot produces translations is addressed under a new key instead of an older contract's output being served as if it were current. Entries are capped at 200 per account, and are deleted together with the account. The translation of a long message is cached as a whole, under the whole message.
+- **Audited requests.** Each request sent to the provider (not served from cache) writes one entry to the [AI audit log](#the-audit-log), so a long message sent in several requests writes several entries. A cache hit writes no audit row.
 - **Provider selection.** Message Translation uses your configured **API-key provider** (Anthropic, OpenAI-compatible, or Google Gemini).
 - **Budget-aware.** If the daily AI budget has been reached, the translation is refused gracefully -- see [Message Translation](../ai-assistant#message-translation) for what you see in that case.
 - **Telemetry contains no message content.** The pseudonymous usage event recorded for each provider call carries only the provider identifier, whether the model ran locally, token counts, latency, a bucketed error class, whether a source language could be labeled (never which one), the chosen target language code, and whether the result came from cache -- never the message text, the translation, the subject, the addresses, the folder name, or the detected source language itself.
@@ -110,35 +121,39 @@ The AI assistant is entirely optional. If you do not configure a provider, no em
 
 ## AI Egress Policy
 
-MailCopilot intercepts every outbound internet-tool call the AI makes — web search, web fetch, and external MCP tool calls — and pauses the AI to ask for your approval before the call is executed. This prevents a malicious email from silently exfiltrating your data through a prompt-injection attack.
+MailCopilot's **AI web access** setting (**Settings → AI**) controls two different kinds of outbound access the assistant can make: calls to your own connected external MCP servers, and — only when you are using the **Anthropic** provider — the assistant's built-in web search and page-fetch tools. This prevents a malicious email from silently exfiltrating your data through a prompt-injection attack.
 
-### How It Works
+### How It Works (External MCP Tool Calls)
 
-When the AI wants to use an internet tool (for example, to search the web), MailCopilot pauses the response and shows an inline confirm modal in the AI panel with the prompt **"AI wants to access the internet"**. The modal displays:
+When the AI wants to call a tool on one of your connected external MCP servers, MailCopilot pauses the response and shows an inline confirm modal in the AI panel with the prompt **"AI wants to access the internet"**. The modal displays:
 
-- The type of action — "Web search:", "Fetch URL:", or "External tool call"
-- The requested query, URL, or external tool name when available
+- The type of action and, when available, the external tool name
 - **Allow** and **Deny** buttons
 
-Click **Allow** to let the AI proceed, or **Deny** to refuse. Your decision applies for the entire current response turn — if the AI makes multiple internet-tool calls in one reply, you are only asked once. Clicking **Allow** grants access for all remaining calls in that turn.
+Click **Allow** to let the AI proceed, or **Deny** to refuse. Your decision applies for the entire current response turn — if the AI makes multiple external-tool calls in one reply, you are only asked once. Clicking **Allow** grants access for all remaining calls in that turn.
 
-If you do not respond within 30 seconds, MailCopilot denies the tool call automatically.
+If you do not respond within 30 seconds, MailCopilot denies the tool call automatically. This confirm modal applies regardless of which AI provider you use, whenever the assistant reaches an external MCP server.
 
-### Shield Icon
+### Anthropic's Built-in Web Search
 
-A shield icon is shown in the AI panel header whenever egress interception is active. Hovering over it shows: "AI web access is intercepted — you will be asked to approve each outbound call". This icon confirms that the interceptor is running and no internet call can bypass your approval.
+When you are using the **Anthropic** provider (Claude), the assistant also has access to a built-in web search and page-fetch capability that runs on Anthropic's own servers as part of generating the reply. Because it runs outside MailCopilot, there is no opportunity to pause mid-response and show a confirm modal for it. Instead, whether it is offered to the assistant at all is decided upfront by your **AI web access** setting, before you send your message:
+
+- **Always allow** — the assistant can search the web and fetch pages freely.
+- **Deny by default** or **Ask each turn** — the built-in web search and page-fetch tools are not offered to the assistant at all, so it cannot search the web on its own. Switch to **Always allow** if you want it to.
+
+This capability is specific to the Anthropic provider. On the OpenAI-compatible and Google Gemini providers, the assistant reaches the internet only through your connected external MCP servers, as described above.
 
 ### Policy Settings
 
-You can adjust the egress policy in **Settings → AI** (under the **AI web access** control). Controls when the AI can use internet tools. With **Deny by default** or **Ask each turn**, MailCopilot prompts on the first internet-tool call in each response turn. With **Always allow**, the prompt is skipped — internet tools execute without confirmation:
+You can adjust the policy in **Settings → AI**, under **AI web access**:
 
-- **Deny by default (recommended)** — intercept all internet-tool calls; you approve or deny each turn via the confirm modal.
-- **Ask each turn** — same behavior as default-deny: explicit per-turn opt-in via the confirm modal.
-- **Always allow** — AI may freely call web tools even with email content in scope. Warning: AI may send email content to external services.
+- **Deny by default (recommended)** — external MCP tool calls are intercepted and require your confirmation each time; Anthropic's built-in web search / fetch is not offered to the assistant.
+- **Ask each turn** — same behavior as **Deny by default**.
+- **Always allow** — external MCP tool calls execute without confirmation, and Anthropic's built-in web search / fetch is available. Warning: AI may send email content to external services.
 
 ### Audit Log
 
-Each intercepted internet-tool call creates an audit row; denied calls increment **Blocked**, while approved calls are recorded with **Blocked** = 0. Each entry is also counted in the telemetry event `ai.egress.intercepted` with tags indicating the tool name, outcome (approved or denied), and whether per-turn consent was already in effect. For query/URL details, the audit log stores only a SHA-256 hash truncated to the first 16 hex characters; raw queries and URLs are never written to disk.
+Each intercepted external MCP tool call is recorded in the **Blocked** column of that request's audit row -- denied calls increase the count, while a fully approved request keeps **Blocked** at 0. Each interception is also counted in the telemetry event `ai.egress.intercepted` with tags indicating the tool name, outcome (approved or denied), and whether per-turn consent was already in effect. For query/URL details, the audit log stores only a SHA-256 hash truncated to the first 16 hex characters; raw queries and URLs are never written to disk. Anthropic's built-in web search and page-fetch calls are not intercepted, so they never increase **Blocked** or emit `ai.egress.intercepted`. Each such call is still written to the audit log as its own entry, using the same truncated SHA-256 hash of the query or URL described above -- never the raw text. That entry proves the outbound call happened and lets you notice repeated ones; it does not tell you what was actually sent. The raw request is withheld on purpose: the risk here is leakage through the request itself, and writing it down verbatim would just create a second copy of that leak.
 
 ## The Audit Log
 

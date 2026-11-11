@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, cleanup } from '@testing-library/react'
+vi.mock('../sentry', () => ({ captureException: vi.fn() }))
+import { captureException } from '../sentry'
 import { useUndoSystem, type UseUndoSystemParams } from './useUndoSystem'
 import type { MailSummary } from '../../packages/net/types'
 
@@ -501,5 +503,122 @@ describe('useUndoSystem §2.127 — error presentation', () => {
     await act(async () => { await Promise.resolve() })
 
     expect(params.t).toHaveBeenCalledWith('app.errors.move', { error: 'app.errors.presented.timeout' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Page teardown: the 5s undo window is work this page owes the server, and a
+// closing window never unmounts React. `win:close` / app.quit() run the DOM
+// unload sequence (electron.d.ts: BrowserWindow 'close' is emitted before the
+// DOM beforeunload/unload events; app.quit() "guarantees that all beforeunload
+// and unload event handlers are correctly executed"), so `pagehide` is where
+// the deferred move has to be committed.
+// ---------------------------------------------------------------------------
+
+describe('useUndoSystem — pagehide commits the deferred move', () => {
+  let consoleError: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // This suite counts net:move calls globally, and vitest runs without
+    // `globals`, so RTL's automatic cleanup never registers: hooks mounted by
+    // earlier tests are still alive (with a pending undo and a pagehide
+    // listener of their own) unless they are unmounted here, before the
+    // counters are cleared.
+    cleanup()
+    mockInvoke.mockReset()
+    mockInvoke.mockResolvedValue(undefined)
+    vi.mocked(captureException).mockClear()
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    consoleError.mockRestore()
+  })
+
+  const moveCalls = () => (mockInvoke.mock.calls as Array<[string, ...unknown[]]>)
+    .filter(([ch]) => ch === 'net:move')
+
+  it('fires net:move once when the page is torn down inside the undo window', () => {
+    const params = makeParams()
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(7)], 'INBOX', 'Trash', 'Del'))
+    expect(moveCalls()).toHaveLength(0)
+
+    // No unmount — exactly what a closing BrowserWindow does.
+    act(() => { window.dispatchEvent(new Event('pagehide')) })
+
+    expect(moveCalls()).toHaveLength(1)
+    expect(moveCalls()[0]).toEqual(['net:move', 1, 'INBOX', 'Trash', [7]])
+  })
+
+  it('does not move twice when pagehide is followed by unmount', () => {
+    const params = makeParams()
+    const { result, unmount } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(8)], 'INBOX', 'Trash', 'Del'))
+    act(() => { window.dispatchEvent(new Event('pagehide')) })
+    act(() => { unmount() })
+
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('does not move twice when pagehide is followed by the 5s timer', () => {
+    const params = makeParams()
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(9)], 'INBOX', 'Trash', 'Del'))
+    act(() => { window.dispatchEvent(new Event('pagehide')) })
+    act(() => { vi.advanceTimersByTime(6000) })
+
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('a canceled move stays canceled when the page is torn down', () => {
+    const params = makeParams()
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(10)], 'INBOX', 'Trash', 'Del'))
+    act(() => result.current.handleUndo())
+    act(() => { window.dispatchEvent(new Event('pagehide')) })
+
+    expect(moveCalls()).toHaveLength(0)
+  })
+
+  it('stops committing once the hook is unmounted (listener is removed)', () => {
+    const params = makeParams()
+    const { result, unmount } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(11)], 'INBOX', 'Trash', 'Del'))
+    act(() => { unmount() })
+    expect(moveCalls()).toHaveLength(1)
+
+    act(() => { window.dispatchEvent(new Event('pagehide')) })
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('reports a failed flush instead of swallowing it, without the server prose', async () => {
+    const params = makeParams()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:move') {
+        return Promise.reject(new Error("[mcerr:unknown] Error invoking remote method 'net:move': NO [TRYCREATE]"))
+      }
+      return Promise.resolve(undefined)
+    })
+    const { result } = renderHook(() => useUndoSystem(params))
+
+    act(() => result.current.moveWithUndo(1, [makeMail(12)], 'INBOX', 'Trash', 'Del'))
+    act(() => { window.dispatchEvent(new Event('pagehide')) })
+    await act(async () => { await Promise.resolve() })
+
+    expect(captureException).toHaveBeenCalledWith(expect.any(Error), { source: 'useUndoSystem.flushUndo' })
+    // The console line carries the verdict only — it is a Sentry breadcrumb
+    // source (§2.127), so third-party prose must not reach it.
+    const logged = consoleError.mock.calls.map(c => c.map(String).join(' ')).join('\n')
+    expect(logged).toContain('unknown')
+    expect(logged).not.toContain('TRYCREATE')
+    expect(logged).not.toContain('mcerr')
   })
 })

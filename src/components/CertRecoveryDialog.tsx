@@ -4,10 +4,6 @@ import { Copy, ShieldAlert } from 'lucide-react'
 import { sanitizeUntrustedText, CN_MAX, HOST_MAX, type CertRecoveryDialogState } from '../hooks/useCertRecovery'
 import { captureException } from '../sentry'
 
-/** Longest raw TLS error we render inline. Server strings can be arbitrarily
- *  long; anything past this is truncated with an ellipsis. UNTRUSTED text is
- *  always placed in a text node — never HTML. */
-const RAW_MESSAGE_MAX = 500
 /** A normalized SHA-256 fingerprint is 64 hex chars (95 with colon separators).
  *  The bound is generous enough to always show a real one in full, and small
  *  enough that a hostile value cannot flood the dialog. */
@@ -88,10 +84,6 @@ export default function CertRecoveryDialog({ state, onTrust, onCancel }: Props) 
   const host = useMemo(() => sanitizeUntrustedText(request.host, HOST_MAX), [request.host])
   const issuer = useMemo(() => sanitizeUntrustedText(issuerCn, CN_MAX), [issuerCn])
   const subject = useMemo(() => sanitizeUntrustedText(subjectCn, CN_MAX), [subjectCn])
-  const rawMessage = useMemo(
-    () => sanitizeUntrustedText(request.rawMessage, RAW_MESSAGE_MAX),
-    [request.rawMessage],
-  )
   const fingerprintText = useMemo(
     () => sanitizeUntrustedText(fingerprint, FINGERPRINT_MAX),
     [fingerprint],
@@ -209,14 +201,15 @@ export default function CertRecoveryDialog({ state, onTrust, onCancel }: Props) 
           </ul>
         )}
 
-        {rawMessage && (
-          <div className="link-prompt-text">
-            <div className="link-prompt-label">{t('app.certRecovery.detailsLabel')}</div>
-            <div className="link-prompt-value" data-testid="cert-recovery-raw" dir="ltr" style={ISOLATE_STYLE}>
-              {rawMessage}
-            </div>
+        {/* Built in main from the error CODE, never the raw message: Node appends
+            runtime advice ("try running Node.js with --use-system-ca") that does
+            not apply to this app, and the text is not localized. */}
+        <div className="link-prompt-text">
+          <div className="link-prompt-label">{t('app.certRecovery.detailsLabel')}</div>
+          <div className="link-prompt-value" data-testid="cert-recovery-raw">
+            {t(`app.certRecovery.reason.${request.reason}`)}
           </div>
-        )}
+        </div>
 
         {errorKey && (
           <p className="status-err" role="alert" data-testid="cert-recovery-error">

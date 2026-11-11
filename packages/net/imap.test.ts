@@ -60,7 +60,17 @@ import {
   withImapPriority,
   MAX_OVERTAKES_BEFORE_PROMOTION,
   __imapOpLockStateForTest,
+  clearImapAuthLatch,
+  testImapConnection,
+  moveMessages,
+  setSeen,
+  setFlagged as setFlaggedRemote,
+  __setOperationDeadlineForTest,
 } from './imap'
+import { decodeErrorPresentation } from '@mailcopilot/core'
+import { isImapOutcomeUndetermined } from '@mailcopilot/core/transportFailure'
+import { noteImapMutation } from './imapAttempt'
+import { __resetLoginLatch, __setLoginLatchClock } from './authLoginLatch'
 import {
   __resetAuthRefreshCooldown,
   __setAuthRefreshCooldownClock,
@@ -75,6 +85,7 @@ import {
   getFolderFlags,
   removeStaleMessages,
   removeStaleMessagesByUids,
+  deleteMessages,
   setUnread,
   upsertMessages,
   upsertContactsIncoming,
@@ -159,6 +170,14 @@ vi.mock('imapflow', () => {
     __mockConnect: mockConnect,
   }
 })
+
+// The login latch (./authLoginLatch) is per-account module state that outlives
+// a single `it`: a case that makes account #1 fail authentication leaves the
+// account latched, and the NEXT case using that id would be refused before it
+// ever reached its mock. Reset it globally, exactly like the sibling
+// `__resetAuthRefreshCooldown` the auth suites already call. The latch's own
+// behaviour is covered in ./authLoginLatch.test.ts and ./imapAuthLatch.test.ts.
+beforeEach(() => { __resetLoginLatch() })
 
 describe('packages/net/imap — detectFolderRoles', () => {
   it('detects roles by specialUse (RFC 6154)', () => {
@@ -923,6 +942,19 @@ describe('classifyImapError', () => {
     expect(classifyImapError(new Error('TLS pin mismatch: AA:BB:CC'))).toBe('cert')
   })
 
+  it('classifies the anchored-endpoint hold as cert, so the recovery dialog is reachable', () => {
+    // The named PRICE of the anchored-endpoint hold (`packages/net/tls.ts`) is
+    // that a fingerprint-only pin stops working there; its only in-app remedy
+    // is the recovery dialog, which main raises off THIS classification. A
+    // 'network' verdict would turn the price into a dead end, so the link from
+    // the refusal message to the 'cert' class is load-bearing here too, not
+    // only at the `isTlsTrustError()` predicate.
+    const hold = 'TLS pin not confirmed: AA:BB — this endpoint accepts only certificates confirmed in the recovery dialog'
+    expect(classifyImapError(new Error(hold))).toBe('cert')
+    // ImapFlow prefixes the failing command onto the socket error text.
+    expect(classifyImapError(new Error(`LOGIN aborted: ${hold}`))).toBe('cert')
+  })
+
   it('cert takes precedence over auth (no useless token refresh on TLS failure)', () => {
     // A message that matches both cert and auth patterns must classify cert —
     // refreshing an OAuth token cannot fix a broken TLS chain.
@@ -997,6 +1029,7 @@ describe('registerCertErrorHandler — cert errors notify main and abort retry',
       host: 'imap.cert-a.com',
       port: 993,
       rawMessage: 'unable to verify the first certificate',
+      reason: 'unknownIssuer',
       // Transport is part of the payload: the diagnostic probe must know
       // whether to speak implicit TLS or STARTTLS to this endpoint.
       secure: true,
@@ -2781,6 +2814,7 @@ describe('fetchAllFolderHeaders — cert error notifies and aborts (withDedicate
       host: 'imap.cert-dedicated.com',
       port: 993,
       rawMessage: 'unable to verify the first certificate',
+      reason: 'unknownIssuer',
       secure: true,
       protocol: 'imap',
     })
@@ -2912,10 +2946,20 @@ describe('auth refresh cooldown — H1 request storm prevention', () => {
   beforeEach(() => {
     fakeNow = 1_700_000_000_000
     __setAuthRefreshCooldownClock(() => fakeNow)
+    // The login latch reads a clock of its own. Point it at the same fake
+    // instant so `advanceClockBy` moves both: these cases model a sequence of
+    // auth failures over real time, and a latch still running on wall-clock
+    // time would refuse the later attempts before they reached the gate under
+    // test. Where the gap is genuinely shorter than the latch window, the case
+    // clears the latch explicitly and says so — the latch's own behaviour is
+    // covered in ./authLoginLatch.test.ts and ./imapAuthLatch.test.ts.
+    __setLoginLatchClock(() => fakeNow)
   })
 
   afterEach(async () => {
     __setAuthRefreshCooldownClock(null)
+    __setLoginLatchClock(null)
+    __resetLoginLatch()
     __resetAuthRefreshCooldown()
     unregisterAuthErrorHandler(accountId)
     await disconnectAllPerAccount()
@@ -2937,6 +2981,11 @@ describe('auth refresh cooldown — H1 request storm prevention', () => {
     // Second auth error 30s later — still inside the 60s window, handler
     // must NOT be invoked a second time.
     advanceClockBy(30_000)
+    // In production the login latch would refuse this attempt outright (its
+    // first window is 60s too), which is a STRONGER guarantee and is asserted
+    // in ./imapAuthLatch.test.ts. Cleared here so this case keeps testing the
+    // `/token` gate on its own, which is what it is for.
+    clearImapAuthLatch(accountId)
     await expect(
       withImapRetryPerAccount(accountId, cfg, async () => {
         throw new Error('AUTHENTICATE failed')
@@ -4308,6 +4357,33 @@ describe('saveDraft — fallback dedup chain (§2.16 AC4)', () => {
     expect(client.search).toHaveBeenCalledTimes(1)
     expect(client.messageDelete).toHaveBeenCalledTimes(1)
     expect(client.messageDelete.mock.calls[0][0]).toEqual([10, 20])
+  })
+
+  it('writes the reply threading headers of a reply draft into the saved message', async () => {
+    const smtp = await import('./smtp')
+    const { client } = makeDraftFakeClient({ onAppend: () => ({ uid: 30 }), onSearch: () => [30] })
+    const imapflow = await import('imapflow')
+    vi.mocked(imapflow.ImapFlow).mockImplementationOnce(() => client as unknown as InstanceType<typeof imapflow.ImapFlow>)
+
+    await saveDraft(1, cfg, 'Drafts', 'D1', {
+      subject: 'Re: hello', text: 'body', inReplyTo: '<p@x>', references: '<r@x> <p@x>',
+    })
+    expect(vi.mocked(smtp.buildRawMessage).mock.calls[vi.mocked(smtp.buildRawMessage).mock.calls.length - 1]?.[0]).toMatchObject({
+      inReplyTo: '<p@x>',
+      references: '<r@x> <p@x>',
+    })
+  })
+
+  it('a draft that answers nothing carries neither threading header', async () => {
+    const smtp = await import('./smtp')
+    const { client } = makeDraftFakeClient({ onAppend: () => ({ uid: 30 }), onSearch: () => [30] })
+    const imapflow = await import('imapflow')
+    vi.mocked(imapflow.ImapFlow).mockImplementationOnce(() => client as unknown as InstanceType<typeof imapflow.ImapFlow>)
+
+    await saveDraft(1, cfg, 'Drafts', 'D1', { subject: 'hello', text: 'body' })
+    const opts = vi.mocked(smtp.buildRawMessage).mock.calls[vi.mocked(smtp.buildRawMessage).mock.calls.length - 1]?.[0] as Record<string, unknown>
+    expect(opts.inReplyTo).toBeUndefined()
+    expect(opts.references).toBeUndefined()
   })
 
   it('X-header SEARCH returns [] → falls back to Message-Id → deletes prior copies', async () => {
@@ -5755,7 +5831,12 @@ describe('§2.165 — connection outcome registry', () => {
       releaseA()
       await runA
 
-      expect(seen.sort((x, y) => x - y)).toEqual([205, 206])
+      // WHICH id the provider is asked about, not how many times: the boundary
+      // asks twice per operation now — once to stamp it at the start, once at
+      // report time to check the stamp is still current before the login latch
+      // acts on it. A constant-id mutant collapses this set to one entry, so
+      // the test keeps its teeth.
+      expect([...new Set(seen)].sort((x, y) => x - y)).toEqual([205, 206])
       expect(outcomes.slice().sort((x, y) => x.accountId - y.accountId)).toEqual([
         { accountId: 205, accountGeneration: 2050, ok: true },
         { accountId: 206, accountGeneration: 2060, ok: true },
@@ -5848,12 +5929,20 @@ describe('§2.165 — connection outcome registry', () => {
       expect(calls.length).toBeGreaterThanOrEqual(9)
       for (const call of calls) expect(call).toContain('accountGeneration')
 
-      // …and the stamp is read in exactly two places: the wrapper funnel and
-      // the head of startIdle. A third call site would mean somebody re-reads
-      // it somewhere, which is the defect itself.
+      // …and the generation is read in exactly three places: the wrapper
+      // funnel and the head of startIdle, which STAMP an operation, plus the
+      // staleness comparison in `notifyConnectionOutcome`, which stamps
+      // nothing. A fourth site would mean somebody re-reads the generation for
+      // a REPORT, which is the defect itself.
       const captures = source.match(/captureAccountGeneration\(/g) ?? []
-      // 1 declaration + 2 call sites.
-      expect(captures).toHaveLength(3)
+      // 1 declaration + 3 call sites.
+      expect(captures).toHaveLength(4)
+      // The third site is pinned to its shape: it may only compare against the
+      // stamp the operation already carries (the login latch must not act on a
+      // verdict that outlived its mailbox), never supply a stamp of its own.
+      expect(source).toMatch(
+        /if \(captureAccountGeneration\(outcome\.accountId\) === outcome\.accountGeneration\) \{/,
+      )
     })
   })
 
@@ -6171,5 +6260,567 @@ describe('§2.17 Phase 1 — pool_queue_wait_ms lock tag', () => {
     const waitEvents = events.filter(e => e.name === 'imap.pool_queue_wait_ms')
     expect(waitEvents).toHaveLength(1)
     expect(waitEvents[0]!.tags.lock).toBe('pool')
+  })
+})
+
+// --- STARTTLS is required on every ImapFlow constructor when secure === false ---
+//
+// ImapFlow continues in cleartext when the server does not advertise STARTTLS,
+// unless `doSTARTTLS: true` is passed. The real-server proof lives in
+// transportSecurity.real.test.ts; this pins that EVERY constructor site in
+// imap.ts routes through the policy (a new or edited site that forgets the
+// spread would silently reopen the cleartext fallback on that path only).
+describe('ImapFlow constructor options — doSTARTTLS follows cfg.secure', () => {
+  const mkCfg = (host: string, secure: boolean): ImapConfig =>
+    ({ host, port: secure ? 993 : 143, secure, user: 'u', pass: 'p' })
+
+  async function lastCtorOpts(): Promise<Record<string, unknown>> {
+    const imapflow = await import('imapflow')
+    const calls = vi.mocked(imapflow.ImapFlow).mock.calls
+    expect(calls.length).toBeGreaterThan(0)
+    return calls[calls.length - 1][0] as unknown as Record<string, unknown>
+  }
+
+  // Each entry drives one production constructor site through its public entry.
+  const sites: Array<[string, (cfg: ImapConfig) => Promise<unknown>]> = [
+    ['connectImap (singleton)', async (cfg) => { await connectImap(cfg); forceDisconnectImap() }],
+    ['connectImapPerAccount', async (cfg) => { await connectImapPerAccount(cfg) }],
+    ['testImapConnection', async (cfg) => { await testImapConnection(cfg) }],
+    ['dedicated connection (syncFolderFlagsOnly)', async (cfg) => {
+      mockMailboxResult = { exists: 0, highestModseq: null, uidValidity: 1 }
+      mockFetchResults = []
+      await syncFolderFlagsOnly(cfg, 'INBOX', 1)
+    }],
+    ['IDLE connection (startIdle)', async (cfg) => {
+      const imapflow = await import('imapflow')
+      // The file-level mock has no idle(); park one so the loop does not enter its error backoff.
+      vi.mocked(imapflow.ImapFlow).mockImplementationOnce(() => ({
+        connect: vi.fn().mockResolvedValue(undefined),
+        logout: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn(),
+        usable: true,
+        on: vi.fn(),
+        removeListener: vi.fn(),
+        close: vi.fn(),
+        noop: vi.fn().mockResolvedValue(undefined),
+        mailboxOpen: vi.fn().mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 }),
+        idle: vi.fn().mockImplementation(() => new Promise<void>(() => { /* parked */ })),
+      }) as unknown as InstanceType<typeof imapflow.ImapFlow>)
+      await startIdle(901, cfg, 'INBOX', () => {})
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    }],
+  ]
+
+  beforeEach(async () => {
+    const imapflow = await import('imapflow')
+    vi.mocked(imapflow.ImapFlow).mockClear()
+  })
+
+  afterEach(async () => {
+    try {
+      await Promise.race([stopIdle(), new Promise<void>((r) => setTimeout(r, 500))])
+    } catch { /* ignore */ }
+    await disconnectAllPerAccount()
+    mockMailboxResult = { exists: 10, highestModseq: BigInt(100), uidValidity: 1 }
+    mockFetchResults = []
+  })
+
+  it.each(sites)('%s: secure=false requests doSTARTTLS', async (_name, run) => {
+    await run(mkCfg('imap.starttls-on.test', false))
+    const opts = await lastCtorOpts()
+    expect(opts.doSTARTTLS).toBe(true)
+    expect(opts.secure).toBe(false)
+  })
+
+  it.each(sites)('%s: secure=true (immediate TLS) does not set doSTARTTLS', async (_name, run) => {
+    await run(mkCfg('imap.starttls-off.test', true))
+    const opts = await lastCtorOpts()
+    expect(opts.doSTARTTLS).toBeUndefined()
+    expect(opts.secure).toBe(true)
+  })
+})
+
+describe('testImapConnection — refused STARTTLS is tagged for the renderer', () => {
+  const cfg: ImapConfig = { host: 'imap.refuse.test', port: 143, secure: false, user: 'u', pass: 'p' }
+
+  afterEach(async () => {
+    const imapflow = await import('imapflow')
+    vi.mocked(imapflow.ImapFlow).mockClear()
+  })
+
+  async function failConnectWith(err: Error) {
+    const imapflow = await import('imapflow')
+    vi.mocked(imapflow.ImapFlow).mockImplementationOnce(() => ({
+      connect: vi.fn().mockRejectedValue(err),
+      logout: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      close: vi.fn(),
+    }) as unknown as InstanceType<typeof imapflow.ImapFlow>)
+  }
+
+  it('prefixes the starttls_required tag and drops the server text when the upgrade is refused', async () => {
+    const err = Object.assign(new Error('Server does not support STARTTLS'), { tlsFailed: true })
+    await failConnectWith(err)
+    const res = await testImapConnection(cfg)
+    expect(res.ok).toBe(false)
+    expect(decodeErrorPresentation(res.error)).toBe('starttls_required')
+    expect(res.error).toContain('ERR_STARTTLS_REQUIRED')
+  })
+
+  it('leaves an ordinary failure untagged, with its own text', async () => {
+    await failConnectWith(new Error('Invalid credentials'))
+    const res = await testImapConnection(cfg)
+    expect(res.ok).toBe(false)
+    expect(res.error).not.toMatch(/^\[mcerr:/)
+    expect(res.error).toContain('Invalid credentials')
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// §2.309 — the retry boundary classifies the error TREE, retries only what is
+// safe to retry, and keeps its reconnect inside one bounded budget
+// ---------------------------------------------------------------------------
+
+describe('§2.309 — structural retry boundary', () => {
+  let imapflowModule: typeof import('imapflow')
+  const cfg: ImapConfig = { host: 'imap.retry-boundary.test', port: 993, secure: true, user: 'boundary@test.com', pass: 'p' }
+  const outcomes: ImapConnectionOutcome[] = []
+
+  /** What Node raises when every address of a multi-address connect failed:
+   *  an AggregateError whose own message is EMPTY. */
+  const refusedEverywhere = (code = 'ECONNREFUSED') => Object.assign(new Error(''), {
+    name: 'AggregateError',
+    code,
+    errors: [
+      Object.assign(new Error(`connect ${code} 203.0.113.7:993`), { code, syscall: 'connect' }),
+      Object.assign(new Error(`connect ${code} 2001:db8::7:993`), { code, syscall: 'connect' }),
+    ],
+  })
+
+  function installImapFlow(overrides: Record<string, unknown> = {}, connect = vi.fn().mockResolvedValue(undefined)): typeof connect {
+    const ImapFlowMock = vi.mocked(imapflowModule.ImapFlow)
+    ImapFlowMock.mockReset()
+    ImapFlowMock.mockImplementation(() => ({
+      connect,
+      logout: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+      usable: true,
+      capabilities: new Set(['MOVE', 'UIDPLUS']),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+      close: vi.fn(),
+      noop: vi.fn().mockResolvedValue(undefined),
+      mailboxOpen: vi.fn().mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 }),
+      fetch: vi.fn(),
+      fetchOne: vi.fn().mockResolvedValue(null),
+      ...overrides,
+    }) as unknown as InstanceType<typeof imapflowModule.ImapFlow>)
+    return connect
+  }
+
+  beforeEach(async () => {
+    outcomes.length = 0
+    imapflowModule = await import('imapflow')
+    installImapFlow()
+    forceDisconnectImap()
+    __resetAuthRefreshCooldown()
+    __resetAuthRefreshConsecutiveForTest()
+  })
+
+  afterEach(async () => {
+    unregisterConnectionOutcomeHandler()
+    unregisterAccountGenerationProvider()
+    forceDisconnectImap()
+    await disconnectAllPerAccount()
+    __resetAuthRefreshCooldown()
+  })
+
+  describe.each([
+    ['withImapRetry', (id: number, fn: () => Promise<unknown>) => withImapRetry(id, cfg, fn)],
+    ['withImapRetryPerAccount', (id: number, fn: () => Promise<unknown>) => withImapRetryPerAccount(id, cfg, fn)],
+  ] as const)('%s', (_name, run) => {
+    it('retries an empty-message AggregateError (every address refused) and recovers', async () => {
+      let attempt = 0
+      const result = await run(51, async () => {
+        attempt++
+        if (attempt === 1) throw refusedEverywhere()
+        return 'recovered'
+      })
+      expect(result).toBe('recovered')
+      expect(attempt).toBe(2)
+    })
+
+    it.each(['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'])('retries %s by code, not by message', async (code) => {
+      let attempt = 0
+      const result = await run(52, async () => {
+        attempt++
+        if (attempt === 1) throw Object.assign(new Error('connect failed'), { code, syscall: 'connect' })
+        return 'ok'
+      })
+      expect(result).toBe('ok')
+      expect(attempt).toBe(2)
+    })
+
+    it('stops after the bounded budget (1 attempt + 2 retries) and rethrows the ORIGINAL error', async () => {
+      let attempt = 0
+      const failure = refusedEverywhere('ENETUNREACH')
+      await expect(run(53, async () => { attempt++; throw failure })).rejects.toBe(failure)
+      expect(attempt).toBe(3)
+    }, 15_000)
+
+    it('does not retry once a mutating command has been issued: undetermined outcome, original error rethrown', async () => {
+      let attempt = 0
+      const dropped = Object.assign(new Error('Unexpected close'), { code: 'ClosedAfterConnectTLS' })
+      await expect(run(54, async () => {
+        attempt++
+        noteImapMutation()
+        throw dropped
+      })).rejects.toBe(dropped)
+      expect(attempt).toBe(1)
+      expect(isImapOutcomeUndetermined(dropped)).toBe(true)
+    })
+
+    it('still retries a failure that struck BEFORE the mutation, then lets the mutation run once', async () => {
+      let attempt = 0
+      let mutations = 0
+      const result = await run(55, async () => {
+        attempt++
+        if (attempt === 1) throw refusedEverywhere() // connect / read-only preparation
+        noteImapMutation()
+        mutations++
+        return 'applied'
+      })
+      expect(result).toBe('applied')
+      expect(attempt).toBe(2)
+      expect(mutations).toBe(1)
+    })
+
+    it('does not mark a server verdict after a mutation as undetermined (the server answered)', async () => {
+      const refusal = Object.assign(new Error('IMAP MOVE failed for 2 messages'), { responseStatus: 'NO' })
+      await expect(run(56, async () => { noteImapMutation(); throw refusal })).rejects.toBe(refusal)
+      expect(isImapOutcomeUndetermined(refusal)).toBe(false)
+    })
+
+    it('does not retry an authentication failure that merely carries a connection-level code', async () => {
+      let attempt = 0
+      await expect(run(57, async () => {
+        attempt++
+        throw Object.assign(new Error('Command failed'), { code: 'NoConnection', authenticationFailed: true })
+      })).rejects.toThrow('Command failed')
+      expect(attempt).toBe(1)
+    })
+
+    it('a trust failure nested beside a refused address is a trust failure: no retry, recovery notified', async () => {
+      const handler = vi.fn()
+      registerCertErrorHandler(66, handler)
+      try {
+        let attempt = 0
+        const mixed = Object.assign(new Error(''), {
+          name: 'AggregateError',
+          code: 'ECONNREFUSED',
+          errors: [
+            Object.assign(new Error('connect ECONNREFUSED 203.0.113.7:993'), { code: 'ECONNREFUSED', syscall: 'connect' }),
+            Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+          ],
+        })
+        await expect(run(66, async () => { attempt++; throw mixed })).rejects.toBe(mixed)
+        expect(attempt).toBe(1)
+        expect(handler).toHaveBeenCalledTimes(1)
+        expect(handler.mock.calls[0]![0].rawMessage).toBe('self-signed certificate')
+      } finally {
+        unregisterCertErrorHandler(66)
+      }
+    })
+
+    it('a token refresh never re-runs a mutation that was already sent, even for an auth-looking failure', async () => {
+      const refresh = vi.fn().mockResolvedValue('fresh-token')
+      registerAuthErrorHandler(67, refresh)
+      try {
+        let attempt = 0
+        await expect(run(67, async () => {
+          attempt++
+          noteImapMutation()
+          throw new Error('AUTHENTICATIONFAILED')
+        })).rejects.toThrow('AUTHENTICATIONFAILED')
+        expect(attempt).toBe(1)
+        expect(refresh).not.toHaveBeenCalled()
+      } finally {
+        unregisterAuthErrorHandler(67)
+      }
+    })
+
+    it('prose that mentions LOGIN does not make a connection-coded failure an authentication failure', async () => {
+      expect(classifyImapError(Object.assign(new Error('read failed in folder LOGIN'), { code: 'NoConnection' }))).toBe('network')
+      expect(classifyImapError(Object.assign(new Error('Invalid credentials'), { code: 'ERR_IMAP_COMMAND_REJECTED' }))).toBe('network')
+    })
+
+    it('does not retry the wait timers that already spent their budget (a path that hangs is not retried three times)', async () => {
+      for (const code of ['CONNECT_TIMEOUT', 'GREETING_TIMEOUT', 'ETIMEOUT']) {
+        let attempt = 0
+        await expect(run(58, async () => {
+          attempt++
+          throw Object.assign(new Error('Failed to establish connection in required time'), { code })
+        })).rejects.toThrow('required time')
+        expect(attempt).toBe(1)
+      }
+    })
+
+    it('reports exactly one outcome per operation however many attempts it took', async () => {
+      registerAccountGenerationProvider(() => 1)
+      registerConnectionOutcomeHandler((o) => { outcomes.push(o) })
+      let attempt = 0
+      await run(59, async () => { attempt++; if (attempt < 3) throw refusedEverywhere(); return 'ok' })
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]).toMatchObject({ accountId: 59, ok: true })
+
+      outcomes.length = 0
+      const failure = refusedEverywhere()
+      await expect(run(59, async () => { throw failure })).rejects.toBe(failure)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]).toMatchObject({ accountId: 59, ok: false, error: failure })
+    }, 15_000)
+  })
+
+  it('the wait for an OAuth token refresh is inside the operation deadline: the lock is released and a late token is not applied', async () => {
+        let releaseRefresh!: (token: string) => void
+    const refresh = vi.fn(() => new Promise<string>((resolve) => { releaseRefresh = resolve }))
+    registerAuthErrorHandler(68, refresh)
+    __setOperationDeadlineForTest(300)
+    const oauthCfg: ImapConfig = { ...cfg, pass: undefined, accessToken: 'old-token' }
+    try {
+      const started = Date.now()
+      await expect(withImapRetry(68, oauthCfg, async () => { throw new Error('AUTHENTICATIONFAILED') }, 2, { overallDeadline: true }))
+        .rejects.toMatchObject({ code: 'ERR_IMAP_OPERATION_DEADLINE' })
+      expect(Date.now() - started).toBeLessThan(2_000)
+      expect(refresh).toHaveBeenCalledTimes(1)
+      // The handler finishes after the operation ended: nothing applies it.
+      releaseRefresh('late-token')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(oauthCfg.accessToken).toBe('old-token')
+      // The connection lock is free for the next operation.
+      __setOperationDeadlineForTest(null)
+      await expect(withImapRetry(68, cfg, async () => 'next')).resolves.toBe('next')
+    } finally {
+      __setOperationDeadlineForTest(null)
+      unregisterAuthErrorHandler(68)
+    }
+  })
+
+  it('an OAuth refresh is not even started once the operation deadline has passed', async () => {
+    const refresh = vi.fn().mockResolvedValue('fresh-token')
+    registerAuthErrorHandler(70, refresh)
+    __setOperationDeadlineForTest(10)
+    try {
+      await expect(withImapRetry(70, { ...cfg, pass: undefined, accessToken: 'old-token' }, async () => {
+        // Hold the thread past the deadline, then fail with an auth error: the
+        // rejection is handled before the deadline timer gets to run.
+        const until = Date.now() + 60
+        while (Date.now() < until) { /* busy wait */ }
+        throw new Error('AUTHENTICATIONFAILED')
+      }, 2, { overallDeadline: true })).rejects.toMatchObject({ code: 'ERR_IMAP_OPERATION_DEADLINE' })
+      expect(refresh).not.toHaveBeenCalled()
+    } finally {
+      __setOperationDeadlineForTest(null)
+      unregisterAuthErrorHandler(70)
+    }
+  })
+
+  it('a logout that does not finish within the deadline is followed by closing the socket', async () => {
+    const close = vi.fn()
+    installImapFlow({ logout: vi.fn(() => new Promise<void>(() => { /* never settles */ })), close })
+    __setOperationDeadlineForTest(300)
+    try {
+      await expect(withImapRetry(71, cfg, async () => {
+        await connectImap(cfg)
+        throw refusedEverywhere('ECONNRESET')
+      }, 2, { overallDeadline: true })).rejects.toMatchObject({ code: 'ERR_IMAP_OPERATION_DEADLINE' })
+      expect(close).toHaveBeenCalled()
+    } finally {
+      __setOperationDeadlineForTest(null)
+    }
+  }, 15_000)
+
+  it('withImapRetry: a failing RECONNECT is charged to the same budget instead of escaping it', async () => {
+    // Attempt 1 fails -> reconnect fails (once) -> reconnect succeeds -> attempt 2 succeeds.
+    // Before: the reconnect sat outside the guarded try, so its failure was thrown at once.
+    const connect = installImapFlow({}, vi.fn()
+      .mockRejectedValueOnce(refusedEverywhere())
+      .mockResolvedValue(undefined))
+    let attempt = 0
+    const result = await withImapRetry(60, cfg, async () => {
+      attempt++
+      if (attempt === 1) throw refusedEverywhere()
+      return 'recovered'
+    })
+    expect(result).toBe('recovered')
+    expect(attempt).toBe(2)
+    expect(connect).toHaveBeenCalledTimes(2)
+  }, 15_000)
+
+  it('withImapRetry: when every reconnect fails the budget still ends the loop (no unbounded retry)', async () => {
+    const connect = installImapFlow({}, vi.fn().mockRejectedValue(refusedEverywhere()))
+    let attempt = 0
+    await expect(withImapRetry(61, cfg, async () => {
+      attempt++
+      throw refusedEverywhere()
+    })).rejects.toMatchObject({ name: 'AggregateError' })
+    // fn ran once; the two retries were spent on reconnect attempts.
+    expect(attempt).toBe(1)
+    expect(connect).toHaveBeenCalledTimes(2)
+  }, 15_000)
+
+  it('moveMessages: a connection lost after MOVE was issued is not re-sent and is reported as undetermined', async () => {
+    const dropped = Object.assign(new Error('Unexpected close'), { code: 'ClosedAfterConnectTLS' })
+    const messageMove = vi.fn().mockRejectedValue(dropped)
+    installImapFlow({ messageMove })
+    await expect(moveMessages(cfg, 'INBOX', 'Archive', [1, 2], 62)).rejects.toBe(dropped)
+    expect(messageMove).toHaveBeenCalledTimes(1)
+    expect(isImapOutcomeUndetermined(dropped)).toBe(true)
+  })
+
+  it('moveMessages: a failure while connecting / selecting the folder IS retried and the MOVE then runs once', async () => {
+    const mailboxOpen = vi.fn()
+      .mockRejectedValueOnce(refusedEverywhere())
+      .mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 })
+    const messageMove = vi.fn().mockResolvedValue({ uidMap: new Map() })
+    installImapFlow({ mailboxOpen, messageMove })
+    await moveMessages(cfg, 'INBOX', 'Archive', [1, 2], 63)
+    expect(mailboxOpen).toHaveBeenCalledTimes(2)
+    expect(messageMove).toHaveBeenCalledTimes(1)
+  }, 15_000)
+
+  it('an outer boundary does not re-run a callback whose inner boundary already reported an undetermined MOVE', async () => {
+    const dropped = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET', syscall: 'read' })
+    const messageMove = vi.fn().mockRejectedValue(dropped)
+    installImapFlow({ messageMove })
+    let outerAttempts = 0
+    await expect(withImapRetryPerAccount(65, cfg, async () => {
+      outerAttempts++
+      await moveMessages(cfg, 'INBOX', 'Archive', [1], 65)
+    })).rejects.toBe(dropped)
+    expect(outerAttempts).toBe(1)
+    expect(messageMove).toHaveBeenCalledTimes(1)
+  })
+
+  it('moveMessages: an `undefined` MOVE result (library state not SELECTED after a server BYE) is not a success', async () => {
+    const messageMove = vi.fn().mockResolvedValue(undefined)
+    installImapFlow({ messageMove, usable: true })
+    ;(vi.mocked(deleteMessages) as ReturnType<typeof vi.fn>).mockClear()
+    await expect(moveMessages(cfg, 'INBOX', 'Archive', [1], 68)).rejects.toMatchObject({ code: expect.stringMatching(/^(NoConnection|ERR_IMAP_COMMAND_REJECTED)$/) })
+    expect(deleteMessages).not.toHaveBeenCalled()
+  })
+
+  it('a MOVE answered with `undefined` on a connection that is no longer SELECTED is reported as lost, hence unknown', async () => {
+    const messageMove = vi.fn().mockResolvedValue(undefined)
+    installImapFlow({ messageMove, state: 3, states: { SELECTED: 2 } })
+    const caught = await moveMessages(cfg, 'INBOX', 'Archive', [1], 69).catch((e: unknown) => e)
+    expect(isImapOutcomeUndetermined(caught)).toBe(true)
+  })
+
+  it('setSeen: STORE is a mutation too, so a drop after it is not re-sent', async () => {
+    const dropped = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET', syscall: 'read' })
+    const messageFlagsAdd = vi.fn().mockRejectedValue(dropped)
+    installImapFlow({ messageFlagsAdd })
+    await expect(setSeen(cfg, 'INBOX', [5], true, 64)).rejects.toBe(dropped)
+    expect(messageFlagsAdd).toHaveBeenCalledTimes(1)
+    expect(isImapOutcomeUndetermined(dropped)).toBe(true)
+  })
+
+  it('setFlagged: STORE \\Flagged is a mutation too, so a drop after it is not re-sent', async () => {
+    const dropped = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET', syscall: 'read' })
+    const messageFlagsRemove = vi.fn().mockRejectedValue(dropped)
+    installImapFlow({ messageFlagsRemove })
+    await expect(setFlaggedRemote(cfg, 'INBOX', [5], false, 65)).rejects.toBe(dropped)
+    expect(messageFlagsRemove).toHaveBeenCalledTimes(1)
+    expect(isImapOutcomeUndetermined(dropped)).toBe(true)
+  })
+
+  describe('auth refresh reconnects inside the guarded attempt', () => {
+    const refreshedCfg = (): ImapConfig => ({ ...cfg, pass: undefined, accessToken: 'old-token' })
+    const authFailure = () => new Error('AUTHENTICATE failed')
+
+    afterEach(() => {
+      unregisterAuthErrorHandler(70)
+      unregisterAuthErrorHandler(71)
+    })
+
+    it.each([
+      ['withImapRetry', (id: number, c: ImapConfig, fn: () => Promise<unknown>) => withImapRetry(id, c, fn)],
+      ['withImapRetryPerAccount', (id: number, c: ImapConfig, fn: () => Promise<unknown>) => withImapRetryPerAccount(id, c, fn)],
+    ] as const)('%s: a connect failure right after the token refresh is classified and retried, not thrown raw', async (_n, run) => {
+      const refresh = vi.fn().mockResolvedValue('fresh-token')
+      registerAuthErrorHandler(70, refresh)
+      const connect = installImapFlow({}, vi.fn()
+        .mockRejectedValueOnce(refusedEverywhere())
+        .mockResolvedValue(undefined))
+      const c = refreshedCfg()
+      let attempt = 0
+      const result = await run(70, c, async () => {
+        attempt++
+        if (attempt === 1) throw authFailure()
+        return 'recovered'
+      })
+      expect(result).toBe('recovered')
+      expect(attempt).toBe(2)
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(c.accessToken).toBe('fresh-token')
+      expect(connect).toHaveBeenCalledTimes(2) // failed reconnect + successful one
+    }, 15_000)
+
+    it.each([
+      ['withImapRetry', (id: number, c: ImapConfig, fn: () => Promise<unknown>) => withImapRetry(id, c, fn)],
+      ['withImapRetryPerAccount', (id: number, c: ImapConfig, fn: () => Promise<unknown>) => withImapRetryPerAccount(id, c, fn)],
+    ] as const)('%s: an auth failure on the reconnect after a refresh ends the loop without a second refresh', async (_n, run) => {
+      const refresh = vi.fn().mockResolvedValue('still-bad-token')
+      registerAuthErrorHandler(71, refresh)
+      const rejected = authFailure()
+      const connect = installImapFlow({}, vi.fn().mockRejectedValue(rejected))
+      let attempt = 0
+      await expect(run(71, refreshedCfg(), async () => {
+        attempt++
+        throw authFailure()
+      })).rejects.toThrow('AUTHENTICATE failed')
+      expect(attempt).toBe(1)
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(connect).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('dedicated-connection boundary (syncFolderFlagsOnly)', () => {
+    it('retries an empty-message AggregateError raised while connecting and recovers', async () => {
+      const connect = installImapFlow(
+        { mailboxOpen: vi.fn().mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 }) },
+        vi.fn().mockRejectedValueOnce(refusedEverywhere()).mockResolvedValue(undefined),
+      )
+      const result = await syncFolderFlagsOnly(cfg, 'INBOX', 72)
+      expect(result.newUids).toEqual([])
+      expect(connect).toHaveBeenCalledTimes(2)
+    }, 15_000)
+
+    it('stops after the bounded budget (1 attempt + 2 retries) and rethrows the ORIGINAL error', async () => {
+      const failure = refusedEverywhere('ENETUNREACH')
+      const connect = installImapFlow({}, vi.fn().mockRejectedValue(failure))
+      await expect(syncFolderFlagsOnly(cfg, 'INBOX', 73)).rejects.toBe(failure)
+      expect(connect).toHaveBeenCalledTimes(3)
+    }, 15_000)
+
+    it('retries a drop of a read-only operation (mutation never announced), without marking it undetermined', async () => {
+      const failure = Object.assign(new Error('Unexpected close'), { code: 'ClosedAfterConnectTLS' })
+      const mailboxOpen = vi.fn()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue({ exists: 0, highestModseq: null, uidValidity: 1 })
+      installImapFlow({ mailboxOpen })
+      const result = await syncFolderFlagsOnly(cfg, 'INBOX', 74)
+      expect(result.newUids).toEqual([])
+      expect(mailboxOpen).toHaveBeenCalledTimes(2)
+      expect(isImapOutcomeUndetermined(failure)).toBe(false)
+    }, 15_000)
+
+    it('does not retry an auth failure with no refresh handler registered', async () => {
+      const connect = installImapFlow({}, vi.fn().mockRejectedValue(new Error('AUTHENTICATE failed')))
+      await expect(syncFolderFlagsOnly(cfg, 'INBOX', 75)).rejects.toThrow('AUTHENTICATE failed')
+      expect(connect).toHaveBeenCalledTimes(1)
+    })
   })
 })

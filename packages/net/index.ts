@@ -37,7 +37,7 @@ export {
 // work in `withImapPriority`; every net call underneath inherits it.
 export { withImapPriority, currentImapPriority } from './imapScheduler'
 export type { ImapPoolRequester } from './imapScheduler'
-export { testSmtpConnection, sendMail, buildRawMessage, classifySmtpError, SMTP_RETRY_DELAYS_MS } from './smtp'
+export { testSmtpConnection, sendMail, buildRawMessage, classifySmtpError, finalSendFailureText, SMTP_RETRY_DELAYS_MS } from './smtp'
 export {
   listAccounts,
   getAccountMeta,
@@ -98,7 +98,7 @@ export {
 export { EML_WORKER_MIN_BYTES } from './emlWorkerClient'
 export { saveEml, readEml, readEmlBounded, emlExists, deleteEml, deleteEmls, deleteAccountEmls, emlCacheSizeBytes } from './mailStore'
 export type { ReadEmlResult } from './mailStore'
-export { autoconfig } from './autoconfig'
+export { autoconfig, gmailPresetAutoconfig } from './autoconfig'
 export { normalizeFingerprintSha256, buildTlsOptions } from './tls'
 export { tryAutoUnsubscribe, tryRfc8058Post, tryHttpGetUnsubscribe, pickHttpsUrl, extractUnsubLinksFromHtml } from './unsubscribe'
 export type { HttpUnsubscribeResult } from './unsubscribe'

@@ -98,6 +98,26 @@ describe('ai:checkAuth', () => {
   })
 })
 
+describe('ai:listModels', () => {
+  // The model list request carries the stored key to the base URL / proxy in force, so it needs the same
+  // confirmation as ai:checkAuth. One wiring test per guard: comments are stripped, and the verdict must be
+  // consumed before the request.
+  const source = handlerSource('ai:listModels')
+
+  it('gates the not-yet-saved overrides before the key is sent anywhere', () => {
+    const verdict = verdictBinding(source, 'ai:listModels')
+    expect(source.indexOf('ensureAiDestinationApproved(')).toBeGreaterThan(-1)
+    expect(source.indexOf('ensureAiDestinationApproved(')).toBeLessThan(source.indexOf('aiListModels('))
+    expect(source).toContain(`!${verdict}.ok`)
+    expect(source.indexOf(`!${verdict}.ok`)).toBeLessThan(source.indexOf('aiListModels('))
+  })
+
+  it('judges and uses one merge rule, like ai:checkAuth', () => {
+    expect(source).toContain('resolveRequestedAiDestination(overrides, persisted)')
+    expect(source).toContain('applyAiDestinationOverrides(')
+  })
+})
+
 describe('no ungated route into the destination fields', () => {
   it('every IPC handler in main.ts that touches them also consults the guard', () => {
     const registrations = [...MAIN_TS.matchAll(/\nhandleIpc\('([^']+)'/g)].map(m => ({
@@ -109,6 +129,7 @@ describe('no ungated route into the destination fields', () => {
       const end = i + 1 < registrations.length ? registrations[i + 1].index : MAIN_TS.length
       const body = MAIN_TS.slice(registrations[i].index, end)
       const touchesDestination = body.includes('aiOpenAiBaseUrl') || body.includes('aiProxyUrl')
+        || body.includes('applyAiDestinationOverrides') || body.includes('aiDestinationOverridesSchema')
       if (!touchesDestination) continue
       if (!body.includes('ensureAiDestinationApproved')) ungated.push(registrations[i].channel)
     }

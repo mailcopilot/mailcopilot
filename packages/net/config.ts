@@ -4,6 +4,9 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
+// Single source of truth for what an email address is. Imported by path, not
+// from the core barrel — see the header of packages/core/emailAddress.ts.
+import { emailAddressSchema, trimmedEmailAddressSchema } from '@mailcopilot/core/emailAddress'
 import { deleteAccountData } from '../db'
 import type { AccountConfig, AccountMeta, FolderRoles, Identity } from './types'
 
@@ -261,6 +264,14 @@ export type Settings = {
    * `autoUpdater.autoDownload` without restart).
    */
   autoUpdateEnabled?: boolean
+  /**
+   * Background update check (at start and hourly). Default TRUE: an
+   * absent key reads as "on", so existing profiles keep checking. When false
+   * main stops every automatic check; the manual button in Settings → About is
+   * an explicit request and still works. Enforced by
+   * `electron/services/updateScheduler.ts`, never by the renderer.
+   */
+  updateCheckEnabled?: boolean
   /**
    * §3.3 B2 — Thread AI Summary opt-in, PER ACCOUNT. Keyed by account id
    * (stringified because electron-store JSON object keys are strings). A value
@@ -672,7 +683,28 @@ if (process.env.MAILCOPILOT_DATA_DIR) {
   fs.mkdirSync(dir, { recursive: true })
   storeOptions.cwd = path.resolve(dir)
 }
-const store = new Store<{ accounts?: AccountMeta[]; account?: AccountConfig; settings?: unknown }>(storeOptions)
+const store = new Store<{ accounts?: AccountMeta[]; account?: AccountConfig; settings?: unknown; accountIdHighWater?: number }>(storeOptions)
+
+/**
+ * Account numbers are issued once and never reused (like SQLite `AUTOINCREMENT`, whose purpose is
+ * "to prevent the reuse of ROWIDs from previously deleted rows", https://www.sqlite.org/autoinc.html).
+ * A number names ONE mailbox for the life of the profile, so anything keyed by it (consents, chat
+ * sources, caches, a link that outlives a deleted mailbox) can never be inherited by another mailbox.
+ *
+ * `accountIdHighWater` is the highest number ever issued. A profile from before it existed starts at
+ * the highest number that exists (a mailbox deleted earlier is unrecoverable), and `deleteAccount`
+ * raises the mark BEFORE removing the record, so the mark never trails the numbers in use.
+ */
+function readAccountIdHighWater(accounts: readonly { id: number }[]): number {
+  const stored = store.get('accountIdHighWater')
+  const mark = typeof stored === 'number' && Number.isSafeInteger(stored) && stored > 0 ? stored : 0
+  return accounts.reduce((m, a) => Math.max(m, a.id), mark)
+}
+
+function raiseAccountIdHighWater(accounts: readonly { id: number }[], issued = 0): void {
+  const next = Math.max(readAccountIdHighWater(accounts), issued)
+  if (next !== store.get('accountIdHighWater')) store.set('accountIdHighWater', next)
+}
 
 const hostSchema = z.string().min(1)
 const portSchema = z.number().int().positive()
@@ -817,7 +849,7 @@ function isUuid(value: string): boolean {
 export const identitySchema = z.object({
   id: z.string().min(1),
   displayName: z.string().trim().min(1),
-  email: z.string().trim().email(),
+  email: trimmedEmailAddressSchema,
   // Accept empty string so "user cleared the signature" survives round-trip
   // as a distinct state from "not submitted / preserve existing value".
   signature: z.string().optional(),
@@ -927,6 +959,18 @@ export const smtpSchema = z.object({
 })
 export const accountSchema = z.object({ imap: imapSchema, smtp: smtpSchema })
 /**
+ * Renderer-facing narrowing of the transport schemas: a `tlsPinnedCertsPem`
+ * body becomes an OpenSSL trust anchor whose leaf skips the hostname check
+ * (packages/net/tls.ts), so anchor provenance is single-writer — bodies are
+ * minted only by `net:trustCert` after a native dialog and read back out of
+ * the pin store. Every schema that parses renderer input uses these, so a body
+ * cannot even be persisted at rest: `accountSaveSchema` below, plus the
+ * connection-test channels in electron/netTestConfig.ts (see the rationale
+ * there; it adds a presence-refusal on top).
+ */
+export const imapRendererSchema = imapSchema.omit({ tlsPinnedCertsPem: true })
+export const smtpRendererSchema = smtpSchema.omit({ tlsPinnedCertsPem: true })
+/**
  * Read-side account-meta schema. Accepts three on-disk shapes and normalizes
  * them to the canonical {authType, providerId, transportType} new-shape:
  *   (a) legacy password-shape: no providerId/transportType, authType missing or 'password'
@@ -948,7 +992,7 @@ export const accountSchema = z.object({ imap: imapSchema, smtp: smtpSchema })
 const rawAccountMetaObject = z.object({
   id: z.number().int().positive(),
   name: z.string().optional(),
-  email: z.string().email().optional(),
+  email: emailAddressSchema.optional(),
   colorIndex: z.number().int().min(0).max(7).optional(),
   avatarInitials: z.string().min(1).max(2).optional(),
   avatarIcon: z.string().min(1).optional(),
@@ -1339,6 +1383,8 @@ export const settingsSchema = z.object({
    * responsible for greying out the toggle on read-only installs.
    */
   autoUpdateEnabled: z.boolean().default(false),
+  /** See `Settings.updateCheckEnabled`. Default on; absent = on. */
+  updateCheckEnabled: z.boolean().default(true),
   /**
    * §3.3 B2 — per-account Thread AI Summary opt-in map (accountId → enabled).
    * Default empty (feature OFF for every account). z.record keys are strings
@@ -1533,6 +1579,10 @@ export const rendererWritableSettingsSchema = z.object({
   // §2.19: renderer can flip auto-download from Settings → About. Bounded
   // boolean — strict() guards against smuggled extra fields.
   autoUpdateEnabled: z.boolean().optional(),
+  // The background-check switch. Renderer-writable like the one above;
+  // the first-run gate in main (not this field) decides whether a fresh install
+  // may check at all, so writing `true` here cannot open it.
+  updateCheckEnabled: z.boolean().optional(),
   // §3.3 B2: renderer Settings toggle writes the per-account Thread AI Summary
   // opt-in map here (accountId → enabled). A plain UX opt-in, not a security
   // gate, so it is renderer-writable (unlike stdio MCP). strict() still bounds
@@ -1981,6 +2031,11 @@ export function listAccounts(): AccountMeta[] {
     })
 
   if (sanitized.length !== items.length || JSON.stringify(sanitized) !== JSON.stringify(items)) {
+    // A record dropped here still counts: its number must not be issued again.
+    raiseAccountIdHighWater(items.flatMap(raw => {
+      const rawId = (raw as { id?: unknown } | null)?.id
+      return typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId > 0 ? [{ id: rawId }] : []
+    }))
     store.set('accounts', sanitized)
   }
   return sanitized
@@ -2088,7 +2143,7 @@ const OAUTH_ALLOWED_PROVIDER_IDS = ['gmail', 'outlook'] as const
 export const accountSaveSchema = z.object({
   id: z.number().int().positive().optional(),
   name: z.string().trim().min(1).optional(),
-  email: z.string().trim().email().optional(),
+  email: trimmedEmailAddressSchema.optional(),
   colorIndex: z.number().int().min(0).max(7).optional(),
   avatarInitials: z.string().trim().min(1).max(2).optional(),
   avatarIcon: z.string().trim().min(1).optional(),
@@ -2096,8 +2151,10 @@ export const accountSaveSchema = z.object({
   authType: z.enum(['password', 'oauth2']).optional(),
   providerId: z.enum(['gmail', 'outlook', 'generic-imap']).optional(),
   transportType: z.enum(['imap-smtp']).optional(),
-  imap: imapSchema,
-  smtp: smtpSchema,
+  // Narrowed: a renderer-supplied certificate body must not reach the stored
+  // record, or a later reader could hand it to a transport as a trust anchor.
+  imap: imapRendererSchema,
+  smtp: smtpRendererSchema,
   folderRoles: folderRolesSchema,
   /**
    * 2.3-A legacy fallback — still accepted so wave 2 (renderer-ui) can land
@@ -2124,7 +2181,7 @@ export const accountSaveSchema = z.object({
   identities: z.array(z.object({
     id: z.string().uuid().optional(),
     displayName: z.string().trim().min(1),
-    email: z.string().trim().email(),
+    email: trimmedEmailAddressSchema,
     signature: z.string().optional(),
     // Empty string is the explicit "clear" sentinel emitted by the Identities
     // tab when the user empties the field — must not be rejected. See
@@ -2334,8 +2391,15 @@ export async function saveAccount(input: unknown): Promise<{ id: number }> {
   const smtpPass = normalizePass(parsed.smtp.pass)
 
   const accounts = listAccounts()
-  const id = parsed.id ?? (accounts.reduce((m, a) => Math.max(m, a.id), 0) + 1)
+  const id = parsed.id ?? (readAccountIdHighWater(accounts) + 1)
   const existing = accounts.find(a => a.id === id)
+  // A number is issued here and only here. A caller that names an id for a record that does not exist (an
+  // OAuth reconnect finishing after the account was deleted, a stale edit window, a crafted payload) would
+  // recreate a deleted number, or burn the counter with a huge one.
+  if (parsed.id !== undefined && !existing) {
+    throw new Error(`Account ${parsed.id} does not exist: an account id is issued by saveAccount and cannot be chosen`)
+  }
+  if (!Number.isSafeInteger(id)) throw new Error('Account id counter exhausted')
   const existingAuthType = existing?.authType
 
   // IPC trust gap guard: refuse to transition an existing account from a
@@ -2538,6 +2602,7 @@ export async function saveAccount(input: unknown): Promise<{ id: number }> {
     ? accounts.map(a => (a.id === id ? meta : a))
     : [...accounts, meta]
   store.set('accounts', next)
+  raiseAccountIdHighWater(next, id)
 
   if (authType === 'password') {
     if (imapPass) await backend.set(imapSecretKey(id), imapPass, 'imap_smtp')
@@ -2569,7 +2634,7 @@ export async function saveAccount(input: unknown): Promise<{ id: number }> {
  * consent — a recorded answer to "may this mailbox use this feature".
  *
  * Kept as an array rather than spelled out at the call site so that adding a
- * fifth per-account opt-in has ONE place to be registered, and so a test can
+ * further per-account opt-in has ONE place to be registered, and so a test can
  * assert the list matches the schema instead of trusting prose.
  */
 export const ACCOUNT_KEYED_CONSENT_FIELDS = [
@@ -2584,15 +2649,12 @@ export type AccountKeyedConsentField = typeof ACCOUNT_KEYED_CONSENT_FIELDS[numbe
 /**
  * Drop every recorded consent belonging to one account id.
  *
- * Why this exists: account ids are handed out as `max(existing) + 1`, so a
- * freed number can come back — deleting the highest-numbered mailbox hands its
- * id to the next one created. Delete a mailbox that had been allowed to use,
- * say, AI Translate, add another, and the main-side gate reads a map that still
- * says `{"2": true}` and honours it. The new mailbox comes up with a consent
- * its owner never gave, and from main's point of view that `true` is a
- * perfectly honest record. The §1.26 consent grid widened the exposure: one
- * click on a column header now writes `true` for every mailbox at once,
- * including the id that is about to be freed.
+ * Why this exists: a consent is a record of what a specific owner allowed. Account
+ * numbers are never reused any more (see `readAccountIdHighWater`), so a leftover
+ * `{"2": true}` can no longer be inherited by another mailbox; it is still removed,
+ * because the owner is gone and a stale grant is the unsafe direction (§2.82). Before
+ * numbers were monotonic the same leftover was a live defect: deleting the highest
+ * mailbox handed its id to the next one, which came up with a consent nobody gave.
  *
  * The entry is DELETED, not set to `false`: `false` means "asked and refused",
  * and there is no longer anyone to have refused. See `forgetAccountAiConsents`
@@ -2626,8 +2688,8 @@ export async function deleteAccount(id: number): Promise<void> {
   // The consents go FIRST — before the record, the secrets and the rows.
   //
   // Everything below this line can fail (the OAuth cleanup awaits are not
-  // wrapped), and an id can come back: `saveAccount` assigns `max(existing) + 1`,
-  // so deleting the highest-numbered mailbox frees its number for the next one.
+  // wrapped). An id no longer comes back (`readAccountIdHighWater`), so what the
+  // ordering protects is the owner's record, not a successor's.
   //
   // What the ordering buys is one guarantee and nothing wider: no path through
   // this function ends with the account record gone and its consents still
@@ -2654,6 +2716,8 @@ export async function deleteAccount(id: number): Promise<void> {
   // split one delete's secret cleanup across two backends.
   const backend = secretBackend
   const accounts = listAccounts()
+  // The number leaves with the record but is never issued again: raise the mark first.
+  raiseAccountIdHighWater(accounts)
   const next = accounts.filter(a => a.id !== id)
   store.set('accounts', next)
   try { await backend.delete(imapSecretKey(id), 'imap_smtp') } catch { /* ignore */ }

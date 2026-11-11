@@ -2,6 +2,17 @@
   box-sizing: border-box;
 }
 
+/* The one scrollbar style of the app: every scrollable area (mail list, reader, chat, settings, menus,
+   text fields) gets the thin bar in the border colour, in both themes. `scrollbar-width` is not
+   inherited, so it is set on every element; `*` has zero specificity, so a deliberate per-element
+   override still wins. The mail body iframe sets the same values in its own document
+   (src/utils/mail.ts). Do not add per-class scrollbar rules or webkit pseudo-element bar styling:
+   Chromium ignores the pseudo-elements once these properties are set. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
 :root {
   /* Base typography */
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif;
@@ -355,8 +366,6 @@ textarea {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
 }
 
 .ai-messages {
@@ -525,6 +534,31 @@ textarea {
   font-size: 11px;
 }
 
+.ai-sources-toggle {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+
+.ai-sources-toggle:hover {
+  text-decoration: underline;
+}
+
+.ai-answer-plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* An image in an answer is never loaded: its alt text and address are shown as text. */
+.ai-blocked-image {
+  color: var(--text-muted, inherit);
+  overflow-wrap: anywhere;
+}
+
 .ai-inline-mail-link {
   background: none;
   border: none;
@@ -539,6 +573,30 @@ textarea {
 
 .ai-inline-mail-link:hover {
   color: var(--accent-hover, #2563eb);
+}
+
+/* A cited message the assistant was never given (§3.3 B3): plain text, never link-like. */
+.ai-inline-mail-unconfirmed {
+  color: var(--muted);
+  cursor: help;
+}
+
+.ai-unconfirmed-mark {
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* One line under an answer when the local index was still incomplete. */
+.ai-index-note {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* flex-shrink:0 restored: status row must not collapse when message content overflows .ai-body. */

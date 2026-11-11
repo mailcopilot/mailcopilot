@@ -6,7 +6,7 @@ title: Datenschutzrichtlinie
 # Datenschutzrichtlinie
 
 **Geltungsdatum:** 13. Februar 2026
-**Zuletzt aktualisiert:** 13. Februar 2026
+**Zuletzt aktualisiert:** 4. November 2026
 
 ## 1. Einleitung
 
@@ -143,7 +143,7 @@ Im Einzelnen:
 
 ## 7. Google OAuth 2.0
 
-Wenn Sie ein Gmail-Konto verbinden, verwendet MailCopilot Google OAuth 2.0 mit PKCE (RFC 7636), um Zugriff zu erhalten. Wir fordern die folgenden Berechtigungen an:
+Wenn Sie ein Gmail-Konto mit der Google-Anmeldung verbinden, verwendet MailCopilot Google OAuth 2.0 mit PKCE (RFC 7636), um Zugriff zu erhalten. Im offiziellen MailCopilot-Build wird die Google-Anmeldung für neue Gmail-Postfächer nicht mehr angeboten (sie werden mit einem App-Passwort über IMAP/SMTP verbunden); sie bleibt für Postfächer verfügbar, die sie bereits verwenden, sowie für aus dem Quellcode erstellte Builds mit einem eigenen Google-Client. Wenn die Google-Anmeldung verwendet wird, fordern wir die folgenden Berechtigungen an:
 
 | Berechtigung | Zweck |
 |---|---|
@@ -196,7 +196,11 @@ Wir setzen die folgenden Sicherheitsmassnahmen um:
 
 ## 12. Automatische Updates
 
-MailCopilot prueft regelmaessig auf Updates. Update-Metadaten (Versionsnummer, Datei-Hash) werden von unserem Release-Repository heruntergeladen. **Es werden keine personenbezogenen Daten** waehrend der Update-Pruefung gesendet. Sie koennen die automatische Update-Pruefung in den Einstellungen deaktivieren.
+MailCopilot sucht im Hintergrund nach Updates: beim Start und danach etwa einmal pro Stunde. Eine Update-Prüfung ist eine gewöhnliche HTTPS-Anfrage an unseren Update-Server nach einer kleinen Metadaten-Datei (Versionsnummer und Datei-Hash). Wie bei jeder Webanfrage sieht der Server Ihre IP-Adresse und – anhand des Namens der angeforderten Datei – die Art Ihres Betriebssystems und Ihrer Prozessorarchitektur. Die Prüfung selbst sendet nicht die Version von MailCopilot, die Sie verwenden (die Anwendung vergleicht die Versionen lokal); ebenso wenig werden E-Mails, Kontodaten oder Nutzungsdaten übermittelt. Die Anfrage enthält nur gewöhnliche HTTP-Header, etwa einen generischen User-Agent. Ein Kompatibilitäts-Header, den die Update-Bibliothek für gestaffelte Rollouts verwendet, wird mit einem festen Nullwert gesendet, der für alle Installationen identisch ist und daher nichts identifiziert. Beim Herunterladen eines Updates ist das anders: Es verrät Versionen, denn die Namen der angeforderten Dateien enthalten Versionsnummern, und wenn ein Differenzial-Download verwendet wird, teilt die Anfrage nach der Block-Map-Datei der aktuell installierten Version (Name der Form `mailcopilot-<current-version>-setup.exe.blockmap` unter Windows) dem Server mit, welche Version läuft.
+
+Sie entscheiden, ob das geschieht. **Im Hintergrund nach Updates suchen** ist standardmäßig aktiviert und kann unter Einstellungen → Über → Updates oder auf dem Bildschirm beim ersten Start ausgeschaltet werden. Ein Neustart ist nicht nötig: Das Ausschalten stoppt neue automatische Prüfungen, sobald Sie speichern. Eine Prüfung oder ein automatischer Download, die bzw. den die Update-Bibliothek bereits begonnen hat, kann trotzdem noch abgeschlossen werden (ein begonnener Download wird nicht abgebrochen; eine Prüfung kann gerade ihre Konfiguration lesen und versucht eine abgelehnte Verbindung mehrmals erneut). Davon abgesehen kontaktiert, wenn die Option ausgeschaltet ist, MailCopilot den Update-Server nie von sich aus – weder eine Prüfung beim Start noch stündliche Prüfungen. Die Schaltfläche **Nach Updates suchen** funktioniert weiterhin, denn Ihr Klick ist eine ausdrückliche Anforderung. Ein neuer automatischer Download kann ohne Prüfung nicht beginnen; daher hat die Option „Updates automatisch im Hintergrund herunterladen“ keine Wirkung, solange die Hintergrundprüfung ausgeschaltet ist. Bei einer völlig neuen Installation (ein Profil ohne frühere Antwort auf den Bildschirm beim ersten Start und ohne E-Mail-Konto) sendet MailCopilot keine automatische Update-Anfrage, bevor Sie diesen Bildschirm beantwortet haben; ihn ohne Antwort zu schließen speichert nichts, das Warten dauert also an. Jedes bestehende Profil prüft weiterhin, auch ein Profil, dem der Bildschirm beim ersten Start nach einer Änderung der Offenlegung erneut angezeigt wird.
+
+Unter Windows zeigt das Installationsprogramm vor den Installationsschritten eine Seite mit einem Datenschutzhinweis (eine kurze Zusammenfassung mit einem Link zu dieser Richtlinie) in der Sprache des Installationsprogramms (Englisch, Russisch, Französisch, Deutsch, Spanisch oder Italienisch; bei anderen Sprachen wird Englisch angezeigt). Sie müssen ihn akzeptieren, um fortzufahren. Diese Seite wird bei stillen Installationen und bei automatischen Updates nicht angezeigt. Die Linux- und macOS-Pakete haben keine Installationsseite; dort werden diese Informationen und die Auswahlmöglichkeit auf dem Bildschirm beim ersten Start und in den Einstellungen angeboten.
 
 ## 13. Datenschutz fuer Kinder
 

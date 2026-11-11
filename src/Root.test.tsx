@@ -23,7 +23,7 @@
  * reasoning documented in src/windows/Settings.bodyRetention.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import type { ReactNode } from 'react'
 
@@ -59,8 +59,18 @@ vi.mock('./windows/MailWindow', () => ({
   )),
 }))
 vi.mock('./components/TelemetryConsentDialog', () => ({
-  default: vi.fn((props: { submitting: boolean }) => (
-    <div data-testid="consent-dialog" data-submitting={String(props.submitting)} />
+  default: vi.fn((props: {
+    submitting: boolean
+    updateCheckEnabled: boolean
+    onUpdateCheckChange: (next: boolean) => void
+  }) => (
+    <div
+      data-testid="consent-dialog"
+      data-submitting={String(props.submitting)}
+      data-update-check={String(props.updateCheckEnabled)}
+    >
+      <button data-testid="consent-dialog-toggle-update" onClick={() => props.onUpdateCheckChange(false)} />
+    </div>
   )),
 }))
 
@@ -194,6 +204,17 @@ describe('Root — telemetry consent gate (AC4)', () => {
     expect(useTelemetryConsentMock).toHaveBeenCalledWith({ enabled: false })
     expect(screen.getByTestId('settings-window')).toBeInTheDocument()
     expect(screen.queryByTestId('consent-dialog')).not.toBeInTheDocument()
+  })
+
+  it('wires the update-check option from the hook into the dialog, both ways', () => {
+    const setUpdateCheckEnabled = vi.fn()
+    useTelemetryConsentMock.mockReturnValue(
+      consentState('required', { updateCheckEnabled: false, setUpdateCheckEnabled }),
+    )
+    render(<Root />)
+    expect(screen.getByTestId('consent-dialog')).toHaveAttribute('data-update-check', 'false')
+    fireEvent.click(screen.getByTestId('consent-dialog-toggle-update'))
+    expect(setUpdateCheckEnabled).toHaveBeenCalledWith(false)
   })
 
   it('forwards submitting to the dialog', () => {

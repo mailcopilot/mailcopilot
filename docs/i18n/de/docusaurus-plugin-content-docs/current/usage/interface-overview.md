@@ -76,7 +76,7 @@ Die Statusleiste bleibt sichtbar, solange Synchronisations- oder Indizierungsarb
 Ein Glockensymbol im Header der Nachrichtenliste oeffnet die Benachrichtigungszentrale. Sie buendelt zwei Arten von Benachrichtigungen:
 
 - **Follow-up-Erinnerungen** -- wenn ein Follow-up, das Sie auf eine gesendete Nachricht gesetzt haben, faellig wird (siehe [E-Mails verfassen](./composing-emails) fuer Details).
-- **Sendefehler** -- wenn eine Nachricht in der Sendeschlange nach dauerhaften Zustellfehlern (SMTP oder, bei Outlook-Konten, Microsoft Graph) aufgibt.
+- **Sendefehler** -- wenn eine Nachricht in der Sendeschlange nach dauerhaften Zustellfehlern (SMTP oder, bei Outlook-Konten, Microsoft Graph) aufgibt oder wenn das Zustellergebnis nicht bestätigt werden konnte.
 
 Die Glocke zeigt ein kleines Badge mit der Zahl neuer Benachrichtigungen. Klicken Sie auf die Glocke, um das Dropdown-Panel zu oeffnen: dort koennen Sie jede Benachrichtigung lesen, sie als gelesen markieren, alle auf einmal als gelesen markieren oder einzelne Eintraege loeschen. Benachrichtigungen werden lokal im SQLite-Cache gespeichert und ueberleben App-Neustarts; Eintraege aelter als 30 Tage werden automatisch entfernt.
 

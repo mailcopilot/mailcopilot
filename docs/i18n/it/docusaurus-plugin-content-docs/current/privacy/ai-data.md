@@ -25,6 +25,16 @@ Quando utilizzate l'assistente IA, MailCopilot trasmette quanto segue al vostro 
 
 L'assistente IA è completamente opzionale. Se non configurate un provider, nessun dato email viene trasmesso a servizi esterni.
 
+Il caricamento dell'elenco dei modelli in **Impostazioni > IA** invia una richiesta all'endpoint del provider con la chiave API salvata, con le stesse impostazioni di proxy e di fiducia dei certificati della chat. La richiesta non contiene contenuti delle e-mail. MailCopilot legge la chiave dall'archivio chiavi del sistema nel suo processo principale.
+
+L'elenco qui sopra descrive il pannello IA. Le funzioni IA che si eseguono fuori da esso hanno flussi di dati propri, descritti nelle sezioni seguenti.
+
+I link ai messaggi in una risposta, e l'elenco **Fonti** sotto di essa, sono contrassegnati come confermati solo per i messaggi che sono stati davvero passati all'assistente nella conversazione; un link a qualsiasi altro messaggio viene mostrato come testo semplice con il contrassegno **non confermato**. Confermato significa soltanto che il messaggio è stato passato all'assistente, non che la risposta lo riporti correttamente. Vedi [Fonti e link non confermati](../ai-assistant#fonti-e-link-non-confermati).
+
+## Le quattro autorizzazioni IA per casella
+
+Quattro funzioni IA richiedono la tua autorizzazione distinta, data per casella nella tabella **Funzioni IA per casella** in **Impostazioni > IA**: [Riepilogo IA della conversazione](#riepilogo-ia-del-thread), [Risposta immediata](#risposta-immediata), [Correzione IA](#ai-proofread) e [Traduzione con IA](#traduzione-del-messaggio) (un'unica autorizzazione condivisa dalla traduzione del messaggio e dalla traduzione della bozza). Tutte e quattro sono disattivate per impostazione predefinita. Ogni colonna della tabella è una finalità a sé: c'è una casella di spunta per ogni casella di posta e funzione, una casella di spunta nell'intestazione di una colonna agisce su quella singola funzione per tutte le caselle, e nessun controllo attiva tutto ovunque. Revocare un'autorizzazione costa un solo clic, come darla, e ha effetto dalla richiesta successiva. Ogni autorizzazione è sempre elencata nella tabella, sia attiva sia disattivata. Nell'app, i controlli di AI Proofread e della traduzione della bozza restano visibili quando la loro autorizzazione è disattivata -- in grigio, con un suggerimento che indica dove attivarli; cliccarli non invia nulla, e anche il processo principale rifiuta la richiesta in modo indipendente. I controlli di Riepilogo IA del thread, Risposta immediata e Traduzione del messaggio non vengono mostrati finché la loro autorizzazione è disattivata. Vedi [Funzioni IA per casella](../ai-assistant#funzioni-ia-per-casella).
+
 ## Riepilogo IA del thread
 
 Il [Riepilogo IA del thread](../ai-assistant#riepilogo-ia-del-thread) è una funzionalità separata e opzionale che genera un breve riepilogo di un thread aperto. Segue le stesse protezioni del resto dell'assistente IA:
@@ -83,11 +93,12 @@ La [Traduzione del messaggio](../ai-assistant#traduzione-del-messaggio) è una f
 
 - **Disattivata per impostazione predefinita, per ciascun account.** Non viene inviato nulla per la traduzione finché non abilitate **Impostazioni > IA > Traduzione con IA** per quello specifico account. Quando è disattivata, il controllo Traduci non viene mostrato e non viene inviata alcuna richiesta.
 - **Solo su richiesta.** Un provider viene chiamato solo quando fate clic su **Traduci** -- non c'è alcuna traduzione automatica all'apertura di un messaggio.
-- **Proiezione in testo semplice.** Il provider vede sempre, e restituisce sempre, solo testo semplice: la traduzione viene generata a partire dalla versione testuale del messaggio, mai dal markup HTML, anche per un messaggio HTML.
+- **Testo semplice.** Il provider vede e restituisce solo testo semplice, mai markup HTML, anche per un messaggio HTML. La formattazione e le immagini non vengono tradotte.
+- **I messaggi lunghi vengono inviati in più richieste.** Un messaggio di oltre 3000 caratteri viene diviso in parti di al massimo 3000 caratteri (alle interruzioni di paragrafo, poi alle fini di frase, poi agli spazi), e ogni parte viene inviata come richiesta a sé, tre alla volta. Ogni richiesta viene fatturata al vostro provider. Se una parte fallisce o arriva troncata, non viene mostrato nulla e nulla viene salvato in cache. Un messaggio di oltre 60 000 caratteri (fino a circa 40 richieste nel caso peggiore) viene rifiutato. La Traduzione della bozza non viene divisa e mantiene il suo limite di 3000 caratteri. Le parti già tradotte restano nella memoria dell’app fino a un’ora, quindi dopo un errore un nuovo tentativo invia solo le parti mancanti. Uscire dal messaggio non ferma una traduzione già avviata: arriva a termine, viene salvata nella cache ed è pronta quando torni. Disattivare la traduzione per la casella la ferma. Le parti vengono tradotte senza il testo vicino, quindi termini e forme di cortesia possono differire tra le parti di un messaggio lungo. Una parte senza lettere (cifre, righe di separazione) resta così com’è. Le parti conservate esistono solo nella memoria dell’app e vengono eliminate insieme all’account.
 - **Solo testo dalla cache.** Il testo del messaggio proviene dalla cache locale di MailCopilot per account, cartella e UID del messaggio — mai da ciò che è al momento mostrato nella finestra.
 - **Contenuto avvolto.** Il testo del messaggio viene avvolto con marcatori di confine `wrapUntrusted()` prima di raggiungere il provider IA, la stessa protezione descritta in [Protezione contro l'iniezione di prompt](#protezione-contro-liniezione-di-prompt) più sotto.
-- **Memorizzata in cache, non reinviata.** Una traduzione già generata per un messaggio, una lingua di destinazione e una versione del contratto di traduzione (provider, modello e forma del prompt) viene servita da una cache locale nelle aperture successive — nessuna richiesta raggiunge il provider una seconda volta per lo stesso messaggio, la stessa lingua e lo stesso contratto. Le voci della cache non hanno una scadenza propria: un cambiamento successivo nel modo in cui MailCopilot produce le traduzioni viene registrato sotto una nuova chiave invece di far passare il risultato di un contratto precedente come attuale. Sono limitate a 500 per account e vengono eliminate insieme all'account.
-- **Generazioni sottoposte ad audit.** Ogni volta che una traduzione viene effettivamente generata (e non servita dalla cache), viene scritta una voce nel [registro di audit IA](#il-registro-di-audit). Un risultato dalla cache non scrive alcuna voce.
+- **Memorizzata in cache, non reinviata.** Una traduzione già generata per un messaggio, una lingua di destinazione e una versione del contratto di traduzione (provider, modello e forma del prompt) viene servita da una cache locale nelle aperture successive — nessuna richiesta raggiunge il provider una seconda volta per lo stesso messaggio, la stessa lingua e lo stesso contratto. Le voci della cache non hanno una scadenza propria: un cambiamento successivo nel modo in cui MailCopilot produce le traduzioni viene registrato sotto una nuova chiave invece di far passare il risultato di un contratto precedente come attuale. Sono limitate a 200 per account e vengono eliminate insieme all'account. La traduzione di un messaggio lungo viene salvata in cache per intero, sotto il messaggio intero.
+- **Richieste sottoposte ad audit.** Ogni richiesta inviata al provider (e non servita dalla cache) scrive una voce nel [registro di audit IA](#il-registro-di-audit); un messaggio lungo inviato in più richieste scrive quindi più voci. Un risultato dalla cache non scrive alcuna voce.
 - **Selezione del provider.** La Traduzione del messaggio utilizza il vostro **provider configurato tramite chiave API** (Anthropic, compatibile con OpenAI, o Google Gemini).
 - **Attenta al budget.** Se il budget IA giornaliero è stato raggiunto, la traduzione viene rifiutata in modo controllato — vedi [Traduzione del messaggio](../ai-assistant#traduzione-del-messaggio) per cosa viene mostrato in questo caso.
 - **La telemetria non contiene contenuto dei messaggi.** L'evento di utilizzo pseudonimo registrato per ogni chiamata al provider riporta solo l'identificativo del provider, se il modello è stato eseguito localmente, i conteggi dei token, la latenza, una classe di errore aggregata, se è stato possibile assegnare un'etichetta alla lingua di origine (mai quale), il codice della lingua di destinazione scelta, e se il risultato proveniva dalla cache — mai il testo del messaggio, la traduzione, l'oggetto, gli indirizzi, il nome della cartella o la lingua di origine rilevata.
@@ -110,35 +121,39 @@ La [Traduzione del messaggio](../ai-assistant#traduzione-del-messaggio) è una f
 
 ## Policy di egress IA
 
-MailCopilot intercepta ogni chiamata a strumenti internet che l'IA vuole effettuare — ricerca web, recupero di pagine web e chiamate a strumenti MCP esterni — e mette in pausa l'IA per richiedere la vostra approvazione prima dell'esecuzione. Questo impedisce a un'email dannosa di esfiltrare silenziosamente i vostri dati tramite un attacco di iniezione di prompt.
+L'impostazione **Accesso web dell'IA** di MailCopilot (**Impostazioni → AI**) controlla due tipi diversi di accesso in uscita che l'assistente può effettuare: le chiamate ai vostri server MCP esterni connessi, e — solo quando usate il provider **Anthropic** — gli strumenti integrati di ricerca web e recupero pagine dell'assistente. Questo impedisce a un'email dannosa di esfiltrare silenziosamente i vostri dati tramite un attacco di iniezione di prompt.
 
-### Funzionamento
+### Funzionamento (chiamate a strumenti MCP esterni)
 
-Quando l'IA vuole usare uno strumento internet (ad esempio, eseguire una ricerca web), MailCopilot mette in pausa la risposta e mostra un modal di conferma integrato nel pannello IA con il messaggio **«L'IA vuole accedere a Internet»**. Il modal mostra:
+Quando l'IA vuole chiamare uno strumento su uno dei vostri server MCP esterni connessi, MailCopilot mette in pausa la risposta e mostra un modal di conferma integrato nel pannello IA con il messaggio **«L'IA vuole accedere a Internet»**. Il modal mostra:
 
-- Il tipo di azione — «Ricerca web:», «Recupero URL:» o «Chiamata a strumento esterno»
-- La query, l'URL o il nome dello strumento esterno richiesto dall'IA (quando disponibile)
+- Il tipo di azione e, quando disponibile, il nome dello strumento esterno
 - I pulsanti **Consenti** e **Rifiuta**
 
-Fate clic su **Consenti** per consentire all'IA di procedere, o su **Rifiuta** per rifiutare. La vostra decisione si applica all'intero turno di risposta corrente — se l'IA effettua più chiamate a strumenti internet in una stessa risposta, vi viene chiesto solo una volta. Fare clic su **Consenti** concede l'accesso a tutte le chiamate rimanenti di quel turno.
+Fate clic su **Consenti** per consentire all'IA di procedere, o su **Rifiuta** per rifiutare. La vostra decisione si applica all'intero turno di risposta corrente — se l'IA effettua più chiamate a strumenti esterni in una stessa risposta, vi viene chiesto solo una volta. Fare clic su **Consenti** concede l'accesso a tutte le chiamate rimanenti di quel turno.
 
-Se non rispondete entro 30 secondi, MailCopilot rifiuta automaticamente la chiamata allo strumento.
+Se non rispondete entro 30 secondi, MailCopilot rifiuta automaticamente la chiamata allo strumento. Questo modal di conferma si applica indipendentemente dal provider IA che usate, ogni volta che l'assistente contatta un server MCP esterno.
 
-### Icona scudo
+### Ricerca web integrata di Anthropic
 
-Nel header del pannello IA viene mostrata un'icona a forma di scudo quando l'interception dell'egress è attiva. Passando il cursore sopra, appare: «L'accesso web dell'IA è intercettato — ogni chiamata in uscita richiede la tua approvazione». Questa icona conferma che l'interceptor è in funzione e che nessuna chiamata internet può bypassare la vostra approvazione.
+Quando usate il provider **Anthropic** (Claude), l'assistente ha anche accesso a una funzionalità integrata di ricerca web e recupero pagine che viene eseguita sui server di Anthropic come parte della generazione della risposta. Poiché questo avviene al di fuori di MailCopilot, non c'è modo di mettere in pausa la risposta e mostrare un modal di conferma per queste chiamate. Invece, se questi strumenti vengono offerti o meno all'assistente viene deciso in anticipo dalla vostra impostazione **Accesso web dell'IA**, prima di inviare il messaggio:
+
+- **Consenti sempre** — l'assistente può cercare sul web e recuperare pagine liberamente.
+- **Nega per impostazione predefinita** o **Chiedi a ogni turno** — gli strumenti integrati di ricerca web e recupero pagine non vengono offerti affatto all'assistente, che quindi non può cercare sul web da solo. Passate a **Consenti sempre** se lo desiderate.
+
+Questa funzionalità è specifica del provider Anthropic. Con i provider compatibile con OpenAI e Google Gemini, l'assistente raggiunge internet solo tramite i vostri server MCP esterni connessi, come descritto sopra.
 
 ### Impostazioni della policy
 
-Potete regolare la policy di egress in **Impostazioni → AI** (sotto il controllo **Accesso web dell'IA**). Controlla quando l'IA può usare strumenti internet. Con **Nega per impostazione predefinita** o **Chiedi a ogni turno**, MailCopilot chiede conferma alla prima chiamata a strumento internet di ogni turno di risposta. Con **Consenti sempre**, la richiesta viene saltata — gli strumenti internet vengono eseguiti senza conferma:
+Potete regolare la policy in **Impostazioni → AI**, sotto **Accesso web dell'IA**:
 
-- **Nega per impostazione predefinita (consigliato)** — intercepta tutte le chiamate a strumenti internet; approvate o rifiutate ogni turno tramite il modal di conferma.
-- **Chiedi a ogni turno** — stesso comportamento del rifiuto predefinito: consenso esplicito per turno tramite il modal di conferma.
-- **Consenti sempre** — l'IA può chiamare liberamente strumenti web. Avvertenza: l'IA potrebbe inviare contenuto email a servizi esterni.
+- **Nega per impostazione predefinita (consigliato)** — le chiamate a strumenti MCP esterni vengono interceptate e richiedono la vostra conferma ogni volta; la ricerca web / recupero pagine integrata di Anthropic non viene offerta all'assistente.
+- **Chiedi a ogni turno** — stesso comportamento di **Nega per impostazione predefinita**.
+- **Consenti sempre** — le chiamate a strumenti MCP esterni vengono eseguite senza conferma, e la ricerca web / recupero pagine integrata di Anthropic è disponibile. Avvertenza: l'IA potrebbe inviare contenuto email a servizi esterni.
 
 ### Registro di audit
 
-Ogni chiamata a strumenti internet interceptata crea una riga nel registro di audit; le chiamate rifiutate incrementano la colonna **Bloccato**, mentre le chiamate approvate vengono registrate con **Bloccato** = 0. Ogni voce è anche conteggiata nell'evento di telemetria `ai.egress.intercepted` con tag che indicano il nome dello strumento, il risultato (approvato o rifiutato) e se il consenso per quel turno era già stato registrato. Per i dettagli su query e URL, il registro conserva solo un hash SHA-256 troncato ai primi 16 caratteri esadecimali; le query e gli URL grezzi non vengono mai scritti su disco.
+Ogni chiamata a strumenti MCP esterni interceptata viene registrata nella colonna **Bloccato** della riga di audit di quella richiesta — le chiamate rifiutate aumentano il contatore, mentre una richiesta completamente approvata mantiene **Bloccato** a 0. Ogni interception è anche conteggiata nell'evento di telemetria `ai.egress.intercepted` con tag che indicano il nome dello strumento, il risultato (approvato o rifiutato) e se il consenso per quel turno era già stato registrato. Per i dettagli su query e URL, il registro conserva solo un hash SHA-256 troncato ai primi 16 caratteri esadecimali; le query e gli URL grezzi non vengono mai scritti su disco. Le chiamate integrate di ricerca web e recupero pagine di Anthropic non vengono interceptate, quindi non aumentano mai **Bloccato** né emettono `ai.egress.intercepted`. Ogni chiamata di questo tipo viene comunque registrata nel registro di controllo come voce a sé stante, con lo stesso hash SHA-256 troncato della query o dell'URL descritto sopra — mai il testo grezzo. Quella voce dimostra che la chiamata in uscita è avvenuta e permette di notare le ripetizioni; non dice cosa sia stato effettivamente inviato. La richiesta grezza non viene conservata di proposito: il rischio qui è una fuga attraverso la richiesta stessa, e salvarla testualmente creerebbe semplicemente una seconda copia di quella fuga.
 
 ## Il registro di audit
 

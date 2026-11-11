@@ -33,6 +33,14 @@ Esta información es útil al informar errores o verificar la compatibilidad.
 
 La sección **Actualizaciones** le permite controlar cómo MailCopilot se mantiene actualizado.
 
+### Buscar actualizaciones en segundo plano
+
+Cuando esta opción está habilitada, MailCopilot busca nuevas versiones al iniciarse y después aproximadamente una vez por hora. Cada búsqueda es una solicitud HTTPS normal a nuestro servidor de actualizaciones para obtener un pequeño archivo de metadatos. El servidor ve su dirección IP y, por el nombre del archivo solicitado, el tipo de su sistema operativo y la arquitectura de su procesador. La propia búsqueda no envía la versión de MailCopilot que usa, ni tampoco nada sobre su correo, sus cuentas o su uso. La descarga de una actualización, en cambio, sí revela versiones: los nombres de los archivos solicitados contienen números de versión, y una descarga diferencial solicita además el archivo block map de la versión instalada actualmente (con un nombre como `mailcopilot-<current-version>-setup.exe.blockmap` en Windows), lo que indica al servidor qué versión se está ejecutando.
+
+Este ajuste está **habilitado de forma predeterminada**. No hace falta reiniciar: al desactivarlo, las nuevas búsquedas automáticas se detienen en cuanto lo guarda. Una búsqueda o una descarga automática que la biblioteca de actualización ya haya iniciado aún puede completarse (una descarga ya comenzada no se cancela; una búsqueda puede estar a mitad de la lectura de su configuración y reintenta varias veces una conexión rechazada). También se ofrece en la pantalla del primer inicio, en un bloque **Actualizaciones** separado de la pregunta sobre el diagnóstico e independiente de su respuesta a ella. Las búsquedas automáticas solo se retienen en una instalación completamente nueva (un perfil sin respuesta anterior a la pantalla del primer inicio y sin cuenta de correo): allí esperan a que se responda esa pantalla, y cerrarla sin responder no registra nada. Todos los perfiles existentes siguen buscando, incluido uno que debe volver a responder la pantalla del primer inicio tras un cambio en la información proporcionada. El ajuste está aquí, en **Configuración → Acerca de**.
+
+Aparte de eso, cuando esta opción está deshabilitada, MailCopilot nunca contacta por sí mismo con el servidor de actualizaciones: ni búsqueda al iniciar ni búsqueda cada hora. Puede seguir usando el botón **Buscar actualizaciones** que aparece más abajo en cualquier momento.
+
 ### Descargar automáticamente las actualizaciones en segundo plano
 
 Cuando esta opción está habilitada, MailCopilot descarga silenciosamente las nuevas versiones a medida que están disponibles. Una vez completada la descarga, se le pide que reinicie la aplicación para aplicar la actualización. No se requiere ninguna acción hasta que esté listo para reiniciar.
@@ -41,9 +49,11 @@ Cuando esta opción está deshabilitada, MailCopilot le notifica que hay una act
 
 Esta configuración está **deshabilitada de forma predeterminada** (requiere activación explícita). Actívela para que MailCopilot descargue las actualizaciones sin intervención manual.
 
+Esta opción solo tiene efecto mientras **Buscar actualizaciones en segundo plano** esté habilitada, porque una descarga automática no puede producirse sin una búsqueda. Mientras la búsqueda en segundo plano esté desactivada, la casilla sigue disponible y una nota lo explica; su elección se conserva y vuelve a aplicarse en cuanto se reactive la búsqueda en segundo plano. En ese estado, una búsqueda manual que encuentra una actualización muestra el botón **Descargar**, y no se inicia ninguna descarga automática nueva (una que ya esté en curso aún puede completarse).
+
 ### Buscar actualizaciones
 
-Haga clic en el botón **Buscar actualizaciones** para activar manualmente una verificación en cualquier momento. El botón y el área de estado reflejan el estado actual del proceso de actualización:
+Haga clic en el botón **Buscar actualizaciones** para activar manualmente una verificación en cualquier momento. Funciona tanto si la búsqueda en segundo plano está habilitada como si no, porque al pulsarlo usted hace una solicitud explícita. El botón y el área de estado reflejan el estado actual del proceso de actualización:
 
 - **inactivo** — el botón **Buscar actualizaciones** está visible y listo para usar.
 - **Comprobando…** — se está realizando una verificación de actualizaciones; el botón está deshabilitado hasta que finalice la comprobación.

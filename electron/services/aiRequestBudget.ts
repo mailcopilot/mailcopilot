@@ -1,7 +1,15 @@
 // ──────────────────────────────────────────────────────────────────────
-// aiRequestBudget.ts — §2.51.f2 request-scoped cost accounting for the Vercel AI
-// SDK (non-Claude) agentic loop: the per-request ceiling AND the spend ledger
-// that decides what the daily/monthly cap is charged.
+// aiRequestBudget.ts — §2.51.f2 request-scoped cost accounting for the shared
+// Vercel AI SDK agentic loop: the per-request ceiling AND the spend ledger that
+// decides what the daily/monthly cap is charged.
+//
+// §2.283 — "non-Claude" WAS in that sentence and is now wrong in a way that
+// matters. Anthropic runs through `streamVercelChat` like every other
+// tool-calling provider, so this ledger is ITS accounting too. Anyone who
+// believes the old wording will either add a duplicate fallback path for Claude
+// or release a reservation that this ledger has already settled — both of which
+// lose or double-count real money. There is exactly one ledger; it covers every
+// provider that reaches the shared loop.
 //
 // WHY BOTH LIVE HERE (§2.51.f2 iteration 4)
 // They were not one module before, and that was the defect. `streamOpenAiChat`
@@ -23,23 +31,32 @@
 // the `finally` (accounted) or it does not leave the loop at all.
 //
 // WHAT THIS IS
-// The `aiMaxBudgetPerRequest` setting ("maximum cost per request") used to be
-// honoured on ONE provider path only: the Claude Agent SDK reads it as
-// `maxBudgetUsd` (electron/services/ai.ts `makeQueryOptions`) and terminates the
-// agentic loop once the accumulated ACTUAL cost of the request reaches the
-// ceiling. On the `openai-api` path — which runs the same multi-step tool loop
-// through `streamText` — nothing read the setting at all, so the slider existed
-// in Settings with no effect for two providers out of three. This module gives
-// that path the same semantics.
+// The `aiMaxBudgetPerRequest` setting ("maximum cost per request") once had two
+// implementations: the Claude Agent SDK read it as its own `maxBudgetUsd`
+// option, while the `openai-api` path read nothing at all, so the slider
+// existed in Settings with no effect for two providers out of three. This
+// module gave the Vercel path real semantics; §2.283 then removed the Agent SDK
+// entirely, so this is now the ONLY implementation and `resolveRequestBudgetUsd`
+// is the ONLY resolver for every provider that HAS a per-request ceiling.
+//
+// WHICH IS NOT EVERY PROVIDER. An earlier draft of this paragraph said "one
+// setting, one meaning, every provider" and that is false: Gemini never reaches
+// this module. Its adapter is a single non-agentic `generateContent` call with
+// no tools and no step loop, so there is no second step to withhold and nothing
+// for a between-steps ceiling to act on — it is documented as such at the
+// `streamGeminiChat` note in ai.ts. Gemini is metered and capped by the
+// daily/monthly ledger admission, just not per request. §2.287 would change
+// that by moving it onto the shared loop; until then, the honest scope is
+// "every provider that runs the agentic loop".
 //
 // WHAT IT IS NOT (scope fence — §4.16)
 // This is a ceiling on ACCUMULATED ACTUAL cost, evaluated BETWEEN steps of an
 // already-admitted request. It is NOT a pre-flight reservation of a computed
 // upper bound for the call (that is §4.16, deliberately out of scope), and it is
 // NOT the daily/monthly cap (that is the atomic ledger admission in ai.ts —
-// `admitBudgetedCall`). Like the Claude SDK's `maxBudgetUsd`, it cannot stop a
-// single in-flight step: the earliest it can act is at the step boundary, so a
-// one-step request always runs to completion regardless of the ceiling.
+// `admitBudgetedCall`). It cannot stop a single in-flight step: the earliest it
+// can act is at the step boundary, so a one-step request always runs to
+// completion regardless of the ceiling.
 //
 // PRICING
 // Cost is priced by the SINGLE shared rate table in `packages/core/aiRules.ts`
@@ -52,7 +69,7 @@
 // block of accounting logic (CLAUDE.md §5 hotspot policy).
 // ──────────────────────────────────────────────────────────────────────
 
-import { estimateAiRuleCostUsd } from '../../packages/core'
+import { estimateAiRuleCostUsd, type CacheTerms } from '../../packages/core'
 
 /**
  * Structural mirror of the token usage the AI SDK reports per step
@@ -62,8 +79,14 @@ import { estimateAiRuleCostUsd } from '../../packages/core'
  * provider omits usage.
  */
 export interface RequestStepUsageLike {
+  /** Total prompt tokens, cache reads and writes included. */
   inputTokens?: number | undefined
   outputTokens?: number | undefined
+  /** Provider prompt-cache split of `inputTokens`; absent when the provider reports none. */
+  inputTokenDetails?: {
+    cacheReadTokens?: number | undefined
+    cacheWriteTokens?: number | undefined
+  } | undefined
 }
 
 /** Structural mirror of the AI SDK `StepResult` fields this module reads. */
@@ -166,6 +189,48 @@ export function usableStepTokens(raw: number | undefined): number | null {
 }
 
 /**
+ * The prompt-cache split of ONE step, clamped to that step's own input.
+ *
+ * Shared by the ceiling guard ({@link accumulatedStepCostUsd}) and the ledger
+ * (`noteStep`) so the two accumulators of the same quantity cannot disagree: a
+ * count clamped against the SUMMED input of all steps would let one malformed
+ * step discount the input of the others. Reads are clamped first, then writes
+ * against what is left. A step with no usable input has no cache.
+ */
+function stepCacheTokens(
+  usage: RequestStepUsageLike | undefined,
+  stepInputTokens: number,
+): { read: number; write: number } {
+  const read = Math.min(normalizeStepTokens(usage?.inputTokenDetails?.cacheReadTokens), stepInputTokens)
+  const write = Math.min(normalizeStepTokens(usage?.inputTokenDetails?.cacheWriteTokens), stepInputTokens - read)
+  return { read, write }
+}
+
+/**
+ * The price of ONE provider call, from its own token counts.
+ *
+ * Costs are summed PER CALL, never from summed tokens: a model that tiers its
+ * price by prompt size (Claude Haiku 5.5 over 100,000 tokens) must see each
+ * call's own prompt, and summing tokens first would tip an ordinary multi-step
+ * request into the dear tier. A call with nothing priceable costs 0 here (the
+ * floors for unpriceable calls are the ledger's business, not this function's).
+ */
+function singleCallCostUsd(
+  model: string,
+  input: number,
+  output: number,
+  cache: { read: number; write: number },
+  cacheTerms: CacheTerms | undefined,
+): number {
+  const cost = estimateAiRuleCostUsd(
+    model,
+    { inputTokens: input, outputTokens: output, cacheReadTokens: cache.read, cacheWriteTokens: cache.write },
+    { cacheTerms },
+  )
+  return typeof cost === 'number' && Number.isFinite(cost) ? cost : 0
+}
+
+/**
  * Accumulated ACTUAL cost of the steps completed so far, priced from the
  * provider-reported token counts through the shared core rate table.
  *
@@ -192,17 +257,22 @@ export function usableStepTokens(raw: number | undefined): number | null {
 export function accumulatedStepCostUsd(
   model: string,
   steps: readonly RequestStepLike[],
+  cacheTerms?: CacheTerms,
 ): number {
-  let inputTokens = 0
-  let outputTokens = 0
+  let total = 0
   for (const step of steps) {
     const usage = step?.usage
     if (!usage) continue
-    inputTokens += normalizeStepTokens(usage.inputTokens)
-    outputTokens += normalizeStepTokens(usage.outputTokens)
+    const stepInput = normalizeStepTokens(usage.inputTokens)
+    total += singleCallCostUsd(
+      model,
+      stepInput,
+      normalizeStepTokens(usage.outputTokens),
+      stepCacheTokens(usage, stepInput),
+      cacheTerms,
+    )
   }
-  const cost = estimateAiRuleCostUsd(model, { inputTokens, outputTokens })
-  return typeof cost === 'number' && Number.isFinite(cost) ? cost : 0
+  return Number.isFinite(total) ? total : 0
 }
 
 /**
@@ -277,6 +347,7 @@ export function createRequestBudgetGuard(
   model: string,
   limitUsd: number | null,
   carriedSpentUsd = 0,
+  cacheTerms?: CacheTerms,
 ): RequestBudgetGuard {
   // Defensive: a non-finite / negative carry (an unpriceable earlier attempt)
   // must not poison the comparison — treat it as "nothing carried".
@@ -286,7 +357,7 @@ export function createRequestBudgetGuard(
 
   const stopWhen = ({ steps }: { steps: readonly RequestStepLike[] }): boolean => {
     if (limitUsd === null) return false
-    spentUsd = carried + accumulatedStepCostUsd(model, steps)
+    spentUsd = carried + accumulatedStepCostUsd(model, steps, cacheTerms)
     if (budgetCeilingReached(limitUsd, spentUsd)) tripped = true
     return tripped
   }
@@ -420,9 +491,32 @@ export interface RequestSpendLedger {
  *
  * THE RULE. Fabricated charges for one request never exceed the per-request cost
  * ceiling the user configured. That statement is the user's own: "one request
- * may cost at most $X". Charging more than $X for one request would contradict
- * the very setting this task made enforceable, and the REAL cost cannot exceed
- * it either, because the ceiling stops the agentic loop.
+ * may cost at most $X". Charging more than $X of INVENTED money for one request
+ * would contradict the very setting this task made enforceable.
+ *
+ * WHAT THE CEILING IS NOT — and this paragraph used to claim the opposite, two
+ * dozen lines above edge case 3, which says plainly that a provider reporting $3
+ * against a $2 ceiling settles at $3. The ceiling is a BETWEEN-STEPS stop
+ * condition, not a hard upper bound on real spend. `stopWhen` is evaluated after
+ * a step completes, so the loop ends at the first step boundary at or past the
+ * ceiling — the step that crossed it has already been generated and billed, and
+ * a single-step request runs to completion no matter what the ceiling says.
+ *
+ * HOW FAR THE OVERSHOOT CAN GO, stated properly. The bound is one step past
+ * the ceiling, not "the cost of one step" per attempt: `streamVercelChat`
+ * builds a fresh guard per attempt seeded with what earlier attempts already
+ * spent, and the seed is a baseline rather than a pre-tripped flag (`stopWhen`
+ * runs only after a completed step). Since §2.288 an attempt is retried only
+ * while NOTHING of it reached the outside — no text, no tool call, no finished
+ * step — so a retried attempt can have carried nothing but a possibly-paid call
+ * (at most one floor, and only when the attempt was marked ambiguous;
+ * reasoning-only output is not billing evidence — a pre-existing gap), and the multi-step overshoot across retries
+ * that this paragraph used to describe cannot occur. The ledger records what
+ * actually happened rather than what was permitted.
+ *
+ * Bounding the real cost BEFORE a call requires reserving a computed upper bound
+ * instead of stopping between steps; that is a different mechanism (§4.16) and
+ * out of scope here. Do not restore the stronger claim without building it.
  *
  * THE THREE EDGE CASES, decided explicitly:
  *
@@ -499,6 +593,7 @@ export function createRequestSpendLedger(
   model: string,
   callFloorUsd: number,
   requestCeilingUsd: number | null,
+  cacheTerms?: CacheTerms,
 ): RequestSpendLedger {
   const floor = Number.isFinite(callFloorUsd) && callFloorUsd > 0 ? callFloorUsd : 0
   // ONE FLOOR IS INDIVISIBLE — see `fabricationCapUsd`. The cap bounds how many
@@ -510,11 +605,12 @@ export function createRequestSpendLedger(
   // garbage — measurement wants every real number it can get.
   let measuredInputTokens = 0
   let measuredOutputTokens = 0
-  // Tokens from steps that were FULLY priceable. Billing uses only these, because
+  // Dollars, accumulated per call (see `singleCallCostUsd`).
+  let measuredCostUsd = 0
+  // Cost of the steps that were FULLY priceable. Billing uses only these, because
   // a partially reported step is charged its floor instead (which dominates the
   // partial price and does not pretend the missing half was zero).
-  let pricedInputTokens = 0
-  let pricedOutputTokens = 0
+  let pricedCostUsd = 0
   // Completed provider calls whose usage we could not price. Each costs one floor.
   let unpricedCalls = 0
   // Provider calls that ended WITHOUT a step boundary — the in-flight call an
@@ -564,6 +660,12 @@ export function createRequestSpendLedger(
       // Measurement keeps whatever half is real.
       measuredInputTokens += inputTokens ?? 0
       measuredOutputTokens += outputTokens ?? 0
+      // Cache counts are a subset of the step's input; clamped per step (same
+      // helper as the ceiling guard) so one bad report cannot hide behind the
+      // other steps' totals.
+      const { read: cacheRead, write: cacheWrite } = stepCacheTokens(usage, inputTokens ?? 0)
+      const callCost = singleCallCostUsd(model, inputTokens ?? 0, outputTokens ?? 0, { read: cacheRead, write: cacheWrite }, cacheTerms)
+      measuredCostUsd += callCost
 
       if (inputTokens === null || outputTokens === null) {
         // Unpriceable call — including the "no usage object at all" case, which
@@ -571,8 +673,7 @@ export function createRequestSpendLedger(
         // reports nothing the cheapest one to use.
         unpricedCalls++
       } else {
-        pricedInputTokens += inputTokens
-        pricedOutputTokens += outputTokens
+        pricedCostUsd += callCost
       }
       return inputTokens ?? 0
     },
@@ -608,11 +709,7 @@ export function createRequestSpendLedger(
     }),
 
     measuredUsd() {
-      const priced = estimateAiRuleCostUsd(model, {
-        inputTokens: measuredInputTokens,
-        outputTokens: measuredOutputTokens,
-      })
-      const measured = typeof priced === 'number' && Number.isFinite(priced) ? priced : 0
+      const measured = measuredCostUsd
       // The same fabrication cap as `billedUsd`, so the two numbers cannot tell
       // different stories about the same invented money. It costs the retry-storm
       // brake nothing: the cap EQUALS the ceiling, and `budgetCeilingReached`
@@ -622,11 +719,7 @@ export function createRequestSpendLedger(
     },
 
     billedUsd() {
-      const priced = estimateAiRuleCostUsd(model, {
-        inputTokens: pricedInputTokens,
-        outputTokens: pricedOutputTokens,
-      })
-      const pricedUsd = typeof priced === 'number' && Number.isFinite(priced) ? priced : 0
+      const pricedUsd = pricedCostUsd
       const floors = (unpricedCalls + unmeasuredAttempts) * floor
       if (pricedUsd === 0 && floors === 0) return undefined
       // The cap applies to the FABRICATED term only (see `fabricationCapUsd`):

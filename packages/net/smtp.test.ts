@@ -49,7 +49,7 @@ vi.mock('node:net', () => ({
 }))
 
 import nodemailer from 'nodemailer'
-import { testSmtpConnection, sendMail, buildRawMessage, resolveIpv4All, findReachableIp, classifySmtpError, SMTP_RETRY_DELAYS_MS } from './smtp'
+import { testSmtpConnection, sendMail, buildRawMessage, resolveIpv4All, findReachableIp, classifySmtpError, SMTP_RETRY_DELAYS_MS, __testOnly } from './smtp'
 import type { SmtpConfig } from './types'
 
 const cfg: SmtpConfig = {
@@ -208,6 +208,12 @@ describe('packages/net/smtp', () => {
 
 // ─── DNS retry tests ─────────────────────────────────────────────────────────
 
+
+// nodemailer reports connection-stage failures with these fields; the IP retry
+// is gated on them (a mid-session timeout must not be resent).
+const preGreeting = (message: string) =>
+  Object.assign(new Error(message), { code: 'ETIMEDOUT', command: 'CONN' })
+
 describe('DNS retry', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -258,7 +264,7 @@ describe('DNS retry', () => {
   describe('sendMail DNS retry', () => {
     it('on timeout retries with a resolved IPv4', async () => {
       mockSendMail
-        .mockRejectedValueOnce(new Error('Connection timeout'))
+        .mockRejectedValueOnce(preGreeting('Connection timeout'))
         .mockResolvedValueOnce({ messageId: '<fallback@test>' })
 
       const result = await sendMail(cfg, {
@@ -285,7 +291,7 @@ describe('DNS retry', () => {
     })
 
     it('on timeout without reachable IPs throws original error', async () => {
-      mockSendMail.mockRejectedValueOnce(new Error('Connection timeout'))
+      mockSendMail.mockRejectedValueOnce(preGreeting('Connection timeout'))
       netConnectBehavior = 'error' // all IPs unreachable
 
       await expect(sendMail(cfg, {
@@ -296,10 +302,22 @@ describe('DNS retry', () => {
       })).rejects.toThrow('Connection timeout')
     })
 
-    it('on ETIMEDOUT also retries by IP', async () => {
+    it('a mid-session socket timeout is NOT resent to another address (the message may have been accepted)', async () => {
+      mockSendMail.mockRejectedValueOnce(Object.assign(new Error('Timeout'), { code: 'ETIMEDOUT', command: 'CONN' }))
+      await expect(sendMail(cfg, { from: 'a@test', to: 'b@test', subject: 'x', text: 'x' })).rejects.toThrow('Timeout')
+      expect(nodemailer.createTransport).toHaveBeenCalledTimes(1)
+    })
+
+    it('a bare ETIMEDOUT message without the connection-stage fields is not treated as pre-greeting', async () => {
+      mockSendMail.mockRejectedValueOnce(new Error('ETIMEDOUT'))
+      await expect(sendMail(cfg, { from: 'a@test', to: 'b@test', subject: 'x', text: 'x' })).rejects.toThrow('ETIMEDOUT')
+      expect(nodemailer.createTransport).toHaveBeenCalledTimes(1)
+    })
+
+    it('retries by IP on a nodemailer greeting timeout (code ETIMEDOUT, message without "timeout")', async () => {
       mockSendMail
-        .mockRejectedValueOnce(new Error('ETIMEDOUT'))
-        .mockResolvedValueOnce({ messageId: '<etm@test>' })
+        .mockRejectedValueOnce(Object.assign(new Error('Greeting never received'), { code: 'ETIMEDOUT', command: 'CONN' }))
+        .mockResolvedValueOnce({ messageId: '<greet@test>' })
 
       const result = await sendMail(cfg, {
         from: 'a@test',
@@ -307,7 +325,7 @@ describe('DNS retry', () => {
         subject: 'x',
         text: 'x',
       })
-      expect(result.messageId).toBe('<etm@test>')
+      expect(result.messageId).toBe('<greet@test>')
       expect(nodemailer.createTransport).toHaveBeenCalledTimes(2)
     })
   })
@@ -375,10 +393,68 @@ describe('classifySmtpError', () => {
     expect(classifySmtpError(err)).toEqual({ code: 554, isTransient: false })
   })
 
-  it('classifies network errors as transient (no code)', () => {
+  it('retries a network-looking failure that did not come from the SMTP session (token refresh, config)', () => {
     expect(classifySmtpError(new Error('ECONNRESET'))).toEqual({ code: null, isTransient: true })
     expect(classifySmtpError(new Error('ETIMEDOUT'))).toEqual({ code: null, isTransient: true })
     expect(classifySmtpError(new Error('socket timeout'))).toEqual({ code: null, isTransient: true })
+  })
+
+  it('keeps the send timers: 100 s of silence, 30 s to connect, 15 s for the greeting', () => {
+    // 100 s is the Thunderbird value; longer would hold the whole queue pass (all mailboxes).
+    expect(__testOnly.sendTimeouts).toEqual({ connection: 30_000, greeting: 15_000, socket: 100_000 })
+  })
+
+  it('retries a TLS handshake timeout after STARTTLS (nothing was sent) but not a socket timeout', () => {
+    const upgrade = Object.assign(new Error('TLS handshake timed out'), { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'UPGRADE_TIMEOUT' })
+    expect(classifySmtpError(upgrade)).toEqual({ code: null, isTransient: true })
+    const socket = Object.assign(new Error('Timeout'), { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'SOCKET_TIMEOUT' })
+    expect(classifySmtpError(socket)).toEqual({ code: null, isTransient: false })
+  })
+
+  it('retries a multi-address connect failure in which every attempt was refused, not a mixed one', () => {
+    const member = (fields: object) => Object.assign(new Error('x'), fields)
+    const aggregate = (members: object[]) =>
+      Object.assign(new Error(''), { name: 'AggregateError', code: 'ESOCKET', originalCode: 'ECONNREFUSED', command: 'CONN', errors: members })
+    const refused = member({ code: 'ECONNREFUSED', syscall: 'connect' })
+    expect(classifySmtpError(aggregate([refused, refused]))).toEqual({ code: null, isTransient: true })
+    expect(classifySmtpError(aggregate([refused, member({ code: 'ECONNRESET', syscall: 'read' })]))).toEqual({ code: null, isTransient: false })
+  })
+
+  it('retries a failure before the greeting, whatever its message says', () => {
+    const err = Object.assign(new Error('Greeting never received'), { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'GREETING_TIMEOUT' })
+    expect(classifySmtpError(err)).toEqual({ code: null, isTransient: true })
+    const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:25'), { code: 'ESOCKET', command: 'CONN', syscall: 'connect' })
+    expect(classifySmtpError(refused)).toEqual({ code: null, isTransient: true })
+  })
+
+  it('never retries a session failure that has no server reply code, however network-like its text', () => {
+    // After the server was reached the message may have been accepted; the
+    // broad text match must not turn these into retries.
+    const session = (message: string, fields: object) => Object.assign(new Error(message), { command: 'CONN', ...fields })
+    for (const err of [
+      session('Timeout', { code: 'ETIMEDOUT', timeoutType: 'SOCKET_TIMEOUT' }),
+      session('read ECONNRESET', { code: 'ESOCKET', syscall: 'read' }),
+      session('write EPIPE', { code: 'ESOCKET', syscall: 'write' }),
+      session('self-signed certificate', { code: 'ESOCKET', originalCode: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+      session('Connection closed unexpectedly', { code: 'ECONNECTION' }),
+    ]) {
+      expect(classifySmtpError(err)).toEqual({ code: null, isTransient: false })
+    }
+  })
+
+  it('looks for the session stage through the whole cause chain, so a wrapper cannot make a post-DATA failure retryable', () => {
+    const inner = Object.assign(new Error('read ECONNRESET'), { code: 'ESOCKET', command: 'CONN', syscall: 'read' })
+    expect(classifySmtpError(Object.assign(new Error('send failed: read ECONNRESET'), { cause: inner }))).toEqual({ code: null, isTransient: false })
+    expect(classifySmtpError(Object.assign(new Error('socket timeout'), { name: 'AggregateError', errors: [inner] }))).toEqual({ code: null, isTransient: false })
+    // Without any session node in the chain the legacy text match still applies.
+    expect(classifySmtpError(Object.assign(new Error('token refresh: ETIMEDOUT'), { cause: new Error('fetch failed') }))).toEqual({ code: null, isTransient: true })
+  })
+
+  it('still retries only on a confirmed 4xx reply and not on a 5xx, whichever stage reported it', () => {
+    const reply = (responseCode: number, command: string) => Object.assign(new Error('x'), { code: 'EMESSAGE', command, responseCode })
+    expect(classifySmtpError(reply(451, 'DATA'))).toEqual({ code: 451, isTransient: true })
+    expect(classifySmtpError(reply(421, 'EHLO'))).toEqual({ code: 421, isTransient: true })
+    expect(classifySmtpError(reply(550, 'RCPT TO'))).toEqual({ code: 550, isTransient: false })
   })
 
   it('treats unknown errors as permanent', () => {
@@ -504,6 +580,33 @@ describe('nodemailer v9 — createTransport auth and TLS config', () => {
     expect(auth.user).toBe('alice@example.test')
     expect(auth.pass).toBe('secret')
     expect(auth.type).toBeUndefined()
+  })
+
+  it('secure:false passes requireTLS:true to createTransport (STARTTLS is mandatory, no cleartext fallback)', async () => {
+    mockVerify.mockResolvedValueOnce(true)
+    await testSmtpConnection({ ...cfg, port: 587, secure: false })
+    const callArg = vi.mocked(nodemailer.createTransport).mock.calls[0][0] as Record<string, unknown>
+    expect(callArg.secure).toBe(false)
+    expect(callArg.requireTLS).toBe(true)
+  })
+
+  it('secure:true (immediate TLS) does not set requireTLS', async () => {
+    mockVerify.mockResolvedValueOnce(true)
+    await testSmtpConnection({ ...cfg, port: 465, secure: true })
+    const callArg = vi.mocked(nodemailer.createTransport).mock.calls[0][0] as Record<string, unknown>
+    expect(callArg.secure).toBe(true)
+    expect(callArg.requireTLS).toBeUndefined()
+  })
+
+  it('the IP-fallback transport keeps requireTLS:true (the retry must not become a cleartext path)', async () => {
+    mockVerify
+      .mockRejectedValueOnce(new Error('Connection timeout'))
+      .mockResolvedValueOnce(true)
+    await testSmtpConnection({ ...cfg, secure: false })
+    expect(nodemailer.createTransport).toHaveBeenCalledTimes(2)
+    const second = vi.mocked(nodemailer.createTransport).mock.calls[1][0] as Record<string, unknown>
+    expect(second.host).toBe('1.2.3.4')
+    expect(second.requireTLS).toBe(true)
   })
 
   it('on IP-fallback retry second createTransport call carries tls.servername = original hostname', async () => {
@@ -677,5 +780,26 @@ describe('sendMail — smtp.send telemetry span', () => {
     })
 
     expect(result.messageId).toBe('<resilient@test>')
+  })
+})
+
+describe('buildRawMessage: threading headers of a reply (Sent copy, Graph MIME)', () => {
+  const base = { from: 'alice@example.test', to: 'bob@example.test', subject: 'Re: Hi', text: 'ok' }
+
+  it('writes In-Reply-To and References into the compiled message', async () => {
+    const raw = await buildRawMessage({
+      ...base,
+      inReplyTo: '<parent@example.test>',
+      references: '<root@example.test> <parent@example.test>',
+    })
+    const str = raw.toString('utf8')
+    expect(str).toMatch(/^In-Reply-To: <parent@example\.test>\r?$/m)
+    expect(str).toMatch(/^References: <root@example\.test> <parent@example\.test>\r?$/m)
+  })
+
+  it('writes neither header for a message without a parent', async () => {
+    const str = (await buildRawMessage(base)).toString('utf8')
+    expect(str).not.toMatch(/^In-Reply-To:/im)
+    expect(str).not.toMatch(/^References:/im)
   })
 })

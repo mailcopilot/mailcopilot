@@ -148,9 +148,10 @@ process.on('unhandledRejection', (reason) => {
   captureException(reason, { source: 'unhandledRejection' })
 })
 
-import { app, BrowserWindow, shell, Menu, dialog, screen } from 'electron'
+import { app, BrowserWindow, shell, Menu, dialog, screen, session } from 'electron'
 import { buildChildWindowOptions, centerOverRect, isStandaloneWindowKind, type ChildWindowKind } from './childWindowOptions'
-import { computeIsE2E } from './e2eFlag'
+import { computeIsE2E, mayRunAlongsideOtherInstances } from './e2eFlag'
+import { imapTestSchema, smtpTestSchema, parseNetTestConfig } from './netTestConfig'
 import { buildFolderCountsResponse } from './folderCountsResponse'
 // §2.145 — whether a stored details row may be served; see that module for why
 // the threshold is the SERVER-DIRECT writer's bound and not the EML soft cap.
@@ -173,8 +174,10 @@ import { featureReach, markFeatureUsed } from './featureReach'
 import { telemetryCollectionStartedAtMs } from './telemetryGate'
 
 // Single Instance Lock: prevent multiple app instances sharing the same DB.
-// Disabled in E2E mode — tests run multiple isolated instances in parallel.
-const gotSingleInstanceLock = process.env.MAILCOPILOT_E2E === '1' || app.requestSingleInstanceLock()
+// Skipped only for the e2e harness (tests run several isolated instances in
+// parallel), decided by the canonical flag — unpackaged AND opted in — so the
+// environment variable alone cannot lift it on a shipped build.
+const gotSingleInstanceLock = mayRunAlongsideOtherInstances(process.env, app.isPackaged, () => app.requestSingleInstanceLock())
 if (!gotSingleInstanceLock) {
   app.quit()
   process.exit(0)
@@ -265,7 +268,12 @@ import path from 'node:path'
 import fs from 'node:fs'
 import dns from 'node:dns'
 import { randomUUID, X509Certificate } from 'node:crypto'
-import { isTransientNetworkError, isLinuxInstallerError } from '@mailcopilot/core'
+import { isTransientNetworkError, isLinuxInstallerError, isPreGreetingFailure, isImapOutcomeUndetermined } from '@mailcopilot/core'
+// Not from the barrel on purpose — see the header of emailAddress.ts (keeps
+// zod out of the renderer bundle, same treatment as language.ts).
+import { prefillAddressListSchema, trimmedEmailAddressSchema } from '@mailcopilot/core/emailAddress'
+import { resolveReplyThreading, resolveDraftReplyRef } from './services/replyThreading'
+import { accountSaveChangesLogin } from './accountSaveLoginChange'
 
 // Prefer IPv4: not all networks support IPv6, and DNS round-robin may
 // return an unreachable IPv6 address, causing SMTP/IMAP timeouts.
@@ -275,7 +283,9 @@ import tls from 'node:tls'
 import { z } from 'zod'
 import { refreshGoogleAccessToken, runGoogleOAuthFlow } from './googleOAuth'
 import type { OAuthConnectStage, OAuthProgress } from '@mailcopilot/types'
-import { requireGoogleOAuthCredentials } from './googleOAuthConfig'
+import { areNewGoogleMailboxesAllowed, isGoogleOAuthConfigured, requireGoogleOAuthCredentials } from './googleOAuthConfig'
+import { saveAccountGuarded } from './googleConnectPolicy'
+import { connectGoogleAccount } from './services/googleConnectService'
 // Microsoft OAuth low-level flows are now consumed via electron/services/outlookOAuthService.ts
 import {
   testImapConnection,
@@ -314,6 +324,7 @@ import {
   sendMail,
   buildRawMessage,
   classifySmtpError,
+  finalSendFailureText,
   SMTP_RETRY_DELAYS_MS,
   setSeen,
   setFlagged,
@@ -335,6 +346,7 @@ import {
   imapSearchFolder,
   fetchSummariesByUids,
   autoconfig,
+  gmailPresetAutoconfig,
   tryAutoUnsubscribe,
   extractUnsubLinksFromHtml,
   getSettings,
@@ -343,8 +355,6 @@ import {
   saveMcpConnection,
   deleteMcpConnection,
   listMcpConnections,
-  imapSchema,
-  smtpSchema,
   accountSaveSchema,
   settingsSchema,
   rendererWritableSettingsSchema,
@@ -359,6 +369,7 @@ import {
   withImapPriority,
 } from '../packages/net/index'
 import { requestSafeRemoteBytes } from '../packages/net/safeRemoteFetch'
+import { IMAP_FETCH_TIMEOUT_MS, raceWithOpenBudget } from './services/openBudget'
 // §2.172 — every e2e fixture seeding site splits the raw `From:` header here,
 // so the seeded rows carry the same address/name split production writes.
 import { senderPartsFromHeader } from './e2eSenderParts'
@@ -411,6 +422,7 @@ import {
   deleteMessages,
   getMessagesBeforeUid,
   getMessageByUid,
+  findMessageForSource,
   getUnifiedInboxPage,
   setUnread,
   setFlagged as setFlaggedLocal,
@@ -480,7 +492,6 @@ import {
   getAllFolderPrefs,
   getLastAiMessages,
   getAiSession,
-  updateAiSessionClaudeId,
   createAiSession,
   listAiSessions,
   updateAiSessionTitle,
@@ -577,7 +588,11 @@ import { reportSentCopyAppendFailure, buildSentCopyAppendDiag } from './services
 import { getOutlookAccessToken, getOutlookGraphSendAccessToken, clearOutlookTokenCache, forceRefreshOutlookAccessToken, connectOutlookAccount, registerMissingCredentialsReporter } from './services/outlookOAuthService'
 import { secretStore } from './services/secretStore'
 import { sendMailViaGraph } from '../packages/net/graphSend'
-import { registerAuthErrorHandler, unregisterAuthErrorHandler, registerCertErrorHandler, unregisterCertErrorHandler, classifyImapError, registerConnectionOutcomeHandler, registerAccountGenerationProvider } from '../packages/net/imap'
+import { citationFor, openCitation, resolveCitations } from './services/aiCitations'
+import { setIndexCoverageReader } from './services/aiIndexCoverage'
+import { saveAccountFenced } from './services/accountSaveFence'
+import { removeAccount } from './services/accountRemoval'
+import { registerAuthErrorHandler, unregisterAuthErrorHandler, registerCertErrorHandler, unregisterCertErrorHandler, classifyImapError, registerConnectionOutcomeHandler, isImapAuthBackoffError, clearImapAuthLatch, registerAccountGenerationProvider } from '../packages/net/imap'
 import { verifyCertTrust } from '../packages/net/tls'
 import { initCertRecovery } from './services/certRecovery'
 import { initAccountAuthState, imapAuthNotConfiguredError, authNotConfiguredError } from './services/accountAuthState'
@@ -596,6 +611,11 @@ import {
 // persistence, migration and the two IPC channels live in the service.
 import { applyAboutToggleFromOrigin, isTelemetryAllowed, clampTelemetryForRenderer } from './telemetryConsent'
 import { initTelemetryConsent } from './services/telemetryConsentService'
+import {
+  createBackgroundUpdateChecks, computeAutoDownload, buildUpdateRequestHeaders, createUpdatePolicy,
+  type UpdatePolicy, type UpdateScheduler,
+} from './services/updateScheduler'
+import { installUpdaterRequestPolicy, UPDATER_SESSION_PARTITION } from './services/updaterRequestPolicy'
 import { attachContextMenu } from './services/contextMenu'
 // §2.103 — spell checking. Every decision about the Chromium spellchecker
 // (which languages, whether it is armed at all, and whether a dictionary may be
@@ -615,6 +635,7 @@ import {
   forgetAccountBackgroundState,
 } from './services/backgroundMail'
 import { disarmTray, shutdownTray } from './services/tray'
+import { requestQueueReschedule, requestQueueSendNow, type SendQueueMoveDeps } from './services/sendQueueMoves'
 import type { MailRef } from './services/desktopNotifications'
 // §2.119 — human confirmation before the address AI requests (and with them
 // the user's API key) are sent to changes. Both renderer routes that can move
@@ -792,6 +813,12 @@ const composeAttachmentSchema = z.object({
   contentBase64: z.string().min(1),
   contentType: z.string().min(1).optional(),
 }).strict()
+// A pointer at a cached message: the compose window never carries header values.
+const messageRefSchema = z.object({
+  accountId: accountIdSchema,
+  folder: mailboxSchema,
+  uid: uidSchema,
+})
 const composeInitSchema = z.object({
   draftId: z.string().min(1).optional(),
   from: z.string().min(1).optional(),
@@ -802,12 +829,18 @@ const composeInitSchema = z.object({
   text: z.string().optional(),
   html: z.string().optional(),
   attachments: z.array(composeAttachmentSchema).optional(),
-  replyRef: z.object({
-    accountId: accountIdSchema,
-    folder: mailboxSchema,
-    uid: uidSchema,
-  }).optional(),
-  originalRecipients: z.array(z.string().email()).optional(),
+  replyRef: messageRefSchema.optional(),
+  // A restored thread pointer (threading only, never archived). Minted by main on
+  // draft reopen; accepted here because cancel→edit of a queued send hands it back.
+  threadRef: messageRefSchema.optional(),
+  // The saved draft being reopened (`source: 'draft'`). Main turns the reply
+  // headers stored in that draft into `threadRef` and never forwards this field.
+  draftRef: messageRefSchema.optional(),
+  // Prefill-only, and deliberately unable to refuse the payload: a single odd
+  // address in the replied-to message's From/To/Cc used to reject the whole
+  // `ui:openCompose` call, so "Reply" opened no window at all. Bad entries are
+  // dropped, the rest is used. Full reasoning: prefillAddressListSchema.
+  originalRecipients: prefillAddressListSchema.optional(),
   source: z.enum(['new', 'reply', 'reply_all', 'forward', 'mailto', 'template', 'ai_chip', 'draft']).optional(),
   // 2.3-B re-review: preserve user-picked identity through queue→cancel→edit.
   // Must stay in sync with the matching field on `ComposeInit`.
@@ -829,7 +862,55 @@ const sendMailOptionsSchema = z.object({
    * or missing ids fall back to the legacy single-identity resolution path.
    */
   identityId: z.string().min(1).optional(),
+  /**
+   * The message this send replies to (reply / reply-all only; a forward has
+   * none). Only a POINTER: main reads the parent's Message-ID and References
+   * from its own cache and derives `In-Reply-To` / `References` itself, so the
+   * renderer cannot choose those header values.
+   */
+  replyRef: messageRefSchema.optional(),
+  /** A thread pointer restored for a reopened draft: threads like `replyRef`, never archived. */
+  threadRef: messageRefSchema.optional(),
 })
+// What the send queue stores and replays: the renderer shape plus the headers
+// main resolved at enqueue time (a scheduled send must not depend on the
+// parent still being at the same UID days later).
+const queuedSendOptionsSchema = sendMailOptionsSchema.extend({
+  // 998 characters of id plus the two angle brackets
+  inReplyTo: z.string().max(1000).optional(),
+  references: z.string().max(60_000).optional(),
+})
+// Where the parent of a reply (and a saved draft) is read from. The e2e fixture
+// keeps its mailboxes in memory, not in the SQLite cache.
+const lookupCachedMessage = (acc: number, folder: string, uid: number) =>
+  IS_E2E ? e2eBox(acc, folder).find(m => m.uid === uid) : getMessageByUid(acc, folder, uid)
+function withReplyThreading<T extends z.infer<typeof sendMailOptionsSchema>>(_sendingAccountId: number, options: T) {
+  return { ...options, ...resolveReplyThreading(options.replyRef ?? options.threadRef, lookupCachedMessage) }
+}
+// Reopening a saved reply draft: the pointer to its parent, found again from
+// the In-Reply-To stored in the draft message (same account, by Message-ID). It
+// comes back as `threadRef`, never `replyRef`: a Message-ID can match several
+// copies, so it is good for threading and never for archiving.
+function withDraftReplyRef<T extends z.infer<typeof composeInitSchema>>(init: T): Omit<T, 'draftRef'> {
+  const { draftRef, ...rest } = init
+  if (rest.replyRef || rest.threadRef || !draftRef) return rest
+  const replyRef = resolveDraftReplyRef(
+    draftRef,
+    lookupCachedMessage,
+    (acc, messageId) => {
+      if (IS_E2E) {
+        for (const folder of Object.keys(e2eBoxes(acc))) {
+          const hit = e2eBox(acc, folder).find(m => m.messageId === messageId)
+          if (hit) return { folder, uid: hit.uid }
+        }
+        return undefined
+      }
+      const found = findMessageForSource(acc, '', 0, messageId)
+      return found ? { folder: found.folder, uid: found.uid } : undefined
+    },
+  )
+  return replyRef ? { ...rest, threadRef: replyRef } : rest
+}
 const delayMsSchema = z.number().int().min(0).max(31 * 24 * 60 * 60 * 1000)
 const sendAtIsoSchema = z.string().datetime({ offset: true })
 const snoozeWakeAtSchema = z.string().datetime({ offset: true })
@@ -893,7 +974,7 @@ const aiRuleIdSchema = z.string().uuid()
 const aiRuleLogLimitSchema = z.number().int().min(1).max(500).default(50)
 
 const queueIdSchema = z.string().min(1).max(128)
-type SendMailOptions = z.infer<typeof sendMailOptionsSchema>
+type SendMailOptions = z.infer<typeof queuedSendOptionsSchema>
 // §2.16 iter4 (Low) — draftId flows into Message-Id, X-MailCopilot-Draft-Id,
 // IMAP SEARCH terms, log lines, and the drafts:wasSent IPC payload. Tighten
 // from `z.string().min(1)` to a bounded alphanumeric/underscore/hyphen token
@@ -908,6 +989,9 @@ const draftPayloadSchema = z.object({
   subject: z.string().optional(),
   text: z.string().optional(),
   html: z.string().optional(),
+  // The message a reply draft answers (a pointer). Main writes In-Reply-To /
+  // References into the saved draft message from its own copy of the parent.
+  replyRef: messageRefSchema.optional(),
 }).strict()
 const contactsSearchLimitSchema = z.number().int().positive().max(50).optional()
 const e2eLanguageSchema = z.enum(['en', 'ru', 'fr', 'de', 'es', 'it'])
@@ -1083,6 +1167,12 @@ const E2E_ACCOUNTS: AccountMeta[] = [
     }],
   },
 ]
+// First-run fixture: the roster starts empty and `accounts:save` appends to it,
+// so a spec can add the first mailbox through the real Account window.
+const E2E_NO_ACCOUNTS = IS_E2E && process.env.MAILCOPILOT_E2E_NO_ACCOUNTS === '1'
+if (E2E_NO_ACCOUNTS) E2E_ACCOUNTS.length = 0
+// Like production, a number is issued once and never reused (the roster is mutable here).
+let e2eAccountIdHighWater = 0
 
 type E2EMail = {
   uid: number
@@ -2130,11 +2220,17 @@ function registerStandaloneChildWindow(child: BrowserWindow): void {
  * and on Linux/Windows keeping `window-all-closed` from firing, so the app
  * would never quit and the survivor would be invisible to the user.
  *
- * Nothing legitimate is lost: no window in this app registers `beforeunload`
- * or an unload-time flush, so an honest window cannot tell the two apart.
- * Compose persists its draft on a typing debounce (localStorage + `net:saveDraft`
- * in `src/windows/Compose.tsx`); `close()` would not have saved anything extra,
- * because there is no unload handler for it to run.
+ * What this costs, named: no window registers `beforeunload`. The message
+ * window commits an archive/delete still inside its 3-second undo window from
+ * its own Close button BEFORE closing, and keeps a `pagehide` listener only as
+ * a backstop for teardowns it does not initiate (`src/windows/MailWindow.tsx`).
+ * `destroy()` skips unload, so a move deferred in the last seconds before the
+ * MAIN window closes is dropped (the message stays where it was; nothing is
+ * deleted that the user did not confirm). The terminal teardown outranks that
+ * convenience. Compose persists its draft on a typing
+ * debounce (localStorage + `net:saveDraft` in `src/windows/Compose.tsx`) and
+ * has no unload handler, so `close()` would not have saved anything extra
+ * there.
  *
  * `destroy()` still emits `closed`, so each window's registry entry is removed
  * exactly as on a normal close.
@@ -2819,6 +2915,13 @@ let updateDownloadSource: 'auto' | 'manual' | null = null
 // many times per download but we only want to record `started` once.
 let updateDownloadStartedEmitted = false
 
+let updateScheduler: UpdateScheduler | null = null
+
+// Both paths that change `updateCheckEnabled` (settings:save and the first-run
+// answer) go through this (see `createUpdatePolicy`). Null in dev/e2e, where the
+// updater is not initialised.
+let updatePolicy: UpdatePolicy | null = null
+
 if (app.isPackaged && !IS_E2E) {
   // §2.19 — initial autoDownload state mirrors the persisted setting, but
   // only where an update can actually be applied in place. §2.58 — "can be
@@ -2829,12 +2932,14 @@ if (app.isPackaged && !IS_E2E) {
   // Settings → About shows the reason as a warning (the checkbox itself
   // stays operable, so the user is never locked out of the preference).
   // Runtime toggle via Settings → About is handled in onSettingsChangedMain.
-  autoUpdater.autoDownload = getSettings().autoUpdateEnabled === true && updateCanSelfUpdate
+  autoUpdater.autoDownload = computeAutoDownload(getSettings(), updateCanSelfUpdate)
   autoUpdater.autoInstallOnAppQuit = true
   // WARNING: secrets must not be stored in source code. If the update feed requires
   // headers (e.g., private GitLab), set the token via environment variable.
   const updateToken = process.env.MAILCOPILOT_UPDATE_TOKEN
-  if (updateToken) autoUpdater.requestHeaders = { 'PRIVATE-TOKEN': updateToken }
+  // Always set: pins electron-updater's per-install staging id to a constant
+  // (see `buildUpdateRequestHeaders`) in addition to the optional token.
+  autoUpdater.requestHeaders = buildUpdateRequestHeaders(updateToken)
 
   if (!updateCanSelfUpdate) {
     // §2.58 — log the enum pair only. `updateSelfUpdate.targetDir` is a user
@@ -2935,14 +3040,35 @@ if (app.isPackaged && !IS_E2E) {
     captureException(new Error(`update_${errorClass}`), { source: 'autoUpdater' })
   })
 
+  // The initial check and the hourly poll both count as 'auto'. Whether either
+  // may run (setting off, first-run screen unanswered) is decided in the
+  // scheduler on every tick; settings changes and the first-run answer call
+  // `updateScheduler.sync()` so a change takes effect without a restart.
+  updateScheduler = createBackgroundUpdateChecks({
+    readSettings: getSettings,
+    hasAccounts: () => listAccounts().length > 0,
+    checkForUpdates: () => autoUpdater.checkForUpdates(),
+    recordAutoCheck: () => recordEvent('update.check_triggered', { source: 'auto' }),
+  })
+  updatePolicy = createUpdatePolicy({
+    scheduler: updateScheduler,
+    canSelfUpdate: updateCanSelfUpdate,
+    getAutoDownload: () => autoUpdater.autoDownload,
+    setAutoDownload: next => {
+      autoUpdater.autoDownload = next
+      logUpdate.info(`autoDownload toggled at runtime: ${next}`)
+    },
+  })
   app.whenReady().then(() => {
-    // §2.19 — initial check + hourly background poll both count as 'auto'.
-    try { recordEvent('update.check_triggered', { source: 'auto' }) } catch { /* telemetry must not block */ }
-    void autoUpdater.checkForUpdates().catch(() => {})
-    setInterval(() => {
-      try { recordEvent('update.check_triggered', { source: 'auto' }) } catch { /* telemetry must not block */ }
-      void autoUpdater.checkForUpdates().catch(() => {})
-    }, 3_600_000)
+    // The updater's requests must not carry the UI language (Chromium adds
+    // `Accept-Language` on its own); see updaterRequestPolicy.ts. Installed
+    // before the scheduler can issue the first check.
+    try {
+      installUpdaterRequestPolicy(session.fromPartition(UPDATER_SESSION_PARTITION, { cache: false }))
+    } catch (err) {
+      logUpdate.warn(`could not install the updater request policy: ${err instanceof Error ? err.name : 'error'}`)
+    }
+    updateScheduler?.start()
   })
 }
 
@@ -3270,7 +3396,7 @@ function emitOAuthProgress(provider: OAuthProgress['provider'], stage: OAuthConn
   }
 }
 
-async function doGoogleOAuthFlow() {
+async function doGoogleOAuthFlow(loginHint?: string) {
   const creds = requireGoogleOAuthCredentials()
   if (googleOAuthBusy) throw new Error('Google OAuth is already running in another window')
   googleOAuthBusy = true
@@ -3278,6 +3404,7 @@ async function doGoogleOAuthFlow() {
     return await runGoogleOAuthFlow({
       clientId: creds.clientId,
       clientSecret: creds.clientSecret || undefined,
+      loginHint,
       openExternal: (url) => { void openExternalGated(url, 'oauth') },
       onStage: (stage) => emitOAuthProgress('gmail', stage),
     })
@@ -3297,9 +3424,9 @@ async function getGoogleAccessToken(accountId: number): Promise<string> {
   // §2.165 fix wave 5 — the stamp, read HERE. Everything above it in this call
   // is synchronous, so this is the generation the id holds when the token fetch
   // starts. The discovery below happens only AFTER the secret-store await, and
-  // ids are reused ("max + 1"): a mailbox deleted inside that window hands its
-  // id to the next account created, and an unstamped report would raise the
-  // badge on that brand-new, perfectly healthy mailbox. Read at report time it
+  // ids used to be reused ("max + 1"; now monotonic): a mailbox deleted inside that
+  // window handed its id to the next account, and an unstamped report would raise the
+  // badge on that healthy mailbox. Read at report time it
   // would always match and prove nothing — the read has to precede the await.
   const accountGeneration = accountAuthState.currentGeneration(accountId)
 
@@ -3491,11 +3618,42 @@ handleIpc('accounts:setCurrent', (_e, accountId: unknown) => {
 handleIpc('accounts:save', async (_e, input: unknown) => {
   const parsed = accountSaveSchema.parse(input)
   if (IS_E2E) {
-    const id = parsed.id ?? 1
+    const id = parsed.id ?? (E2E_NO_ACCOUNTS ? e2eAccountIdHighWater + 1 : 1)
+    if (E2E_NO_ACCOUNTS && !E2E_ACCOUNTS.some(a => a.id === id)) {
+      e2eAccountIdHighWater = Math.max(e2eAccountIdHighWater, id)
+      E2E_ACCOUNTS.push({
+        id,
+        name: parsed.name ?? parsed.email ?? `E2E ${id}`,
+        colorIndex: parsed.colorIndex ?? 0,
+        providerId: 'generic-imap',
+        transportType: 'imap-smtp',
+        imap: { host: parsed.imap.host, port: parsed.imap.port, secure: parsed.imap.secure, user: parsed.imap.user },
+        smtp: { host: parsed.smtp.host, port: parsed.smtp.port, secure: parsed.smtp.secure, user: parsed.smtp.user },
+        folderRoles: { sent: 'Sent', drafts: 'Drafts', trash: 'Trash', junk: 'Junk', archive: 'Archive' },
+        identities: [{ id: `e2e-identity-${id}`, displayName: parsed.name ?? `E2E ${id}`, email: parsed.imap.user, isDefault: true }],
+      })
+    }
     broadcast('accounts:changed', { kind: 'saved', id })
     return { ok: true as const, id }
   }
-  const { id } = await saveAccount(parsed)
+  // Read BEFORE the save — afterwards the stored record is the new one and the
+  // comparison below has nothing to compare against. §2.297 — the Google
+  // connect gate trusts the stored record, so the renderer may neither mint a
+  // Google sign-in mailbox nor re-address one through this channel.
+  // The write itself runs inside the per-id save queue: the guard refuses first,
+  // and runs again inside the queue (the `gate`) on the record the write will overwrite.
+  const { id, previous: previousLogin } = await saveAccountGuarded(parsed, {
+    getAccountMeta,
+    saveAccount: (input, gate) => saveAccountFenced(saveAccount, input, gate),
+  })
+  // A login the server just refused is owed an immediate retry only when the
+  // next login would actually be DIFFERENT. `accounts:save` is also how an
+  // avatar colour and a signature are stored, and those payloads carry the
+  // whole account record with no password — clearing the latch for them let
+  // the login storm it exists to stop resume on a mailbox with a stale
+  // password. See electron/accountSaveLoginChange.ts. This does NOT clear the
+  // re-authentication badge either way — a saved string is not proof (§2.165).
+  if (accountSaveChangesLogin(parsed, previousLogin)) clearImapAuthLatch(id)
   // Telemetry: remember the first time this account id was seen so the
   // onboarding funnel can measure "time from save → first headers sync".
   // No-op for re-saves of an existing account.
@@ -3512,8 +3670,11 @@ handleIpc('accounts:removePreview', (_e, accountId: unknown) => {
   return { messageCount, localDataBytes }
 })
 
-handleIpc('accounts:autoconfig', async (_e, email: unknown) => {
-  const parsedEmail = z.string().email().parse(email)
+handleIpc('accounts:autoconfig', async (_e, email: unknown, preset?: unknown) => {
+  const parsedEmail = trimmedEmailAddressSchema.parse(email)
+  // The Gmail card of the wizard names the servers whatever the address domain
+  // is (a Workspace domain has no autoconfig of its own): §2.297 AC (б).
+  if (z.literal('gmail').optional().parse(preset ?? undefined) === 'gmail') return gmailPresetAutoconfig()
   if (IS_E2E) {
     const domain = parsedEmail.split('@')[1]?.toLowerCase() || ''
     if (domain === 'gmail.com') {
@@ -3574,10 +3735,10 @@ function accountRecordIsGone(id: number): boolean {
  * disappear — a deletion that resolved, and a deletion that rejected after
  * removing the record — and both owe the process exactly the same cleanup. The
  * one that must never be skipped is `forget`: it bumps the generation, and the
- * generation is what keeps verdicts of the vanished mailbox from landing on the
- * next account created, since ids are reused ("max + 1"). A record that is gone
- * with its generation left behind is the worst combination available — the id
- * is free for reuse while every stale verdict still matches.
+ * generation keeps verdicts of the vanished mailbox from landing on any later account
+ * (ids used to be reused as "max + 1" and are monotonic now; the generation stays as defence
+ * in depth). A record that is gone with its generation left behind is still the worst
+ * combination: every stale verdict would still match.
  *
  * Callers must have established that the record is gone (`accountRecordIsGone`)
  * before calling this. Nothing here needs a config that no longer loads: both
@@ -3620,37 +3781,27 @@ handleIpc('accounts:remove', async (_e, accountId: unknown) => {
   const id = accountIdSchema.parse(accountId)
   if (IS_E2E) {
     // In e2e we don't support real account deletion: a stable list is sufficient.
+    // The first-run fixture (`E2E_NO_ACCOUNTS`) owns a mutable roster, so there
+    // a removal really removes (a spec adds, removes and adds a mailbox again).
+    if (E2E_NO_ACCOUNTS) {
+      const at = E2E_ACCOUNTS.findIndex(a => a.id === id)
+      if (at >= 0) E2E_ACCOUNTS.splice(at, 1)
+    }
     broadcast('accounts:changed', { kind: 'removed', id })
     return { ok: true as const }
   }
-  // If removing an account with an active IDLE, stop the push connection.
-  try { await stopIdle() } catch { /* ignore */ }
-  // §2.165 — teardown happens strictly AFTER the deletion, and only for an
-  // account that is actually gone. Both halves of that sentence are load-bearing
-  // and they are NOT the same condition (fix wave 5).
-  //
-  // Ordering: `deleteAccount` can reject, and this handler then propagates the
-  // rejection. Tearing down first left a SURVIVING account without a
-  // token-refresh handler — condemned to auth failures that nothing was left to
-  // repair — without a cert-error subscription, so a TLS interception on it
-  // would pass in silence, and without its "needs sign-in" flag, the only
-  // warning the user had that the mailbox is broken.
-  //
-  // Condition: "the promise resolved" is not the same as "the account is gone".
-  // `deleteAccount` removes the record before work that can fail, so a rejection
-  // can leave the record deleted with none of the teardown done — and the
-  // generation un-bumped, which is what makes the reused id inherit the dead
-  // mailbox's verdicts. So the failure path asks the store, and finishes the
-  // cleanup when the record has in fact gone.
-  //
-  // The rejection is re-thrown either way: the deletion did NOT complete, and
-  // the caller is entitled to know that whatever else we tidied up.
-  try {
-    await deleteAccount(id)
-  } catch (err) {
-    if (accountRecordIsGone(id)) {
+  // §2.165 — the sequence (fence, idle stop, deletion, teardown strictly AFTER
+  // the deletion and only for an account that is actually gone, fence end) is
+  // documented and tested in services/accountRemoval.ts. The rejection is
+  // re-thrown there either way: the deletion did NOT complete.
+  await removeAccount(id, {
+    stopIdle,
+    deleteAccount,
+    recordIsGone: accountRecordIsGone,
+    teardown: completeAccountRemoval,
+    onPartialDelete: (accountId, err) => {
       logMain.warn('account deletion failed after the record was removed; finishing teardown', {
-        accountId: id,
+        accountId,
         code: errCodeOf(err),
       })
       // Synthetic, same reason as in `accountRecordIsGone`: this rejection
@@ -3660,13 +3811,17 @@ handleIpc('accounts:remove', async (_e, accountId: unknown) => {
         source: 'accounts_remove',
         step: 'partial_delete',
       })
-      completeAccountRemoval(id)
-    }
-    throw err
-  }
-  completeAccountRemoval(id)
+    },
+  })
   return { ok: true as const }
 })
+
+// What the Add Account window may offer. Display only — the refusals live in
+// `oauth:google:connect` below.
+handleIpc('oauth:google:availability', async () => ({
+  configured: isGoogleOAuthConfigured(),
+  newMailboxes: areNewGoogleMailboxesAllowed(),
+}))
 
 handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
   if (IS_E2E) throw new Error('Google OAuth is not available in e2e mode')
@@ -3675,158 +3830,37 @@ handleIpc('oauth:google:connect', async (_e, existingAccountId: unknown) => {
     ? undefined
     : accountIdSchema.parse(existingAccountId)
 
-  if (typeof existingId === 'number' && !getAccountMeta(existingId)) {
-    throw new Error(`Account #${existingId} not found`)
-  }
-
-  logOAuth.info('Starting OAuth flow...')
-  const tokens = await doGoogleOAuthFlow()
-  logOAuth.info('OAuth flow completed, got email:', tokens.email)
-
-  const imapMeta = {
-    host: 'imap.gmail.com',
-    port: 993,
-    secure: true,
-    user: tokens.email,
-  }
-  const smtpMeta = {
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
-    user: tokens.email,
-  }
-
-  logOAuth.info('Token received, email:', tokens.email)
-
-  // Verify token scopes (diagnostics for Invalid credentials).
-  try {
-    logOAuth.info('Checking tokeninfo...')
-    const tokenInfo = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(tokens.accessToken)}`)
-    const info = await tokenInfo.json() as { scope?: string; error_description?: string }
-    // Defensive projection: Google's tokeninfo response is typed narrowly above,
-    // but the runtime shape is not validated. Log only the two fields we care
-    // about so an undocumented field (e.g. an echoed token) can't leak into logs.
-    logOAuth.info('tokeninfo:', JSON.stringify({ scope: info.scope, error_description: info.error_description }))
-    if (info.error_description) {
-      throw new Error(`Google access token is invalid: ${info.error_description}`)
-    }
-    const scopes = (info.scope || '').split(' ')
-    if (!scopes.includes('https://mail.google.com/')) {
-      throw new Error('Google access token does not contain scope https://mail.google.com/ — add this scope in OAuth consent screen in Google Cloud Console (Scopes section)')
-    }
-    logOAuth.info('Scopes OK')
-  } catch (e) {
-    if (e instanceof Error && (e.message.includes('scope') || e.message.includes('invalid'))) throw e
-    logOAuth.warn('Could not verify tokeninfo:', e)
-  }
-
-  // Test IMAP/SMTP with timeout (30 sec) to avoid hanging indefinitely.
-  const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
-    Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} timeout (${ms / 1000}s)`)), ms))])
-
-  const isTlsCertError = (msg: string) =>
-    /SELF.SIGNED|UNABLE_TO_VERIFY|CERT_HAS_EXPIRED|DEPTH_ZERO|CERT_UNTRUSTED|CERT_REJECTED|CERT_ALTNAME_INVALID|ERR_TLS_CERT/i.test(msg)
-
-  let tlsCertImap: { host: string; port: number } | undefined
-  let tlsCertSmtp: { host: string; port: number } | undefined
-
-  logOAuth.info('Testing IMAP...')
-  emitOAuthProgress('gmail', 'imap')
-  const imapRes = await withTimeout(testImapConnection({ ...imapMeta, accessToken: tokens.accessToken }), 30_000, 'IMAP')
-  logOAuth.info('IMAP result:', JSON.stringify(imapRes))
-  if (!imapRes.ok) {
-    if (isTlsCertError(imapRes.error || '')) {
-      tlsCertImap = { host: imapMeta.host, port: imapMeta.port }
-      logOAuth.warn('IMAP TLS cert error (account will be saved, user can accept the certificate):', imapRes.error)
-    } else {
-      throw new Error(`IMAP: ${imapRes.error || 'error'}\n\nMake sure IMAP is enabled in Gmail (Settings → Forwarding and POP/IMAP → Enable IMAP)`)
-    }
-  }
-
-  // SMTP test — non-critical. If IMAP passed, the token works and SMTP should too.
-  // nodemailer verify() sometimes hangs with OAuth2, so we don't block account creation.
-  logOAuth.info('Testing SMTP...')
-  emitOAuthProgress('gmail', 'smtp')
-  try {
-    let smtpRes = await withTimeout(testSmtpConnection({ ...smtpMeta, accessToken: tokens.accessToken }), 15_000, 'SMTP')
-    if (!smtpRes.ok && /timeout|ETIMEDOUT|Connection timeout/i.test(String(smtpRes.error || ''))) {
-      logOAuth.warn('SMTP 465 timeout, retrying 587 STARTTLS')
-      smtpRes = await withTimeout(testSmtpConnection({
-        ...smtpMeta,
-        port: 587,
-        secure: false,
-        accessToken: tokens.accessToken,
-      }), 15_000, 'SMTP (587)')
-      if (smtpRes.ok) {
-        smtpMeta.port = 587
-        smtpMeta.secure = false
-      }
-    }
-    logOAuth.info('SMTP result:', JSON.stringify(smtpRes))
-    if (!smtpRes.ok) {
-      if (isTlsCertError(smtpRes.error || '')) {
-        tlsCertSmtp = { host: smtpMeta.host, port: smtpMeta.port }
-        logOAuth.warn('SMTP TLS cert error (user can accept the certificate):', smtpRes.error)
-      } else {
-        logOAuth.warn('SMTP test failed (account will be saved):', smtpRes.error)
-      }
-    }
-  } catch (e) {
-    logOAuth.warn('SMTP test failed with error (account will be saved):', e instanceof Error ? e.message : e)
-  }
-
-  const existingMeta = typeof existingId === 'number' ? getAccountMeta(existingId) : undefined
-
-  // Ordering constraint (IPC trust gap — see saveAccount guard in
-  // packages/net/config.ts): when transitioning an existing non-OAuth
-  // account into OAuth, the refresh token MUST already be in keytar
-  // before saveAccount runs, otherwise the guard rejects the save. For
-  // brand-new accounts, id is allocated by saveAccount itself and no
-  // existing record exists (guard is a no-op), so the keytar write
-  // happens afterwards.
-  const existingIsNonOAuth = !!existingMeta && existingMeta.authType !== 'oauth2'
-  if (typeof existingId === 'number' && existingIsNonOAuth) {
-    await setOauthRefreshToken('gmail', existingId, tokens.refreshToken)
-  }
-
-  emitOAuthProgress('gmail', 'saving')
-
-  const { id } = await saveAccount({
-    id: existingId,
-    // A re-authorization must not overwrite a name the user has edited; the
-    // profile name fills in only where the record has none.
-    //
-    // Deliberately `||`, not `??`: the read schema accepts `name: ''` while
-    // the write schema requires a non-empty name, so a legacy record with a
-    // blank name would otherwise carry that blank through and make the save
-    // fail outright (codex-bg-review, 2026-08-02).
-    name: existingMeta?.name?.trim() || tokens.displayName || undefined,
-    authType: 'oauth2',
-    providerId: 'gmail',
-    transportType: 'imap-smtp',
-    imap: imapMeta,
-    smtp: smtpMeta,
-    folderRoles: existingMeta?.folderRoles ?? {},
-    signature: existingMeta?.signature,
+  // Policy and the connect sequence live in electron/services/googleConnectService.ts
+  // (§2.297): refusals are returned as `{ ok: false, refusal }`.
+  const res = await connectGoogleAccount(existingId, {
+    configured: isGoogleOAuthConfigured,
+    newMailboxesAllowed: areNewGoogleMailboxesAllowed,
+    getAccountMeta,
+    runOAuthFlow: (loginHint) => doGoogleOAuthFlow(loginHint),
+    fetchTokenInfo: async (accessToken) => {
+      const tokenInfo = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`)
+      return await tokenInfo.json() as { scope?: string; error_description?: string }
+    },
+    testImap: testImapConnection,
+    testSmtp: testSmtpConnection,
+    saveAccount: (input, gate) => saveAccountFenced(saveAccount, input, gate),
+    setRefreshToken: (accountId, token) => setOauthRefreshToken('gmail', accountId, token),
+    cacheAccessToken: (accountId, accessToken, expiresAt) => { GOOGLE_TOKEN_CACHE.set(accountId, { accessToken, expiresAt }) },
+    emitProgress: (stage) => emitOAuthProgress('gmail', stage),
+    log: logOAuth,
   })
-
-  // For the new-account path (no existing record) and the re-save-of-
-  // OAuth-account path, write the refresh token after saveAccount so we
-  // have the final id. If we pre-wrote above for the transition path,
-  // this call is a harmless no-op overwrite with the same token.
-  await setOauthRefreshToken('gmail', id, tokens.refreshToken)
-  GOOGLE_TOKEN_CACHE.set(id, { accessToken: tokens.accessToken, expiresAt: tokens.expiresAt })
+  if (!res.ok) return res
   // §2.165 — a completed re-authorization is the one moment the badge must
   // disappear at once, and the only credentials proof that does NOT travel
-  // through the connection boundary: `testImapConnection` above opened a
+  // through the connection boundary: the service's IMAP test opened a
   // throwaway connection with no account id attached. Gated on that test
-  // having actually passed — `tlsCertImap` set means the login was never
-  // reached, only the TLS handshake failed, and the account is saved anyway so
-  // the user can accept the certificate.
-  if (!tlsCertImap) accountAuthState.noteSignedIn(id)
-  broadcast('accounts:changed', { kind: 'saved', id })
-  const tlsCertRequired = (tlsCertImap || tlsCertSmtp) ? { imap: tlsCertImap, smtp: tlsCertSmtp } : undefined
-  return { ok: true as const, id, email: tokens.email, tlsCertRequired }
+  // having actually passed — `tlsCertRequired.imap` set means the login was
+  // never reached, only the TLS handshake failed, and the account is saved
+  // anyway so the user can accept the certificate.
+  if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)
+  clearImapAuthLatch(res.id)
+  broadcast('accounts:changed', { kind: 'saved', id: res.id })
+  return res
 })
 
 // Microsoft 365 / Outlook.com OAuth — delegated to electron/services/outlookOAuthService.ts
@@ -3843,6 +3877,7 @@ handleIpc('oauth:microsoft:connect', async (_e, existingAccountId: unknown) => {
   // "saved despite an unusable IMAP endpoint" case — the login was never
   // reached, so nothing was proven.
   if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)
+  clearImapAuthLatch(res.id)
   return res
 })
 
@@ -3933,8 +3968,8 @@ const accountAuthState = initAccountAuthState({
 // §2.165 (fix wave 4) — the identity half of the wiring, and it MUST come
 // first.
 //
-// Account ids are reused ("max + 1"), so an id alone does not say which mailbox
-// a verdict is about; the pair (id, generation) does. The service mints the
+// Account ids used to be reused ("max + 1"; they are monotonic now), so an id alone did not say
+// which mailbox a verdict is about; the pair (id, generation) did and still does as defence in depth. The service mints the
 // generation and bumps it on deletion, packages/net stamps every outcome with
 // the generation read at the START of the operation, and the service acts on a
 // verdict only while the stamp still matches. An unstamped verdict (`null`) is
@@ -4198,7 +4233,30 @@ handleIpc('tls:listPins', (_e, accountId: unknown) => {
  * `rejectUnauthorized: true`, so the chain must ALSO verify against the real
  * root stores. The worst a forged pin achieves is refusing to connect.
  *
- * Consequence: a self-signed server pinned from Settings stays fail-closed
+ * Partial chain building does not change that, and it costs this channel
+ * something on endpoints that already hold a confirmed anchor.
+ * `allowPartialTrustChain` is a property of the whole CONTEXT while the
+ * anchored/fingerprint-only distinction is a property of the PRESENTED
+ * certificate, so on such an endpoint the relaxed chain building reaches a
+ * fingerprint-only leaf too — and an anchor that is itself a CA would even
+ * terminate the chain of everything it ever issued. Containment therefore sits
+ * where the certificate is visible: on a partial-chain context
+ * `buildTlsOptions` accepts ONLY a leaf whose body was confirmed, and refuses a
+ * fingerprint-only one with `TLS pin not confirmed`. See `secureContextFor` and
+ * `buildTlsOptions` in packages/net/tls.ts.
+ *
+ * Named price of that, for this channel: a pin added here has no effect on an
+ * endpoint where the user already confirmed a certificate — it is refused until
+ * that certificate is confirmed in the recovery dialog too. The refusal
+ * classifies as a trust error, and that closes the remedy loop for the
+ * RECEIVING endpoint only: `notifyCertError` is raised from packages/net/imap.ts,
+ * `CertErrorPayload.protocol` is `'imap'`, and certRecovery emits offers with
+ * that protocol hard-coded. A SENDING endpoint (SMTP) has no cert seam at all
+ * (packages/net/smtp.ts raises nothing), so a private-CA or self-signed SMTP
+ * server has NO in-app recovery today — the pin added here stays fail-closed
+ * and no dialog opens for it. Wiring that seam is a separate task.
+ *
+ * Consequence: a self-signed IMAP server pinned from Settings stays fail-closed
  * until it is confirmed through the recovery dialog — which is exactly where
  * the user sees what they are trusting.
  */
@@ -4217,8 +4275,13 @@ handleIpc('tls:addPin', async (_e, payload: unknown) => {
     })
     throw new Error('tls_pin_write_failed')
   }
-  // After adding a pin, the main window should re-sync —
-  // the certificate is now accepted and IMAP/SMTP connection should succeed.
+  // After adding a pin, the main window should re-sync: the pin narrows what
+  // this endpoint accepts, so the connection has to be re-evaluated against it.
+  // It is NOT a grant — a fingerprint-only pin still has to pass the full chain
+  // AND hostname check, and on an endpoint that already holds a confirmed
+  // certificate it is refused outright (design B). An untrusted chain keeps
+  // failing closed (IMAP then routes the user to the recovery dialog; SMTP has
+  // no such seam, see above).
   broadcast('accounts:changed', { kind: 'saved', id: parsed.accountId })
   return { ok: true as const, pin: toPinDto(row) }
 })
@@ -4675,15 +4738,19 @@ handleIpc('folder:refreshCounts', (_e, accountId: unknown) => {
 })
 
 // --- IPC: network operations ---
+// These two channels parse NARROWED account schemas: `tlsPinnedCertsPem` is
+// inadmissible over IPC because a certificate body is what mints a TLS trust
+// anchor, and anchors come only from `net:trustCert` after a native dialog.
+// See electron/netTestConfig.ts for the full reasoning and the two layers.
 handleIpc('net:testImap', async (_e, cfg: unknown) => {
   if (IS_E2E) return { ok: true as const }
-  const parsed = imapSchema.parse(cfg)
+  const parsed = parseNetTestConfig(imapTestSchema, cfg)
   return testImapConnection(parsed)
 })
 
 handleIpc('net:testSmtp', async (_e, cfg: unknown) => {
   if (IS_E2E) return { ok: true as const }
-  const parsed = smtpSchema.parse(cfg)
+  const parsed = parseNetTestConfig(smtpTestSchema, cfg)
   return testSmtpConnection(parsed)
 })
 
@@ -4849,7 +4916,8 @@ function assertSmtpAuth(accountId: number, cfg: AccountConfig['smtp']) {
 // unwrapAggregate moved to ./unwrapAggregate for unit-testability — pure
 // function, does not depend on the main-process module graph. Used on IPC
 // failure paths for §2.14 offline-fallback surface.
-import { unwrapAggregate } from './unwrapAggregate'
+import { unwrapAggregate, describeErrorReason } from './unwrapAggregate'
+import { describeMailActionFailure } from './services/mailActionFailure'
 
 // queueItemToComposeInit lives in ./queueComposeBridge so the pure
 // queue-payload → ComposeInit transform can be unit-tested without dragging
@@ -4908,6 +4976,8 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
       hasAttachments: Boolean(parsedOptions.attachments && parsedOptions.attachments.length > 0),
       text: parsedOptions.text,
       html: parsedOptions.html,
+      inReplyTo: parsedOptions.inReplyTo,
+      references: parsedOptions.references,
     }
     e2eBox(accountId, 'Sent').unshift(msg)
     upsertContactsOutgoing([
@@ -4923,8 +4993,10 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
   // Strip identityId before handing off — it's a renderer-side hint used
   // only by the From-header resolver above. Unknown fields are harmless
   // but noisy.
-  const { identityId: _identityId, ...sendMailOptionsForTransport } = parsedOptions
+  const { identityId: _identityId, replyRef: _replyRef, threadRef: _threadRef, ...sendMailOptionsForTransport } = parsedOptions
   void _identityId
+  void _replyRef
+  void _threadRef
 
   let result: { messageId: string }
   if (meta.providerId === 'outlook') {
@@ -4952,7 +5024,8 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
       const message = e instanceof Error ? e.message : String(e)
       const isTimeout = /timeout|ETIMEDOUT|Connection timeout/i.test(message)
       const canFallbackGmail = cfg.smtp.host.toLowerCase() === 'smtp.gmail.com' && cfg.smtp.port === 465 && cfg.smtp.secure
-      if (isTimeout && canFallbackGmail) {
+      // Pre-greeting only: a timeout after the greeting may follow an accepted message.
+      if (isTimeout && canFallbackGmail && isPreGreetingFailure(e)) {
         logMail.warn(`SMTP timeout on 465, retrying STARTTLS 587 for account=${accountId}`)
         result = await trySend({ ...cfg.smtp, port: 587, secure: false })
       } else {
@@ -5012,6 +5085,8 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
         html: parsedOptions.html,
         attachments: parsedOptions.attachments,
         alternatives: transportWithAlts.alternatives,
+        inReplyTo: sendMailOptionsForTransport.inReplyTo,
+        references: sendMailOptionsForTransport.references,
         messageId: result.messageId,
       })
       rawSizeForDiag = typeof raw === 'string' ? Buffer.byteLength(raw, 'utf8') : raw.length
@@ -5177,7 +5252,7 @@ async function processSendQueue() {
       if (!claimed) continue
       const dispatchT0 = Date.now()
       try {
-        const options = sendMailOptionsSchema.parse(item.messageData)
+        const options = queuedSendOptionsSchema.parse(item.messageData)
         await sendMailWithAccountConfig(item.accountId, options)
         markSendQueueSent(item.id)
         // Telemetry: time from row creation to successful SMTP delivery.
@@ -5216,19 +5291,23 @@ async function processSendQueue() {
           logMail.warn(`Send queue item ${item.id} transient error (code=${code}), retry #${item.attemptCount + 1} at ${retryAt}: ${String(e)}`)
         } else {
           // Permanent error (5xx) or max attempts reached
-          markSendQueueFailed(item.id, String(e))
+          // A failure before the server greeted us is shown as a network/VPN
+          // hint, not as the raw text of the last address tried; the tag is
+          // decoded by the renderer, the raw text stays after it for the log.
+          const failureText = finalSendFailureText(e)
+          markSendQueueFailed(item.id, failureText)
           recordEvent('send_queue.failed', { failure_kind: smtpFailureKind(code, e) })
           logMail.error(`Send queue item ${item.id} failed permanently (code=${code}, attempts=${item.attemptCount}): ${String(e)}`)
           broadcast('mail:sendFailed', {
             id: item.id,
             accountId: item.accountId,
-            error: String(e),
+            error: failureText,
             subject: subj,
           })
           addNotification(
             'send_failed',
             subj || 'Send failed',
-            String(e),
+            failureText,
             item.id,
           )
         }
@@ -6699,7 +6778,8 @@ handleIpc('net:setSeen', async (_e, accountId: unknown, mailbox: unknown, uids: 
   try {
     await imapInteractive(() => setSeen(cfg.imap, parsedMailbox, parsedUids, parsedSeen, id))
   } catch (err) {
-    if (isTransientNetworkError(err)) {
+    // An operation whose outcome is unknown is not queued behind the user's back: the error is shown and the user decides.
+    if (isTransientNetworkError(err) && !isImapOutcomeUndetermined(err)) {
       logMail.warn(`net:setSeen transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
       setUnread(id, parsedMailbox, parsedUids, !parsedSeen)
       const uidVal = getSyncState(id, parsedMailbox)?.uidValidity ?? null
@@ -6745,7 +6825,8 @@ handleIpc('net:setFlagged', async (_e, accountId: unknown, mailbox: unknown, uid
   try {
     await imapInteractive(() => setFlagged(cfg.imap, parsedMailbox, parsedUids, parsedFlagged, id))
   } catch (err) {
-    if (isTransientNetworkError(err)) {
+    // An operation whose outcome is unknown is not queued behind the user's back: the error is shown and the user decides.
+    if (isTransientNetworkError(err) && !isImapOutcomeUndetermined(err)) {
       logMail.warn(`net:setFlagged transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
       setFlaggedLocal(id, parsedMailbox, parsedUids, parsedFlagged)
       const uidVal = getSyncState(id, parsedMailbox)?.uidValidity ?? null
@@ -6762,7 +6843,7 @@ handleIpc('net:setFlagged', async (_e, accountId: unknown, mailbox: unknown, uid
 handleIpc('net:sendMail', async (_e, accountId: unknown, options: unknown) => {
   const id = accountIdSchema.parse(accountId)
   const parsedOptions = sendMailOptionsSchema.parse(options)
-  return sendMailWithAccountConfig(id, parsedOptions)
+  return sendMailWithAccountConfig(id, withReplyThreading(id, parsedOptions))
 })
 
 // §2.22 Wave A — ICS / iTIP invite bridge.
@@ -6919,7 +7000,7 @@ handleIpc('mail:scheduleSend', async (_e, accountId: unknown, messageData: unkno
   const sendAt = delayMs <= 0
     ? new Date().toISOString()
     : new Date(Date.now() + delayMs).toISOString()
-  const queueId = enqueueSendQueue(id, parsedMessage, sendAt, randomUUID(), archiveRef)
+  const queueId = enqueueSendQueue(id, withReplyThreading(id, parsedMessage), sendAt, randomUUID(), archiveRef)
   const source: QueueEnqueuedSource = delayMs <= 0 ? 'immediate' : 'delay'
   notifyQueueEnqueued({ id: queueId, accountId: id, sendAt, source })
   notifyQueueChanged(id)
@@ -6934,7 +7015,7 @@ handleIpc('mail:scheduleSendAt', async (_e, accountId: unknown, messageData: unk
   const sendAt = sendAtIsoSchema.parse(sendAtRaw)
   const archiveRef: ArchiveRef | null = archiveRefRaw ? archiveRefSchema.parse(archiveRefRaw) : null
   if (archiveRef && archiveRef.accountId !== id) throw new Error('archiveRef.accountId must match the sending account')
-  const queueId = enqueueSendQueue(id, parsedMessage, sendAt, randomUUID(), archiveRef)
+  const queueId = enqueueSendQueue(id, withReplyThreading(id, parsedMessage), sendAt, randomUUID(), archiveRef)
   notifyQueueEnqueued({ id: queueId, accountId: id, sendAt, source: 'schedule' })
   notifyQueueChanged(id)
   if (new Date(sendAt).getTime() <= Date.now()) void processSendQueue()
@@ -6958,25 +7039,23 @@ handleIpc('mail:cancelSend', (_e, queueIdRaw: unknown) => {
   }
 })
 
+// The two moves share one set of dependencies; the refusal of a row that is being
+// sent lives in the service (see electron/services/sendQueueMoves.ts).
+const sendQueueMoveDeps: SendQueueMoveDeps = {
+  getById: getSendQueueById,
+  sendNow: sendQueueNow,
+  reschedule: rescheduleSendQueue,
+  notifyChanged: notifyQueueChanged,
+  startProcessing: () => { void processSendQueue() },
+  now: () => Date.now(),
+}
+
 handleIpc('mail:queueSendNow', async (_e, queueIdRaw: unknown) => {
-  const queueId = queueIdSchema.parse(queueIdRaw)
-  const item = getSendQueueById(queueId)
-  if (!item) throw new Error(`Queue entry ${queueId} not found`)
-  if (!sendQueueNow(queueId)) throw new Error('Cannot send now for current status')
-  notifyQueueChanged(item.accountId)
-  void processSendQueue()
-  return { ok: true as const }
+  return requestQueueSendNow(sendQueueMoveDeps, queueIdSchema.parse(queueIdRaw))
 })
 
 handleIpc('mail:queueReschedule', (_e, queueIdRaw: unknown, sendAtRaw: unknown) => {
-  const queueId = queueIdSchema.parse(queueIdRaw)
-  const sendAt = sendAtIsoSchema.parse(sendAtRaw)
-  const item = getSendQueueById(queueId)
-  if (!item) throw new Error(`Queue entry ${queueId} not found`)
-  if (!rescheduleSendQueue(queueId, sendAt)) throw new Error('Cannot reschedule for current status')
-  notifyQueueChanged(item.accountId)
-  if (new Date(sendAt).getTime() <= Date.now()) void processSendQueue()
-  return { ok: true as const, sendAt }
+  return requestQueueReschedule(sendQueueMoveDeps, queueIdSchema.parse(queueIdRaw), sendAtIsoSchema.parse(sendAtRaw))
 })
 
 handleIpc('contacts:search', (_e, query: unknown, limit: unknown) => {
@@ -6996,7 +7075,8 @@ handleIpc('net:saveDraft', async (_e, accountId: unknown, draftsMailbox: unknown
   const id = accountIdSchema.parse(accountId)
   const parsedMailbox = mailboxSchema.parse(draftsMailbox)
   const parsedDraftId = draftIdSchema.parse(draftId)
-  const parsedPayload = draftPayloadSchema.parse(payload)
+  const { replyRef: draftReplyRef, ...parsedPayload } = draftPayloadSchema.parse(payload)
+  const draftThreading = resolveReplyThreading(draftReplyRef, lookupCachedMessage)
 
   // §2.16 iter4 (Medium) — finalized-LRU short-circuit. If the draftId is
   // already in `sentDraftIdsByAccount`, the draft was sent or explicitly
@@ -7031,6 +7111,9 @@ handleIpc('net:saveDraft', async (_e, accountId: unknown, draftsMailbox: unknown
       text: parsedPayload.text,
       html: parsedPayload.html,
       draftId: parsedDraftId,
+      inReplyTo: draftThreading.inReplyTo,
+      references: draftThreading.references,
+      messageId: `<draft-${parsedDraftId}@mailcopilot.local>`,
     }
     const box = e2eBox(id, parsedMailbox)
     const idx = box.findIndex(m => m.uid === uid)
@@ -7055,7 +7138,7 @@ handleIpc('net:saveDraft', async (_e, accountId: unknown, draftsMailbox: unknown
     if (wasDraftFinalized(id, parsedDraftId)) {
       return { uid: undefined as number | undefined }
     }
-    return saveDraft(id, cfg.imap, parsedMailbox, parsedDraftId, parsedPayload)
+    return saveDraft(id, cfg.imap, parsedMailbox, parsedDraftId, { ...parsedPayload, ...draftThreading })
   })
   logDraftSync.info(`saved draft account=${id} draftId=${parsedDraftId} subjectLen=${(parsedPayload.subject || '').length} uid=${res.uid ?? 'unknown'}`)
   return { ok: true as const, uid: res.uid }
@@ -7229,14 +7312,6 @@ function imapSync<T>(fn: () => Promise<T>): Promise<T> {
   return withImapPriority('sync', fn)
 }
 
-/** §2.17 Phase 0 — IMAP fetch step gets a 10s AbortController timeout.
- *  Cache and DB tiers are not timed out (they are local and fast).
- *  imapflow does not support a real abort signal, so the timeout is
- *  enforced via Promise.race; a slow fetch may still complete in the
- *  background, but the handler returns the cached-headers fallback to
- *  the renderer within the budget. */
-const IMAP_FETCH_TIMEOUT_MS = 10_000
-
 /** Result discriminator for the timed IMAP fetch helper. */
 type ImapFetchOutcome =
   | { kind: 'ok'; details: MessageDetails }
@@ -7248,40 +7323,16 @@ async function fetchMessageDetailsWithTimeout(
   mailbox: string,
   uid: number,
 ): Promise<ImapFetchOutcome> {
-  // AbortController is threaded into fetchMessageDetails as of Phase 0 fix
-  // iter 2: the signal short-circuits awaits at logical boundaries (between
-  // mailboxOpen / fetchOne / download steps), so the renderer-visible budget
-  // is honored even when the underlying socket I/O cannot be cancelled.
-  const ac = new AbortController()
-  let timer: ReturnType<typeof setTimeout> | null = null
-  const timeoutPromise = new Promise<ImapFetchOutcome>((resolve) => {
-    timer = setTimeout(() => {
-      try { ac.abort() } catch { /* ignore */ }
-      resolve({ kind: 'timeout' })
-    }, IMAP_FETCH_TIMEOUT_MS)
-    // Don't keep the event loop alive for telemetry-only timers.
-    if (timer && typeof timer === 'object' && 'unref' in timer) {
-      try { (timer as { unref?: () => void }).unref?.() } catch { /* ignore */ }
-    }
-  })
-  try {
-    // §2.17 Phase 1 — the open path is the interactive tier by definition:
-    // this budget expiring on our own queue is the defect the phase exists to
-    // fix (a 10 941 ms `net:setSeen` behind an offline-sync EML burst).
-    const fetchPromise = imapInteractive(() => fetchMessageDetails(accountId, cfg, mailbox, uid, ac.signal))
-      .then((details): ImapFetchOutcome => ({ kind: 'ok', details }))
-      .catch((err): ImapFetchOutcome => {
-        // If the abort fired between awaits, fetchMessageDetails throws
-        // AbortError. The Promise.race already resolved as 'timeout' in
-        // that case, but ImapFlow may also throw AbortError after the
-        // race winner — swallow it so it doesn't bubble as unhandled.
-        if (err instanceof Error && err.name === 'AbortError') return { kind: 'timeout' }
-        throw err
-      })
-    return await Promise.race([fetchPromise, timeoutPromise])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+  // §2.17 Phase 1 — the open path is the interactive tier by definition:
+  // this budget expiring on our own queue is the defect the phase exists to
+  // fix (a 10 941 ms `net:setSeen` behind an offline-sync EML burst). The
+  // race itself (Promise.race + AbortController, §2.17 Phase 0) lives in
+  // `services/openBudget.ts` so it can be exercised against a real stalled
+  // socket.
+  const outcome = await raceWithOpenBudget(
+    (signal) => imapInteractive(() => fetchMessageDetails(accountId, cfg, mailbox, uid, signal)),
+  )
+  return outcome.kind === 'ok' ? { kind: 'ok', details: outcome.value } : { kind: 'timeout' }
 }
 
 /** §2.17 Phase 0 — same Promise.race timeout pattern for the per-folder
@@ -7774,6 +7825,9 @@ handleIpc('net:messageDetails', async (_e, accountId: unknown, mailbox: unknown,
           to: addrList(msg?.to) ?? [{ address: acc?.imap.user || `e2e${id}@example.test` }],
           cc: addrList(msg?.cc),
           bcc: addrList(msg?.bcc),
+          messageId: msg?.messageId,
+          inReplyTo: msg?.inReplyTo,
+          references: msg?.references,
         },
         flags: [
           msg?.unread ? '' : 'Seen',
@@ -8448,7 +8502,8 @@ handleIpc('net:move', async (_e, accountId: unknown, fromMailbox: unknown, toMai
     // Transient network failure → queue via offline_ops instead of failing
     // the user's action (§2.14). Local state mirrors the workOffline branch
     // above so the UI shows the message in the destination immediately.
-    if (isTransientNetworkError(err)) {
+    // An operation whose outcome is unknown is not queued behind the user's back: the error is shown and the user decides.
+    if (isTransientNetworkError(err) && !isImapOutcomeUndetermined(err)) {
       logMail.warn(`net:move transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
       moveMessagesLocally(id, parsedFrom, parsedTo, parsedUids)
       deleteEmls(id, parsedFrom, parsedUids)
@@ -8499,7 +8554,8 @@ handleIpc('net:delete', async (_e, accountId: unknown, mailbox: unknown, uids: u
   try {
     await imapInteractive(() => deleteMessagesRemote(cfg.imap, parsedMailbox, parsedUids, id))
   } catch (err) {
-    if (isTransientNetworkError(err)) {
+    // An operation whose outcome is unknown is not queued behind the user's back: the error is shown and the user decides.
+    if (isTransientNetworkError(err) && !isImapOutcomeUndetermined(err)) {
       logMail.warn(`net:delete transient failure, queueing: ${err instanceof Error ? err.message : String(err)}`)
       deleteMessages(id, parsedMailbox, parsedUids)
       deleteEmls(id, parsedMailbox, parsedUids)
@@ -9038,8 +9094,8 @@ handleIpc('settings:save', async (event, s: unknown) => {
   // four back whole on every save. Deleting an account purges its entries from
   // the store (`forgetAccountAiConsents`), but a window that was open across
   // that deletion still holds them, so its next ordinary save merges the purged
-  // `true` back in — and ids are reused (`max + 1`), so a later mailbox can
-  // inherit a grant its owner never gave.
+  // `true` back in (ids are monotonic now; before that a later mailbox could
+  // inherit a grant its owner never gave).
   //
   // The registry is read HERE, after the post-dialog re-read of `current`, so
   // the list and the settings snapshot are of the same moment: a deletion that
@@ -9244,6 +9300,8 @@ handleIpc('settings:save', async (event, s: unknown) => {
 // service; main only wires it.
 initTelemetryConsent({
   broadcastSettings: settings => { broadcastSettingsChanged(settings) },
+  // The first-run answer opens the gate on the first automatic update check.
+  onConsentRecorded: persisted => { updatePolicy?.apply(() => persisted) },
   // §2.82 iter3 — the consent screen renders in the main window only, so a
   // write from any other WebContents cannot be a click on it. Evaluated
   // lazily: this runs at module scope, before `win` exists.
@@ -9349,6 +9407,9 @@ handleIpc('e2e:injectMail', (_e, payload: unknown) => {
     flagged: z.boolean().default(false),
     text: z.string().optional(),
     html: z.string().optional(),
+    // The fixture's Message-ID (the cache row and, for an EML fixture, the header must agree): a chat source is
+    // opened by Message-ID, so a spec that opens one needs a message that has it.
+    messageId: z.string().min(1).max(998).optional(),
     // §2.145 — EML-backed fixture, the two ways to ask for one. Either gives
     // the message real bytes on disk and makes `net:messageDetails` serve it
     // from the production parse pipeline; neither is reachable outside e2e
@@ -9376,6 +9437,7 @@ handleIpc('e2e:injectMail', (_e, payload: unknown) => {
     date: p.date,
     unread: p.unread,
     flagged: p.flagged,
+    messageId: p.messageId,
     text: p.text,
     html: p.html,
   }
@@ -9544,10 +9606,13 @@ handleIpc('ui:openCompose', (_e, accountIdOrInit?: unknown, maybeInit?: unknown)
       ? pickAccountId(accountIdOrInit)
       : pickAccountId(undefined)
 
-  const parsedInit =
+  const rawInit =
     (accountIdOrInit && typeof accountIdOrInit === 'object')
       ? composeInitSchema.parse(accountIdOrInit)
       : (maybeInit ? composeInitSchema.parse(maybeInit) : null)
+  // A reopened reply draft names itself (`draftRef`); what it answers is read
+  // back here, so everything below sees an ordinary reply init.
+  const parsedInit = rawInit ? withDraftReplyRef(rawInit) : null
 
   // §3.3 B6 (draft side): start the local language detection now, deliver it
   // later. `parsedInit.suggestedTargetLang` cannot arrive from the renderer —
@@ -9665,8 +9730,10 @@ const mailOpenInWindowSchema = z.object({
  */
 const openMailWindows = new Map<string, BrowserWindow>()
 
-handleIpc('mail:openInWindow', (_e, rawInput: unknown) => {
-  const input = mailOpenInWindowSchema.parse(rawInput)
+handleIpc('mail:openInWindow', (_e, rawInput: unknown) => openMailInWindow(mailOpenInWindowSchema.parse(rawInput)))
+
+// Opening a message window only reads: no flag is written, unlike the main window's open path.
+function openMailInWindow(input: z.infer<typeof mailOpenInWindowSchema>) {
   // Reject opening a mail for an account that does not exist — keeps the
   // surface area of the IPC tight (accountIds from a compromised renderer
   // cannot conjure ghost windows).
@@ -9757,7 +9824,7 @@ handleIpc('mail:openInWindow', (_e, rawInput: unknown) => {
   if (VITE_DEV_SERVER_URL) child.loadURL(VITE_DEV_SERVER_URL + '#' + hash)
   else child.loadFile(path.join(RENDERER_DIST, 'index.html'), { hash })
   return { ok: true as const }
-})
+}
 
 // --- IPC: window management ---
 handleIpc('win:minimize', (e) => {
@@ -9861,6 +9928,7 @@ import {
   stopAll as aiStopAll,
   setUiContext,
   checkAuth as aiCheckAuth,
+  listModels as aiListModels,
   setDraftCallback,
   setMailActionCallback,
   setUnsubscribeCallback,
@@ -9941,6 +10009,14 @@ import type {
  */
 const aiProviderSchema = z.enum(['anthropic-api', 'openai-api', 'gemini-api'])
 
+/** E2E-only model lists (served by `ai:listModels` when `IS_E2E`): the real endpoints are never contacted. */
+const E2E_AI_MODEL_LIST: Record<string, Array<{ id: string; label: string }>> = {
+  'anthropic-api': [{ id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' }, { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' }],
+  'openai-api': [{ id: 'gpt-6-luna', label: 'gpt-6-luna' }, { id: 'gpt-6-astra', label: 'gpt-6-astra' }],
+  'gemini-api': [{ id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }, { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' }],
+}
+
+
 // §3.10 P2: wire the internet-tool interceptor broadcaster. The renderer
 // listens on `ai:internet-tool-pending` for the inline confirm UI in the AI
 // panel; the gate calls `broadcaster(payload)` synchronously from
@@ -9993,7 +10069,12 @@ setMailActionCallback(async (input: MailActionApplyRequest) => imapInteractive(a
 
   let affected = 0
   const affectedFolders: { accountId: number; folder: string }[] = []
-  for (const group of grouped.values()) {
+  // §2.309: a failure part-way through the sequential groups is reported with
+  // the progress made so far instead of being thrown away with the batch.
+  const groups = [...grouped.values()]
+  let failure: { err: unknown; accountId: number; index: number } | null = null
+  for (const [index, group] of groups.entries()) {
+   try {
     const { id, meta, cfg, accountGeneration } = await requireAccountConfig(group.accountId)
     assertImapAuth(id, cfg.imap, accountGeneration)
     const uniqueUids = [...new Set(group.uids)].filter(u => Number.isFinite(u) && u > 0)
@@ -10034,11 +10115,27 @@ setMailActionCallback(async (input: MailActionApplyRequest) => imapInteractive(a
     affected += uniqueUids.length
     affectedFolders.push({ accountId: id, folder: group.folder })
     affectedFolders.push({ accountId: id, folder: targetFolder })
+   } catch (err) {
+    failure = { err, accountId: group.accountId, index }
+    break
+   }
   }
 
   // Notify renderer about changes to refresh the message list (force — skip count check)
   for (const af of affectedFolders) {
     broadcast('mail:exists', { accountId: af.accountId, path: af.folder, force: true })
+  }
+
+  if (failure) {
+    const message = describeMailActionFailure({
+      action: input.action,
+      accountId: failure.accountId,
+      err: failure.err,
+      affected,
+      notAttempted: groups.length - failure.index - 1,
+    })
+    logAI.error(`mailActionCallback → ${message}`)
+    return { ok: false as const, message, affected }
   }
 
   logAI.info(`mailActionCallback → ok=true affected=${affected}`)
@@ -10309,9 +10406,11 @@ setFlagCallback(async (input: FlagRequest) => {
     broadcast('mail:exists', { accountId: input.accountId, path: input.folder, force: true })
     return { ok: true, message: `${input.flagged ? 'Starred' : 'Unstarred'} ${input.uids.length} email(s)`, affected: input.uids.length }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    logAI.error(`flagCallback error: ${msg}`)
-    return { ok: false, message: `Flag error: ${msg}`, affected: 0 }
+    // Closed-vocabulary reason (code, syscall, class) with the "outcome unknown"
+    // note after a sent STORE; the server's own text never reaches the model or the log.
+    const reason = describeErrorReason(e)
+    logAI.error(`flagCallback error: ${reason}`)
+    return { ok: false, message: `Flag error: ${reason}`, affected: 0 }
   }
 })
 
@@ -10326,9 +10425,9 @@ setMoveCallback(async (input: MoveRequest) => {
     broadcast('mail:exists', { accountId: input.accountId, path: input.fromFolder, force: true })
     return { ok: true, message: `Moved ${input.uids.length} email(s) to ${input.toFolder}`, affected: input.uids.length }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    logAI.error(`moveCallback error: ${msg}`)
-    return { ok: false, message: `Move error: ${msg}`, affected: 0 }
+    const reason = describeErrorReason(e)
+    logAI.error(`moveCallback error: ${reason}`)
+    return { ok: false, message: `Move error: ${reason}`, affected: 0 }
   }
 })
 
@@ -10350,6 +10449,9 @@ setFollowUpDismissCallback(async (input: FollowUpDismissRequest) => {
   const ok = dismissFollowUp(input.followUpId)
   return { ok, message: ok ? 'Follow-up dismissed' : 'Follow-up not found' }
 })
+
+// §3.3 B3 — the chat's "index still incomplete" line reads the same coverage figures the search bar shows.
+setIndexCoverageReader(ids => searchWorkerClient.getSearchCoverageStats(ids))
 
 setReadLaterCallback(async (input: ReadLaterRequest) => {
   logAI.info(`readLaterCallback accountId=${input.accountId} folder=${input.folder} uids=${input.uids.length} add=${input.add}`)
@@ -10387,6 +10489,17 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
 
   if (IS_E2E) {
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+    // The mock behaves like the live path for the open message: its row gets a ticket in this session, and the answer
+    // links it (the same function the request-start context uses), so a spec can store a real, resolvable citation.
+    const mockCite = (() => {
+      const data = ctx && typeof ctx === 'object' ? (ctx as { data?: unknown }).data : undefined
+      if (!data || typeof data !== 'object') return undefined
+      const ref = data as { accountId?: unknown; folder?: unknown; uid?: unknown }
+      if (typeof ref.accountId !== 'number' || typeof ref.folder !== 'string' || typeof ref.uid !== 'number') return undefined
+      const row = getMessageByUid(ref.accountId, ref.folder, ref.uid)
+      const cite = row ? citationFor(sid, row) : undefined
+      return row && cite ? { subject: row.subject || 'message', cite } : undefined
+    })()
     const mockText = [
       `Quick summary for: "${p}"`,
       '',
@@ -10394,7 +10507,7 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
       '- Action: confirm deadline and attach the latest document',
       '- Draft hint: keep response short and specific',
       '',
-      'Sources: accountId=1, folder=INBOX, uid=101',
+      mockCite ? `Source: [${mockCite.subject}](${mockCite.cite})` : 'Sources: accountId=1, folder=INBOX, uid=101',
     ].join('\n')
     const chunks = mockText.match(/.{1,42}/g) ?? [mockText]
 
@@ -10433,21 +10546,12 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
         }
 
         if (win && !win.isDestroyed()) {
-          const source = (() => {
-            if (!ctx || typeof ctx !== 'object') return undefined
-            const data = (ctx as { data?: unknown }).data
-            if (!data || typeof data !== 'object') return undefined
-            const ref = data as { accountId?: unknown; folder?: unknown; uid?: unknown }
-            if (typeof ref.accountId !== 'number' || typeof ref.folder !== 'string' || typeof ref.uid !== 'number') return undefined
-            return [{ ref: { accountId: ref.accountId, folder: ref.folder, uid: ref.uid }, reason: 'mock' }]
-          })()
           win.webContents.send('ai:stream', {
             type: 'result',
             requestId: reqId,
             text: mockText,
             sessionId: sid || 'e2e-session',
             costUsd: 0,
-            sources: source,
           } satisfies AiStreamEvent)
           win.webContents.send('ai:stream', { type: 'status', requestId: reqId, status: 'done' } satisfies AiStreamEvent)
         }
@@ -10467,71 +10571,60 @@ handleIpc('ai:chat', async (_e, requestId: unknown, prompt: unknown, context?: u
 
   logAI.info(`ai:chat requestId=${reqId} provider=${provider || 'auto'} prompt="${p.slice(0, 80)}"`)
 
-  // Load conversation history for multi-turn (OpenAI/Gemini) or map Claude sessionId
+  // Load conversation history for multi-turn chat — every live provider.
   //
-  // §2.218 — BOTH branches below are POSITIVE equality checks against live
-  // providers, and that is what makes a legacy session safe. After the
-  // `subscription` provider was removed, an affected user's `aiProvider` is
-  // dropped from settings on load, so `effectiveProvider` resolves to
-  // `undefined` and NEITHER branch fires: no history is loaded and, critically,
-  // the session's stored `claudeSessionId` is never substituted into
-  // `effectiveSid`. The turn then fails cleanly with "AI provider not
-  // configured" from `aiChat`. Note the decision reads the SETTINGS provider,
-  // never the session row's own `provider` column — a row labelled with a
-  // removed provider cannot steer this. Do not rewrite either check as a
-  // negative (`!== 'openai-api'`): that would make an unknown/legacy provider
-  // fall INTO a branch instead of out of all of them.
+  // §2.283 — our own `ai_messages` rows are now the ONLY continuation mechanism.
+  // The Anthropic path used to keep its conversation inside the Claude Code CLI
+  // and rejoin it through the stored `claude_session_id` (`resume`), so it did
+  // not need this load; that SDK is gone, and an Anthropic turn that skips the
+  // load collapses a multi-turn conversation into a single-turn one. The
+  // provider-scoped resume gate (§2.218.f2) went with it: nothing substitutes a
+  // stored id into the session id any more, so a legacy row cannot carry resume
+  // material into a request at all. The `claude_session_id` column stays as
+  // history — main no longer reads or writes it.
+  //
+  // §2.218 — the check is a POSITIVE equality list against live providers, and
+  // that is what keeps a legacy session safe. After the `subscription` provider
+  // was removed, an affected user's `aiProvider` is dropped from settings on
+  // load, so `effectiveProvider` resolves to `undefined`, falls out of the list,
+  // and the turn fails cleanly with "AI provider not configured" from `aiChat`.
+  // Note the decision reads the SETTINGS provider, never the session row's own
+  // `provider` column — a row labelled with a removed provider cannot steer it.
+  // Do not rewrite the check as a negative (`!== 'openai-api'`): that would make
+  // an unknown/legacy provider fall INTO the branch instead of out of it.
+  //
+  // The provider is resolved ONCE, here, and the SAME value is handed to
+  // `aiChat` below. `aiChat` falls back to `getSettings().aiProvider` when the
+  // request carries no explicit provider, so leaving it to re-read would make
+  // this a TWO-read decision: the renderer may save settings while a chat
+  // request is in flight, and a switch landing between the two reads would load
+  // one provider's history and then run the turn on another (or load nothing at
+  // all before an Anthropic turn). One read, one value, both uses.
+  const effectiveProvider = provider || getSettings().aiProvider
   let history: Array<{ role: 'user' | 'assistant'; content: string }> | undefined
-  let effectiveSid = sid
   if (sid) {
-    const effectiveProvider = provider || getSettings().aiProvider
-    if (effectiveProvider === 'openai-api' || effectiveProvider === 'gemini-api') {
+    if (effectiveProvider === 'anthropic-api' || effectiveProvider === 'openai-api' || effectiveProvider === 'gemini-api') {
       const msgs = getLastAiMessages(sid, 40)
       if (msgs.length > 0) history = msgs.map(m => ({ role: m.role, content: m.content }))
     }
-    if (effectiveProvider === 'anthropic-api') {
-      const session = getAiSession(sid)
-      // §2.218.f2 — THE ROW'S OWN PROVIDER MUST MATCH before its resume material
-      // is consumed. `claude_session_id` is provider-specific state minted by
-      // whichever provider created the row, and the removed `subscription`
-      // provider minted it against the user's CONSUMER Claude session. Gating on
-      // the CURRENT provider alone let that id cross into an `anthropic-api`
-      // request — reached by an honest user simply reopening an old chat, or by
-      // a compromised renderer passing an explicit provider override for a
-      // session it did not create. Resume material is not fungible across
-      // providers, so a mismatch starts a FRESH session instead: `effectiveSid`
-      // stays the app-level id and the SDK is given no `resume`.
-      //
-      // Compared as an opaque string on purpose. The row is HISTORY and may name
-      // a provider that no longer exists (that is the whole point here), so it
-      // must not be validated against the live provider union — only compared to
-      // the provider about to run. A row with no provider recorded fails the
-      // comparison and therefore does not resume, which is the safe direction.
-      if (session?.claudeSessionId && session.provider === effectiveProvider) {
-        effectiveSid = session.claudeSessionId
-      } else if (session?.claudeSessionId) {
-        logAI.info(
-          `ai:chat resume skipped: session provider does not match the provider for this turn (requestId=${reqId})`,
-        )
-      }
-    }
   }
-
   // Start streaming in background, send events only to the main window
   void (async () => {
     let eventCount = 0
     try {
-      for await (const event of aiChat({ requestId: reqId, prompt: p, context: ctx, sessionId: effectiveSid, aiProvider: provider, history, perRequestEgressConsent: perTurnConsent })) {
+      for await (const event of aiChat({ requestId: reqId, prompt: p, context: ctx, sessionId: sid, aiProvider: effectiveProvider, history, perRequestEgressConsent: perTurnConsent })) {
         eventCount++
         if (event.type === 'text_delta') {
           logAI.debug(`  stream #${eventCount} text_delta len=${(event as { text: string }).text.length}`)
         } else {
           logAI.debug(`  stream #${eventCount} type=${event.type}`)
         }
-        // Save Claude session ID for resume support
-        if (event.type === 'result' && event.sessionId && sid) {
-          updateAiSessionClaudeId(sid, event.sessionId)
-        }
+        // §2.283 — nothing to persist from `event.sessionId` any more: with the
+        // Agent SDK gone it is an echo of the id we just passed in (or a fresh
+        // UUID for a session-less turn), so writing it back into
+        // `claude_session_id` stored our own identifier under a column that
+        // meant "the CLI's session". Conversation continuity is the
+        // `ai_messages` rows the renderer already writes per turn.
         if (win && !win.isDestroyed()) win.webContents.send('ai:stream', event)
       }
       logAI.info(`ai:chat done requestId=${reqId} totalEvents=${eventCount}`)
@@ -10753,6 +10846,38 @@ handleIpc('ai:checkAuth', async (event, providerOverride?: unknown, settingsOver
     return aiCheckAuth({ ...settings, aiProvider: parsedProvider })
   }
   return aiCheckAuth(settings)
+})
+
+// The model picker's list. Takes ONLY a provider and the unsaved address
+// overrides `ai:checkAuth` takes: the key is read from the secret store inside
+// `listModels`, and a renderer cannot hand one in. The destination guard is the
+// same one as above for the same reason: this request carries the stored key to
+// whatever base URL / proxy is in force. Failures come back as one word from a
+// closed set, never as provider text.
+handleIpc('ai:listModels', async (event, providerRaw?: unknown, settingsOverrides?: unknown) => {
+  const parsedProvider = aiProviderSchema.optional().parse(
+    typeof providerRaw === 'string' ? providerRaw : undefined
+  ) as AiProvider | undefined
+  const overrides = aiDestinationOverridesSchema.parse(
+    typeof settingsOverrides === 'object' && settingsOverrides ? settingsOverrides : undefined
+  )
+  const persisted = getSettings()
+  const provider = parsedProvider ?? persisted.aiProvider
+  if (!provider) return { ok: false as const, reason: 'no_key' as const }
+
+  if (IS_E2E) {
+    // Fixed list: no network and no keychain (CLAUDE.md §5 "Testing / Build").
+    return { ok: true as const, models: E2E_AI_MODEL_LIST[provider] ?? [] }
+  }
+
+  const requestedDestination = withEffectiveProvider(
+    resolveRequestedAiDestination(overrides, persisted),
+    parsedProvider,
+  )
+  const destinationVerdict = await ensureAiDestinationApproved(requestedDestination, event?.sender)
+  if (!destinationVerdict.ok) return { ok: false as const, reason: 'destination_not_approved' as const }
+  const settings = applyAiDestinationOverrides(getSettings(), overrides)
+  return aiListModels({ ...settings, aiProvider: provider })
 })
 
 handleIpc('ai:openProviderSetup', () => {
@@ -11397,6 +11522,12 @@ handleIpc('aiSession:messages', (_e, id: unknown) => {
   return listAiMessages(sid)
 })
 
+// §3.3 B3 — citation tickets (see aiCitations.ts): which links of an answer are sources of THIS session, and where
+// the message of a ticket lives now. The renderer names a session and tickets and gets back only what the mail and
+// session IPC already give it; it cannot make main open anything but the message a ticket of that session names.
+handleIpc('ai:resolveCitations', (_e, raw: unknown) => resolveCitations(raw))
+handleIpc('ai:openCitation', (_e, raw: unknown) => openCitation(raw))
+
 handleIpc('aiSession:addMessage', (_e, data: unknown) => {
   const parsed = z.object({
     sessionId: z.string().min(1),
@@ -11404,6 +11535,7 @@ handleIpc('aiSession:addMessage', (_e, data: unknown) => {
     content: z.string(),
     costUsd: z.number().optional(),
   }).parse(data)
+  // Main marks every new assistant answer as written with citation tickets (the renderer cannot opt out or in).
   return insertAiMessage(parsed.sessionId, parsed.role, parsed.content, parsed.costUsd)
 })
 
@@ -11864,7 +11996,9 @@ handleIpc('mail:snoozeAdd', async (_e, accountId: unknown, folder: unknown, uids
   const id = accountIdSchema.parse(accountId)
   const f = mailboxSchema.parse(folder)
   const parsedUids = snoozeUidsSchema.parse(uids)
-  const wake = snoozeWakeAtSchema.parse(wakeAt)
+  // Canonical UTC: listDueSnooze compares wake_at as TEXT, so an offset form
+  // (`+03:00`) would fire hours late. Enforced here, not trusted to the renderer.
+  const wake = new Date(snoozeWakeAtSchema.parse(wakeAt)).toISOString()
 
   const ids: number[] = []
   for (const uid of parsedUids) {
@@ -12823,7 +12957,7 @@ let prevWorkOffline = getSettings().workOffline ?? false
 let prevBodyRetentionDays: number = (getSettings().bodyRetentionDays ?? DEFAULT_BODY_RETENTION_DAYS)
 
 /** Called from settings:save handler when settings change (main-process side). */
-function onSettingsChangedMain(next: { workOffline?: boolean; periodicSyncIntervalMin?: number; bodyRetentionDays?: number; autoUpdateEnabled?: boolean }): void {
+function onSettingsChangedMain(next: { workOffline?: boolean; periodicSyncIntervalMin?: number; bodyRetentionDays?: number; autoUpdateEnabled?: boolean; updateCheckEnabled?: boolean }): void {
   const nowOffline = next.workOffline ?? false
   if (prevWorkOffline && !nowOffline) {
     logReplay.info('Went back online — replaying offline ops')
@@ -12842,11 +12976,7 @@ function onSettingsChangedMain(next: { workOffline?: boolean; periodicSyncInterv
   // longer traps a persisted `true`; it only suppresses the pointless
   // download while the warning explains why.
   if (app.isPackaged && !IS_E2E) {
-    const wantAutoDownload = next.autoUpdateEnabled === true && updateCanSelfUpdate
-    if (autoUpdater.autoDownload !== wantAutoDownload) {
-      autoUpdater.autoDownload = wantAutoDownload
-      logUpdate.info(`autoDownload toggled at runtime: ${wantAutoDownload}`)
-    }
+    updatePolicy?.apply(() => next)
   }
 
   // §2.99 — tray and autostart follow the settings with no restart. Creating
@@ -13031,6 +13161,14 @@ async function syncOneAccountFolders(aid: number, isTimedOut: () => boolean): Pr
       // operation that failed reported it at the connection boundary, which
       // sees the same failure plus every other one this loop never runs — and
       // reports them for accounts whose folders this loop skips entirely.
+      // A rejected login is an ACCOUNT-wide verdict: every remaining folder of
+      // this pass would get the same "no". The login latch already refuses them
+      // before the socket (packages/net/authLoginLatch.ts); stopping here saves
+      // the pointless walk and its log lines. `break` still runs `finally`.
+      if (isImapAuthBackoffError(err) || classifyImapError(err) === 'auth') {
+        logPeriodic.warn(`Periodic sync for account #${aid} stopped: credentials rejected`)
+        break
+      }
     } finally {
       // §2.86 iter2, review finding 1: this loop is a SEPARATE sync path from
       // the `net:syncFolderHeaders` handler, it runs with no user present, and

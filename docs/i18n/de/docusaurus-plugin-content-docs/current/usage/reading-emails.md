@@ -9,6 +9,8 @@ title: E-Mails lesen
 
 Klicken Sie auf eine Nachricht, um sie im Lesebereich zu oeffnen. Tastatur: **j**/**k** (naechste/vorherige), **o** oder **Enter** (oeffnen), **u** (zurueck).
 
+Diese Tasten bewegen sich zwischen Nachrichten in der Liste. Ist eine Konversation mit mehreren Nachrichten geöffnet, bewegen **j** / **k** stattdessen einen Cursor zwischen ihren Karten -- die vollständige Liste der dort geltenden Tastenkombinationen finden Sie unter [Innerhalb der Konversation](../keyboard-shortcuts#innerhalb-der-konversation).
+
 ## Empfänger-Kopfzeilen
 
 Im Lesebereich werden die Felder **To**, **Cc** und (bei gesendeten Nachrichten) **Bcc** oberhalb des Nachrichtentexts angezeigt. Enthält ein Feld mehr als drei Adressen, klappt MailCopilot den Überlauf ein: Die ersten drei Namen werden inline angezeigt, gefolgt von einer Schaltfläche **+N mehr**, wobei N die Anzahl der ausgeblendeten Adressen ist.
@@ -16,6 +18,8 @@ Im Lesebereich werden die Felder **To**, **Cc** und (bei gesendeten Nachrichten)
 Klicken Sie auf **+N mehr**, um die vollständige Empfängerliste in mehreren Zeilen einzublenden. Klicken Sie erneut auf die Schaltfläche, um zur Zusammenfassung zurückzukehren. Alternativ können Sie **Esc** drücken, während die Liste ausgeklappt ist, um sie einzuklappen.
 
 Fahren Sie mit der Maus über einen Empfängernamen, um einen Tooltip mit der vollständigen Zeichenfolge `Name <email@host>` anzuzeigen. Tastaturbenutzer können mit Tab zu jedem Empfänger-Chip und zur Schaltfläche **+N mehr** navigieren; **Enter** oder **Leertaste** auf der Schaltfläche wechselt den ausgeklappten Zustand.
+
+Klicken Sie mit der rechten Maustaste auf die Adresse eines Absenders oder Empfängers -- in der Nachrichtenkopfzeile, in den Empfänger-Chips, beim Absender einer Konversationskarte oder im eigenständigen Nachrichtenfenster --, um ein Kontextmenü mit **Adresse kopieren** zu öffnen. Dieser Eintrag kopiert die reine Adresse (zum Beispiel `user@example.com`) in die Zwischenablage. Den Absender in der Kopfzeile und die Empfänger-Chips können Sie auch per Tastatur öffnen: Navigieren Sie mit Tab dorthin und drücken Sie die Menütaste oder **Umschalt+F10**.
 
 **Bcc-Datenschutz:** Die Bcc-Zeile wird nur für Nachrichten angezeigt, die Sie selbst gesendet haben. Bei empfangenen Nachrichten wird sie nie angezeigt, sodass die Bcc-Empfänger eingehender Nachrichten vertraulich bleiben.
 
@@ -55,6 +59,10 @@ Threads mit zwei oder mehr Nachrichten werden als vertikaler Kartenstapel darges
 Threads mit einer einzelnen Nachricht sowie Konten mit deaktivierter Gruppierung verwenden weiterhin die einfache Einzelnachrichtenansicht — der Kartenstapel erscheint nur bei zwei oder mehr Nachrichten.
 
 Deaktivierbar unter **Einstellungen > Produktivität > Nachrichten in Konversationen gruppieren**.
+
+### Tastaturnavigation innerhalb eines Threads
+
+Sobald ein Thread mit zwei oder mehr Nachrichten geöffnet ist, bewegen **j** / **k** einen Cursor zwischen den Karten, statt die Nachrichtenliste zu bewegen, und **r** / **a** / **f** beantworten, beantworten allen oder leiten die Karte weiter, auf der sich der Cursor gerade befindet. Drücken Sie **Escape**, um die Navigation in der Konversation zu verlassen und **j** / **k** wieder der Nachrichtenliste zu übergeben. Die vollständige Liste der Tastenkombinationen, die bei geöffneter Konversation gelten, finden Sie unter [Innerhalb der Konversation](../keyboard-shortcuts#innerhalb-der-konversation).
 
 ### Konversationsreihenfolge
 
@@ -113,17 +121,25 @@ Klicken Sie auf **Übersetzen** über dem Nachrichtentext und wählen Sie dann e
 
 Sobald eine Übersetzung angezeigt wird, können Sie mit dem Umschalter **Original anzeigen** / **Übersetzung anzeigen** über dem Text jederzeit hin- und herwechseln. Die gespeicherte Nachricht selbst wird nie verändert -- die Übersetzung ist immer nur eine Ansicht darüber.
 
-**HTML-Nachrichten werden anhand ihrer Textfassung übersetzt.** Die Übersetzung wird immer als reiner Text angezeigt, auch bei einer HTML-Nachricht -- Formatierung, Layout und eingebettete Bilder sind nicht Teil der Übersetzung. Eine Bildunterschrift über dem übersetzten Text weist ausdrücklich darauf hin: „Übersetzt wurde die Textfassung der Nachricht — Formatierung und Bilder sind daher nicht Teil der Übersetzung."
+Über der Übersetzung zeigt MailCopilot „Übersetzt aus dem Russischen ins Englische“ an, oder „Übersetzt ins Englische“, wenn die Originalsprache nicht bekannt ist. Formatierung und Bilder werden nicht übersetzt.
 
-### Erkannte Ausgangssprache
+### Originalsprache
 
-Vor dem Übersetzen versucht MailCopilot, die Originalsprache der Nachricht auf Ihrem Gerät zu erkennen, und nennt sie, wenn das gelingt, in einer Bildunterschrift über der Übersetzung (zum Beispiel: „Maschinelle Übersetzung aus dem Englischen ins Deutsche. Das Original ist einen Klick entfernt."). Die Erkennung erfolgt lokal und dient nur als Beschriftung -- sie entscheidet nie, ob die Nachricht übersetzt werden kann.
+MailCopilot versucht, die Originalsprache der Nachricht auf Ihrem Gerät zu erkennen. Gelingt das, nennt der Hinweis über der Übersetzung sie. Die Erkennung dient nur dieser Beschriftung.
 
-Die Beschriftung lässt sich in beiden Fällen korrigieren, nicht nur wenn die Erkennung fehlschlägt. Kann die Sprache nicht mit ausreichender Sicherheit erkannt werden, übersetzt MailCopilot trotzdem und zeigt einfach keine Bildunterschrift an, sondern bietet eine Auswahl **Sprache dieser Nachricht** (Platzhalter: **Sprache auswählen**) an, damit Sie sie selbst benennen können. Wird eine Beschriftung angezeigt, nennt aber die falsche Sprache -- die lokale Erkennung kann eng verwandte Sprachen mit hoher Sicherheit verwechseln --, öffnet ein Link **Nicht die richtige Sprache?** daneben dieselbe Auswahl. In beiden Fällen ist die Sprachangabe optional und aktualisiert nur die Beschriftung der bereits angezeigten, zwischengespeicherten Übersetzung, ohne den Anbieter erneut aufzurufen.
+Um die Sprache anzugeben oder zu korrigieren, klicken Sie auf **Originalsprache angeben**. Der Link wird angezeigt, egal ob eine Sprache erkannt wurde oder nicht. Wählen Sie die Sprache in der Auswahl **Sprache des Originals** (Platzhalter: **Sprache auswählen**) und klicken Sie auf **Übernehmen**. Dabei ändert sich nur die Beschriftung, sie wird aus dem Cache aktualisiert; der Anbieter wird nicht erneut aufgerufen.
+
+### Lange Nachrichten
+
+Eine Nachricht mit bis zu 3000 Zeichen wird in einer Anfrage übersetzt. Eine längere Nachricht wird an Absatzumbrüchen (dann an Satzenden, dann an Leerraum) in Teile von höchstens 3000 Zeichen zerlegt. Jeder Teil wird in einer eigenen Anfrage übersetzt, drei gleichzeitig, und die Antworten werden mit den ursprünglichen Absatzumbrüchen zusammengefügt.
+
+Das Ergebnis gilt ganz oder gar nicht: Schlägt ein Teil fehl oder kommt abgeschnitten zurück, wird keine Übersetzung angezeigt und nichts zwischengespeichert. Eine Nachricht mit mehr als 60 000 Zeichen (im ungünstigsten Fall bis zu etwa 40 Anfragen) wird als zu lang abgelehnt. Bereits übersetzte Teile werden bis zu einer Stunde im Arbeitsspeicher der App gehalten, sodass ein erneuter Versuch nach einem Fehler nur die fehlenden Teile sendet. Das Verlassen der Nachricht stoppt eine begonnene Übersetzung nicht: Sie wird beendet, im Cache gespeichert und ist beim Zurückkehren fertig. Das Ausschalten der Übersetzung für das Postfach stoppt sie. Die Teile werden ohne den benachbarten Text übersetzt, daher können Begriffe und Anredeformen in verschiedenen Teilen einer langen Nachricht voneinander abweichen. Ein Teil ohne Buchstaben (Ziffern, Trennzeilen) bleibt unverändert.
+
+Eine lange Nachricht bedeutet daher mehrere Anfragen, jede bei Ihrem KI-Anbieter kostenpflichtig und jede als eigener Eintrag im [KI-Auditprotokoll](../privacy/ai-data#das-auditprotokoll) erfasst. Die [Entwurfsübersetzung](../ai-assistant#entwurfsübersetzung) zerlegt den Text nicht und behält ihr Limit von 3000 Zeichen.
 
 ### Übersetzungs-Cache
 
-Die Übersetzung einer Nachricht in eine bestimmte Sprache wird lokal auf Ihrem Gerät zwischengespeichert, verknüpft mit dem Inhalt der Nachricht selbst, der Zielsprache und der Version des Übersetzungsvertrags (Anbieter, Modell und Prompt-Form), unter der sie entstanden ist -- das erneute Öffnen derselben Nachricht und die erneute Wahl derselben Sprache verwendet die zwischengespeicherte Übersetzung, statt den Anbieter erneut aufzurufen, und eine spätere Änderung daran, wie MailCopilot Übersetzungen erzeugt, wird unter einem neuen Schlüssel abgelegt, statt das Ergebnis eines älteren Vertrags als aktuell auszugeben. Der Cache hat weiterhin keine eigene Ablaufzeit -- an ihrer Stelle lässt das Limit unten Einträge veralten. Jedes Konto behält seine 500 neuesten Übersetzungen; wird dieses Limit erreicht, werden die ältesten Übersetzungen dieses Kontos entfernt, um Platz für neue zu schaffen. Das Entfernen eines Kontos löscht auch dessen zwischengespeicherte Übersetzungen.
+Die Übersetzung einer Nachricht in eine bestimmte Sprache wird lokal auf Ihrem Gerät zwischengespeichert, verknüpft mit dem Inhalt der Nachricht selbst, der Zielsprache und der Version des Übersetzungsvertrags (Anbieter, Modell und Prompt-Form), unter der sie entstanden ist -- das erneute Öffnen derselben Nachricht und die erneute Wahl derselben Sprache verwendet die zwischengespeicherte Übersetzung, statt den Anbieter erneut aufzurufen, und eine spätere Änderung daran, wie MailCopilot Übersetzungen erzeugt, wird unter einem neuen Schlüssel abgelegt, statt das Ergebnis eines älteren Vertrags als aktuell auszugeben. Der Cache hat weiterhin keine eigene Ablaufzeit -- an ihrer Stelle lässt das Limit unten Einträge veralten. Jedes Konto behält seine 200 neuesten Übersetzungen; wird dieses Limit erreicht, werden die ältesten Übersetzungen dieses Kontos entfernt, um Platz für neue zu schaffen. Das Entfernen eines Kontos löscht auch dessen zwischengespeicherte Übersetzungen. Die Übersetzung einer langen Nachricht wird als Ganzes unter der ganzen Nachricht zwischengespeichert.
 
 ### Wenn eine Übersetzung nicht verfügbar ist
 
@@ -131,13 +147,13 @@ MailCopilot nennt den genauen Grund, warum eine Übersetzung nicht erstellt werd
 
 - Die Übersetzung ist für dieses Konto ausgeschaltet.
 - Es ist noch kein KI-Anbieter eingerichtet.
-- Der KI-Anbieter hat keine Übersetzung geliefert und keinen Grund genannt.
-- Die Übersetzung passt nicht in das Antwortlimit des KI-Anbieters, kam deshalb abgeschnitten zurück und wird nicht angezeigt.
+- Der KI-Anbieter hat keine Übersetzung geliefert.
+- Die Übersetzung hat das Antwortlimit des Anbieters überschritten und wird nicht angezeigt. Ein neuer Versuch führt zum selben Ergebnis.
 - Der Text der Nachricht ist noch nicht heruntergeladen.
-- Die Nachricht ist zu lang, um sie in einem Durchgang zu übersetzen, und es gibt keine Möglichkeit, nur einen Teil davon zu übersetzen -- die gesamte Nachricht zählt für die Grenze, einschließlich einer eventuell darin zitierten früheren Korrespondenz.
+- Diese Nachricht ist zu lang für eine Übersetzung.
 - Das KI-Budget für diesen Zeitraum ist aufgebraucht.
 
-**Eine Schaltfläche „Erneut versuchen" erscheint nur dort, wo ein erneuter Versuch das Ergebnis tatsächlich ändern könnte.** Jeder Klick ist eine eigene, beim KI-Anbieter kostenpflichtige Anfrage, deshalb bietet MailCopilot diese Schaltfläche nicht bei einer Ablehnung an, die sich unverändert wiederholen würde: die Übersetzung, die am Antwortlimit des Anbieters scheitert, eine Nachricht, die grundsätzlich zu lang zum Übersetzen ist, oder eine für das Konto ausgeschaltete Übersetzung. Für die übrigen Gründe -- der Anbieter ist ohne Erklärung gescheitert, die Nachricht lädt noch, es ist kein Anbieter eingerichtet, oder das Budget ist aufgebraucht -- wird **Erneut versuchen** angezeigt, da das Beheben der Ursache, oder einfaches Abwarten, den nächsten Versuch erfolgreich machen kann. Ab dem zweiten Versuch trägt die Ablehnung den Vermerk **„Versuch 2"** (und so weiter), damit ein Wiederholungsversuch, der auf dem Bildschirm nichts ändert, nicht mit einem Klick verwechselt wird, der nicht reagiert hat.
+**Eine Schaltfläche „Erneut versuchen" erscheint nur dort, wo ein erneuter Versuch das Ergebnis tatsächlich ändern könnte.** Jeder Klick ist eine eigene, beim KI-Anbieter kostenpflichtige Anfrage, deshalb bietet MailCopilot diese Schaltfläche nicht bei einer Ablehnung an, die sich unverändert wiederholen würde: die Übersetzung, die am Antwortlimit des Anbieters scheitert, eine Nachricht, die grundsätzlich zu lang zum Übersetzen ist, oder eine für das Konto ausgeschaltete Übersetzung. Für die übrigen Gründe -- der Anbieter hat keine Übersetzung geliefert, die Nachricht lädt noch, es ist kein Anbieter eingerichtet, oder das Budget ist aufgebraucht -- wird **Erneut versuchen** angezeigt, da das Beheben der Ursache, oder einfaches Abwarten, den nächsten Versuch erfolgreich machen kann. Ab dem zweiten Versuch trägt die Ablehnung den Vermerk **„Versuch 2"** (und so weiter), damit ein Wiederholungsversuch, der auf dem Bildschirm nichts ändert, nicht mit einem Klick verwechselt wird, der nicht reagiert hat.
 
 ## Anhaenge
 
@@ -189,6 +205,8 @@ Das eigenständige Fenster ist ein vollständig funktionsfähiger Arbeitsbereich
 - **Drucken** -- den Nachrichteninhalt drucken.
 
 Wenn Sie auf **Archivieren** klicken oder auf **Löschen** für eine Nachricht, die in den Papierkorb verschoben werden kann, zeigt das eigenständige Fenster für 3 Sekunden einen eingebetteten Widerrufshinweis, bevor MailCopilot die Verschiebung durchführt und das Fenster schließt. Klicken Sie auf **Rückgängig**, um den Vorgang abzubrechen — die Nachricht bleibt an ihrem Platz und das Fenster bleibt geöffnet. Solange der Widerrufshinweis sichtbar ist, sind die Schaltflächen **Archivieren** und **Löschen** deaktiviert; **Antworten**, **Allen antworten**, **Weiterleiten**, **Markieren / Markierung aufheben**, **Als gelesen / ungelesen markieren** und **Drucken** bleiben verfügbar.
+
+Schließen Sie das eigenständige Fenster selbst, während der Widerrufshinweis noch sichtbar ist -- zum Beispiel über die Titelleiste -- wird die Verschiebung sofort ausgeführt, genau wie wenn die 3 Sekunden abgelaufen wären. Das bricht die Aktion nicht ab. Um sie abzubrechen, klicken Sie im Hinweis auf **Rückgängig**, bevor Sie das Fenster schließen.
 
 Hat das Konto keinen Papierkorb-Ordner oder befindet sich die Nachricht bereits im Papierkorb, fragt **Löschen** vor der endgültigen Löschung nach einer Bestätigung — es erscheint kein Widerrufshinweis, und die Aktion ist nicht rückgängig zu machen.
 

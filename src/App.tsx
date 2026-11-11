@@ -19,7 +19,10 @@ import {
   deriveIsSentByMe,
 } from './utils/mail'
 import { isFolderCountedInBadges } from '@mailcopilot/core'
-import { TranslatedError, presentedError } from './utils/errorPresentation'
+import { TranslatedError, presentedError, presentedTaggedText } from './utils/errorPresentation'
+import { googleRefusalMessage } from './utils/googleRefusal'
+import { decideAccountsChangedAction } from './utils/accountsChangedAction'
+import { useMailOpenOwnership } from './hooks/useMailOpenOwnership'
 import { useMailLinkClick } from './hooks/useMailLinkClick'
 import { useMailOpenRef } from './hooks/useMailOpenRef'
 import { useCertRecovery } from './hooks/useCertRecovery'
@@ -87,9 +90,11 @@ import NotificationCenter from './components/NotificationCenter'
 import ResizeEdges from './components/ResizeEdges'
 import ThreadView from './components/ThreadView'
 import MailBodyContent from './components/MailBodyContent'
+import CopyableAddress, { CopyableAddressList } from './components/CopyableAddress'
 import { SingleMessageInstantReply } from './components/SingleMessageInstantReply'
 import { isAiFeatureEnabledForAccount } from './utils/aiAccountGate'
 import { useMailTranslation } from './hooks/useMailTranslation'
+import { resolveMessageRefSummary } from './utils/messageRefSummary'
 import './App.css'
 
 const PAGE_SIZE = 50
@@ -332,11 +337,6 @@ export default function App() {
   const [aiPrivacyConsent, setAiPrivacyConsent] = useState(false)
   const [aiSendOnEnter, setAiSendOnEnter] = useState(true)
   const [aiShowSources, setAiShowSources] = useState(true)
-  // §3.10 P1: outbound egress policy. Source of truth is `Settings`; this
-  // mirrors the value into the AI panel so the chip can render the correct
-  // state (hidden when 'allow', visible/blocked otherwise). Default
-  // 'default-deny' matches `aiEgressPolicy.ts::defaultEgressPolicy()`.
-  const [aiEgressPolicy, setAiEgressPolicy] = useState<'default-deny' | 'ask' | 'allow'>('default-deny')
   // §3.3 B2 Thread AI Summary — per-account opt-in, keyed by stringified
   // accountId. Default OFF (missing/false). Written from Settings via
   // settings:save; mirrored here only to gate whether ThreadView renders the
@@ -350,6 +350,7 @@ export default function App() {
   // entry is not `true`.
   const [aiTranslateEnabled, setAiTranslateEnabled] = useState<Record<string, boolean>>({})
   const [aiQuickPrompt, setAiQuickPrompt] = useState<string | null>(null)
+  // Search text handed to the chat input as a draft (never sent); consumed by the panel.
   // pendingGoRef, pendingGoTimer — in useKeyboardShortcuts
   const alwaysLoadImagesRef = useRef(alwaysLoadImages)
   alwaysLoadImagesRef.current = alwaysLoadImages
@@ -440,12 +441,18 @@ export default function App() {
   const syncingRef = useRef(false)
   const syncOpSeq = useRef(0)
   const ctxSeq = useRef(0)
-  const openSeq = useRef(0)
+  // §2.308 — ownership of the open message, separate from the list generation
+  // `ctxSeq`: a refresh of the folder on screen must not orphan an in-flight open.
+  const mailOpen = useMailOpenOwnership()
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const detailsRef = useRef(details)
   detailsRef.current = details
   const currentAccountIdRef = useRef<number | null>(null)
   currentAccountIdRef.current = currentAccountId
+  // The live account list for the `accounts:changed` handler, which is mounted
+  // once and must not read a stale closure.
+  const accountsRef = useRef<AccountMeta[]>([])
+  accountsRef.current = accounts
   const currentFolderRef = useRef(currentFolder)
   currentFolderRef.current = currentFolder
   const viewModeRef = useRef(viewMode)
@@ -565,12 +572,17 @@ export default function App() {
         }
         setError(t(startingKey, { account: accountLabel }))
         try {
-          const result = await window.api.invoke(channel, accountId) as { ok?: boolean }
+          const result = await window.api.invoke(channel, accountId) as { ok?: boolean; refusal?: unknown }
           // TranslatedError, not Error: this branch throws so the catch below
           // owns the cooldown + reopen-account cleanup once, and its message is
           // already our own translated copy. `presentedError` passes it through
           // instead of collapsing it into the generic sentence.
-          if (!result?.ok) throw new TranslatedError(t('common.error'))
+          if (!result?.ok) {
+            // Google answers a refusal with a verdict (§2.297): say which one.
+            throw new TranslatedError(kind === 'google'
+              ? googleRefusalMessage(result?.refusal, account.imap.user, t)
+              : t('common.error'))
+          }
           authRecoveryCooldownUntil.current.delete(accountId)
           setError(t(successKey, { account: accountLabel }))
           void window.setTimeout(() => {
@@ -689,7 +701,16 @@ export default function App() {
     startColdStartSpan()
   }, [])
 
+  // Navigation (another folder, account, view or search state): drops the list
+  // requests AND any open request still in flight.
   const invalidateContext = useCallback(() => {
+    ctxSeq.current += 1
+    mailOpen.invalidateNavigation()
+  }, [mailOpen])
+
+  // Refresh of the context already on screen (sync): drops stale LIST responses
+  // only. The open message keeps its in-flight body request (§2.308).
+  const invalidateListContext = useCallback(() => {
     ctxSeq.current += 1
   }, [])
 
@@ -875,7 +896,6 @@ export default function App() {
       aiPanelWidth?: unknown
       aiSendOnEnter?: unknown
       aiShowSources?: unknown
-      aiEgressPolicy?: unknown
       aiThreadSummaryEnabled?: unknown
       aiInstantReplyEnabled?: unknown
       aiTranslateEnabled?: unknown
@@ -907,11 +927,6 @@ export default function App() {
       if (typeof s.aiPanelWidth === 'number') setAiPanelWidth(s.aiPanelWidth)
       setAiSendOnEnter(Boolean(s.aiSendOnEnter ?? true))
       setAiShowSources(Boolean(s.aiShowSources ?? true))
-      if (s.aiEgressPolicy === 'default-deny' || s.aiEgressPolicy === 'ask' || s.aiEgressPolicy === 'allow') {
-        setAiEgressPolicy(s.aiEgressPolicy)
-      } else {
-        setAiEgressPolicy('default-deny')
-      }
       // §3.3 B2: normalize to a plain Record<string, boolean>; ignore
       // non-boolean/legacy shapes defensively (default OFF).
       if (s.aiThreadSummaryEnabled && typeof s.aiThreadSummaryEnabled === 'object') {
@@ -963,7 +978,6 @@ export default function App() {
           aiPanelWidth?: unknown
           aiSendOnEnter?: unknown
           aiShowSources?: unknown
-          aiEgressPolicy?: unknown
           aiThreadSummaryEnabled?: unknown
           aiInstantReplyEnabled?: unknown
           aiTranslateEnabled?: unknown
@@ -996,7 +1010,6 @@ export default function App() {
         aiPanelWidth?: unknown
         aiSendOnEnter?: unknown
         aiShowSources?: unknown
-        aiEgressPolicy?: unknown
         aiThreadSummaryEnabled?: unknown
         aiInstantReplyEnabled?: unknown
         aiTranslateEnabled?: unknown
@@ -1057,7 +1070,11 @@ export default function App() {
     // MailBodyContent — one decision, one owner (the hook that substituted
     // their bytes).
     hiddenAttachments: mailHiddenAttachments,
+    // §2.308: images arrive after the body is shown and are written into the
+    // iframe's live document; a (re)loaded document gets them re-applied.
+    onIframeLoad: onMailIframeLoad,
   } = useMailIframeDoc({
+    iframeRef: mailIframeRef,
     active,
     details,
     alwaysLoadImages,
@@ -1244,7 +1261,7 @@ export default function App() {
     const onSendFailed = (payload: unknown) => {
       const data = payload as { error?: string; subject?: string } | undefined
       const subject = data?.subject || t('compose.title')
-      const error = data?.error || 'Unknown error'
+      const error = presentedTaggedText(t, data?.error || 'Unknown error')
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         try {
           new Notification(t('notifications.sendFailed'), {
@@ -1630,13 +1647,16 @@ export default function App() {
 
     const onAccountsChanged = (payload?: unknown) => {
       const data = payload as { kind?: unknown; id?: unknown } | undefined
-      const kind = (data && typeof data === 'object' && typeof data.kind === 'string') ? data.kind : ''
       const id = (data && typeof data === 'object' && typeof data.id === 'number') ? data.id : NaN
+      const action = decideAccountsChangedAction(payload, {
+        currentAccountId: currentAccountIdRef.current,
+        knownAccountIds: accountsRef.current.map(a => a.id),
+      })
 
       // Current account switch may come from another window (Account).
       // In that case, switch locally without a full reload(),
       // otherwise we may clear the mail list `setMails([])` and skip auto-sync.
-      if (kind === 'current' && Number.isFinite(id) && id > 0) {
+      if (action === 'switch-current') {
         if (currentAccountIdRef.current === id) return
         setCurrentAccountId(id)
 
@@ -1667,7 +1687,7 @@ export default function App() {
 
       // Account settings saved: refresh metadata and prefs from DB
       // without reloading folder list from IMAP (prevents flickering).
-      if (kind === 'saved' && Number.isFinite(id) && id > 0) {
+      if (action === 'refresh-saved') {
         void (async () => {
           try {
             const list = await window.api.invoke('accounts:list') as AccountMeta[]
@@ -1691,7 +1711,7 @@ export default function App() {
         return
       }
 
-      console.debug('[active→null] accounts-changed-fallback-reload kind=', kind)
+      console.debug('[active→null] accounts-changed-init action=', action)
       void load()
     }
     window.api?.on('accounts:changed', onAccountsChanged)
@@ -1724,7 +1744,7 @@ export default function App() {
       await loadReadLater()
       return
     }
-    invalidateContext()
+    invalidateListContext()
     const aid = currentAccountId
     const mySync = ++syncOpSeq.current
     try {
@@ -1827,7 +1847,7 @@ export default function App() {
     } finally {
       if (syncOpSeq.current === mySync) setSyncing(false)
     }
-  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, invalidateContext, loadFollowUps, loadOutbox, loadReadLater, loadSnoozed, maybeRecoverAuthIssue, setHasMore, t, viewMode])
+  }, [applyUnreadOverrides, currentAccountId, currentFolder, filterSnoozed, invalidateListContext, loadFollowUps, loadOutbox, loadReadLater, loadSnoozed, maybeRecoverAuthIssue, setHasMore, t, viewMode])
 
   // Drops any in-flight search request and clears the search lifecycle so
   // a stale worker response cannot clobber the new view, and infinite-scroll
@@ -2264,7 +2284,7 @@ export default function App() {
       const ids = validIds.length > 0 ? validIds : accounts.map(a => a.id)
       if (ids.length === 0) return
 
-      invalidateContext()
+      invalidateListContext()
       const seq = ctxSeq.current
       try {
         setError('')
@@ -2325,7 +2345,7 @@ export default function App() {
     applyUnreadOverrides,
     applyUnreadOverridesForMixedList,
     hasAccount,
-    invalidateContext,
+    invalidateListContext,
     q,
     setHasMore,
     syncFolder,
@@ -2347,8 +2367,7 @@ export default function App() {
   }, [hasAccount, q, syncCurrentView, syncIntervalMinutes])
 
   const openMail = useCallback(async (m: MailSummary) => {
-    const seq = ctxSeq.current
-    const myOpen = ++openSeq.current
+    const ticket = mailOpen.beginOpen()
     setActive(m)
     // The opened message stands for its row in the selection, whichever message
     // of the row it is — selection is a row property and every consumer resolves
@@ -2383,44 +2402,47 @@ export default function App() {
       } catch { /* telemetry must never throw */ }
       openSpan.end()
     }
-    try {
-      const d = await window.api.invoke('net:messageDetails', m.accountId, m.folder, m.uid) as MessageDetails
-      if (ctxSeq.current !== seq || openSeq.current !== myOpen) {
-        endOpenSpan()
-        return
-      }
+    // §2.308: only a newer open or a real navigation discards the response; a
+    // sync of the folder already on screen does not. The loading flag is
+    // released on every outcome by the request that owns it (`runMailOpen`).
+    await mailOpen.run(
+      ticket,
+      () => window.api.invoke('net:messageDetails', m.accountId, m.folder, m.uid) as Promise<MessageDetails>,
+      {
+        onApplied: (d) => {
+          setDetails(d)
+          endOpenSpan({
+            body_size_bucket: bucketBodySizeRenderer(d),
+            attachments_count: d.attachments?.length ?? 0,
+            offline_fallback: d.offlineFallback === true,
+          })
 
-      setDetails(d)
-      setLoadingBody(false)
-      endOpenSpan({
-        body_size_bucket: bucketBodySizeRenderer(d),
-        attachments_count: d.attachments?.length ?? 0,
-        offline_fallback: d.offlineFallback === true,
-      })
-
-      // Auto-mark as read on open — optimistic UI update, then IMAP in background.
-      if (m.unread) {
-        // Optimistic: update UI immediately
-        setMails(prev => prev.map(x => (
-          x.accountId === m.accountId && x.folder === m.folder && x.uid === m.uid ? { ...x, unread: false } : x
-        )))
-        setActive(sel => (
-          sel && sel.accountId === m.accountId && sel.folder === m.folder && sel.uid === m.uid ? { ...sel, unread: false } : sel
-        ))
-        bumpFolderUnreadPending(m.accountId, m.folder, -1)
-        recordPendingUnread(m.accountId, m.folder, m.uid, false)
-        // IMAP sync in background (fire-and-forget)
-        void window.api.invoke('net:setSeen', m.accountId, m.folder, [m.uid], true).catch(() => {})
-      }
-    } catch (e) {
-      if (ctxSeq.current === seq && openSeq.current === myOpen) setError(t('app.errors.loadMessage', { error: presentedError(t, e) }))
-      endOpenSpan()
-    } finally {
-      if (ctxSeq.current === seq && openSeq.current === myOpen) setLoadingBody(false)
-      // Cover the cancellation path where setDetails was never called.
-      endOpenSpan()
-    }
-  }, [bumpFolderUnreadPending, recordPendingUnread, selectionAnchorKey, setSelectedKeys, t])
+          // Auto-mark as read on open — optimistic UI update, then IMAP in background.
+          if (m.unread) {
+            // Optimistic: update UI immediately
+            setMails(prev => prev.map(x => (
+              x.accountId === m.accountId && x.folder === m.folder && x.uid === m.uid ? { ...x, unread: false } : x
+            )))
+            setActive(sel => (
+              sel && sel.accountId === m.accountId && sel.folder === m.folder && sel.uid === m.uid ? { ...sel, unread: false } : sel
+            ))
+            bumpFolderUnreadPending(m.accountId, m.folder, -1)
+            recordPendingUnread(m.accountId, m.folder, m.uid, false)
+            // IMAP sync in background (fire-and-forget)
+            void window.api.invoke('net:setSeen', m.accountId, m.folder, [m.uid], true).catch(() => {})
+          }
+        },
+        onFailed: (e) => {
+          setError(t('app.errors.loadMessage', { error: presentedError(t, e) }))
+          endOpenSpan()
+        },
+        onDiscarded: () => endOpenSpan(),
+        releaseLoading: () => setLoadingBody(false),
+      },
+    )
+    // Cover any path where no sink ran to the end.
+    endOpenSpan()
+  }, [bumpFolderUnreadPending, mailOpen, recordPendingUnread, selectionAnchorKey, setSelectedKeys, t])
 
   // §2.145 — "show full message" for a soft-capped body. Owns its own in-flight
   // flag and drops a result whose message is no longer the open one; see the
@@ -3250,6 +3272,9 @@ export default function App() {
         subject: (env?.subject || m.subject || '').trim(),
         text,
         source: 'draft',
+        // Main reads the reply headers stored in this draft from its cache and
+        // restores the pointer to the message it answers.
+        draftRef: { accountId: m.accountId, folder: m.folder, uid: m.uid },
       } satisfies ComposeInit)
     } catch (e) {
       setError(t('app.errors.compose', { error: presentedError(t, e) }))
@@ -3760,7 +3785,6 @@ export default function App() {
     [visibleFolders],
   )
   const env = details?.envelope
-  const metaFrom = active ? (env?.from ? addrListToString(env.from) : active.from) : ''
   // §3.3.C-uiaudit.22: pass raw MailAddress[] instead of pre-formatted strings
   // so RecipientList can render collapsible chips with per-chip tooltips.
   const metaTo = env?.to ?? []
@@ -3831,9 +3855,6 @@ export default function App() {
     if (key === 'aiPrivacyConsent') setAiPrivacyConsent(Boolean(value))
     if (key === 'aiSendOnEnter') setAiSendOnEnter(Boolean(value))
     if (key === 'aiShowSources') setAiShowSources(Boolean(value))
-    if (key === 'aiEgressPolicy' && (value === 'default-deny' || value === 'ask' || value === 'allow')) {
-      setAiEgressPolicy(value)
-    }
     void (async () => {
       try {
         // Only the changed field — see setGroupConversationsAndPersist. This is
@@ -3855,36 +3876,9 @@ export default function App() {
    * the referenced folder so the window still lands somewhere useful.
    */
   const openMessageRef = useCallback(async (ref: MessageRef, opts?: { silentIfMissing?: boolean }) => {
-    const { accountId, folder, uid } = ref
+    const { accountId, folder } = ref
 
-    let summary = await window.api.invoke('cache:messageByUid', accountId, folder, uid) as MailSummary | null
-    if (!summary) {
-      try {
-        const detailsByRef = await window.api.invoke('net:messageDetails', accountId, folder, uid) as MessageDetails
-        const from0 = detailsByRef.envelope?.from?.[0]
-        const fromAddr = (from0?.address || '').trim()
-        const fromName = (from0?.name || '').trim()
-        const flags = detailsByRef.flags || []
-        summary = {
-          accountId,
-          folder,
-          uid,
-          from: fromName || fromAddr || `UID ${uid}`,
-          fromAddr: fromAddr || undefined,
-          fromName: fromName || undefined,
-          subject: detailsByRef.envelope?.subject || `(uid:${uid})`,
-          date: detailsByRef.envelope?.date || new Date().toISOString(),
-          unread: !flags.includes('\\Seen'),
-          flagged: flags.includes('\\Flagged'),
-          hasAttachments: Boolean(detailsByRef.attachments && detailsByRef.attachments.length > 0),
-          messageId: detailsByRef.envelope?.messageId,
-          inReplyTo: detailsByRef.envelope?.inReplyTo,
-          references: detailsByRef.envelope?.references,
-        }
-      } catch {
-        summary = null
-      }
-    }
+    const summary = await resolveMessageRefSummary(ref, (channel, ...args) => (window.api.invoke as (c: string, ...a: unknown[]) => Promise<unknown>)(channel, ...args))
 
     const needsSelection =
       viewMode !== 'account' || currentAccountId !== accountId || currentFolder !== folder
@@ -3894,7 +3888,8 @@ export default function App() {
         if (needsSelection) selectAccount(accountId, folder)
         return
       }
-      setError(t('app.errors.loadMessage', { error: `Source not found: ${accountId}/${folder}/${uid}` }))
+      // No ids in the text: the user sees a mailbox by its address, never by a number.
+      setError(t('app.errors.sourceNotFound'))
       return
     }
 
@@ -3902,10 +3897,20 @@ export default function App() {
     await openMail(summary)
   }, [currentAccountId, currentFolder, openMail, selectAccount, t, viewMode])
 
+  // An answer saved before citation tickets: its link names a place, opened as before.
   const openAiSource = useCallback(
     (ref: MessageRef) => openMessageRef(ref),
     [openMessageRef],
   )
+
+  // A citation link of an answer: main finds the message by its Message-ID and returns where it is NOW; opening it
+  // from there is the same as a click in the list. Not found: the message is not in the mailbox, and nothing else opens.
+  const openAiCitation = useCallback(async (sessionId: string, token: string) => {
+    const place = await window.api.invoke('ai:openCitation', { sessionId, token }) as
+      { found: true; accountId: number; folder: string; uid: number } | { found: false } | undefined
+    if (!place || !place.found) { setError(t('app.errors.sourceNotFound')); return }
+    await openMessageRef({ accountId: place.accountId, folder: place.folder, uid: place.uid })
+  }, [openMessageRef, t])
 
   // §2.99: a new-mail notification click arrives from main as identifiers only.
   // No memoization needed — the hook holds the handler in a ref.
@@ -4736,7 +4741,7 @@ export default function App() {
                         <span>{to || '—'}</span>
                         <span>{sendAtLabel}</span>
                       </div>
-                      {item.lastError && <div className="outbox-item-error">{item.lastError}</div>}
+                      {item.lastError && <div className="outbox-item-error">{presentedTaggedText(t, item.lastError)}</div>}
                       <div className="outbox-item-actions">
                         <button
                           type="button"
@@ -5074,7 +5079,11 @@ export default function App() {
                 const replyTarget = pickReplyTarget(active, latestMail, isThreadMode)
                 return (
               <div className="mail-viewer-header">
-                <div className="mail-viewer-from">{metaFrom}</div>
+                <div className="mail-viewer-from">
+                  {env?.from?.length
+                    ? <CopyableAddressList list={env.from} />
+                    : <CopyableAddress address={active.fromAddr} tabIndex={active.fromAddr ? 0 : undefined}>{active.from}</CopyableAddress>}
+                </div>
                 <div className="mail-viewer-subject-row">
                   <div data-testid="mail-subject" className="mail-viewer-subject">{active.subject}</div>
                   <div className="mail-viewer-actions">
@@ -5222,6 +5231,7 @@ export default function App() {
                   summaryEnabled={isAiFeatureEnabledForAccount(aiThreadSummaryEnabled, active?.accountId ?? activeThread.lead?.accountId)}
                   instantReplyEnabled={isAiFeatureEnabledForAccount(aiInstantReplyEnabled, active?.accountId ?? activeThread.lead?.accountId)}
                   onInstantReplyPick={(ref, draft) => { void instantReplyPick(ref, draft) }}
+                  onCardAction={(item, mode) => { void replyMail(item, mode) }}
                   renderBody={() => (
                     <MailBodyContent
                       active={active}
@@ -5240,6 +5250,7 @@ export default function App() {
                       hiddenAttachments={mailHiddenAttachments}
                       iframeKey={`${activeKey}:${alwaysLoadImages || showExternalImages ? 'ext' : 'safe'}`}
                       mailIframeRef={mailIframeRef}
+                      onMailIframeLoad={onMailIframeLoad}
                       activeMailKey={`${active?.accountId}:${active?.folder}:${active?.uid}`}
                       savingAttachment={savingAttachment}
                       onShowExternalImages={() => setShowExternalImages(true)}
@@ -5287,6 +5298,7 @@ export default function App() {
                     hiddenAttachments={mailHiddenAttachments}
                     iframeKey={`${activeKey}:${alwaysLoadImages || showExternalImages ? 'ext' : 'safe'}`}
                     mailIframeRef={mailIframeRef}
+                    onMailIframeLoad={onMailIframeLoad}
                     activeMailKey={`${active?.accountId}:${active?.folder}:${active?.uid}`}
                     savingAttachment={savingAttachment}
                     onShowExternalImages={() => setShowExternalImages(true)}
@@ -5347,9 +5359,9 @@ export default function App() {
             aiPrivacyConsent={aiPrivacyConsent}
             aiSendOnEnter={aiSendOnEnter}
             aiShowSources={aiShowSources}
-            aiEgressPolicy={aiEgressPolicy}
             onSettingsChange={handleAiSettingsChange}
             onOpenSource={openAiSource}
+            onOpenCitation={openAiCitation}
             quickPrompt={aiQuickPrompt}
             onQuickPromptHandled={() => setAiQuickPrompt(null)}
           />

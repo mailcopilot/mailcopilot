@@ -13,7 +13,7 @@
  * same account picker.
  *
  * The per-feature descriptions that used to be a `section-hint` under each of
- * those four sections are kept, as a legend below the table: they are the only
+ * those four sections are kept, as a collapsible legend below the table: they are the only
  * place that says what each feature costs and that nothing runs on its own, and
  * a column header of two or three words cannot carry that.
  */
@@ -154,14 +154,16 @@ export default function AiConsentMatrix({
         </table>
       )}
 
-      <dl className="ai-consent-legend">
+      {/* One collapsed entry per feature: several paragraphs under the table made a wall of text, and every
+          description is still one click away (the same copy, unabridged). */}
+      <div className="ai-consent-legend">
         {AI_CONSENT_FEATURES.map(feature => (
-          <div key={feature} className="ai-consent-legend-item">
-            <dt>{t(featureTitleKey(feature))}</dt>
-            <dd className="section-hint">{t(featureHelpKey(feature))}</dd>
-          </div>
+          <details key={feature} className="ai-consent-legend-item" data-testid={`settings-ai-consent-legend-${feature}`}>
+            <summary>{t(featureTitleKey(feature))}</summary>
+            <p className="section-hint">{t(featureHelpKey(feature))}</p>
+          </details>
         ))}
-      </dl>
+      </div>
     </section>
   )
 }

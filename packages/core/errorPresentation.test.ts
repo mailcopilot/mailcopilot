@@ -49,7 +49,7 @@ function makeEtimedoutAggregate(): Error & { errors: unknown[] } {
 
 describe('vocabulary', () => {
   it('is closed and fully translated', () => {
-    expect(ERROR_PRESENTATION_KEYS).toEqual(['offline', 'timeout', 'auth', 'unknown'])
+    expect(ERROR_PRESENTATION_KEYS).toEqual(['offline', 'timeout', 'auth', 'starttls_required', 'pre_greeting', 'delivery_unknown', 'unknown'])
     for (const key of ERROR_PRESENTATION_KEYS) {
       expect(ERROR_PRESENTATION_I18N_KEYS[key]).toBe(`app.errors.presented.${key}`)
     }
@@ -171,6 +171,44 @@ describe('classifyErrorPresentation', () => {
       code: 'SELF_SIGNED_CERT_IN_CHAIN',
     })
     expect(classifyErrorPresentation(err)).toBe('unknown')
+  })
+})
+
+describe('classifyErrorPresentation — transport stages', () => {
+  const stage = (message: string, fields: object) => Object.assign(new Error(message), fields)
+
+  it('reads a refused STARTTLS upgrade and a pre-greeting failure from the error stage, not its prose', () => {
+    expect(classifyErrorPresentation(stage('x', { code: 'ETLS', command: 'STARTTLS', response: '502 no' }))).toBe('starttls_required')
+    expect(classifyErrorPresentation(stage('Server does not support STARTTLS', { tlsFailed: true }))).toBe('starttls_required')
+    expect(classifyErrorPresentation(stage('connect ENETUNREACH ::1:465', { code: 'ESOCKET', command: 'CONN', syscall: 'connect' }))).toBe('pre_greeting')
+    // 'Connection timeout' is also a timeout by text; the stage is the more precise reading.
+    expect(classifyErrorPresentation(stage('Connection timeout', { code: 'ETIMEDOUT', command: 'CONN' }))).toBe('pre_greeting')
+  })
+
+  it('reads ImapFlow\'s greeting and connect timers as pre_greeting, by code; its mid-session timer stays a timeout', () => {
+    expect(classifyErrorPresentation(stage('Failed to receive greeting from server in required time', { code: 'GREETING_TIMEOUT' }))).toBe('pre_greeting')
+    expect(classifyErrorPresentation(stage('Failed to establish connection in required time', { code: 'CONNECT_TIMEOUT' }))).toBe('pre_greeting')
+    expect(classifyErrorPresentation(stage('Socket timeout', { code: 'ETIMEOUT' }))).toBe('timeout')
+  })
+
+  it('reads a session that broke after the server was reached as an unknown delivery, ahead of timeout and offline', () => {
+    // 'Timeout' and 'read ECONNRESET' are timeout/offline by text; "try again" is the wrong advice there.
+    expect(classifyErrorPresentation(stage('Timeout', { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'SOCKET_TIMEOUT' }))).toBe('delivery_unknown')
+    expect(classifyErrorPresentation(stage('read ECONNRESET', { code: 'ESOCKET', command: 'CONN', syscall: 'read' }))).toBe('delivery_unknown')
+    expect(classifyErrorPresentation(stage('Connection closed unexpectedly', { code: 'ECONNECTION', command: 'CONN' }))).toBe('delivery_unknown')
+    // A server reply, a refused STARTTLS and an auth failure keep their own readings.
+    expect(classifyErrorPresentation(stage('x', { code: 'ECONNECTION', command: 'CONN', responseCode: 421, response: '421 bye' }))).toBe('unknown')
+    expect(classifyErrorPresentation(stage('x', { code: 'EAUTH', command: 'AUTH PLAIN', responseCode: 535 }))).toBe('auth')
+  })
+
+  it('leaves the same words without the stage to the old buckets', () => {
+    expect(classifyErrorPresentation(new Error('Connection timeout'))).toBe('timeout')
+    expect(classifyErrorPresentation(new Error('connect ENETUNREACH ::1:465'))).toBe('offline')
+  })
+
+  it('survives the IPC round trip as a tag', () => {
+    const e = stage('Server does not support STARTTLS', { tlsFailed: true })
+    expect(decodeErrorPresentation(new Error(presentedIpcMessage(e)))).toBe('starttls_required')
   })
 })
 

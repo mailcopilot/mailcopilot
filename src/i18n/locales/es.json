@@ -95,6 +95,7 @@
       "sync": "Error de sincronización: {{error}}",
       "load": "Error de carga: {{error}}",
       "loadMessage": "Error al cargar el mensaje: {{error}}",
+      "sourceNotFound": "Este mensaje ya no está disponible.",
       "bodyNotAvailableOffline": "El contenido del mensaje no está disponible sin conexión. Solo se han guardado los encabezados.",
       "bodyLoadTimedOut": "El mensaje no se cargó en el tiempo previsto. Esto puede ocurrir cuando una tarea en segundo plano ocupa la conexión, cuando el servidor responde con lentitud o cuando el mensaje es muy grande. Puedes reintentarlo.",
       "bodyLoadFailed": "MailCopilot no pudo cargar el contenido de este mensaje: solo se muestran sus encabezados. Puedes reintentarlo.",
@@ -113,6 +114,9 @@
         "offline": "Sin conexión con el servidor de correo. MailCopilot seguirá intentándolo.",
         "timeout": "El servidor de correo no respondió a tiempo. MailCopilot seguirá intentándolo.",
         "auth": "Inicio de sesión rechazado. Revisa la contraseña de la cuenta o vuelve a autorizarla en los ajustes.",
+        "starttls_required": "El servidor no ofrece una conexión cifrada (STARTTLS), así que MailCopilot no ha enviado ninguna contraseña ni mensaje. Revisa el puerto y los ajustes de seguridad, o contacta con tu proveedor de correo.",
+        "pre_greeting": "No se pudo contactar con el servidor de correo antes de que respondiera. A menudo significa que la red o una VPN bloquea los puertos de correo saliente. Revisa tu conexión o los ajustes de la VPN e inténtalo de nuevo.",
+        "delivery_unknown": "La conexión con el servidor de correo se interrumpió antes de que se confirmara el envío, así que no se sabe si el mensaje salió. Si lo vuelves a enviar, el destinatario podría recibirlo dos veces.",
         "unknown": "No se pudo completar la solicitud. Inténtalo de nuevo."
       }
     },
@@ -167,6 +171,17 @@
       "copyFingerprint": "Copiar la huella digital SHA-256",
       "copied": "Copiada",
       "detailsLabel": "Detalles",
+      "reason": {
+        "expired": "El certificado del servidor ha caducado.",
+        "notYetValid": "El certificado del servidor aún no es válido. Compruebe la fecha y la hora del equipo.",
+        "selfSigned": "El certificado es autofirmado: no lo emitió una autoridad de certificación en la que este dispositivo confíe.",
+        "unknownIssuer": "El certificado lo emitió una autoridad en la que este dispositivo no confía, o el servidor no envió la cadena de certificados completa.",
+        "nameMismatch": "El certificado se emitió para un nombre de servidor distinto del que está usando para conectarse.",
+        "revoked": "El emisor ha revocado el certificado.",
+        "pinMismatch": "El certificado del servidor es distinto del que confirmó anteriormente.",
+        "untrusted": "No se puede verificar la cadena de certificados o no es de confianza.",
+        "unknown": "No se pudo verificar el certificado del servidor."
+      },
       "interception": "Parece que esta conexión está siendo inspeccionada por un antivirus o proxy ({{issuer}}).",
       "trust": "Confiar y continuar",
       "readCertificate": "Leer el certificado",
@@ -296,7 +311,7 @@
     "stdioWarning": "Los servidores MCP stdio lanzan procesos hijo locales con sus privilegios de usuario. Pueden leer archivos, acceder a la red y ejecutar más comandos. Habilitarlo requiere un diálogo de confirmación nativo.",
     "stdioEnabled": "Stdio MCP está habilitado. Cada conexión a continuación sigue requiriendo su propia aprobación.",
     "requestStdioEnable": "Habilitar stdio MCP…",
-    "needsApproval": "Necesita aprobación — revise el comando y los argumentos antes de conectar",
+    "needsApproval": "Necesita aprobación: revise el comando y los argumentos antes de conectar",
     "approved": "Aprobado",
     "approve": "Aprobar…",
     "env": "Variables de entorno",
@@ -310,7 +325,7 @@
     "connecting": "Conectando",
     "disconnected": "Desconectado",
     "error": "Error",
-    "testSuccess": "OK — {{count}} herramientas",
+    "testSuccess": "OK, {{count}} herramientas",
     "saveError": {
       "forbiddenEnvKey": "La variable de entorno {{keys}} no está permitida por razones de seguridad.",
       "unapprovedCommand": "Este comando no está en la lista blanca integrada. Contacte con soporte para solicitar su incorporación.",
@@ -383,20 +398,17 @@
       "targetLabel": "Traducir al",
       "sourceLabel": "Idioma del original",
       "sourcePlaceholder": "Elige un idioma",
-      "sourceOffer": "No se ha podido identificar el idioma del original, así que la traducción de arriba no lleva esa indicación. Indicarlo es opcional: solo actualiza la indicación y reutiliza la traducción ya obtenida, sin pedir una nueva al proveedor.",
-      "sourceApply": "Actualizar la indicación",
-      "sourceRestate": "¿No es este el idioma?",
-      "sourceRestateHint": "Indique usted mismo el idioma del original. Solo cambia la indicación de arriba: la traducción que está leyendo se mantiene igual y se reutiliza, sin pedir una nueva al proveedor.",
-      "produced": "Traducción automática al {{target}}. El original está a un clic.",
-      "producedFrom": "Traducción automática del {{source}} al {{target}}. El original está a un clic.",
-      "textProjection": "La traducción se ha hecho sobre la versión de texto del mensaje, así que su formato y sus imágenes no forman parte de ella.",
+      "sourceApply": "Aplicar",
+      "sourceRestate": "Indicar el idioma original",
+      "produced": "Traducido al {{target}}",
+      "producedFrom": "Traducido del {{source}} al {{target}}",
       "refusal": {
         "budget": "El presupuesto de IA de este periodo se ha agotado. Auméntalo en Ajustes → IA o espera al siguiente periodo.",
         "no_provider": "Todavía no hay ningún proveedor de IA configurado. Añade uno en Ajustes → IA.",
-        "provider_error": "El proveedor de IA no ha devuelto ninguna traducción ni ha indicado el motivo. Otro intento volverá a enviar el mensaje al proveedor.",
-      "answer_too_long": "La traducción no cabe en el límite de respuesta del proveedor de IA: ha llegado cortada y por eso no se muestra. Otro intento terminaría igual: ni este mensaje ni el límite han cambiado.",
+        "provider_error": "El proveedor de IA no ha devuelto ninguna traducción. Inténtalo de nuevo.",
+        "answer_too_long": "La traducción superó el límite de respuesta del proveedor y no se muestra. Otro intento dará el mismo resultado.",
         "empty_input": "El texto de este mensaje aún no se ha descargado. Vuelve a intentarlo cuando el mensaje se haya cargado.",
-        "too_long": "Este mensaje es demasiado largo para traducirlo de una sola vez y no hay forma de traducir solo una parte: para el límite cuenta el mensaje entero, incluida la correspondencia anterior que pueda estar citada dentro.",
+        "too_long": "Este mensaje es demasiado largo para traducirlo.",
         "opt_out": "La traducción está desactivada para esta cuenta. Actívala en Ajustes → IA → Traducir mensajes."
       },
       "languages": {
@@ -496,7 +508,8 @@
     "pinned": "Fijado",
     "print": "Imprimir",
     "context": {
-      "selected": "{{count}} mensajes seleccionados"
+      "selected": "{{count}} mensajes seleccionados",
+      "copyAddress": "Copiar dirección"
     }
   },
   "settings": {
@@ -690,7 +703,7 @@
       "loadFailed": "Error al cargar carpetas: {{error}}",
       "noAccount": "Conecte una cuenta para configurar las carpetas",
       "onlyInbox": "Solo INBOX es visible en el servidor. Cree las carpetas necesarias y luego selecciónelas aquí.",
-      "notSet": "— no establecido —",
+      "notSet": "No establecido",
       "auto": "Auto: {{path}}",
       "create": "Crear",
       "createNew": "Crear nueva carpeta...",
@@ -759,9 +772,9 @@
       "conditions": "Condiciones",
       "actions": "Acciones",
       "field": {
-        "from_address": "Remitente — dirección",
-        "from_name": "Remitente — nombre visible",
-        "from": "Remitente — nombre o dirección (obsoleto)",
+        "from_address": "Remitente: dirección",
+        "from_name": "Remitente: nombre visible",
+        "from": "Remitente: nombre o dirección (obsoleto)",
         "to": "Destinatario",
         "cc": "Cc",
         "subject": "Asunto",
@@ -868,6 +881,9 @@
         "title": "Actualizaciones",
         "autoDownload": "Descargar automáticamente las actualizaciones en segundo plano",
         "autoDownloadHint": "Si está activado, las nuevas versiones se descargan en silencio y se te pide reiniciar. Si está desactivado, tú decides si descargar cada actualización.",
+        "checkEnabled": "Buscar actualizaciones en segundo plano",
+        "checkEnabledHint": "Aproximadamente una vez por hora, MailCopilot pregunta a nuestro servidor de actualizaciones si hay una versión nueva. Es una solicitud HTTPS normal: el servidor ve tu dirección IP y el tipo de sistema operativo y de procesador, y nada sobre tu correo, tus cuentas o tu uso. Si está desactivado, MailCopilot no inicia nuevas búsquedas por su cuenta (una ya en curso puede terminar): usa «Buscar actualizaciones» cuando quieras.",
+        "autoDownloadNeedsCheck": "La búsqueda en segundo plano está desactivada, así que no se inicia ninguna descarga automática nueva (una ya en curso puede terminar): las actualizaciones solo se encuentran al pulsar «Buscar actualizaciones», y tú decides si descargarlas. Este ajuste vuelve a aplicarse cuando se activa la búsqueda en segundo plano.",
         "cannotSelfUpdateHint": "La carpeta que contiene la aplicación no admite escritura, así que la actualización no puede instalarse en el sitio. Descarga la nueva versión manualmente o mueve la aplicación a una carpeta propia.",
         "cannotSelfUpdateNoTarget": "Esta compilación no puede reemplazarse a sí misma (no se está ejecutando como AppImage ni como paquete del sistema). Descarga la nueva versión manualmente desde el sitio web.",
         "cannotSelfUpdateUnknown": "Esta instalación no puede actualizarse automáticamente. Descarga la nueva versión manualmente desde el sitio web.",
@@ -877,9 +893,9 @@
         "downloadVersion": "Descargar {{version}}",
         "downloadingPercent": "Descargando… {{percent}} %",
         "restartToInstall": "Reiniciar para instalar",
-        "errorNetwork": "Error de red — inténtalo de nuevo cuando estés en línea",
-        "errorPermission": "Permiso denegado — se requiere administrador",
-        "errorUnknown": "Error de actualización — consulta los registros para más detalles",
+        "errorNetwork": "Error de red. Inténtalo de nuevo cuando estés en línea",
+        "errorPermission": "Permiso denegado, se requiere administrador",
+        "errorUnknown": "Error de actualización. Consulta los registros para más detalles",
         "unsupportedDev": "Las actualizaciones están desactivadas en esta compilación"
       }
     }
@@ -906,7 +922,12 @@
       "aiPrompts": "El texto de las peticiones a la IA y de sus respuestas"
     },
     "changeLater": "Puede cambiar esta decisión en cualquier momento: Ajustes → Acerca de.",
-    "learnMore": "Qué se recopila — página de privacidad",
+    "learnMore": "Qué se recopila: página de privacidad",
+    "updates": {
+      "title": "Actualizaciones",
+      "body": "MailCopilot busca versiones nuevas en segundo plano, aproximadamente una vez por hora. Cada búsqueda es una solicitud normal a nuestro servidor de actualizaciones, que ve su dirección IP y el tipo de sistema operativo y de procesador, y nada sobre su correo, sus cuentas o su uso. Esto es independiente de la pregunta sobre diagnósticos: los botones de abajo responden solo a esa. Puede cambiarlo en cualquier momento: Ajustes → Acerca de.",
+      "checkbox": "Buscar actualizaciones en segundo plano"
+    },
     "allow": "Permitir",
     "deny": "No permitir"
   },
@@ -990,11 +1011,15 @@
       "imapSmtp": "IMAP: {{imap}}, SMTP: {{smtp}}",
       "imapOnly": "IMAP: {{error}}",
       "smtpOnly": "SMTP: {{error}}",
+      "tlsPinFetch": "No se pudo obtener el certificado TLS: {{error}}",
       "enterEmailForAutoconfig": "Ingrese el correo para ejecutar la configuración automática",
       "autoconfigNotFound": "No se pudieron detectar los ajustes del servidor automáticamente",
       "autoconfigFailed": "Error de configuración automática: {{error}}",
-      "tlsPinFetch": "No se pudo obtener el certificado TLS: {{error}}",
       "googleOAuthFailed": "Error en la autenticación de Google",
+      "googleNewMailboxClosed": "Esta versión no conecta buzones nuevos con el inicio de sesión de Google. Añada esta dirección de Gmail con una contraseña de aplicación: elija Gmail de nuevo para ver los pasos.",
+      "googleAccountMismatch": "Esa cuenta de Google no es {{email}}, así que el buzón no se ha modificado. Inicie sesión con la misma dirección que está reconectando.",
+      "googleNotConfigured": "El inicio de sesión de Google no está disponible: esta versión no incluye un cliente de Google OAuth.",
+      "googleMailboxUnavailable": "Este buzón inicia sesión con Google, pero esta versión no incluye un cliente de Google OAuth, por lo que no se puede reconectar aquí.",
       "microsoftOAuthFailed": "Error en la autenticación de Microsoft"
     },
     "wizard": {
@@ -1004,6 +1029,16 @@
       "stepProvider": {
         "title": "Agregar cuenta de correo",
         "hint": "Elija su proveedor de correo electrónico"
+      },
+      "stepGmailPassword": {
+        "title": "Conectar Gmail con una contraseña de aplicación",
+        "intro": "Los buzones nuevos de Gmail se conectan por IMAP/SMTP con una contraseña de aplicación, no con el inicio de sesión de Google. Los buzones que ya inician sesión con Google siguen funcionando.",
+        "step1": "Active la verificación en dos pasos en su cuenta de Google: las contraseñas de aplicación la requieren.",
+        "step2": "Cree una contraseña de aplicación para MailCopilot en su cuenta de Google.",
+        "step3": "En la pantalla siguiente, introduzca su dirección de Gmail y la contraseña de aplicación de 16 caracteres (no su contraseña habitual de Google).",
+        "orgNote": "Si no aparece la opción de contraseñas de aplicación, puede que su cuenta la gestione una organización, use la Protección avanzada o solo permita llaves de seguridad en la verificación en dos pasos. En esos casos las contraseñas de aplicación no están disponibles.",
+        "openHelp": "Abrir las instrucciones de Google",
+        "openFaq": "Si no aparece la opción"
       },
       "stepType": {
         "title": "Agregar cuenta de correo",
@@ -1018,7 +1053,8 @@
       "provider": {
         "gmail": {
           "label": "Gmail",
-          "desc": "Iniciar sesión con Google OAuth"
+          "desc": "Iniciar sesión con Google OAuth",
+          "descAppPassword": "Conectar con una contraseña de aplicación"
         },
         "outlook": {
           "label": "Outlook / Microsoft 365",
@@ -1164,6 +1200,13 @@
     "clearSelection": "Borrar selección",
     "commandPalette": "Abrir paleta de comandos",
     "showHelp": "Mostrar atajos de teclado",
+    "threadTitle": "Dentro de la conversación",
+    "threadNextPrev": "Mensaje siguiente / anterior en la conversación",
+    "threadToggle": "Expandir / contraer el mensaje seleccionado",
+    "threadReply": "Responder al mensaje seleccionado",
+    "threadReplyAll": "Responder a todos en el mensaje seleccionado",
+    "threadForward": "Reenviar el mensaje seleccionado",
+    "threadExit": "Salir de la navegación por la conversación",
     "contextMenuTitle": "Menú contextual",
     "contextMenuHint": "Acciones rápidas en el mensaje (responder, archivar, mover…)"
   },
@@ -1206,6 +1249,13 @@
       "placeholder": "Pregunte sobre su correo...",
       "send": "Enviar",
       "sources": "Fuentes",
+      "sourcesShowAll": "Todas las fuentes ({{count}})",
+      "sourcesCollapse": "Contraer",
+      "sourceUnconfirmed": "sin confirmar",
+      "sourceUnconfirmedTooltip": "Sin confirmar: la aplicación no emitió este enlace en esta conversación, por lo que no se puede abrir.",
+      "sourceNoSubject": "Los detalles del mensaje no están disponibles",
+      "sourceNotFound": "Mensaje no encontrado",
+      "indexIncomplete": "Los resultados pueden estar incompletos: el correo aún se está indexando.",
       "costTooltip": "Costo de la solicitud: {{cost}}",
       "sessionCostTooltip": "Costo de la sesión: {{cost}}"
     },
@@ -1277,7 +1327,7 @@
       "applied": "Aplicado",
       "cancel": "Cancelar",
       "account": "{{email}}",
-      "accountFallback": "Cuenta #{{accountId}}",
+      "accountFallback": "Un buzón que ya no está disponible",
       "crossAccount_one": "{{count}} cuenta",
       "crossAccount_other": "{{count}} cuentas",
       "folder": "Carpeta: {{folder}}",
@@ -1296,7 +1346,7 @@
         "unsubscribe": "Cancelar suscripción",
         "send_email": "Enviar correo",
         "move_email": "Mover correos",
-        "snooze_email": "Posponer correos",
+        "snooze_email": "Posponer correos hasta {{when}}",
         "unsnooze_email": "Cancelar posposición",
         "flag_email": {
           "star": "Marcar con estrella",
@@ -1306,7 +1356,7 @@
           "add": "Añadir a «Leer más tarde»",
           "remove": "Quitar de «Leer más tarde»"
         },
-        "add_followup": "Añadir recordatorio",
+        "add_followup": "Añadir recordatorio para el {{when}}",
         "dismiss_followup": "Cerrar recordatorio",
         "create_mail_rule": "Crear regla",
         "update_mail_rule": "Actualizar regla",
@@ -1326,7 +1376,6 @@
       "policy_allow": "Permitir siempre",
       "policy_allow_hint": "La IA puede llamar libremente a herramientas web incluso con contenido de correo en el contexto.",
       "policy_allow_warning": "Advertencia: la IA puede enviar contenido de correo a servicios externos.",
-      "shieldTooltip": "El acceso web de la IA está interceptado: cada llamada saliente requiere su aprobación",
       "confirmTitle": "La IA quiere acceder a Internet",
       "confirmAllow": "Permitir",
       "confirmDeny": "Denegar",
@@ -1335,7 +1384,7 @@
         "webFetch": "Obtener URL:",
         "externalTool": "Llamada a herramienta externa"
       },
-      "timeout": "Tiempo de espera agotado — acceso denegado"
+      "timeout": "Tiempo de espera agotado, acceso denegado"
     },
     "chips": {
       "summarize": "Resumir",
@@ -1371,7 +1420,9 @@
       "actionNotPrepared": "No se preparó ninguna acción, así que no hay botón de confirmación y no se ha cambiado nada. Pídelo de nuevo indicando los correos afectados.",
       "offline": "El asistente IA no está disponible sin conexión.",
       "timeout": "Tiempo de espera agotado. Intente de nuevo.",
-      "changeProvider": "Cambiar proveedor"
+      "changeProvider": "Cambiar proveedor",
+      "modelUnavailable": "El modelo {{model}} no está disponible en el proveedor. Elija otro en Ajustes → IA.",
+      "endpointNotFound": "El servidor respondió «no encontrado» a esta solicitud. Compruebe la dirección del servidor en Ajustes → IA."
     },
     "prompts": {
       "summarize": "Resume este correo",
@@ -1445,7 +1496,7 @@
       },
       "consentMatrix": {
         "title": "Funciones de IA por buzón",
-        "help": "Cada función de IA se pide por separado y está desactivada hasta que usted la active. Una casilla marcada solo permite ofrecer la función en ese buzón: nada se resume, redacta, revisa ni traduce hasta que lo pida.",
+        "help": "Cada función de IA se activa por separado y está desactivada por defecto. Una casilla marcada solo permite ofrecer la función en ese buzón. No se ejecuta nada hasta que lo pida.",
         "accountColumn": "Buzón",
         "noAccounts": "Añada un buzón para elegir qué funciones de IA puede usar.",
         "cellLabel": "«{{feature}}» en {{account}}",
@@ -1472,7 +1523,19 @@
       "translate": {
         "title": "Traducción con IA",
         "label": "Permitir traducir los mensajes recibidos y tus propios borradores con IA",
-        "help": "Añade un botón Traducir encima del mensaje que estás leyendo. Nada se traduce solo: solo se llama al proveedor cuando lo pulsas, y el original siempre está a un clic. La traducción se muestra como texto plano y nunca sustituye al mensaje guardado. El mismo botón aparece en la ventana de redacción para el borrador que estás escribiendo: MailCopilot envía solo el texto que has escrito tú — una cita, un encabezado de reenvío o una firma que reconozca no entran en la petición y vuelven sin cambios. Ese reconocimiento no es completo: algunos estilos de cita de otros programas de correo no llevan ninguna marca que MailCopilot pueda ver y, en ese caso, se envía el borrador entero. Aquí tampoco se traduce nada solo: el resultado aparece en un panel de comparación junto a tu borrador y lo sustituye únicamente si tú lo decides. Desactivado de forma predeterminada; se activa por cuenta."
+        "help": "Añade un botón Traducir encima del mensaje abierto y en la ventana de redacción. La traducción solo empieza cuando lo pulsas. El formato y las imágenes no se traducen. De un borrador solo se envía tu propio texto; las citas, los encabezados de reenvío y las firmas se quedan fuera cuando se reconocen. Algunos estilos de cita de otros programas de correo no se reconocen y entonces se envía el borrador entero. El resultado se abre en un panel junto al borrador y lo sustituye solo si tú lo eliges. Desactivado de forma predeterminada; se activa por cuenta."
+      },
+      "modelCustom": "Otro modelo…",
+      "modelFromList": "Elegir de la lista",
+      "modelRefresh": "Actualizar la lista de modelos",
+      "modelListError": {
+        "no_key": "Introduzca y compruebe la clave de API para cargar la lista de modelos.",
+        "invalid_key": "El proveedor rechazó la clave, no se cargó la lista de modelos.",
+        "store_unavailable": "El almacén de claves no responde, no se cargó la lista de modelos.",
+        "destination_not_approved": "La dirección del servidor no fue confirmada, no se cargó la lista de modelos.",
+        "network": "Sin conexión con el proveedor. Puede escribir el identificador del modelo a mano.",
+        "timeout": "El proveedor no respondió a tiempo. Puede escribir el identificador del modelo a mano.",
+        "provider": "El proveedor no devolvió una lista de modelos. Puede escribir el identificador del modelo a mano."
       }
     },
     "threadSummary": {
@@ -1494,7 +1557,7 @@
         "formal": "Formal",
         "grammar": "Corregir gramática"
       },
-      "presetTitle": "{{label}} — reescribe su texto entero; el resultado se acepta o se descarta de una vez.",
+      "presetTitle": "{{label}}: reescribe su texto entero; el resultado se acepta o se descarta de una vez.",
       "diff": {
         "title": "Revisar la reescritura de IA",
         "before": "Antes",
@@ -1517,12 +1580,12 @@
         "noProvider": "Configura un proveedor de IA en Ajustes para reescribir borradores.",
         "providerError": "No se pudo reescribir este borrador ahora mismo.",
         "emptyInput": "Escribe algo de texto primero y luego elige una acción rápida.",
-        "tooLong": "Este borrador es demasiado largo para reescribirlo de una vez y no hay forma de reescribir solo una selección: MailCopilot siempre toma todo su propio texto. Acorte el borrador, o corte una parte, reescriba lo que quede y vuelva a pegar la parte cortada. Si su propio texto parece corto, es posible que MailCopilot no haya detectado dónde empieza un mensaje citado y lo haya contado junto con el suyo.",
+        "tooLong": "Este borrador es demasiado largo para reescribirlo de una vez, y una selección no se puede reescribir por separado: MailCopilot siempre toma todo su propio texto. Acorte el borrador, o corte una parte, reescriba lo que quede y vuelva a pegar la parte cortada. Si su texto parece corto, es posible que no se haya reconocido el mensaje citado y se haya contado con él.",
         "noOwnText": "Las acciones rápidas solo reescriben su propio texto: el mensaje citado y su firma quedan intactos. Escriba algo encima de la cita primero."
       },
       "proofread": {
         "button": "Revisar el texto",
-        "buttonTitle": "Revisar el texto — las correcciones se enumeran una a una y usted acepta cada una por separado.",
+        "buttonTitle": "Revisar el texto: las correcciones se enumeran una a una y usted acepta cada una por separado.",
         "disabledHint": "La revisión de borradores con IA está desactivada para este buzón. Actívela en Ajustes → IA.",
         "checking": "Revisando…",
         "title": "Correcciones sugeridas",
@@ -1548,7 +1611,7 @@
           "notEnabled": "Activa la revisión con IA para esta cuenta en Ajustes para revisar tu texto.",
           "noOwnText": "La revisión solo comprueba tu propio texto: el mensaje citado y tu firma quedan intactos. Escribe algo encima de la cita primero.",
           "emptyInput": "Escribe algo de texto primero y luego ejecuta la revisión.",
-          "tooLong": "Este borrador es demasiado largo para revisarlo de una vez y no hay forma de revisar solo una selección: MailCopilot siempre toma todo tu propio texto. Acorta el borrador, o corta una parte, revisa lo que quede y vuelve a pegar la parte cortada. Si tu propio texto parece corto, es posible que MailCopilot no haya detectado dónde empieza un mensaje citado y lo haya contado junto con el tuyo.",
+          "tooLong": "Este borrador es demasiado largo para revisarlo de una vez, y una selección no se puede revisar por separado: MailCopilot siempre toma todo tu propio texto. Acorta el borrador, o corta una parte, revisa lo que quede y vuelve a pegar la parte cortada. Si tu texto parece corto, es posible que no se haya reconocido el mensaje citado y se haya contado con él.",
           "budget": "Se alcanzó el presupuesto diario de IA: la revisión se pausa hasta que se restablezca.",
           "noProvider": "Configura un proveedor de IA en Ajustes para revisar borradores.",
           "providerError": "No se pudo revisar este borrador ahora mismo."
@@ -1566,11 +1629,11 @@
           "budget": "El presupuesto de IA de este periodo se ha agotado. Auméntelo en Ajustes → IA o espere al siguiente periodo.",
           "noProvider": "Todavía no hay ningún proveedor de IA configurado. Añada uno en Ajustes → IA.",
           "providerError": "El proveedor de IA no devolvió ninguna traducción. Inténtelo de nuevo.",
-          "answerTooLong": "La traducción no cabe en el límite de respuesta del proveedor de IA: ha llegado cortada y por eso no se muestra. Otro intento terminaría igual: ni este borrador ni el límite han cambiado. Acorte su propio texto, o corte una parte, traduzca lo que quede y vuelva a pegar la parte cortada.",
-          "emptyInput": "Todavía no hay nada que traducir: escriba algo primero.",
-          "tooLong": "Este borrador es demasiado largo para traducirlo de una vez y no hay forma de traducir solo una selección: MailCopilot siempre toma todo su propio texto. Acorte el borrador, o corte una parte, traduzca lo que quede y vuelva a pegar la parte cortada. Si su propio texto parece corto, es posible que MailCopilot no haya detectado dónde empieza un mensaje citado y lo haya contado junto con el suyo.",
+          "answerTooLong": "La traducción superó el límite de respuesta del proveedor y no se muestra. Acorte su texto e inténtelo de nuevo.",
+          "emptyInput": "Escriba primero un texto.",
+          "tooLong": "Este borrador es demasiado largo para traducirlo. Acórtelo e inténtelo de nuevo.",
           "optOut": "La traducción está desactivada para esta cuenta. Actívela en Ajustes → IA → Traducir mensajes.",
-          "noOwnText": "Su borrador solo contiene texto citado y una firma. Escriba su propio texto encima de la cita: las citas y las firmas nunca se traducen."
+          "noOwnText": "El borrador solo contiene texto citado y una firma. Escriba su texto encima de la cita."
         }
       }
     },
@@ -1668,11 +1731,11 @@
     "endpointLabel": "Dirección del servicio de IA",
     "proxyLabel": "Proxy para las solicitudes de IA",
     "endpointRisk": "Cada solicitud de IA a esta dirección lleva su clave de API, así que quien la controle recibirá esa clave y todo lo que envíe el asistente.",
-    "endpointRiskCleartext": "Cada solicitud de IA a esta dirección lleva su clave de API, así que quien la controle recibirá esa clave y todo lo que envíe el asistente. La dirección empieza por http:// y no por https://, de modo que esas solicitudes no van cifradas: cualquiera en el trayecto de red puede leerlas, incluido un proxy.",
-    "endpointRiskInactive": "Esta dirección solo se usa cuando el proveedor de IA es un servicio compatible con OpenAI, que no es el proveedor en uso ahora mismo. Si se selecciona ese proveedor más adelante, cada solicitud de IA a esta dirección llevará su clave de API, así que quien la controle recibiría esa clave y todo lo que envíe el asistente.",
-    "endpointRiskInactiveCleartext": "Esta dirección solo se usa cuando el proveedor de IA es un servicio compatible con OpenAI, que no es el proveedor en uso ahora mismo. Si se selecciona ese proveedor más adelante, cada solicitud de IA a esta dirección llevará su clave de API, así que quien la controle recibiría esa clave y todo lo que envíe el asistente. Además, la dirección empieza por http:// y no por https://, de modo que esas solicitudes no irían cifradas: cualquiera en el trayecto de red podría leerlas, incluido un proxy.",
+    "endpointRiskCleartext": "Cada solicitud de IA a esta dirección lleva su clave de API, así que quien la controle recibirá esa clave y todo lo que envíe el asistente. La dirección empieza por http:// (sin https://), de modo que esas solicitudes no van cifradas: cualquiera en el trayecto de red puede leerlas, incluido un proxy.",
+    "endpointRiskInactive": "Esta dirección solo se usa cuando el proveedor de IA es un servicio compatible con OpenAI, y ahora mismo está en uso otro proveedor. Si se selecciona ese proveedor más adelante, cada solicitud de IA a esta dirección llevará su clave de API, así que quien la controle recibiría esa clave y todo lo que envíe el asistente.",
+    "endpointRiskInactiveCleartext": "Esta dirección solo se usa cuando el proveedor de IA es un servicio compatible con OpenAI, y ahora mismo está en uso otro proveedor. Si se selecciona ese proveedor más adelante, cada solicitud de IA a esta dirección llevará su clave de API, así que quien la controle recibiría esa clave y todo lo que envíe el asistente. Además, la dirección empieza por http:// (sin https://), de modo que esas solicitudes no irían cifradas: cualquiera en el trayecto de red podría leerlas, incluido un proxy.",
     "proxyRisk": "Todas las solicitudes de IA pasarán por este proxy, así que quien lo controle verá a qué direcciones se conecta, cuánto y con qué frecuencia. Solo podrá leer su clave de API y el contenido de los mensajes si el proxy intercepta las conexiones cifradas con un certificado en el que este equipo confía.",
-    "proxyRiskCleartext": "Todas las solicitudes de IA pasarán por este proxy y la dirección del servicio de IA empieza por http:// y no por https://, de modo que esas solicitudes no van cifradas. Por tanto, quien controle el proxy podrá leer su clave de API y el contenido de los mensajes, no solo ver a qué direcciones se conecta.",
+    "proxyRiskCleartext": "Todas las solicitudes de IA pasarán por este proxy y la dirección del servicio de IA empieza por http:// (sin https://), de modo que esas solicitudes no van cifradas. Quien controle el proxy verá a qué direcciones se conecta y podrá leer su clave de API y el contenido de los mensajes.",
     "currentValue": "Ahora",
     "newValue": "Nueva",
     "directValue": "sin proxy (conexión directa)",

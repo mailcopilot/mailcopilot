@@ -226,7 +226,14 @@ export default function Root() {
     // exists — the consent question has to come before any of that (AC (c)/AC4).
     if (consent.phase === 'checking') return null
     if (consent.phase === 'required') {
-      return <TelemetryConsentDialog submitting={consent.submitting} onDecide={consent.decide} />
+      return (
+        <TelemetryConsentDialog
+          submitting={consent.submitting}
+          onDecide={consent.decide}
+          updateCheckEnabled={consent.updateCheckEnabled}
+          onUpdateCheckChange={consent.setUpdateCheckEnabled}
+        />
+      )
     }
     // `resolved` AND `unresolved` (§2.236). The app renders either way — mail is
     // never held hostage behind a modal (GDPR art. 7(4)) — but the two are not

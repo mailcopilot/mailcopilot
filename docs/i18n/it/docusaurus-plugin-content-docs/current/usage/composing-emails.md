@@ -28,6 +28,8 @@ Clicca su **Allega** o trascina i file. Massimo: 25 MB per file.
 
 Rispondi (**r**), Rispondi a tutti (**a**), Inoltra (**f**).
 
+Le risposte (Rispondi e Rispondi a tutti) portano le intestazioni standard `In-Reply-To` e `References`, che puntano al messaggio a cui rispondi; così il client di posta del destinatario inserisce la tua risposta nella stessa conversazione invece di aprirne una nuova. Gli inoltri non le portano. Se il messaggio originale non ha l'intestazione `Message-ID` o non è più nella cache locale, la risposta viene comunque inviata, solo senza queste intestazioni. Scegliere un altro mittente nella finestra di scrittura non cambia ciò a cui stai rispondendo, quindi le intestazioni restano. Anche una risposta salvata come bozza le conserva: la bozza memorizza `In-Reply-To` e `References`, e riaprendola da **Bozze** e inviandola viene collocata nella conversazione come prima, finché il messaggio originale è nella cache locale.
+
 ## Bozze
 
 Salvataggio automatico locale e nella cartella Bozze IMAP.

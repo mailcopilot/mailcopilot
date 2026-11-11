@@ -1,6 +1,7 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
   GOOGLE_OAUTH_UNCONFIGURED_MESSAGE,
+  areNewGoogleMailboxesAllowed,
   getGoogleOAuthCredentials,
   isGoogleOAuthConfigured,
   requireGoogleOAuthCredentials,
@@ -112,5 +113,20 @@ describe('requireGoogleOAuthCredentials', () => {
   it('returns the credentials when configured', () => {
     setEnv({ MAILCOPILOT_GOOGLE_CLIENT_ID: FAKE_ENV_ID, MAILCOPILOT_GOOGLE_CLIENT_SECRET: FAKE_ENV_SECRET })
     expect(requireGoogleOAuthCredentials()).toEqual({ clientId: FAKE_ENV_ID, clientSecret: FAKE_ENV_SECRET })
+  })
+})
+
+describe('areNewGoogleMailboxesAllowed', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('is closed when the build-time define is undeclared (never open by omission)', () => {
+    expect(areNewGoogleMailboxesAllowed()).toBe(false)
+  })
+
+  it('follows the baked flag, read on every call', () => {
+    vi.stubGlobal('__GOOGLE_NEW_MAILBOXES__', true)
+    expect(areNewGoogleMailboxesAllowed()).toBe(true)
+    vi.stubGlobal('__GOOGLE_NEW_MAILBOXES__', false)
+    expect(areNewGoogleMailboxesAllowed()).toBe(false)
   })
 })

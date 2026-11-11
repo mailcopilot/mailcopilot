@@ -80,16 +80,13 @@ import { captureException } from '../sentry'
  * while `TranslateMessageRequest.sourceLang` is documented as precisely the
  * field "a user who disagrees with that caption" states themselves.
  *
- * So there are two doors into the same picker, and they never both show:
+ * So the picker is reachable through one link, {@link UseMailTranslationResult.canRestateSourceLang},
+ * shown next to the translation notice whether the label is there or missing
+ * (it used to appear unprompted when the label was missing, with a paragraph of
+ * explanation; a short link says the same without taking space).
  *
- *   - {@link UseMailTranslationResult.needsLanguageChoice} — the label is
- *     missing, so the picker is offered unprompted (§3.3.B6.f1).
- *   - {@link UseMailTranslationResult.canRestateSourceLang} — the label is
- *     there, so the picker is one disclosure click away from the caption it
- *     would correct.
- *
- * Both are OFFERS. The translation is on screen before either appears and stays
- * on screen while they are open; neither blocks anything. Answering re-requests,
+ * It is an OFFER. The translation is on screen before either appears and stays
+ * on screen while they are open; it blocks nothing. Answering re-requests,
  * and because the translation cache is keyed on the hash of the SOURCE TEXT —
  * the language is not part of that key — the same text comes straight back with
  * the user's own label. No provider call, nothing to pay for, which is why
@@ -199,9 +196,9 @@ export type UseMailTranslationResult = {
    */
   needsLanguageChoice: boolean
   /**
-   * True when a translation carries a source-language caption that the user
-   * could disagree with — i.e. the correction door described in the module
-   * docblock is worth offering (§3.3.B6.f2).
+   * True when the link that opens the source-language picker is worth showing:
+   * a translation is on screen, with a caption the reader may disagree with or
+   * without one (§3.3.B6.f2).
    *
    * Requires the translation to be the thing currently ON SCREEN: the control
    * is a correction of a caption, and the caption only exists next to the
@@ -213,9 +210,8 @@ export type UseMailTranslationResult = {
   /** Whether the disclosure opened by {@link toggleSourceChoice} is expanded. */
   sourceChoiceOpen: boolean
   /**
-   * True when the source-language picker should be on screen — through either
-   * door: offered unprompted because the caption is missing, or opened by the
-   * reader to correct a caption that is present.
+   * True when the source-language picker should be on screen: the reader opened
+   * it from the link while a translation is on screen.
    */
   sourceChoiceVisible: boolean
   /**
@@ -545,8 +541,7 @@ export function useMailTranslation({
   const readyTranslation = status === 'ready' ? translation : null
   const needsLanguageChoice = readyTranslation !== null && readyTranslation.sourceLang === null
   const showingTranslation = view === 'translation' && translation !== null
-  const sourceChoiceVisible =
-    needsLanguageChoice || (readyTranslation !== null && sourceChoiceOpen)
+  const sourceChoiceVisible = readyTranslation !== null && sourceChoiceOpen
 
   return {
     active,
@@ -561,11 +556,8 @@ export function useMailTranslation({
     targetLang,
     sourceLang,
     needsLanguageChoice,
-    // The two doors are mutually exclusive by construction (`=== null` vs
-    // `!== null` on the same caption), so the reader is never offered the same
-    // picker twice.
-    canRestateSourceLang:
-      readyTranslation !== null && readyTranslation.sourceLang !== null && showingTranslation,
+    // The link that opens the picker, offered with or without a caption.
+    canRestateSourceLang: readyTranslation !== null && showingTranslation,
     sourceChoiceOpen,
     // A disclosure flag alone can never put the picker on screen: without a
     // ready translation there is no caption to correct, and the settle paths

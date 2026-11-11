@@ -26,12 +26,12 @@ MailCopilot puede enviar una pequeña cantidad de datos de diagnóstico y de uso
 
 ## Consentimiento en el primer arranque
 
-La primera vez que inicias MailCopilot, antes de que se abra el asistente de configuración de cuenta, verás una pantalla de consentimiento titulada **¿Enviar datos de diagnóstico?**. Enumera qué se enviaría si lo permites y qué no se envía nunca, y ofrece dos botones del mismo tamaño: **Permitir** y **No permitir**. Ninguno de los dos está preseleccionado ni destacado, y no hay ninguna casilla premarcada -- tienes que hacer una elección activa.
+La primera vez que inicias MailCopilot, antes de que se abra el asistente de configuración de cuenta, verás una pantalla de consentimiento titulada **¿Enviar datos de diagnóstico?**. Enumera qué se enviaría si lo permites y qué no se envía nunca, y ofrece dos botones del mismo tamaño: **Permitir** y **No permitir**. Ninguno de los dos está preseleccionado ni destacado, y no hay ninguna casilla premarcada -- tienes que hacer una elección activa. La misma pantalla incluye además un bloque **Actualizaciones** independiente con una casilla **Buscar actualizaciones en segundo plano**, activada de forma predeterminada e independiente de tu respuesta sobre el diagnóstico -- consulta [Acerca de](../settings/about).
 
 De ahí se derivan varias cosas:
 
 - **No se recopila nada antes de que respondas, no solo que no se envía.** Los contadores y búferes de diagnóstico y de uso no se abren mientras el consentimiento está pendiente -- MailCopilot no acumula en silencio un rezago para enviarlo de golpe en cuanto lo permitas. Lo que ocurrió antes de tu respuesta simplemente desaparece; en el momento en que lo permites, el conteo empieza de cero desde ese instante (una medición de duración de sesión, por ejemplo, empieza a contar desde el momento del consentimiento, no desde el inicio de la aplicación).
-- **Cerrar la pantalla o pulsar Escape cuenta como "No permitir".** No hay forma de cerrar la pantalla y terminar habiendo consentido.
+- **Pulsar Escape cuenta como "No permitir".** Cerrar la ventana sin responder no registra nada: la pantalla vuelve en el siguiente inicio, mientras tanto no se recopila nada y, en una instalación completamente nueva, no se ejecuta ninguna búsqueda automática de actualizaciones hasta que respondas. No hay forma de cerrar la pantalla y terminar habiendo consentido.
 - **Tu decisión se guarda junto con la versión de esta divulgación.** MailCopilot solo vuelve a mostrar la pantalla si la lista de lo recopilado realmente se amplía -- una nueva categoría de datos, un nuevo destino, o un alcance más amplio que antes. Las actualizaciones normales de la aplicación, los ajustes de redacción y las correcciones de errores nunca provocan una nueva pregunta.
 - **Si ya habías desactivado el diagnóstico** en Configuración -> Acerca de antes de que existiera esta pantalla, esa negativa se respeta y no se te vuelve a preguntar. A todos los demás se les desactiva el diagnóstico automáticamente, y se les pregunta una vez en el siguiente inicio.
 - **Puedes cambiar de opinión en cualquier momento** en **Configuración -> Acerca de**. Hasta que respondas a la pregunta inicial, el interruptor allí se muestra apagado y deshabilitado, con una nota que explica que solo tendrá efecto una vez que respondas en la pantalla de consentimiento.
@@ -241,7 +241,7 @@ Lo que está garantizado es un evento `eml.parse_dispatch` por cada archivo EML 
 | --- | --- | --- | --- | --- |
 | `imap.cert_error` | event | sí (ventana 10 s) | `provider` | Una operación IMAP falló con un error TLS clasificado como de certificado (autofirmado, cadena no confiable, discrepancia de pin, discrepancia de nombre de host). |
 | `cert.recovery_dialog_shown` | event | no | `provider` | Se mostró el diálogo de recuperación de certificado para un host, como máximo una vez por ventana de storm-guard. |
-| `cert.trust_clicked` | event | no | `provider`, `pem` | Aceptaste un certificado presentado, guardando un pin TLS y disparando una resincronización de la cuenta. `pem` solo registra si el cuerpo del certificado se capturó junto con el pin, lo que determina si un servidor autofirmado puede seguir siendo de confianza en adelante. |
+| `cert.trust_clicked` | event | no | `provider`, `pem` | Aceptaste un certificado presentado, guardando un pin TLS y disparando una resincronización de la cuenta. `pem` solo registra si el cuerpo del certificado se capturó junto con el pin, lo que determina si un servidor autofirmado o con autoridad de certificación privada puede seguir siendo de confianza en adelante. |
 | `cert.trust_rejected` | event | no | `provider`, `reason` | Un intento de confianza no terminó con un pin guardado -- por ejemplo, rechazaste la confirmación, o el certificado que presentó el servidor no coincidía con el que mostraba el diálogo de recuperación. |
 | `cert.interception_notice_shown` | event | no | `provider` | Se mostró un aviso único de que la cadena de certificados de tu servidor de correo solo se verifica contra el almacén de certificados de tu sistema operativo, no contra la lista de raíces públicas incluida -- la firma de un antivirus o un proxy corporativo inspeccionando la conexión. |
 
@@ -336,7 +336,7 @@ Ninguno de estos tres eventos lleva un identificador de cuenta, dirección de co
 
 | Evento | Tipo | Agregado | Etiquetas | Propósito |
 | --- | --- | --- | --- | --- |
-| `update.check_triggered` | event | no | `source` | Se emitió una comprobación de actualizaciones, ya fuera por el temporizador horario en segundo plano o por tu clic en Configuración -> Acerca de. |
+| `update.check_triggered` | event | no | `source` | Se emitió una comprobación de actualizaciones, ya fuera por el temporizador horario en segundo plano (que solo funciona mientras la búsqueda de actualizaciones en segundo plano esté activada) o por tu clic en Configuración -> Acerca de. |
 | `update.check_result` | event | no | `result`, `error_class` | Terminó una comprobación de actualizaciones: al día, hay una actualización disponible, o falló. |
 | `update.download_started` | event | no | `source` | Comenzó una descarga de actualización, ya fuera automática o por tu clic. |
 | `update.download_completed` | event | no | — | La descarga de una actualización terminó con éxito y queda lista para instalarse en el próximo reinicio. |

@@ -70,7 +70,11 @@ const log = createLogger('SearchWorker')
 const REQUEST_TIMEOUT_MS = 120_000
 const SHUTDOWN_TIMEOUT_MS = 5_000
 
-class SearchWorkerClient {
+/**
+ * Exported so a second, independent client can exist: cancelling one instance
+ * terminates only its own worker.
+ */
+export class SearchWorkerClient {
   private worker: Worker | null = null
   private nextId = 1
   private pending = new Map<number, PendingRequest>()

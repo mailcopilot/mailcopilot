@@ -33,6 +33,14 @@ Queste informazioni sono utili per segnalare bug o verificare la compatibilità.
 
 La sezione **Aggiornamenti** consente di controllare come MailCopilot si mantiene aggiornato.
 
+### Cerca aggiornamenti in background
+
+Quando questa opzione è abilitata, MailCopilot cerca nuove versioni all'avvio e poi circa una volta all'ora. Ogni ricerca è una normale richiesta HTTPS al nostro server di aggiornamento per ottenere un piccolo file di metadati. Il server vede il vostro indirizzo IP e, dal nome del file richiesto, il tipo di sistema operativo e l'architettura del processore. La ricerca in sé non invia la versione di MailCopilot in uso, né viene inviato qualcosa sulla vostra posta, sui vostri account o sul vostro utilizzo. Il download di un aggiornamento, invece, rivela le versioni: i nomi dei file richiesti contengono numeri di versione e un download differenziale richiede anche il file block map della versione attualmente installata (nome del tipo `mailcopilot-<current-version>-setup.exe.blockmap` su Windows), il che indica al server quale versione è in esecuzione.
+
+Questa impostazione è **abilitata per impostazione predefinita**. Non è necessario riavviare: la disattivazione interrompe le nuove ricerche automatiche non appena salvate. Una ricerca o un download automatico che la libreria di aggiornamento ha già avviato può comunque completarsi (un download già iniziato non viene annullato; una ricerca può essere a metà della lettura della propria configurazione e ritenta più volte una connessione rifiutata). Viene proposta anche nella schermata del primo avvio, in un blocco **Aggiornamenti** separato dalla domanda sulla diagnostica e indipendente dalla vostra risposta. Le ricerche automatiche vengono trattenute solo su un'installazione del tutto nuova (un profilo senza una risposta precedente alla schermata del primo avvio e senza account di posta): lì attendono che la schermata del primo avvio riceva risposta, e chiuderla senza rispondere non registra nulla. Tutti i profili esistenti continuano a cercare, compreso uno che deve rispondere di nuovo alla schermata del primo avvio dopo una modifica dell'informativa. L'impostazione si trova qui, in **Impostazioni → Informazioni**.
+
+A parte questo, quando questa opzione è disabilitata, MailCopilot non contatta mai da solo il server di aggiornamento: né una ricerca all'avvio né ricerche ogni ora. Potete comunque usare in qualsiasi momento il pulsante **Controlla aggiornamenti** qui sotto.
+
 ### Scarica automaticamente gli aggiornamenti in background
 
 Quando questa opzione è abilitata, MailCopilot scarica silenziosamente le nuove versioni man mano che diventano disponibili. Una volta completato il download, viene chiesto di riavviare l'applicazione per applicare l'aggiornamento. Non è richiesta alcuna azione fino a quando non si è pronti al riavvio.
@@ -41,9 +49,11 @@ Quando questa opzione è disabilitata, MailCopilot notifica che è disponibile u
 
 Questa impostazione è **disabilitata per impostazione predefinita** (richiede attivazione esplicita). Abilitatela per consentire a MailCopilot di scaricare gli aggiornamenti senza intervento manuale.
 
+Questa opzione ha effetto solo finché **Cerca aggiornamenti in background** è abilitata, perché un download automatico non può avvenire senza una ricerca. Finché la ricerca in background è disattivata, la casella resta disponibile e una nota lo spiega; la vostra scelta viene conservata e torna ad applicarsi non appena la ricerca in background viene riattivata. In questo stato, una ricerca manuale che trova un aggiornamento mostra il pulsante **Scarica**, e non viene avviato alcun nuovo download automatico (uno già in corso può comunque completarsi).
+
 ### Controlla aggiornamenti
 
-Fate clic sul pulsante **Controlla aggiornamenti** per avviare manualmente una verifica in qualsiasi momento. Il pulsante e l'area di stato riflettono lo stato attuale del processo di aggiornamento:
+Fate clic sul pulsante **Controlla aggiornamenti** per avviare manualmente una verifica in qualsiasi momento. Funziona indipendentemente dal fatto che la ricerca in background sia abilitata, perché fare clic su di esso è una richiesta esplicita. Il pulsante e l'area di stato riflettono lo stato attuale del processo di aggiornamento:
 
 - **inattivo** — il pulsante **Controlla aggiornamenti** è visibile e pronto all'uso.
 - **Verifica…** — è in corso una verifica degli aggiornamenti; il pulsante è disabilitato fino al completamento.

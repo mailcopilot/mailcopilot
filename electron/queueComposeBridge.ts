@@ -33,6 +33,15 @@ export const queuedSendPayloadSchema = z.object({
   // 2.3-B: identity the user picked when authoring the send. Preserved
   // through cancel→edit so the re-opened Compose starts on the same alias.
   identityId: z.string().min(1).optional(),
+  // The reply pointer survives the queue so cancel→edit→send keeps threading
+  // (the resolved headers are re-derived from it on the next enqueue).
+  replyRef: z
+    .object({ accountId: z.number().int().positive(), folder: z.string().min(1), uid: z.number().int().positive() })
+    .optional(),
+  // A thread pointer restored for a reopened draft: threads, never archives.
+  threadRef: z
+    .object({ accountId: z.number().int().positive(), folder: z.string().min(1), uid: z.number().int().positive() })
+    .optional(),
 })
 
 /**
@@ -54,7 +63,8 @@ export function queueItemToComposeInit(raw: unknown, archiveRef?: ArchiveRef | n
     attachments: parsed.attachments,
     replyRef: archiveRef
       ? { accountId: archiveRef.accountId, folder: archiveRef.folder, uid: archiveRef.uid }
-      : undefined,
+      : parsed.replyRef,
+    threadRef: parsed.threadRef,
     identityId: parsed.identityId,
   }
 }

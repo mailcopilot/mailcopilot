@@ -20,8 +20,14 @@ import WindowTitlebar from './WindowTitlebar'
  *     deceptive pattern (EDPB Guidelines 03/2022 §3; GDPR art. 4(11) requires
  *     freely given consent).
  *   - No `autoFocus` on either button, so Enter cannot answer for the user.
- *   - No checkbox at all, therefore no pre-ticked one (CJEU Planet49 C-673/17:
- *     a pre-ticked box is not consent).
+ *   - No checkbox in the diagnostics question, therefore no pre-ticked one
+ *     (CJEU Planet49 C-673/17: a pre-ticked box is not consent). The ONE
+ *     checkbox on this screen belongs to a different question — the background
+ *     update check, which is on by default and is a notice with an off switch,
+ *     not a request for consent. It sits in its own block (`.consent-dialog-updates`)
+ *     outside the answer row, has its own heading, and neither answer button
+ *     changes it: declining diagnostics never touches it and vice versa. Do not
+ *     move it into the answer row or tie the two together.
  *   - No nudging copy ("recommended", "help us", emphasis on the upside).
  *   - Concrete disclosure: what is sent, what is never sent, and where the
  *     decision can be changed (GDPR art. 7(3) — withdrawal must be as easy as
@@ -69,6 +75,9 @@ type Props = {
   submitting: boolean
   /** Reports the click. `false` must be reachable in one click, like `true`. */
   onDecide: (granted: boolean) => void
+  /** Background update check option. Independent of the diagnostics answer. */
+  updateCheckEnabled: boolean
+  onUpdateCheckChange: (next: boolean) => void
 }
 
 /**
@@ -110,7 +119,7 @@ type Props = {
 const SENT_ITEMS = ['errors', 'versions', 'performance', 'usage', 'aiKeyStore', 'setup', 'installId'] as const
 const NEVER_ITEMS = ['bodies', 'addresses', 'attachments', 'searchQueries', 'aiPrompts'] as const
 
-export default function TelemetryConsentDialog({ submitting, onDecide }: Props) {
+export default function TelemetryConsentDialog({ submitting, onDecide, updateCheckEnabled, onUpdateCheckChange }: Props) {
   const { t } = useTranslation()
 
   const openPrivacyPage = useCallback(() => {
@@ -205,6 +214,24 @@ export default function TelemetryConsentDialog({ submitting, onDecide }: Props) 
               <ExternalLink size={12} style={{ verticalAlign: -1, marginLeft: 4 }} />
             </button>
           </div>
+        </div>
+
+        {/* A different question from the one the buttons answer, so it has its
+            own heading and sits outside the scroller (always visible) and
+            outside the answer row. See the header on why this is a checkbox. */}
+        <div className="consent-dialog-updates" data-testid="telemetry-consent-updates">
+          <div className="link-prompt-label">{t('telemetryConsent.updates.title')}</div>
+          <p className="consent-dialog-updates-text">{t('telemetryConsent.updates.body')}</p>
+          <label className="setting-check">
+            <input
+              type="checkbox"
+              data-testid="telemetry-consent-update-check"
+              checked={updateCheckEnabled}
+              disabled={submitting}
+              onChange={e => onUpdateCheckChange(e.target.checked)}
+            />
+            {t('telemetryConsent.updates.checkbox')}
+          </label>
         </div>
 
         {/* Equal weight by construction: same element, same (absent) class, same

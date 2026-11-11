@@ -59,3 +59,11 @@ Server search supports basic operators (`from:`, `to:`, `subject:`, `before:`, `
 ## Relevance Ranking
 
 Search results are ranked by relevance. Matches in the subject line rank higher than matches in the message body.
+
+## Asking the AI Assistant About Your Mail
+
+Search finds messages. If you would rather ask a question in plain words, use the AI assistant: open the chat panel from the sidebar.
+
+- **Same cache and index.** When the assistant searches your mail it uses the local cache and search index described on this page, so everything in [Search Completeness](#search-completeness) applies to its answers too: a message that is not indexed yet can be missed. When the index of a searched mailbox is still incomplete, a line under the answer says so.
+
+How the assistant works, what it sends to your AI provider and how it marks links to messages it did not receive are described in [AI Assistant](../ai-assistant#opening-the-ai-panel).

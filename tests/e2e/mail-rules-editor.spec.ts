@@ -72,7 +72,7 @@ test('mail rules editor: legacy `from` field stays visible with the display-name
     // The deprecated option is still offered while a condition uses it.
     await fieldTrigger.click()
     const listbox = settings.locator('[role="listbox"]')
-    await expect(listbox).toContainText('From — name or address (legacy)')
+    await expect(listbox).toContainText('From: name or address (legacy)')
     await settings.keyboard.press('Escape')
   } finally {
     await cleanupApp(ctx)
@@ -93,9 +93,9 @@ test('mail rules editor: a new rule defaults to from_address and never offers th
 
     await fieldTrigger.click()
     const listbox = settings.locator('[role="listbox"]')
-    await expect(listbox).toContainText('From — address')
-    await expect(listbox).toContainText('From — display name')
-    await expect(listbox).not.toContainText('From — name or address (legacy)')
+    await expect(listbox).toContainText('From: address')
+    await expect(listbox).toContainText('From: display name')
+    await expect(listbox).not.toContainText('From: name or address (legacy)')
     await settings.keyboard.press('Escape')
   } finally {
     await cleanupApp(ctx)
@@ -132,7 +132,7 @@ test('mail rules editor: switching the legacy field to from_address persists and
     await expect(settings.getByTestId('rule-display-name-caveat')).not.toBeVisible()
 
     await reopenedTrigger.click()
-    await expect(settings.locator('[role="listbox"]')).not.toContainText('From — name or address (legacy)')
+    await expect(settings.locator('[role="listbox"]')).not.toContainText('From: name or address (legacy)')
     await settings.keyboard.press('Escape')
   } finally {
     await cleanupApp(ctx)
@@ -289,7 +289,7 @@ test('mail rules editor: pairing the legacy `from` field with a destructive acti
     expect(dialogMessage).not.toContain('Please try again')
     expect(dialogMessage).toContain('not saved')
     expect(dialogMessage).toContain('Move to trash')
-    expect(dialogMessage).toContain('From — address')
+    expect(dialogMessage).toContain('From: address')
 
     // The rule was never persisted: the editor stays open on the rejected
     // state rather than discarding the user's edit or silently closing as if
@@ -339,17 +339,17 @@ test('mail rules editor: from_name carries the same refusal as the legacy field,
     await settings.locator('.modal-dialog').getByRole('button', { name: 'Save' }).click()
     await expect.poll(() => dialogMessage, { timeout: EXPECT_TIMEOUT }).not.toBe('')
 
-    // Decoded and field-specific — "From — display name", not the legacy
+    // Decoded and field-specific — "From: display name", not the legacy
     // field's label, and not the raw wire code or the generic fallback. If the
     // renderer ever hardcoded the legacy field's copy instead of reading
     // `condition.field`, this is the assertion that would catch it.
     expect(dialogMessage).not.toContain('MAIL_RULE_REFUSED')
     expect(dialogMessage).not.toContain('Please try again')
     expect(dialogMessage).toContain('not saved')
-    expect(dialogMessage).toContain('From — display name')
-    expect(dialogMessage).not.toContain('From — name or address (legacy)')
+    expect(dialogMessage).toContain('From: display name')
+    expect(dialogMessage).not.toContain('From: name or address (legacy)')
     expect(dialogMessage).toContain('Archive')
-    expect(dialogMessage).toContain('From — address')
+    expect(dialogMessage).toContain('From: address')
 
     await expect(settings.locator('.modal-dialog')).toBeVisible()
   } finally {

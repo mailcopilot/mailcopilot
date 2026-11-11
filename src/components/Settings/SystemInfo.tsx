@@ -101,9 +101,14 @@ type Props = {
   autoUpdateEnabled: boolean
   /** Setter — parent flips the unsavedChanges snapshot on user toggle. */
   onAutoUpdateEnabledChange: (next: boolean) => void
+  /** Controlled value — the background check switch; persisted like the one above. */
+  updateCheckEnabled: boolean
+  onUpdateCheckEnabledChange: (next: boolean) => void
 }
 
-export default function SystemInfo({ autoUpdateEnabled, onAutoUpdateEnabledChange }: Props) {
+export default function SystemInfo({
+  autoUpdateEnabled, onAutoUpdateEnabledChange, updateCheckEnabled, onUpdateCheckEnabledChange,
+}: Props) {
   const { t } = useTranslation()
   const [info, setInfo] = useState<SystemInfoPayload | null>(null)
   const [status, setStatus] = useState<CheckStatus>({ kind: 'idle' })
@@ -349,6 +354,20 @@ export default function SystemInfo({ autoUpdateEnabled, onAutoUpdateEnabledChang
         {t('settings.about.update.title')}
       </h4>
 
+      {/* Whether MailCopilot may contact the update server on its own. Main
+          enforces it (start check and hourly timer); the manual button below
+          is an explicit request and works either way. */}
+      <label className="setting-check">
+        <input
+          type="checkbox"
+          data-testid="settings-about-update-check"
+          checked={updateCheckEnabled}
+          onChange={e => onUpdateCheckEnabledChange(e.target.checked)}
+        />
+        {t('settings.about.update.checkEnabled')}
+      </label>
+      <p className="hint">{t('settings.about.update.checkEnabledHint')}</p>
+
       <label
         className="setting-check"
         title={selfUpdateWarning ?? undefined}
@@ -377,6 +396,13 @@ export default function SystemInfo({ autoUpdateEnabled, onAutoUpdateEnabledChang
       <p className="hint">
         {t('settings.about.update.autoDownloadHint')}
       </p>
+      {/* An automatic download cannot happen without a check. The preference
+          stays operable (and stored); it just has no effect while checks are off. */}
+      {!updateCheckEnabled && (
+        <p className="hint" data-testid="settings-about-auto-download-needs-check">
+          {t('settings.about.update.autoDownloadNeedsCheck')}
+        </p>
+      )}
 
       {/* Action button — state-machine driven */}
       <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

@@ -71,13 +71,26 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 /** Render and flush the titlebar's mount-time IPC so no state lands outside act(). */
-async function renderDialog(props: { submitting?: boolean; onDecide?: (granted: boolean) => void } = {}) {
+async function renderDialog(props: {
+  submitting?: boolean
+  onDecide?: (granted: boolean) => void
+  updateCheckEnabled?: boolean
+  onUpdateCheckChange?: (next: boolean) => void
+} = {}) {
   const onDecide = props.onDecide ?? vi.fn()
+  const onUpdateCheckChange = props.onUpdateCheckChange ?? vi.fn()
   let result!: RenderResult
   await act(async () => {
-    result = render(<TelemetryConsentDialog submitting={props.submitting ?? false} onDecide={onDecide} />)
+    result = render(
+      <TelemetryConsentDialog
+        submitting={props.submitting ?? false}
+        onDecide={onDecide}
+        updateCheckEnabled={props.updateCheckEnabled ?? true}
+        onUpdateCheckChange={onUpdateCheckChange}
+      />,
+    )
   })
-  return { onDecide, container: result.container }
+  return { onDecide, onUpdateCheckChange, container: result.container }
 }
 
 describe('TelemetryConsentDialog — no dark patterns (AC5)', () => {
@@ -104,9 +117,25 @@ describe('TelemetryConsentDialog — no dark patterns (AC5)', () => {
     expect(document.activeElement).toBe(document.body)
   })
 
-  it('contains no checkbox at all, so none can be pre-ticked', async () => {
+  it('keeps the diagnostics question free of checkboxes: the only one is the update option, outside the answer row', async () => {
     const { container } = await renderDialog()
-    expect(container.querySelectorAll('input')).toHaveLength(0)
+    const boxes = container.querySelectorAll('input')
+    expect(boxes).toHaveLength(1)
+    const updateBox = screen.getByTestId('telemetry-consent-update-check')
+    expect(boxes[0]).toBe(updateBox)
+    // Not in the answer row, not in the disclosure body: a block of its own.
+    expect(updateBox.closest('.confirm-dialog-actions')).toBeNull()
+    expect(updateBox.closest('.consent-dialog-body')).toBeNull()
+    expect(updateBox.closest('.consent-dialog-updates')).not.toBeNull()
+  })
+
+  it('shows the update option as passed in and reports a change without answering diagnostics', async () => {
+    const { onDecide, onUpdateCheckChange } = await renderDialog({ updateCheckEnabled: true })
+    const box = screen.getByTestId('telemetry-consent-update-check') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    fireEvent.click(box)
+    expect(onUpdateCheckChange).toHaveBeenCalledWith(false)
+    expect(onDecide).not.toHaveBeenCalled()
   })
 
   it('reports the click as a boolean decision', async () => {

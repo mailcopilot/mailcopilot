@@ -181,3 +181,54 @@ describe('Account testConnections() — 2026-08-27 error message composition', (
     expect(screen.queryByText(/SMTP:/)).not.toBeInTheDocument()
   })
 })
+
+describe('Account testConnections() — tagged results are shown as translated sentences', () => {
+  it('replaces a starttls_required tag on the IMAP half with its sentence and drops the raw text', async () => {
+    imapResult = { ok: false, error: '[mcerr:starttls_required] ERR_STARTTLS_REQUIRED: the server does not offer an encrypted connection (STARTTLS); nothing was sent' }
+    smtpResult = { ok: true }
+
+    await renderAndTest()
+
+    const sentence = lookup('app.errors.presented.starttls_required')!
+    await waitFor(() => {
+      expect(screen.getByText(`IMAP: ${sentence}`)).toBeInTheDocument()
+    })
+    expect(document.body.textContent).not.toContain('mcerr')
+    expect(document.body.textContent).not.toContain('ERR_STARTTLS_REQUIRED')
+  })
+
+  it('translates each half independently when both fail and only one is tagged', async () => {
+    imapResult = { ok: false, error: 'Invalid credentials' }
+    smtpResult = { ok: false, error: '[mcerr:starttls_required] ERR_STARTTLS_REQUIRED: x' }
+
+    await renderAndTest()
+
+    const sentence = lookup('app.errors.presented.starttls_required')!
+    await waitFor(() => {
+      expect(screen.getByText(`IMAP: Invalid credentials, SMTP: ${sentence}`)).toBeInTheDocument()
+    })
+  })
+
+  it('leaves an untagged SMTP refusal reason untouched', async () => {
+    imapResult = { ok: true }
+    smtpResult = { ok: false, error: '550 5.7.1 relay denied' }
+
+    await renderAndTest()
+
+    await waitFor(() => {
+      expect(screen.getByText('SMTP: 550 5.7.1 relay denied')).toBeInTheDocument()
+    })
+  })
+
+  it('falls back to the generic word when the error is blank', async () => {
+    imapResult = { ok: false, error: '   ' }
+    smtpResult = { ok: true }
+
+    await renderAndTest()
+
+    await waitFor(() => {
+      expect(screen.getByText(`IMAP: ${lookup('common.error')!}`)).toBeInTheDocument()
+    })
+  })
+})
+

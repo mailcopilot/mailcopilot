@@ -30,6 +30,8 @@ Cliquez sur **Joindre** ou glissez-deposez des fichiers. Taille maximale : 25 Mo
 - **Repondre a tous** (**a**) -- avec tous les destinataires.
 - **Transferer** (**f**) -- avec le message cite et "Fwd:" dans l'objet.
 
+Les réponses (Répondre et Répondre à tous) portent les en-têtes standard `In-Reply-To` et `References` qui désignent le message auquel vous répondez ; le client de messagerie du destinataire range ainsi votre réponse dans la même conversation au lieu d'en ouvrir une nouvelle. Les transferts n'en portent pas. Si le message d'origine n'a pas d'en-tête `Message-ID` ou n'est plus dans le cache local, la réponse est quand même envoyée, simplement sans ces en-têtes. Choisir un autre expéditeur dans la fenêtre de rédaction ne change pas ce à quoi vous répondez : les en-têtes restent. Une réponse enregistrée comme brouillon les conserve aussi : le brouillon stocke `In-Reply-To` et `References`, et le rouvrir depuis **Brouillons** puis l'envoyer range la réponse dans la bonne conversation tant que le message d'origine est dans le cache local.
+
 ## Brouillons et sauvegarde automatique
 
 Les brouillons sont sauvegardes automatiquement en local et dans votre dossier Brouillons IMAP.

@@ -296,9 +296,9 @@ export function applyTrayEnabled(enabled: boolean): void {
  * Drop every trace of an account from the background-mail state (security
  * review MEDIUM-2).
  *
- * Account ids are REUSED (`max + 1`), which is the §2.165 lesson in a different
- * place: a mark left behind under a deleted id becomes the starting watermark
- * of the next account to take that id, and a notification still queued for it
+ * Account ids used to be REUSED (`max + 1`; monotonic now, so this is defence in depth), the
+ * §2.165 lesson in a different place: a mark left behind under a deleted id would become the
+ * starting watermark of the next account to take that id, and a notification still queued for it
  * would show the removed mailbox's subject and open a ref into it.
  */
 export function forgetAccountBackgroundState(accountId: number): void {

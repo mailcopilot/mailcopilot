@@ -15,6 +15,8 @@ You can navigate between messages using the keyboard:
 - **o** or **Enter** -- open message
 - **u** -- back to list
 
+These move between messages in the list. While a conversation with more than one message is open, **j** / **k** instead move between its cards -- see [Inside a Conversation](../keyboard-shortcuts#inside-a-conversation) for the full set of shortcuts that apply there.
+
 ## Recipient Headers
 
 The reading pane shows the **To**, **Cc**, and (for sent messages) **Bcc** headers above the message body. When a header field contains more than three addresses, MailCopilot collapses the overflow: the first three names are shown inline, followed by a **+N more** button where N is the number of hidden addresses.
@@ -22,6 +24,8 @@ The reading pane shows the **To**, **Cc**, and (for sent messages) **Bcc** heade
 Click **+N more** to expand the full list of recipients on multiple lines. Click the button again to collapse back to the summary view. You can also press **Esc** while the list is expanded to collapse it.
 
 Hover over any recipient name to see a tooltip with the full `Name <email@host>` string. Keyboard users can Tab to each recipient chip and the **+N more** button; pressing **Enter** or **Space** on the button toggles the expanded state.
+
+Right-click a sender or recipient address -- in the message header, in the recipient chips, on the sender of a conversation card, or in the standalone message window -- to open a context menu with **Copy address**, which copies the bare address (for example `user@example.com`) to the clipboard. The header sender and the recipient chips can also be opened from the keyboard: Tab to one and press the menu key or **Shift+F10**.
 
 **Bcc privacy:** the Bcc row is shown only for messages you sent yourself. It is never displayed for received mail, so Bcc recipients of incoming messages remain private.
 
@@ -65,6 +69,10 @@ Threads with two or more messages are displayed as a vertical stack of cards. Ca
 Single-message threads and accounts with conversation grouping disabled continue to use the simple single-message viewer — the stack view only appears when there are two or more messages.
 
 You can enable or disable conversation grouping in **Settings > Productivity > Group messages into conversations**.
+
+### Keyboard Navigation Within a Thread
+
+Once a thread with two or more messages is open, **j** / **k** move a cursor between cards instead of moving the message list, and **r** / **a** / **f** reply, reply all, or forward whichever card the cursor is on. Press **Escape** to leave conversation navigation and hand **j** / **k** back to the message list. See [Inside a Conversation](../keyboard-shortcuts#inside-a-conversation) for the complete list of shortcuts that apply while a conversation is open.
 
 ### Conversation Order
 
@@ -123,17 +131,25 @@ Click **Translate** above the message body, then pick a target language from the
 
 Once a translation is shown, a **Show original** / **Show translation** toggle above the body lets you switch back and forth at any time. The stored message itself is never changed -- the translation is only ever a view on top of it.
 
-**HTML messages are translated from their plain-text version.** The translation is always shown as plain text, even for an HTML message -- formatting, layout, and inline images are not part of it. A caption above the translated text says so explicitly: "Translated from the plain-text version of the message, so its formatting and images are not part of the translation."
+Above the translation, MailCopilot shows "Translated from Russian into English", or "Translated into English" when the original language is not known. Formatting and images are not translated.
 
-### Detected Source Language
+### Original Language
 
-Before translating, MailCopilot tries to identify the message's original language on your device and, when it succeeds, names it in a caption above the translation (for example, "Machine translation from Russian into English. The original is one click away."). Detection is local and is used only as a label -- it never decides whether the message can be translated.
+MailCopilot tries to identify the original language of the message on your device. When it succeeds, the notice above the translation names it. Detection is used only for that label.
 
-The caption is correctable either way, not only when detection fails. If the language cannot be identified with enough confidence, MailCopilot translates anyway and simply shows no source caption, offering a **Language of this message** picker (placeholder: **Choose a language**) so you can name it yourself. If a caption IS shown but names the wrong language -- local detection can confidently mislabel closely related languages -- a **Not the right language?** link next to it opens the same picker. Either way, naming the language is optional and only relabels the translation already on screen from the cache; it never calls the provider again.
+To set or correct the language, click **Set the original language**. It is shown whether or not a language was detected. Choose the language in the **Language of the original** picker (placeholder: **Choose a language**) and click **Apply**. This only changes the label, which is updated from the cache; the provider is not called again.
+
+### Long Messages
+
+A message of up to 3000 characters is translated in one request. A longer message is split at paragraph breaks (then at sentence ends, then at whitespace) into pieces of at most 3000 characters. Each piece is translated by its own request, three at a time, and the answers are joined with the original paragraph breaks.
+
+The result is all or nothing: if any piece fails or comes back cut off, no translation is shown and nothing is cached. A message longer than 60 000 characters (up to about 40 requests in the worst case) is refused as too long. The pieces already translated are kept in the app's memory for up to one hour, so after a failure a retry sends only the missing pieces. Leaving the message does not stop a translation that has started: it finishes, is saved in the cache and is ready when you return. Turning translation off for the mailbox stops it. Pieces are translated without the neighbouring text, so terms and forms of address can differ between parts of a long message. A piece with no letters (digits, separator lines) is left as it is.
+
+A long message therefore costs several requests, each billed to your AI provider and each recorded as its own entry in the [AI audit log](../privacy/ai-data#the-audit-log). [Draft Translation](../ai-assistant#draft-translation) does not split text and keeps its 3000-character limit.
 
 ### Translation Cache
 
-A message's translation into a given language is cached locally on your device, keyed to the message's own content, the target language, and the version of the translation contract (provider, model, and prompt shape) that produced it -- reopening the same message and choosing the same language again reuses the cached translation instead of calling the provider a second time, and a later change to how MailCopilot produces translations is addressed under a new key rather than an older contract's output being served as if it were current. The cache still has no separate expiry; the per-account cap below ages entries out instead. Each account keeps its 500 most recent translations; once that limit is reached, the oldest translations for that account are dropped to make room for new ones. Removing an account deletes that account's cached translations along with it.
+A message's translation into a given language is cached locally on your device, keyed to the message's own content, the target language, and the version of the translation contract (provider, model, and prompt shape) that produced it -- reopening the same message and choosing the same language again reuses the cached translation instead of calling the provider a second time, and a later change to how MailCopilot produces translations is addressed under a new key rather than an older contract's output being served as if it were current. The cache still has no separate expiry; the per-account cap below ages entries out instead. Each account keeps its 200 most recent translations; once that limit is reached, the oldest translations for that account are dropped to make room for new ones. Removing an account deletes that account's cached translations along with it. The translation of a long message is cached as a whole, under the whole message.
 
 ### If Translation Is Not Available
 
@@ -141,13 +157,13 @@ MailCopilot names the specific reason translation could not be produced, rather 
 
 - Translation is turned off for this account.
 - No AI provider is set up yet.
-- The AI provider did not return a translation, and did not say why.
-- The translation did not fit within the AI provider's answer limit, so it came back cut off and is not shown.
+- The AI provider did not return a translation.
+- The translation did not fit in the provider's answer limit and is not shown. Trying again gives the same result.
 - There is no downloaded text for the message yet.
-- The message is too long to translate in one go, and there is no way to translate only part of it -- the whole message counts toward the limit, including any earlier correspondence quoted inside it.
+- The message is too long to translate.
 - The AI budget for this period is used up.
 
-**A Try again button appears only where trying again could change the outcome.** Each click is a separate request billed to your AI provider, so MailCopilot does not offer the button for a refusal that would only reproduce itself: the answer hitting the provider's limit, the message being too long to translate at all, or translation being turned off for the account. For the remaining reasons -- the provider failing without explanation, the message still downloading, no provider configured, or the budget being used up -- **Try again** is shown, since fixing the underlying cause, or simply waiting, can make the next attempt succeed. From the second attempt on, the refusal is labeled **Attempt 2** (and so on), so a retry that changes nothing on screen is not mistaken for a click that failed to register.
+**A Try again button appears only where trying again could change the outcome.** Each click is a separate request billed to your AI provider, so MailCopilot does not offer the button for a refusal that would only reproduce itself: the answer hitting the provider's limit, the message being too long to translate at all, or translation being turned off for the account. For the remaining reasons -- the provider not returning a translation, the message still downloading, no provider configured, or the budget being used up -- **Try again** is shown, since fixing the underlying cause, or simply waiting, can make the next attempt succeed. From the second attempt on, the refusal is labeled **Attempt 2** (and so on), so a retry that changes nothing on screen is not mistaken for a click that failed to register.
 
 ## Working with Attachments
 
@@ -216,6 +232,8 @@ The standalone window is a fully functional workspace. It includes a complete ac
 - **Print** -- print the message body.
 
 When you click **Archive**, or **Delete** for a message that can be moved to Trash, the standalone window shows an inline undo banner for 3 seconds before MailCopilot performs the move and closes the window. Click **Undo** to cancel — the message stays put and the window remains open. While the undo banner is visible, the **Archive** and **Delete** buttons are disabled; **Reply**, **Reply all**, **Forward**, **Star / Unstar**, **Mark as read / Mark as unread**, and **Print** remain available.
+
+Closing the standalone window yourself while the undo banner is still showing — for example via its title bar — commits the move immediately, the same as letting the 3-second timer run out. It does not cancel the action. To cancel, click **Undo** in the banner before closing the window.
 
 If the account has no Trash folder, or the message is already in Trash, **Delete** asks for confirmation before permanently deleting it — no undo banner appears, and the action is irreversible.
 

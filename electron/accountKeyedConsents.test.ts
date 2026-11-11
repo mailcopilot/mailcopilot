@@ -1,4 +1,10 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+// `packages/net/config` transitively reaches `packages/db`, which opens SQLite
+// at module load. Only the real consent field LIST is wanted from it below.
+vi.mock('../packages/db', () => ({ deleteAccountData: vi.fn() }))
+
+import { ACCOUNT_KEYED_CONSENT_FIELDS } from '../packages/net/config'
 import { pruneUnknownAccountConsents, keepStoredConsents } from './accountKeyedConsents'
 
 /**
@@ -142,5 +148,25 @@ describe('keepStoredConsents', () => {
     const result = keepStoredConsents(merged, stored, FIELDS)
     expect(result.settings).toBe(merged)
     expect(result.changedFields).toEqual([])
+  })
+})
+
+describe('the production consent field list', () => {
+  it('prunes a deleted mailbox out of EVERY production consent map', () => {
+    const merged: Record<string, unknown> = {}
+    for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) merged[field] = { '1': true, '9': true }
+    const result = pruneUnknownAccountConsents(merged, ACCOUNT_KEYED_CONSENT_FIELDS, new Set([1]))
+    for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) {
+      expect(result.settings[field], field).toEqual({ '1': true })
+    }
+    expect(result.changedFields).toEqual([...ACCOUNT_KEYED_CONSENT_FIELDS])
+    expect(result.droppedEntries).toBe(ACCOUNT_KEYED_CONSENT_FIELDS.length)
+  })
+
+  it('keeps the stored answer when the account registry cannot be read', () => {
+    const stored = { aiTranslateEnabled: { '1': true } }
+    const merged = { aiTranslateEnabled: { '1': true, '2': true } }
+    const result = keepStoredConsents(merged, stored, ACCOUNT_KEYED_CONSENT_FIELDS)
+    expect(result.settings.aiTranslateEnabled).toEqual({ '1': true })
   })
 })

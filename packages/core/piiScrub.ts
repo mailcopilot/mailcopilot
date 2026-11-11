@@ -94,7 +94,7 @@ const EMAIL_PLACEHOLDER = '<email>'
 // SHAPE, so a leak in another shape (a folder name, a subject) still has to be
 // stopped at the call site.
 //
-// The local-part class is the practical set (`A-Za-z0-9._%+'-`), NOT the full
+// The local-part PUNCTUATION is the practical set (`._%+'-`), NOT the full
 // RFC 5322 `atext`. Including `=`, `&` and friends is technically more correct
 // but makes the match run backwards through the surrounding text: `to=a@b.io`
 // would redact as `<email>`, swallowing the `to=` label that tells a reader
@@ -105,7 +105,55 @@ const EMAIL_PLACEHOLDER = '<email>'
 // The right side requires a dotted TLD so ordinary prose containing `@`
 // (`@types/node`, `root@localhost`) is left alone. `<email>` contains no `@`,
 // so the function is idempotent by construction.
-const EMAIL_RE = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,63}/g
+//
+// ── Two changes, both forced by the IDN address work ──────────────────────
+//
+// (1) LETTERS, NOT ASCII. The pattern used `A-Za-z0-9` on both sides, so
+// `иван@example.com`, `user@почта.рф` and `пользователь@почта.рф` travelled to
+// Sentry in full. That was survivable only while such a mailbox could not be
+// stored at all (the account schema rejected it); once it could, the promise
+// on the consent screen — addresses are never sent — stopped being true for
+// exactly the locale this app is written in. Classes are now
+// `\p{L}\p{N}\p{M}`: letters, digits, and the combining marks that attach to
+// them. Marks are not decoration — in Devanagari (`डाटामेल.भारत`) a mark sits
+// INSIDE an ordinary label, and a class without them stops the match mid-label
+// and then fails the whole address, i.e. redacts nothing at all.
+//
+// The TLD keeps its letters-only rule (that is what makes `root@localhost` and
+// bare prose safe) with ONE addition: the RFC 5890 ACE form `xn--…`, which is
+// letters AND digits by construction. Without it the most common real IDN
+// spelling, `info@xn--80a1acny.xn--p1ai`, matched only up to `…xn` and left
+// `--p1ai` behind — a partial redaction that looked like a working one.
+//
+// (2) EVERY QUANTIFIER IS BOUNDED. The previous pattern used `+` and `*` with
+// adjacent overlapping classes (`[A-Za-z0-9-]*[A-Za-z0-9]`), which is
+// quadratic in the input length. Measured on this machine, the OLD pattern on
+// a reachable input (`'a@' + 'b'.repeat(n)` — reachable because the `@` check
+// below only rejects strings with no `@` at all): 102 ms at 12.5k chars,
+// 435 ms at 25k, 1750 ms at 50k, 6754 ms at 100k — a clean ×4 per doubling.
+// This runs inside `beforeSend` in the MAIN process, so that is the IDLE loop,
+// the send queue and every IPC handler frozen on a long string somebody else
+// wrote. Simply widening the classes to `\p{L}` made it far worse rather than
+// better: the ASCII classes failed instantly on Cyrillic, the unicode ones do
+// not, and the same 100k input went to 115 SECONDS.
+//
+// The bounds are the RFC 5321 limits, so they are narrowing nothing real: 64
+// for the local part, 63 per label (`1 + 61 + 1`), and a label count cap that
+// buys the constant-per-`@` cost the linearity argument needs — a domain with
+// 26 dot-separated labels is not an address anyone needs redacted. Measured
+// after the change, same machine: 75 ms at 50k, 156 ms at 100k, 326 ms at 200k,
+// 634 ms at 400k — linear, and ~370× faster than the old pattern at 100k.
+// Pinned by `piiScrub.test.ts`; if a future edit reintroduces an unbounded
+// quantifier here, that test is the one that fails.
+const ADDR_CHARS = '\\p{L}\\p{N}\\p{M}'
+/** One dot-separated label: starts and ends alphanumeric, hyphens inside. */
+const ADDR_LABEL = `[${ADDR_CHARS}](?:[${ADDR_CHARS}-]{0,61}[${ADDR_CHARS}])?`
+/** Letters-only TLD, plus the RFC 5890 ACE (`xn--`) form of an IDN one. */
+const ADDR_TLD = '(?:xn--[\\p{L}\\p{N}]{1,59}|[\\p{L}\\p{M}]{2,63})'
+const EMAIL_RE = new RegExp(
+  `[${ADDR_CHARS}._%+'-]{1,64}@${ADDR_LABEL}(?:\\.${ADDR_LABEL}){0,24}\\.${ADDR_TLD}`,
+  'gu',
+)
 
 /**
  * Replace anything shaped like an email address with `<email>`.

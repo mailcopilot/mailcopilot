@@ -233,9 +233,8 @@ export function suggestReplyTargetLang(
     // A SLICE, NOT A REFUSAL, and it is not optional (§3.3.B6.f2). What comes
     // back from the cache is a whole message body — `messages.body_text` holds
     // up to 200 000 characters — and the detector is a SYNCHRONOUS quadratic
-    // pass on the main process. The reading path never had this problem because
-    // it refuses above `TRANSLATE_INPUT_CHAR_CAP` before detecting; this path
-    // must not refuse, because a suggestion is advisory and the size gate needs
+    // pass on the main process. The reading path slices the same way (a message
+    // up to 60 000 characters is accepted there); this path must not refuse, because a suggestion is advisory and the size gate needs
     // only 80 script characters, so the head of the message carries the answer.
     //
     // `detectTextLanguage` applies the same cap itself — this is the second

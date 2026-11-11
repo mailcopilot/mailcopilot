@@ -111,7 +111,7 @@ function fireCertError(
   svc.ensureAccountRegistered(accountId)
   const handler = handlers.get(accountId)
   expect(handler).toBeDefined()
-  handler!({ host: 'imap.example.com', port: 993, rawMessage: 'self-signed certificate', ...payload })
+  handler!({ host: 'imap.example.com', port: 993, rawMessage: 'self-signed certificate', reason: 'selfSigned', ...payload })
 }
 
 /** Let queued microtasks (enrichAndBroadcast) settle. */
@@ -172,8 +172,17 @@ describe('cert:recoveryRequired storm-guard', () => {
       fingerprintSha256: 'AA:BB',
       systemOnly: true,
       rawMessage: 'self-signed certificate',
+      reason: 'selfSigned',
     })
     expect(deps.recordEvent).toHaveBeenCalledWith('cert.recovery_dialog_shown', { provider: 'other' })
+  })
+
+  it('sends a closed-set reason and never a value main did not classify', async () => {
+    const { deps, handlers } = makeDeps()
+    const svc = initCertRecovery(deps)
+    fireCertError(svc, handlers, 1, { reason: 'expired; <b>' as never })
+    await flush()
+    expect(deps.broadcast).toHaveBeenCalledWith('cert:recoveryRequired', expect.objectContaining({ reason: 'unknown' }))
   })
 
   it('swallows duplicate cert errors for the same host while the dialog is open', async () => {
@@ -224,6 +233,7 @@ describe('cert:recoveryRequired storm-guard', () => {
       fingerprintSha256: '',
       systemOnly: false,
       rawMessage: 'self-signed certificate',
+      reason: 'selfSigned',
     }))
   })
 

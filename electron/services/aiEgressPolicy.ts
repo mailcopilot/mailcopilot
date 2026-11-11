@@ -14,39 +14,67 @@
  *     the model cannot invoke them, so it cannot construct an exfiltration URL.
  *
  * SDK constraint that drives the semantics here (codex-security-review wave 2,
- * 2026-04-24): the Claude Agent SDK locks `tools[]` and `allowedTools[]` for
- * the entire lifetime of a `query()` call. We pass them once at construction
- * and the SDK does not honour mid-query mutations. The same is true for
- * Vercel AI SDK's `streamText({ tools })`: the tool catalogue is fixed for the
- * life of the call. Therefore "EmailContext absence makes egress safe" is
- * NOT a valid optimisation: turn 1 may start with an empty context, the
- * model may call `get_email` mid-turn, and after that the SDK still has
- * `WebFetch` available because the `tools[]` snapshot was taken at query
- * start. Mid-query taint detection cannot revoke what the SDK has already
- * committed to.
+ * 2026-04-24): Vercel AI SDK's `streamText({ tools })` fixes the tool catalogue
+ * for the life of the call. Therefore "EmailContext absence makes egress safe"
+ * is NOT a valid optimisation: turn 1 may start with an empty context, the
+ * model may call `get_email` mid-turn, and the SDK still holds the toolset
+ * snapshot taken at call construction. Mid-call taint detection cannot revoke
+ * what the SDK has already committed to. (The same was true of the Claude Agent
+ * SDK's `query()`, which §2.283 removed — the constraint outlived the SDK that
+ * first demonstrated it.)
  *
  * Resolution: deny egress unconditionally except when the user has opted in.
  * The only two ways to enable egress in the SDK call are:
  *   - `policy === 'allow'` (power-user persistent allow), OR
- *   - `perRequestConsent === true` (per-turn user consent for this request).
+ *   - `perRequestConsent === true` (per-turn consent for this request).
+ *
+ * NOTE ON THE SECOND ONE: `perRequestConsent` is plumbed end-to-end but NO
+ * shipping UI sets it — `ai:chat`'s sixth argument is never passed by the AI
+ * panel. In practice the only route a user has today is Settings → AI →
+ * Internet access → Always allow. Do not describe the per-turn path as
+ * something the user can reach; see the note at `streamAnthropicChat`.
  *
  * EmailContext detection is retained for telemetry, UX chip visibility, and
  * the renderer's `useEgressConsent()` hint logic — but is **not** used for
  * tool gating any more. Taint propagation is also retained (best-effort
  * observability into tainted sessions) but does not relax the gate.
  *
- * Policy values (`Settings.aiEgressPolicy`, all three apply identically across
- * Claude Agent SDK / OpenAI / Gemini paths):
- *   - `'default-deny'` — default. Egress tools removed from the toolset
- *     unless the user grants per-request consent. Email context is irrelevant
- *     to the gating decision; consent is the only override.
- *   - `'ask'`           — same as `default-deny`, future renderer can show
- *     an inline prompt instead of toggling a chip; same data flow.
- *   - `'allow'`         — egress always available. Power-user mode. Logged.
+ * Policy values (`Settings.aiEgressPolicy`). The VALUES are the same for every
+ * provider, but §2.283 split WHERE they take effect, and the difference is not
+ * cosmetic:
+ *
+ *   (a) Locally-executed egress — the external-MCP bridge. The tools stay
+ *       visible to the model and `interceptInternetTool` decides at execution
+ *       time. This is the case the six-step flow in `aiInternetGate.ts`
+ *       describes.
+ *   (b) Provider-executed egress — Anthropic's `web_search` / `web_fetch`,
+ *       which run inside Anthropic's own `/v1/messages` call. There is no local
+ *       execution point, so they cannot be intercepted at all. They are gated
+ *       by DECLARATION at request-build time in `streamAnthropicChat`: offered
+ *       only when the policy already permits egress, and absent from the
+ *       request otherwise.
+ *
+ *   - `'default-deny'` — default. (a) tools visible, interceptor default-denies;
+ *     (b) tools not offered at all. Email context is irrelevant to the gating
+ *     decision; consent is the only override.
+ *   - `'ask'`           — same data flow as `default-deny`. For (b) this means
+ *     NOT OFFERED rather than offered-and-then-asked: a provider-executed tool
+ *     cannot raise a prompt mid-call.
+ *   - `'allow'`         — egress always available, both kinds. Power-user mode.
+ *     Logged.
+ *
+ * Gemini reaches neither case: its adapter sends no tools at all (§2.287).
  *
  * Defence-in-depth layers:
- *   1. SDK-level filtering (`computeAllowedTools()`) — tools not even passed
- *      to the model. First and primary line of defence.
+ *   1. Tool availability. §2.283 split this in two and retired the helper that
+ *      used to implement it: `computeAllowedTools()` has NO production caller
+ *      any more (tests only) and is not what protects anything today. For
+ *      LOCALLY-EXECUTED egress the tools stay visible on purpose and layer 2 is
+ *      the real gate; for Anthropic's PROVIDER-EXECUTED tools availability IS
+ *      the gate, applied by declaration in `streamAnthropicChat` — they are put
+ *      in the request only when the policy already permits egress. Separately,
+ *      `filterToWhitelist` in ai.ts keeps anything outside `ALLOWED_TOOLS` from
+ *      reaching the model at all.
  *   2. Runtime guard (`assertEgressAllowed()`) — `list_external_tools` /
  *      `call_external_tool` MCP handlers call this before talking to
  *      `mcpClientManagerRef`. If the SDK filter is somehow bypassed (model
@@ -107,9 +135,9 @@ export type EgressToolName = typeof EGRESS_TOOLS[number]
  * The catalogue is still important — completeness here drives accurate
  * audit and telemetry signals about which sessions touched user mail.
  *
- * Naming: matches the MCP `name` field as advertised to the SDKs. Claude
- * Agent SDK exposes them as `mcp__mailcopilot__<name>`; Vercel AI SDK exposes
- * them with the same prefix (mcpClient.tools() flattens namespaces). The
+ * Naming: matches the MCP `name` field as advertised to the SDK. The Vercel
+ * `@ai-sdk/mcp` client keys mailcopilot tools by their BARE name, while the
+ * whitelist and older call sites spell them `mcp__mailcopilot__<name>`. The
  * matcher below normalises both shapes.
  */
 export const EMAIL_DATA_TOOLS = new Set<string>([
@@ -140,9 +168,9 @@ export const EMAIL_DATA_TOOLS = new Set<string>([
 /** Returns true if the given tool name reads user mail data. */
 export function isEmailDataTool(toolName: string): boolean {
   if (!toolName) return false
-  // Claude Agent SDK and Vercel @ai-sdk/mcp both expose mailcopilot tools
-  // under `mcp__mailcopilot__<bare>`. Bare names also flow through unit tests
-  // that talk to the McpServer instance directly.
+  // Tool names arrive in two spellings: `mcp__mailcopilot__<bare>` (the
+  // whitelist form) and the bare name (what `@ai-sdk/mcp` keys tools by, and
+  // what unit tests talking to the McpServer instance directly produce).
   const bare = toolName.startsWith('mcp__mailcopilot__')
     ? toolName.slice('mcp__mailcopilot__'.length)
     : toolName
@@ -304,7 +332,7 @@ export function createEgressGate(input: {
  *
  * Wave 2 (2026-04-24) note: taint is no longer load-bearing for the egress
  * decision (see `shouldDenyEgress`). The SDK's `tools[]` is fixed at
- * `query()` construction, so flipping a flag mid-stream cannot revoke a
+ * `streamText()` construction, so flipping a flag mid-stream cannot revoke a
  * tool already exposed to the model. We still track taint for telemetry
  * and audit (`audit.ai_action_apply`-style logs benefit from knowing
  * whether email data flowed through the request) and to keep the
@@ -322,9 +350,9 @@ export function markEmailDataAccessed(gate: EgressGate, toolName: string): void 
  * Returns true if egress tools must currently be denied.
  *
  * Wave 2 (2026-04-24) — secure-by-default semantics, decoupled from email
- * context. Both Claude Agent SDK and Vercel AI SDK lock their tool catalogue
- * at `query()` / `streamText()` construction; we cannot revoke a tool mid
- * call after taint propagates. Hence the only safe rule is:
+ * context. The Vercel AI SDK locks its tool catalogue at `streamText()`
+ * construction; we cannot revoke a tool mid call after taint propagates. Hence
+ * the only safe rule is:
  *
  *   - `'allow'`        — never deny (power-user opt-in).
  *   - `'default-deny'` — deny unless the user grants `perRequestConsent`
@@ -334,10 +362,10 @@ export function markEmailDataAccessed(gate: EgressGate, toolName: string): void 
  *                        render a different prompt. Identical data layer.
  *
  * Why `initialEmailContext` and `taintedByToolUse` no longer relax the gate:
- * the SDK accepted the toolset at `query()` start and won't honour mid-call
- * mutations. So a clean-context request that later calls `get_email` and
- * subsequently calls `WebFetch` would be allowed under the old "context =>
- * deny, no context => allow" rule. Closing this requires moving away from
+ * the SDK accepted the toolset at `streamText()` start and won't honour
+ * mid-call mutations. So a clean-context request that later calls `get_email`
+ * and subsequently reaches for egress would be allowed under the old
+ * "context => deny, no context => allow" rule. Closing this requires moving away from
  * a context-based gate entirely. They are kept as observability only.
  */
 export function shouldDenyEgress(gate: EgressGate): boolean {
@@ -365,9 +393,18 @@ export function computeAllowedTools(baseAllowed: readonly string[], gate: Egress
 }
 
 /**
- * Compute the SDK-level `tools` list (Claude Agent SDK uses a separate
- * `tools` parameter for built-in Anthropic tools — WebSearch, WebFetch).
- * Returns either the full set or an empty array depending on the gate.
+ * DEAD SINCE §2.283 — no production caller, tests only.
+ *
+ * This computed the Claude Agent SDK's separate `tools` parameter, whose only
+ * members were the built-ins `WebSearch` / `WebFetch`. Both the SDK and those
+ * built-in names are gone: Anthropic's replacements are `web_search` /
+ * `web_fetch`, they are provider-executed, and they are gated by DECLARATION in
+ * `streamAnthropicChat` rather than by any list computed here.
+ *
+ * Kept only because deleting it would touch three test files outside the scope
+ * of §2.283. Do NOT wire it into a new provider path: the names it returns do
+ * not exist any more, so its output cannot match any real tool. Scheduled for
+ * removal with its tests.
  */
 export function computeBuiltinTools(gate: EgressGate): string[] {
   if (!shouldDenyEgress(gate)) return ['WebSearch', 'WebFetch']

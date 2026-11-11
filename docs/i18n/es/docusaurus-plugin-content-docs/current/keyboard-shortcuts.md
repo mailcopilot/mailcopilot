@@ -42,6 +42,21 @@ Pulsa **?** para ver la referencia. Preset por defecto: **Gmail**.
 | **p** | Fijar / desfijar mensaje |
 | **Ctrl+P** | Imprimir mensaje |
 
+## Dentro de la conversación
+
+Cuando abre una conversación con más de un mensaje, sus tarjetas reciben sus propios atajos de teclado. Mientras la conversación está abierta de esta forma, **j** / **k** dejan de mover la lista de mensajes y en su lugar mueven un cursor entre las tarjetas, y **r** / **a** / **f** actúan sobre la tarjeta donde se encuentra el cursor, no sobre el mensaje que tiene abierto.
+
+| Atajo | Accion |
+|-------|--------|
+| **j** / **k** | Mensaje siguiente / anterior en la conversación |
+| **Enter** / **Espacio** | Expandir / contraer el mensaje seleccionado |
+| **r** | Responder al mensaje seleccionado |
+| **a** | Responder a todos en el mensaje seleccionado |
+| **f** | Reenviar el mensaje seleccionado |
+| **Escape** | Salir de la navegación por la conversación (**j** / **k** vuelven a mover la lista de mensajes) |
+
+**↑** / **↓** no se interceptan aquí -- siguen moviendo la lista de mensajes incluso con una conversación abierta, para que pueda explorar otras conversaciones sin pulsar antes **Escape**. Ninguno de estos atajos actúa mientras escribe en un campo de texto o hay un diálogo abierto.
+
 ## IA
 
 | Atajo | Accion |

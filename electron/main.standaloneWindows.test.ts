@@ -201,7 +201,7 @@ describe('main.ts IS_E2E — derivation', () => {
   })
 
   it('imports computeIsE2E from the pure module', () => {
-    expect(MAIN_TS).toMatch(/import\s*\{\s*computeIsE2E\s*\}\s*from\s*'\.\/e2eFlag'/)
+    expect(MAIN_TS).toMatch(/import\s*\{[^}]*\bcomputeIsE2E\b[^}]*\}\s*from\s*'\.\/e2eFlag'/)
   })
 
   it('never assigns IS_E2E straight from the environment', () => {

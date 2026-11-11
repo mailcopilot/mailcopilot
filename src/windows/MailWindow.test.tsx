@@ -26,6 +26,7 @@ import { render, fireEvent, act, cleanup } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import React from 'react'
 import type { FolderRoles, MessageDetails } from '@mailcopilot/types'
+import { BLOCKED_IMAGE_PLACEHOLDER_DATA_URI } from '../utils/mail'
 
 // ---------------------------------------------------------------------------
 // Stable i18n mock — must be module-level to avoid infinite useEffect loops
@@ -187,6 +188,13 @@ Object.defineProperty(window, 'close', {
 })
 
 // ---------------------------------------------------------------------------
+// src/sentry — the deferred-move commit reports its failures there instead of
+// swallowing them; stub it so the assertions do not depend on the SDK.
+// ---------------------------------------------------------------------------
+vi.mock('../sentry', () => ({ captureException: vi.fn() }))
+import { captureException } from '../sentry'
+
+// ---------------------------------------------------------------------------
 // Static import of the component under test
 // ---------------------------------------------------------------------------
 import MailWindow from './MailWindow'
@@ -248,6 +256,16 @@ describe('MailWindow — header rendering', () => {
     await act(async () => { renderMailWindow() })
     const fromEl = document.querySelector('.mail-viewer-from')
     expect(fromEl?.textContent).toMatch(/alice@example\.com/)
+  })
+
+  it('right-click on the sender copies the bare address', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    await act(async () => { renderMailWindow() })
+    const sender = document.querySelector('.mail-viewer-from [data-testid="mail-address"]')!
+    fireEvent.contextMenu(sender, { button: 2, clientX: 30, clientY: 30 })
+    fireEvent.click(document.querySelector('[data-testid="address-context-copy"]')!)
+    expect(writeText).toHaveBeenCalledWith('alice@example.com')
   })
 
   it('renders the subject in the viewer subject row', async () => {
@@ -422,9 +440,18 @@ describe('MailWindow — sanitizeMailHtml', () => {
     // img element itself may survive (CSP blocks the fetch in the browser).
   })
 
-  it('preserves cid: inline image references', async () => {
-    const srcDoc = await renderWithHtml('<img src="cid:image001@example.com" alt="inline">')
-    expect(srcDoc).toMatch(/cid:image001@example\.com/)
+  it('draws the blocked-image placeholder for a cid: reference with no part, not a broken image', async () => {
+    // This window resolves no inline parts, so a `cid:` reference that reaches
+    // the iframe can only end as a broken-image icon: the same placeholder the
+    // main reading pane uses (`blockUnresolvedCidImages`) replaces it.
+    const srcDoc = await renderWithHtml('<img src="cid:missing@example.com" alt="gap">')
+    expect(srcDoc).not.toMatch(/src\s*=\s*["']?cid:/i)
+    expect(srcDoc).toContain(BLOCKED_IMAGE_PLACEHOLDER_DATA_URI)
+  })
+
+  it('leaves text that only mentions cid: alone', async () => {
+    const srcDoc = await renderWithHtml('<p>write cid:something in the text</p>')
+    expect(srcDoc).toContain('write cid:something in the text')
   })
 
   it('preserves data: image references (inline base64 attachments)', async () => {
@@ -2548,9 +2575,11 @@ describe('MailWindow — MEDIUM fix: flushPendingUndo idempotent (ref-based)', (
     cleanup()
   })
 
-  it('Double-Archive click fires net:move exactly once (first flush + second click starts new pending)', async () => {
-    // AC#4 from codex: second Archive while pending → flush fires exactly one net:move for the first,
-    // then sets up a new pending for the second. The new pending does NOT immediately fire.
+  it('Archive → Undo → Archive: only the second archive commits, and only once', async () => {
+    // Undo cancels the first pending move entirely (no net:move at all), and the
+    // second archive starts a fresh one that commits on its own timer.
+    // Double-flush idempotence is covered by the pagehide/unmount and
+    // Close-button suites below, which call the flush twice for real.
     await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
     const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
     // First click — starts pending, no net:move yet.
@@ -2686,5 +2715,368 @@ describe('MailWindow — §2.145 parse-cap wiring', () => {
 
     expect(document.querySelector('[data-testid="mail-parse-cap-hard"]')).not.toBeInTheDocument()
     expect(document.querySelector('[data-testid="mail-parse-cap-soft"]')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests: the `pagehide` backstop.
+//
+// A closing window tears the page down without unmounting React, so the only
+// commit point used to be an unmount cleanup that nothing but RTL's
+// `unmount()` ever calls. `pagehide` covers the teardowns this window does not
+// originate (a `win:close` issued elsewhere, app quit) — Electron documents the
+// DOM unload sequence for those.
+//
+// It is NOT what covers the titlebar Close button: that path commits before
+// closing (see the suite further down), because a renderer-initiated close
+// makes no unload promise. These tests pin the wiring and its idempotence, and
+// they deliberately claim nothing about whether main executed the request — a
+// synthetic `pagehide` in jsdom cannot speak to that.
+// ---------------------------------------------------------------------------
+
+describe('MailWindow — deferred move commits on page teardown (pagehide)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    cleanup()
+    vi.clearAllMocks()
+    mockWindowClose.mockClear()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      if (channel === 'cache:folderRoles') return Promise.resolve({ 1: { archive: 'Archive', trash: 'Trash' } })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+
+  const moveCalls = () => (mockInvoke.mock.calls as Array<[string, ...unknown[]]>)
+    .filter(([ch]) => ch === 'net:move')
+
+  it('Delete → window closes inside the undo window: net:move fires exactly once', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    const deleteBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')
+    await act(async () => { fireEvent.click(deleteBtn!) })
+    expect(document.querySelector('[data-testid="undo-banner"]')).toBeInTheDocument()
+    expect(moveCalls()).toHaveLength(0)
+
+    // The page goes away — NO unmount, exactly what a closing window does.
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+
+    expect(moveCalls()).toHaveLength(1)
+    expect(moveCalls()[0]).toEqual(['net:move', 1, 'INBOX', 'Trash', [42]])
+  })
+
+  it('Archive → page teardown commits to the archive folder', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+
+    expect(moveCalls()).toHaveLength(1)
+    expect(moveCalls()[0]).toEqual(['net:move', 1, 'INBOX', 'Archive', [42]])
+  })
+
+  it('pagehide then unmount moves the message once, not twice', async () => {
+    const { unmount } = await act(async () => renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }))
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+    await act(async () => { unmount() })
+
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('pagehide cancels the 3s timer — no second move and no window.close()', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+    await act(async () => { vi.advanceTimersByTime(5000) })
+
+    expect(moveCalls()).toHaveLength(1)
+    // The timer never ran, so its window.close() never ran either — the window
+    // was already on its way out.
+    expect(mockWindowClose).not.toHaveBeenCalled()
+  })
+
+  it('a double pagehide (unload sequence fires more than once) still moves once', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+
+    await act(async () => {
+      window.dispatchEvent(new Event('pagehide'))
+      window.dispatchEvent(new Event('pagehide'))
+    })
+
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('Undo before the teardown keeps the message where it is', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+    const undoBtn = document.querySelector<HTMLButtonElement>('[data-testid="undo-banner-btn"]')
+    await act(async () => { fireEvent.click(undoBtn!) })
+
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+
+    expect(moveCalls()).toHaveLength(0)
+  })
+
+  it('pagehide after the window is gone (listener removed on unmount) does nothing', async () => {
+    const { unmount } = await act(async () => renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }))
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+    await act(async () => { unmount() })
+    expect(moveCalls()).toHaveLength(1)
+
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('a failed commit is reported, and the console line carries the verdict only', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      if (channel === 'cache:folderRoles') return Promise.resolve({ 1: { archive: 'Archive', trash: 'Trash' } })
+      if (channel === 'net:move') {
+        return Promise.reject(new Error("[mcerr:unknown] Error invoking remote method 'net:move': NO [TRYCREATE]"))
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    const archiveBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')
+    await act(async () => { fireEvent.click(archiveBtn!) })
+
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+    await act(async () => { await Promise.resolve() })
+
+    expect(captureException).toHaveBeenCalledWith(expect.any(Error), { source: 'MailWindow.deferredMove' })
+    const logged = consoleError.mock.calls.map(c => c.map(String).join(' ')).join('\n')
+    expect(logged).toContain('unknown')
+    expect(logged).not.toContain('TRYCREATE')
+    consoleError.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests: where the standalone window learns its folder roles.
+//
+// Roles decide whether Delete is reversible (move to Trash + undo window) or
+// permanent (confirm dialog). `cache:folderRoles` reads `cached_roles`, which
+// main fills only after a successful IMAP LIST — so on a profile where that has
+// not happened yet the window used to offer PERMANENT deletion for a message
+// that has a perfectly good Trash folder, while the main window (which also
+// asks `net:mailboxesAndRoles`) moved it to Trash. That divergence is what the
+// e2e spec walked into.
+// ---------------------------------------------------------------------------
+
+describe('MailWindow — folder roles: cache first, authoritative source when unknown', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    cleanup()
+    vi.clearAllMocks()
+    mockWindowClose.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+
+  const channels = () => (mockInvoke.mock.calls as Array<[string, ...unknown[]]>).map(([ch]) => ch)
+
+  it('an account the cache has never heard of: Delete moves to Trash, not permanently', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      // Cache was never written for this account (fresh account / first run).
+      if (channel === 'cache:folderRoles') return Promise.resolve({})
+      if (channel === 'net:mailboxesAndRoles') {
+        return Promise.resolve({ mailboxes: [], detected: {}, roles: { archive: 'Archive', trash: 'Trash' } })
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+
+    const deleteBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')
+    expect(deleteBtn).not.toBeDisabled()
+    await act(async () => { fireEvent.click(deleteBtn!) })
+
+    // Reversible path: undo banner, no permanent-delete dialog.
+    expect(document.querySelector('[data-testid="undo-banner"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="confirm-permanent-delete-overlay"]')).not.toBeInTheDocument()
+
+    await act(async () => { vi.advanceTimersByTime(3001) })
+    expect(mockInvoke).toHaveBeenCalledWith('net:move', 1, 'INBOX', 'Trash', [42])
+  })
+
+  it('a cached account does not trigger a second LIST', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      if (channel === 'cache:folderRoles') return Promise.resolve({ 1: { archive: 'Archive', trash: 'Trash' } })
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+
+    expect(channels()).not.toContain('net:mailboxesAndRoles')
+  })
+
+  it('an account cached WITHOUT a trash role is a known answer, not a reason to re-ask', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      // The server really has no Trash folder — that is an answer, not a gap.
+      if (channel === 'cache:folderRoles') return Promise.resolve({ 1: { archive: 'Archive' } })
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+
+    expect(channels()).not.toContain('net:mailboxesAndRoles')
+    const deleteBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')
+    await act(async () => { fireEvent.click(deleteBtn!) })
+    expect(document.querySelector('[data-testid="confirm-permanent-delete-overlay"]')).toBeInTheDocument()
+  })
+
+  it('both sources unavailable: Delete becomes usable and keeps the permanent-delete confirmation', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      if (channel === 'cache:folderRoles') return Promise.reject(new Error('[mcerr:unknown] cache down'))
+      if (channel === 'net:mailboxesAndRoles') return Promise.reject(new Error('[mcerr:offline] no connection'))
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+
+    // Not stuck disabled — the attempt is over, the answer is "unknown".
+    const deleteBtn = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')
+    expect(deleteBtn).not.toBeDisabled()
+    await act(async () => { fireEvent.click(deleteBtn!) })
+    // Unknown roles still take the explicit, confirmed path — never a silent
+    // permanent delete, and never a move to a folder we are guessing at.
+    expect(document.querySelector('[data-testid="confirm-permanent-delete-overlay"]')).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="undo-banner"]')).not.toBeInTheDocument()
+  })
+
+  it('Delete stays disabled while the authoritative answer is still in flight', async () => {
+    let release: (() => void) | null = null
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      if (channel === 'cache:folderRoles') return Promise.resolve({})
+      if (channel === 'net:mailboxesAndRoles') {
+        return new Promise(resolve => {
+          release = () => resolve({ mailboxes: [], detected: {}, roles: { trash: 'Trash' } })
+        })
+      }
+      return Promise.resolve(undefined)
+    })
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+
+    // Roles unknown so far — the button must not offer anything yet.
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')).toBeDisabled()
+
+    await act(async () => { release!(); await Promise.resolve() })
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')).not.toBeDisabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests: the titlebar Close button commits the deferred move itself.
+//
+// The e2e run proved that relying on the unload sequence is not enough for a
+// renderer-initiated close (`mail-window-close-commits-move.spec.ts`: Delete →
+// close → Trash empty, twice). Electron promises the DOM unload sequence for
+// `BrowserWindow.close()`, not for the renderer's own `window.close()`, so the
+// close the user performs commits explicitly, while the page is still alive.
+// ---------------------------------------------------------------------------
+
+describe('MailWindow — titlebar Close commits the pending move before closing', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    cleanup()
+    vi.clearAllMocks()
+    mockWindowClose.mockClear()
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === 'net:messageDetails') return Promise.resolve(makeMessageDetails())
+      if (channel === 'cache:folderRoles') return Promise.resolve({ 1: { archive: 'Archive', trash: 'Trash' } })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+
+  const moveCalls = () => (mockInvoke.mock.calls as Array<[string, ...unknown[]]>)
+    .filter(([ch]) => ch === 'net:move')
+
+  const clickClose = async () => {
+    const closeBtn = document.querySelector<HTMLButtonElement>('[data-testid="window-titlebar-close"]')
+    expect(closeBtn).toBeInTheDocument()
+    await act(async () => { fireEvent.click(closeBtn!) })
+  }
+
+  it('Delete then Close: net:move is issued BEFORE the window is asked to close', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('[data-testid="toolbar-delete"]')!) })
+    expect(document.querySelector('[data-testid="undo-banner"]')).toBeInTheDocument()
+    expect(moveCalls()).toHaveLength(0)
+
+    await clickClose()
+
+    expect(moveCalls()).toHaveLength(1)
+    expect(moveCalls()[0]).toEqual(['net:move', 1, 'INBOX', 'Trash', [42]])
+    expect(mockWindowClose).toHaveBeenCalledOnce()
+    // Ordering is the whole point: the request must be written while the page
+    // is alive, not from inside the teardown.
+    const moveOrder = mockInvoke.mock.invocationCallOrder[
+      (mockInvoke.mock.calls as Array<[string]>).findIndex(([ch]) => ch === 'net:move')
+    ]
+    expect(moveOrder).toBeLessThan(mockWindowClose.mock.invocationCallOrder[0])
+  })
+
+  it('Archive then Close commits to the archive folder', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')!) })
+
+    await clickClose()
+
+    expect(moveCalls()).toHaveLength(1)
+    expect(moveCalls()[0]).toEqual(['net:move', 1, 'INBOX', 'Archive', [42]])
+  })
+
+  it('Close then the pagehide backstop still moves the message once', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')!) })
+
+    await clickClose()
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+
+    expect(moveCalls()).toHaveLength(1)
+  })
+
+  it('Close with nothing pending issues no move and still closes', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+
+    await clickClose()
+
+    expect(moveCalls()).toHaveLength(0)
+    expect(mockWindowClose).toHaveBeenCalledOnce()
+  })
+
+  it('Undo then Close leaves the message where it is', async () => {
+    await act(async () => { renderMailWindow({ accountId: 1, folder: 'INBOX', uid: 42 }) })
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('[data-testid="toolbar-archive"]')!) })
+    await act(async () => { fireEvent.click(document.querySelector<HTMLButtonElement>('[data-testid="undo-banner-btn"]')!) })
+
+    await clickClose()
+
+    expect(moveCalls()).toHaveLength(0)
+    expect(mockWindowClose).toHaveBeenCalledOnce()
   })
 })

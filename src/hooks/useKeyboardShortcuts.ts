@@ -102,6 +102,12 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams): void {
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Somebody nearer the user already took this keystroke. The open
+      // conversation does exactly that (§3.3.C-thread.4): `useThreadKeyboard`
+      // listens in the CAPTURE phase and marks `j` / `k` / Enter / Space and
+      // `r` / `a` / `f` handled while the card cursor is inside the thread, so
+      // one keypress never both walks the cards and moves the message list.
+      // Removing this line is what re-creates that double action.
       if (e.defaultPrevented) return
       const key = e.key
       // Physical key (by position on QWERTY) — shortcuts work in any keyboard layout.

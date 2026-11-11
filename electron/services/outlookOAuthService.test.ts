@@ -13,6 +13,13 @@ vi.mock('../../packages/net/index', () => ({
   testSmtpConnection: vi.fn().mockResolvedValue({ ok: true }),
 }))
 
+// `accountSaveFence` reads the stored record from `packages/net/config`, not from
+// the `packages/net/index` barrel mocked above; unmocked it would load the real
+// config and with it the native SQLite module.
+vi.mock('../../packages/net/config', () => ({
+  getAccountMeta: vi.fn(),
+}))
+
 vi.mock('../microsoftOAuth', () => ({
   runMicrosoftOAuthFlow: vi.fn().mockResolvedValue({
     email: 'user@outlook.com',

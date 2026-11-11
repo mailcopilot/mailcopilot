@@ -564,4 +564,39 @@ describe('useKeyboardShortcuts', () => {
       expect(params.setShowCommandPalette).toHaveBeenCalledWith(true)
     })
   })
+
+  describe('yielding to a handler that already claimed the event', () => {
+    // §3.3.C-thread.4 — card navigation inside an open conversation claims
+    // `j` / `k` in the capture phase and marks the event handled. This handler
+    // bails out on `defaultPrevented`, which is the whole mechanism keeping the
+    // two from firing on one keystroke. Pin it: the guard is one line and its
+    // removal would silently move the message list under an open thread.
+    function dispatchClaimed(key: string, code: string) {
+      const ev = new KeyboardEvent('keydown', { key, code, bubbles: true, cancelable: true })
+      window.dispatchEvent(ev)
+      return ev
+    }
+
+    it('does not move the list when j was claimed first', () => {
+      const claim = (e: Event) => e.preventDefault()
+      // Registered before the hook: on an event dispatched at `window` the
+      // listeners run in registration order, whatever their phase.
+      window.addEventListener('keydown', claim, true)
+      try {
+        params.viewMailsRef.current = [makeMail(1), makeMail(2)]
+        renderHook(() => useKeyboardShortcuts(params))
+        dispatchClaimed('j', 'KeyJ')
+        expect(params.openMail).not.toHaveBeenCalled()
+      } finally {
+        window.removeEventListener('keydown', claim, true)
+      }
+    })
+
+    it('still moves the list when nobody claimed the keystroke', () => {
+      params.viewMailsRef.current = [makeMail(1), makeMail(2)]
+      renderHook(() => useKeyboardShortcuts(params))
+      dispatchClaimed('j', 'KeyJ')
+      expect(params.openMail).toHaveBeenCalledTimes(1)
+    })
+  })
 })

@@ -100,7 +100,16 @@ test('conversation view: thread strip opens email from thread and preserves acti
     // The originating row in the mail list must retain the selected (active) highlight.
     await expect(threadRow).toHaveClass(/mail-active/)
 
-    // Navigation k should correctly move to the previous list row (from thread), not "get stuck".
+    // §3.3.C-thread.4 — the open conversation owns j / k: with the cursor on
+    // the newest card, k has nowhere to go inside the stack and must NOT move
+    // the list behind it.
+    await page.keyboard.press('k')
+    await expect(page.getByTestId('mail-subject')).toHaveText('Re: E2E1: thread root')
+
+    // Esc hands the keys back to the list. The original regression this test
+    // guards — k "getting stuck" when the open message is not the thread lead —
+    // is asserted right after it.
+    await page.keyboard.press('Escape')
     await page.keyboard.press('k')
     await expect(page.getByTestId('mail-subject')).not.toHaveText('Re: E2E1: thread root')
   } finally {
@@ -146,14 +155,19 @@ test('mail: privacy banner + inline cid images + show images', async () => {
     const banner = page.getByTestId('images-blocked-banner')
     await expect(banner).toBeVisible()
 
-    // Verify that cid: was replaced with data: in srcdoc (inline images).
+    // The body is shown at once with inert placeholders for inline images; the
+    // bytes are written into the LIVE iframe document when they arrive (§2.308),
+    // so the srcdoc string itself never carries them.
     const iframe = page.locator('iframe.mail-iframe')
     await expect(iframe).toBeVisible()
     await expect.poll(async () => await iframe.getAttribute('srcdoc'), { timeout: EXPECT_TIMEOUT }).not.toBeNull()
     const srcdoc = (await iframe.getAttribute('srcdoc')) || ''
     expect(srcdoc).toContain("img-src 'self' data: cid:")
-    expect(srcdoc).toContain('data:image/png;base64,')
     expect(srcdoc.toLowerCase()).not.toContain('cid:img1')
+
+    // The inline (cid:) image arrives later and is swapped in the live document.
+    const liveImages = page.frameLocator('iframe.mail-iframe').locator('img[alt="inline"]')
+    await expect(liveImages.first()).toHaveAttribute('src', /^data:image\/png;base64,/, { timeout: EXPECT_TIMEOUT })
 
     // Link in iframe rewritten to internal protocol.
     const frame = page.frameLocator('iframe.mail-iframe')
@@ -965,8 +979,9 @@ test('shortcuts modal: ? opens, ESC and click close it', async () => {
     const modal = page.locator('.shortcuts-modal')
     await expect(modal).toBeVisible()
 
-    // Contains 4 groups (navigation, actions, general + context-menu added in polish-bundle-2)
-    await expect(modal.locator('.shortcuts-group')).toHaveCount(4)
+    // Contains 5 groups (navigation, actions, in-conversation added in
+    // §3.3.C-thread.4, general + context-menu added in polish-bundle-2)
+    await expect(modal.locator('.shortcuts-group')).toHaveCount(5)
     await expect(modal.locator('kbd').first()).toBeVisible()
 
     // ESC — closes

@@ -385,6 +385,17 @@ describe('packages/net/config', () => {
       expect(result.imap.host).toBe('h')
     })
 
+    // A body mints a TLS trust anchor (packages/net/tls.ts); anchors come only
+    // from `net:trustCert` after a native dialog. Dropping the `.omit` → red.
+    it('accountSaveSchema cannot persist a renderer-supplied certificate body', () => {
+      const result = accountSaveSchema.parse({
+        imap: { host: 'h', port: 993, secure: true, user: 'a@b.com', pass: 'x', tlsPinnedCertsPem: ['-----BEGIN CERTIFICATE-----'] },
+        smtp: { host: 'h', port: 587, secure: false, user: 'a@b.com', pass: 'x', tlsPinnedCertsPem: ['-----BEGIN CERTIFICATE-----'] },
+      })
+      expect('tlsPinnedCertsPem' in result.imap).toBe(false)
+      expect('tlsPinnedCertsPem' in result.smtp).toBe(false)
+    })
+
     it('accountSaveSchema rejects extra fields (strict)', () => {
       expect(() => accountSaveSchema.parse({
         imap: { host: 'h', port: 993, secure: true, user: 'a@b.com', pass: 'x' },
@@ -1075,6 +1086,13 @@ describe('packages/net/config', () => {
     })
   })
 
+  describe('settingsSchema — removed aiAskEnabled', () => {
+    it('drops a stored aiAskEnabled map instead of carrying it', () => {
+      const parsed = settingsSchema.parse({ theme: 'light', aiAskEnabled: { '1': true } }) as Record<string, unknown>
+      expect(parsed.aiAskEnabled).toBeUndefined()
+    })
+  })
+
   describe('§3.10 P0 stdio command allowlist', () => {
     it('accepts all entries in DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST', () => {
       for (const cmd of DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST) {
@@ -1760,21 +1778,18 @@ describe('packages/net/config', () => {
         expect(after.aiTranslateEnabled).toEqual({ '1': false })
       })
 
-      it('a NEW mailbox reusing the freed id comes up denied', async () => {
-        // The defect this pins: ids are handed out as max(existing) + 1, so the
-        // next account created after deleting #2 IS #2. With the leftover map
-        // entry, main's gate would read a genuine `true` for a mailbox whose
-        // owner never ticked anything.
+      it('a NEW mailbox never gets the freed id (ids are not reused) and, whatever its id, comes up denied', async () => {
         await twoAccounts()
         await deleteAccount(2)
         const { id } = await saveAccount({
           imap: { host: 'imap3', port: 993, secure: true, user: 'c@test', pass: 'p' },
           smtp: { host: 'smtp3', port: 587, secure: false, user: 'c@test', pass: 'p' },
         })
-        expect(id).toBe(2)
+        expect(id).toBe(3)
         const after = getSettings()
         for (const field of ACCOUNT_KEYED_CONSENT_FIELDS) {
           expect(after[field]?.['2'], field).toBeUndefined()
+          expect(after[field]?.['3'], field).toBeUndefined()
         }
       })
 
@@ -4590,5 +4605,77 @@ describe('§2.132 — default secret backend under MAILCOPILOT_E2E', () => {
     expect(keytarMock.getPassword).not.toHaveBeenCalled()
     expect(keytarMock.setPassword).not.toHaveBeenCalled()
     expect(keytarMock.deletePassword).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('account ids are issued once and never reused', () => {
+  const mailbox = (n: number, extra: Record<string, unknown> = {}) => ({
+    imap: { host: `imap${n}`, port: 993, secure: true, user: `u${n}@test`, pass: 'p' },
+    smtp: { host: `smtp${n}`, port: 587, secure: false, user: `u${n}@test`, pass: 'p' },
+    ...extra,
+  })
+
+  beforeEach(() => {
+    storeData.clear()
+    keytarStore.clear()
+    vi.clearAllMocks()
+  })
+
+  it('deleting the highest-numbered account does not hand its number to the next one', async () => {
+    await saveAccount(mailbox(1))
+    const second = await saveAccount(mailbox(2))
+    expect(second.id).toBe(2)
+    await deleteAccount(2)
+    const third = await saveAccount(mailbox(3))
+    expect(third.id).toBe(3)
+  })
+
+  it('holds across an application restart: the high-water mark is persisted, not derived from memory', async () => {
+    await saveAccount(mailbox(1))
+    const second = await saveAccount(mailbox(2))
+    await deleteAccount(second.id)
+    vi.resetModules()
+    const reloaded = await import('./config')
+    expect((await reloaded.saveAccount(mailbox(3))).id).toBe(3)
+  })
+
+  it('deleting every account keeps counting: the next one is not number 1 again', async () => {
+    const only = await saveAccount(mailbox(1))
+    await deleteAccount(only.id)
+    expect((await saveAccount(mailbox(2))).id).toBe(2)
+  })
+
+  it('a profile from before the mark existed: the mark starts at the highest existing number, and deleting raises it first', async () => {
+    // What an older build left: two accounts, no mark.
+    await saveAccount(mailbox(1))
+    await saveAccount(mailbox(2))
+    storeData.delete('accountIdHighWater')
+    await deleteAccount(2)
+    expect((await saveAccount(mailbox(3))).id).toBe(3)
+  })
+
+  it('a caller cannot choose an id for a record that does not exist: that would recreate a deleted number', async () => {
+    await expect(saveAccount(mailbox(7, { id: 7 }))).rejects.toThrow(/issued by saveAccount|does not exist/)
+    const first = await saveAccount(mailbox(1))
+    await deleteAccount(first.id)
+    // e.g. an Outlook reconnect that finishes after the account was deleted
+    await expect(saveAccount(mailbox(1, { id: first.id }))).rejects.toThrow(/issued by saveAccount|does not exist/)
+    expect((await saveAccount(mailbox(2))).id).toBe(2)
+  })
+
+  it('an id that exists can still be saved under its own number', async () => {
+    const first = await saveAccount(mailbox(1))
+    expect((await saveAccount(mailbox(1, { id: first.id, signature: 'edited' }))).id).toBe(first.id)
+  })
+
+  it('a record dropped by the read sanitizer still raises the mark: its number is not issued again', async () => {
+    await saveAccount(mailbox(1))
+    await saveAccount(mailbox(2))
+    storeData.delete('accountIdHighWater')
+    // The highest record becomes unreadable (fails the schema) and is dropped on the next read.
+    const raw = storeData.get('accounts') as Array<Record<string, unknown>>
+    storeData.set('accounts', [raw[0], { id: 2, broken: true }])
+    expect((await saveAccount(mailbox(3))).id).toBe(3)
   })
 })

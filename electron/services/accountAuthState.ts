@@ -34,10 +34,20 @@
  *   - Two consecutive auth failures are required (AUTH_FAILURE_THRESHOLD).
  *     One is not enough: an error only reaches us AFTER withImapRetry's single
  *     token-refresh retry, but a refresh that raced a server-side revocation
- *     window can still produce one isolated failure. Two also arrive fast in
- *     practice — a periodic pass walks several folders, so a truly dead
- *     credential trips the badge within the same pass rather than after two
- *     5-minute cycles.
+ *     window can still produce one isolated failure.
+ *
+ *     Where the second one comes from has CHANGED, and the old answer is no
+ *     longer true. It used to be "the same periodic pass, one folder later":
+ *     every folder opened its own connection and was rejected in turn. The
+ *     login latch in packages/net/authLoginLatch now refuses those follow-up
+ *     connections before the socket (a rejected mailbox gets one attempt per
+ *     window, 60s at first), and refusals report no verdict at all, so the
+ *     second failure arrives from the next ADMITTED attempt — about a minute
+ *     later, not milliseconds. Two consequences worth holding on to: the badge
+ *     is now roughly a minute behind a dead credential rather than instant,
+ *     which is why the latch's first window is short rather than the full auth
+ *     backoff; and a mailbox that makes no further attempts at all still has
+ *     the raise-on-sight paths below, which the threshold never governed.
  *
  *   - …except where a second observation will never come. The threshold buys
  *     one retry against a racing server, and it is only affordable where the
@@ -116,10 +126,10 @@
  * Verdicts that outlived the mailbox they belong to (§2.165, fix wave 4).
  * A single process-wide subscriber cannot tell a live account id from one that
  * was removed while an operation was in flight: `forget()` runs when the
- * deletion commits, and the doomed operation reports afterwards. Worse, account
- * ids are handed out as "max + 1" and are therefore REUSED, so the stray
- * verdict does not land on nothing — it lands on whatever mailbox was created
- * next. Neither ordering of those events can be decided from the payload (an
+ * deletion commits, and the doomed operation reports afterwards. Account ids were
+ * once handed out as "max + 1" and REUSED, so a stray verdict landed on whatever
+ * mailbox was created next; ids are monotonic now (`readAccountIdHighWater`), and the
+ * generation stays as defence in depth against a profile that still has a reused id. Neither ordering of those events can be decided from the payload (an
  * account id and an error, that is all) and no property of the account decides
  * it either: the verdict arrives after the new mailbox exists, so every
  * fingerprint taken at that moment describes the new one.
@@ -411,8 +421,8 @@ export type AccountAuthStateService = {
    * verdict about the record the caller read, and every caller reads it across
    * at least one await — the secret-store lookup for a refresh token, the
    * config load that precedes `assertImapAuth`. A mailbox deleted inside that
-   * window frees its id to the next account created ("max + 1"), so an unstamped
-   * report lands the badge on a brand-new, perfectly healthy mailbox. The rule
+   * window used to free its id to the next account created ("max + 1"; ids are now
+   * monotonic), so an unstamped report could land the badge on a brand-new, healthy mailbox. The rule
    * is the same one the boundary follows: read the generation BEFORE the first
    * await of the operation, hand it in here, and let the service drop the
    * verdict if the id has changed hands since.

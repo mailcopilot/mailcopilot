@@ -9,6 +9,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { electronLaunchArgs, hasDisplayServer } from './launchArgs'
 
 // In CI (Docker) Electron starts slower — increase timeouts.
 // Local values are NOT much tighter than CI on purpose: the full `e2e:bg` suite
@@ -29,10 +30,9 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export function hasDisplayServer(): boolean {
-  if (process.platform !== 'linux') return true
-  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)
-}
+// Launch arguments and display detection live in a Playwright-free module so
+// vitest can unit-test them; specs keep importing them from here.
+export { electronLaunchArgs, forceX11Args, hasDisplayServer } from './launchArgs'
 
 export async function getFreePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
@@ -130,9 +130,27 @@ export async function launchApp(
   extraEnv?: Record<string, string>,
 ): Promise<AppContext> {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), tmpPrefix))
-  const { proc, browser, page } = await spawnAndConnect(dataDir, extraEnv, 'launchApp')
-  await waitForMailList(page)
-  return { proc, browser, page, dataDir }
+  let launched: Awaited<ReturnType<typeof spawnAndConnect>> | undefined
+  try {
+    launched = await spawnAndConnect(dataDir, extraEnv, 'launchApp')
+    await waitForMailList(launched.page)
+  } catch (err) {
+    // A launch that fails half way (CDP up, list never shown) must not leave the process or the profile behind:
+    // the caller never receives a context to clean up.
+    await discardPartialLaunch(launched, dataDir)
+    throw err
+  }
+  return { ...launched, dataDir }
+}
+
+/** Tear down whatever a failed launch had already created. Never throws: the launch error is the one to report. */
+async function discardPartialLaunch(
+  launched: { proc: ChildProcessWithoutNullStreams; browser: Browser } | undefined,
+  dataDir: string | undefined,
+): Promise<void> {
+  await launched?.browser.close().catch(() => {})
+  if (launched) await terminateProcess(launched.proc).catch(() => {})
+  if (dataDir) await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
 }
 
 /**
@@ -162,12 +180,7 @@ async function spawnAndConnect(
   }
   delete (env as NodeJS.ProcessEnv).ELECTRON_RUN_AS_NODE
 
-  // --no-sandbox is required in CI (Docker runs as root).
-  // --disable-gpu — software rendering, stabilizes operation in Docker without GPU.
-  // --disable-dev-shm-usage — Docker containers have limited /dev/shm (64 MB default),
-  //   Chromium uses it for shared memory; insufficient space causes renderer crashes
-  //   ("Target crashed" errors). This flag tells Chromium to use /tmp instead.
-  const electronArgs = ['.', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+  const electronArgs = electronLaunchArgs()
   const proc = hasDisplayServer()
     ? spawn(electronBinary, electronArgs, { env, stdio: 'pipe' })
     : spawn('xvfb-run', ['-a', electronBinary, ...electronArgs], { env, stdio: 'pipe' })
@@ -181,32 +194,55 @@ async function spawnAndConnect(
   })
   proc.on('exit', (code, signal) => console.log(`[electron:exit] code=${code} signal=${signal}`))
 
-  await waitForPortOpen(cdpPort)
-  const wsUrl = await waitForDevToolsWsUrl(cdpPort)
-  // Retry CDP connection — socket hang up is transient in Docker under load
   let browser: Browser | null = null
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      browser = await chromium.connectOverCDP(wsUrl)
-      break
-    } catch (err) {
-      if (attempt >= 2) throw err
-      console.log(`[${label}] CDP connect attempt ${attempt + 1} failed, retrying in 2s...`)
-      await sleep(2000)
+  try {
+    await waitForPortOpen(cdpPort)
+    const wsUrl = await waitForDevToolsWsUrl(cdpPort)
+    // Retry CDP connection — socket hang up is transient in Docker under load
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        browser = await chromium.connectOverCDP(wsUrl)
+        break
+      } catch (err) {
+        if (attempt >= 2) throw err
+        console.log(`[${label}] CDP connect attempt ${attempt + 1} failed, retrying in 2s...`)
+        await sleep(2000)
+      }
     }
-  }
-  if (!browser) throw new Error('Failed to connect via CDP')
-  const context = browser.contexts()[0]
-  const page = context.pages()[0] ?? await context.waitForEvent('page')
-  await page.waitForLoadState('domcontentloaded')
+    if (!browser) throw new Error('Failed to connect via CDP')
+    const context = browser.contexts()[0]
+    const page = context.pages()[0] ?? await context.waitForEvent('page')
+    await page.waitForLoadState('domcontentloaded')
 
-  return { proc, browser, page }
+    return { proc, browser, page }
+  } catch (err) {
+    // The process was started here and the caller will never see it: stop it before reporting the failure.
+    await browser?.close().catch(() => {})
+    await terminateProcess(proc).catch(() => {})
+    throw err
+  }
 }
 
 /** Wait for the mail list to appear (increased timeout for CI under load). */
 async function waitForMailList(page: Page): Promise<void> {
   await expect(page.getByTestId('inbox-list')).toBeVisible({ timeout: IS_CI ? 45_000 : 30_000 })
   await expect(page.getByTestId('mail-item').first()).toBeVisible({ timeout: LAUNCH_TIMEOUT })
+}
+
+/**
+ * Launch with an EMPTY account roster (first-run state): the main window shows
+ * "Connect your email" and opens the Account window, and `accounts:save` adds
+ * to the roster. Returns once the page loads; there is no mail list to wait for.
+ */
+export async function launchAppNoAccounts(tmpPrefix = 'mailcopilot-e2e-noacc-'): Promise<AppContext> {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), tmpPrefix))
+  try {
+    const launched = await spawnAndConnect(dataDir, { MAILCOPILOT_E2E_NO_ACCOUNTS: '1' }, 'launchAppNoAccounts')
+    return { ...launched, dataDir }
+  } catch (err) {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
 }
 
 /**
@@ -228,11 +264,15 @@ export async function launchAppWithConsentGate(
   const reuse = Boolean(options.dataDir)
   const dataDir = options.dataDir
     ?? await fs.mkdtemp(path.join(os.tmpdir(), options.tmpPrefix ?? 'mailcopilot-e2e-consent-'))
-  const { proc, browser, page } = await spawnAndConnect(
-    dataDir,
-    { MAILCOPILOT_E2E_CONSENT: '1' },
-    'launchAppWithConsentGate',
-  )
+  let launched: Awaited<ReturnType<typeof spawnAndConnect>>
+  try {
+    launched = await spawnAndConnect(dataDir, { MAILCOPILOT_E2E_CONSENT: '1' }, 'launchAppWithConsentGate')
+  } catch (err) {
+    // `spawnAndConnect` has stopped the process; the profile directory made here (not a caller's) goes too.
+    if (!reuse) await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
+  const { proc, browser, page } = launched
   return { proc, browser, page, dataDir: (reuse ? undefined : dataDir) as unknown as string }
 }
 
@@ -248,7 +288,13 @@ export async function launchAppReuse(
   extraEnv?: Record<string, string>,
 ): Promise<AppContext> {
   const { proc, browser, page } = await spawnAndConnect(dataDir, extraEnv, 'launchAppReuse')
-  await waitForMailList(page)
+  try {
+    await waitForMailList(page)
+  } catch (err) {
+    // The caller owns `dataDir`; the process and the connection are ours.
+    await discardPartialLaunch({ proc, browser }, undefined)
+    throw err
+  }
   // Return context without dataDir so cleanupApp skips directory removal.
   // The caller manages the shared dataDir lifecycle.
   return { proc, browser, page, dataDir: undefined as unknown as string }

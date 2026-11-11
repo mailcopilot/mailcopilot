@@ -2,7 +2,7 @@
  * AI Agent Integration Tests
  *
  * Runs real AI providers (Anthropic API + OpenAI) against a seeded
- * SQLite database, exercising all 27 MCP mail tools across 13 representative
+ * SQLite database, exercising the MCP mail tools across 13 representative
  * scenarios.
  *
  * Requires: .env.integration with INTEG_ENABLED=1 and provider credentials.
@@ -22,13 +22,30 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env.integration') })
 
 const INTEG_ENABLED = process.env.INTEG_ENABLED === '1'
 // §2.218 — the Claude leg runs against the ANTHROPIC API with the operator's
-// own key (the consumer-subscription provider was removed). It shares
-// `streamClaudeChat` with the former subscription leg, so the Agent SDK path is
-// still covered end to end.
+// own key (the consumer-subscription provider was removed).
+//
+// §2.283 — and it now runs the SAME code as the OpenAI leg: `streamVercelChat`
+// over `@ai-sdk/anthropic`. That makes this matrix worth more than it was. The
+// two legs used to prove two independent implementations; they now prove ONE
+// implementation against two real providers, which is exactly the coverage a
+// unified path needs — a provider-shaped assumption baked into the shared loop
+// shows up as one leg failing while the other passes. There is no local `claude`
+// binary and no subprocess anywhere on this path any more: both legs are plain
+// HTTPS with a key from the store.
+//
+// A NOTE ON WHAT THIS FILE CANNOT DO. It only runs with `.env.integration` and
+// `INTEG_ENABLED=1`. Without credentials every leg is `describe.skip`, and a
+// green `npm run test:integration` then means "nothing ran", not "the provider
+// switch works". §2.122 is the precedent: the provider-switch path broke while
+// the mocked suites stayed green.
 const ANTHROPIC_KEY = process.env.INTEG_ANTHROPIC_API_KEY || ''
 const OPENAI_KEY = process.env.INTEG_OPENAI_API_KEY || ''
 const OPENAI_MODEL = process.env.INTEG_OPENAI_MODEL || 'gpt-4o-mini'
 const OPENAI_BASE_URL = process.env.INTEG_OPENAI_BASE_URL || ''
+// Optional: run the Claude leg against another Anthropic Messages-compatible
+// endpoint (a gateway that fronts real Claude models). Test-only; the product
+// keeps its pinned host and has no setting for this.
+const ANTHROPIC_MODEL = process.env.INTEG_ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929'
 
 // ---------------------------------------------------------------------------
 // 1. Create temp dir for MAILCOPILOT_DATA_DIR BEFORE any db import
@@ -40,12 +57,26 @@ process.env.MAILCOPILOT_DATA_DIR = tmpDir
 // 2. Probe better-sqlite3 ABI compatibility
 // ---------------------------------------------------------------------------
 let betterSqlite3Usable = true
+let betterSqlite3Failure = ''
 try {
   const { default: Database } = await import('better-sqlite3')
   const probe = new Database(':memory:')
   probe.close()
-} catch {
+} catch (err) {
   betterSqlite3Usable = false
+  betterSqlite3Failure = err instanceof Error ? err.message.split('\n')[0] : String(err)
+}
+
+// A suite that was asked to run must not turn into "27 skipped" because the
+// native module is built for Electron: a green exit would then mean "nothing
+// ran". Fail loudly and say how to get a Node build.
+if (INTEG_ENABLED && !betterSqlite3Usable) {
+  throw new Error(
+    'INTEG_ENABLED=1 but better-sqlite3 cannot be loaded under this Node ' +
+      `(${betterSqlite3Failure}). The addon is most likely built for the Electron ABI. ` +
+      'Rebuild it for Node and restore it afterwards through scripts/run-native-tests.mjs ' +
+      '(runNativeTests) instead of calling npm rebuild by hand; unset INTEG_ENABLED to skip this suite.',
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +86,30 @@ try {
 // Tool call spy — captures MCP tool invocations from logger
 type ToolCallRecord = { toolName: string; args: string; timestamp: number }
 const toolCalls: ToolCallRecord[] = []
+
+// Warnings the AI service logged (apply rejections, withheld tools) and the
+// tool names it handed to the model on each `streamText` call.
+const warnings: string[] = []
+const offered = vi.hoisted(() => ({ sets: [] as string[][] }))
+// Opt-in tap on finished model steps, used only by the prompt-cache measurement
+// below. Null for every other test, so they see the unmodified `streamText` call.
+type StepTap = { usage?: unknown; request?: { body?: unknown } }
+const stepTap = vi.hoisted(() => ({ on: null as null | ((step: StepTap) => void) }))
+
+vi.mock('ai', async (importActual) => {
+  const actual = await importActual<typeof import('ai')>()
+  return {
+    ...actual,
+    streamText: ((opts: { tools?: Record<string, unknown>; onStepFinish?: (s: StepTap) => unknown }) => {
+      offered.sets.push(Object.keys(opts.tools ?? {}))
+      const tap = stepTap.on
+      const wrapped = tap
+        ? { ...opts, onStepFinish: (s: StepTap) => { tap(s); return opts.onStepFinish?.(s) } }
+        : opts
+      return (actual.streamText as (o: unknown) => unknown)(wrapped)
+    }) as typeof actual.streamText,
+  }
+})
 
 const logSpy = {
   info: vi.fn((...args: unknown[]) => {
@@ -67,6 +122,7 @@ const logSpy = {
   }),
   debug: vi.fn(),
   warn: vi.fn((...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '))
     if (process.env.INTEG_VERBOSE === '1') console.warn('[AI-WARN]', ...args)
   }),
   error: vi.fn((...args: unknown[]) => {
@@ -90,6 +146,26 @@ vi.mock('keytar', () => ({
     deletePassword: vi.fn(async (_svc: string, key: string) => { keytarStore.delete(key); return true }),
   },
 }))
+
+// Test-only seam for the Claude leg. The real `createAnthropic` is wrapped, not
+// replaced, so `aiChat` -> `streamVercelChat` -> `createAnthropicChatModel` ->
+// `aiFetch` stay production code; only the host and the credential header differ.
+// Wrapping the SDK factory is the narrowest point that reaches the hard-coded
+// base URL without a product change. With INTEG_ANTHROPIC_BASE_URL unset the
+// wrapper is a pass-through.
+vi.mock('@ai-sdk/anthropic', async (importActual) => {
+  const actual = await importActual<typeof import('@ai-sdk/anthropic')>()
+  const baseURL = process.env.INTEG_ANTHROPIC_BASE_URL
+  if (!baseURL) return actual
+  return {
+    ...actual,
+    createAnthropic: (opts: Parameters<typeof actual.createAnthropic>[0] = {}) => {
+      const { apiKey, ...rest } = opts
+      // Such gateways take the key as a Bearer token (`authToken`), not `x-api-key`.
+      return actual.createAnthropic({ ...rest, baseURL, authToken: apiKey })
+    },
+  }
+})
 
 // Current settings mock (will be updated per-provider test)
 let currentSettings: Record<string, unknown> = {
@@ -187,7 +263,7 @@ function hasSpiedTool(name: string): boolean {
 // ---------------------------------------------------------------------------
 // Main test suite
 // ---------------------------------------------------------------------------
-describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
+describeFn('AI Agent Integration — MCP mail tools × 2 Providers', () => {
   // Dynamic imports (after mocks)
   let aiChat: typeof import('../../electron/services/ai').aiChat
   let setUiContext: typeof import('../../electron/services/ai').setUiContext
@@ -324,7 +400,63 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
     moveCb.mockClear()
     followUpAddCb.mockClear()
     followUpDismissCb.mockClear()
+    warnings.length = 0
+    offered.sets.length = 0
   })
+
+  // -------------------------------------------------------------------------
+  // Product-contract helpers
+  // -------------------------------------------------------------------------
+  /** Every message's mutable state; the mailbox is unchanged when this is. */
+  function mailboxSnapshot(): string {
+    const rows = dbMod.default
+      .prepare('SELECT account_id, folder_path, uid, unread, flagged FROM messages ORDER BY account_id, folder_path, uid')
+      .all()
+    return JSON.stringify(rows)
+  }
+
+  /** Tool names handed to the model across the calls since the last reset, prefix stripped. */
+  function offeredToolNames(): Set<string> {
+    return new Set(offered.sets.flat().map(n => n.replace(/^mcp__mailcopilot__/, '')))
+  }
+
+  /**
+   * True when `applyTool` got past the confirmation-token check. Every apply tool
+   * logs an entry line before it validates anything, so `hasSpiedTool` cannot tell
+   * a refused attempt from an executed one; only this line marks execution.
+   */
+  function appliedWithToken(applyTool: string): boolean {
+    return toolCalls.some(c => c.toolName === applyTool && c.args.includes('token validated'))
+  }
+
+  /**
+   * §3.10 P0: the model cannot apply a prepared action. The confirmation token is
+   * minted by a user click in the UI, so an apply issued from chat text alone must
+   * be refused, the mutating callback must not run and the mailbox must not change.
+   * The model may or may not try to apply after "yes"; both are acceptable, a
+   * successful apply is not.
+   */
+  function expectApplyRefused(applyTool: string, callback: Mock, before: string): void {
+    expect(appliedWithToken(applyTool)).toBe(false)
+    expect(callback).not.toHaveBeenCalled()
+    const rejections = warnings.filter(w => w.startsWith(`MCP ${applyTool} →`))
+    for (const r of rejections) expect(r).toContain('token validation failed: token_missing')
+    expect(mailboxSnapshot()).toBe(before)
+  }
+
+  /**
+   * The direct (no preview) variants are not in ALLOWED_TOOLS: they must be absent
+   * from what the model is offered, and nothing may have mutated state.
+   */
+  function expectNoDirectMutation(direct: string[], preview: string, callbacks: Mock[], before: string): void {
+    const names = offeredToolNames()
+    expect(names.size).toBeGreaterThan(0)
+    for (const d of direct) expect(names.has(d)).toBe(false)
+    expect(names.has(preview)).toBe(true)
+    for (const d of direct) expect(hasSpiedTool(d)).toBe(false)
+    for (const cb of callbacks) expect(cb).not.toHaveBeenCalled()
+    expect(mailboxSnapshot()).toBe(before)
+  }
 
   // -------------------------------------------------------------------------
   // Provider matrix
@@ -338,6 +470,8 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
 
   const providers: ProviderConfig[] = [
     {
+      // §2.283 — same streamer as the OpenAI leg below; only the model and the
+      // provider-executed tool set differ.
       name: 'Claude (Anthropic API)',
       provider: 'anthropic-api',
       skip: !ANTHROPIC_KEY,
@@ -345,7 +479,7 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         currentSettings = {
           ...currentSettings,
           aiProvider: 'anthropic-api',
-          aiModel: 'claude-sonnet-4-5-20250929',
+          aiModel: ANTHROPIC_MODEL,
           aiMaxTurns: 10,
           aiMaxBudgetPerRequest: 1,
         }
@@ -459,6 +593,44 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
       })
 
       // =====================================================================
+      // S14: citation tickets (§3.3 B3). Main hands the model a ready link next to every row it reads
+      // (`cite`); the model must copy it exactly. A link it makes up or distorts is not a source.
+      // This is the check that real models copy the ticket without damage, on both contours.
+      // =====================================================================
+      it('S14: the model copies the ready link of every message it mentions, without distortion', async () => {
+        // Spend is bounded by the number of steps: the app's per-request ceiling prices an unknown model by a floor and
+        // would end the answer right after the tool step.
+        currentSettings = { ...currentSettings, aiMaxTurns: 4 }
+        const sid = randomUUID()
+        dbMod.createAiSession(sid, prov.provider)
+
+        const { resultText, error, events } = await collectEvents(
+          aiChat({
+            requestId: randomUUID(),
+            sessionId: sid,
+            prompt: 'Use search_emails to find emails from alice@example.com (accountId=1, folder=INBOX). Then list every message you found as a bullet: its subject as a link to the message.',
+            aiProvider: prov.provider,
+          }),
+        )
+
+        expect(error).toBeUndefined()
+        expect(hasSpiedTool('search_emails') || hasSpiedTool('list_emails')).toBe(true)
+
+        // Every ticket-shaped link the model wrote, whatever its length, and every place-form link it composed.
+        const written = [...resultText.matchAll(/mailref:\/\/c\/([^\s)\]]*)/g)].map(m => m[1]!)
+        const composed = [...resultText.matchAll(/mailref:\/\/\d+\//g)].length
+        const wellFormed = written.filter(t => /^[a-z2-7]{8}$/.test(t))
+        const known = dbMod.listAiCitations(sid, wellFormed).map(r => r.token)
+        const distorted = written.filter(t => !known.includes(t))
+        console.log('CITATION_LIVE', JSON.stringify({ provider: prov.name, written: written.length, wellFormed: wellFormed.length, known: known.length, distorted, composedPlaceLinks: composed, tools: getSpiedToolNames() }))
+        if (written.length === 0) console.log('CITATION_LIVE_TEXT', JSON.stringify(resultText.slice(0, 600)), JSON.stringify(events.filter(e => e.type !== 'text_delta').map(e => e.type === 'notice' ? `notice:${e.code}` : e.type === 'status' ? `status:${e.status}` : e.type)))
+
+        expect(written.length).toBeGreaterThan(0)
+        expect(distorted).toEqual([])
+        expect(composed).toBe(0)
+      })
+
+      // =====================================================================
       // S3: Attachment analysis
       // Tools: list_attachments, read_attachment
       // =====================================================================
@@ -510,8 +682,10 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         expect(turn1.error).toBeUndefined()
         expect(hasSpiedTool('preview_mail_action')).toBe(true)
 
-        // Turn 2: confirm
+        // Turn 2: a "yes" typed in chat carries no UI confirmation token
+        const before = mailboxSnapshot()
         toolCalls.length = 0
+        warnings.length = 0
         const turn2 = await collectEvents(
           aiChat({
             requestId: randomUUID(),
@@ -526,8 +700,7 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         )
 
         expect(turn2.error).toBeUndefined()
-        expect(hasSpiedTool('apply_mail_action')).toBe(true)
-        expect(mailActionCb).toHaveBeenCalled()
+        expectApplyRefused('apply_mail_action', mailActionCb, before)
       })
 
       // =====================================================================
@@ -552,8 +725,10 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         expect(turn1.error).toBeUndefined()
         expect(hasSpiedTool('send_email_preview')).toBe(true)
 
-        // Turn 2: confirm
+        // Turn 2: a "yes" typed in chat carries no UI confirmation token
+        const before = mailboxSnapshot()
         toolCalls.length = 0
+        warnings.length = 0
         const turn2 = await collectEvents(
           aiChat({
             requestId: randomUUID(),
@@ -568,13 +743,7 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         )
 
         expect(turn2.error).toBeUndefined()
-        expect(hasSpiedTool('send_email_apply')).toBe(true)
-        expect(sendEmailCb).toHaveBeenCalled()
-
-        // Validate callback received correct data
-        const callArgs = sendEmailCb.mock.calls[0][0]
-        expect(callArgs.to).toContain('test2@example.com')
-        expect(callArgs.subject).toMatch(/AI Integration Test/i)
+        expectApplyRefused('send_email_apply', sendEmailCb, before)
       })
 
       // =====================================================================
@@ -599,8 +768,10 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         expect(turn1.error).toBeUndefined()
         expect(hasSpiedTool('preview_unsubscribe')).toBe(true)
 
-        // Turn 2: confirm
+        // Turn 2: a "yes" typed in chat carries no UI confirmation token
+        const before = mailboxSnapshot()
         toolCalls.length = 0
+        warnings.length = 0
         const turn2 = await collectEvents(
           aiChat({
             requestId: randomUUID(),
@@ -615,8 +786,7 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         )
 
         expect(turn2.error).toBeUndefined()
-        expect(hasSpiedTool('apply_unsubscribe')).toBe(true)
-        expect(unsubscribeCb).toHaveBeenCalled()
+        expectApplyRefused('apply_unsubscribe', unsubscribeCb, before)
       })
 
       // =====================================================================
@@ -681,63 +851,56 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
       })
 
       // =====================================================================
-      // S9: Snooze + unsnooze email
-      // Tools: snooze_email, unsnooze_email
+      // S9: Snooze / unsnooze — only the preview half is offered
+      // Product contract: `snooze_email` and `unsnooze_email` are not in ALLOWED_TOOLS
+      // (§3.10 P0), only `preview_snooze_email` / `preview_unsnooze_email` and the
+      // token-gated `apply_*` halves. Kept, rewritten: it still proves the model gets
+      // the gated pair and that a snooze request cannot reach the callback.
       // =====================================================================
-      it('S9: snooze and unsnooze email', async () => {
+      it('S9: snooze request reaches a preview, never a direct snooze', async () => {
         setUiContext({
           type: 'email',
           data: { accountId: 1, folder: 'INBOX', uid: 103 },
         })
+        const before = mailboxSnapshot()
 
-        const { resultText, error } = await collectEvents(
+        const { error } = await collectEvents(
           aiChat({
             requestId: randomUUID(),
-            prompt: 'Snooze this email (uid 103, accountId 1, folder INBOX) until tomorrow morning using snooze_email tool. Then immediately unsnooze it using unsnooze_email with snoozeIds=[1].',
+            prompt: 'Snooze this email (uid 103, accountId 1, folder INBOX) until tomorrow morning. Use preview_snooze_email.',
             aiProvider: prov.provider,
           }),
         )
 
         expect(error).toBeUndefined()
-        expect(hasSpiedTool('snooze_email')).toBe(true)
-        expect(snoozeCb).toHaveBeenCalled()
-
-        // At least snooze should have been called — unsnooze may or may not be called
-        // depending on AI behavior, but we verify the callback was invoked
-        const snoozeArgs = snoozeCb.mock.calls[0][0]
-        expect(snoozeArgs.uids).toContain(103)
-        expect(snoozeArgs.accountId).toBe(1)
-
-        expect(resultText).toMatch(/snooze/i)
+        expect(hasSpiedTool('preview_snooze_email')).toBe(true)
+        expectNoDirectMutation(['snooze_email', 'unsnooze_email'], 'preview_snooze_email', [snoozeCb, unsnoozeCb], before)
+        expect(appliedWithToken('apply_snooze_email')).toBe(false)
       })
 
       // =====================================================================
-      // S10: Flag/star email
-      // Tools: flag_email
+      // S10: Flag/star — only the preview half is offered
+      // `flag_email` is not in ALLOWED_TOOLS; the request must stop at the preview.
       // =====================================================================
-      it('S10: flag/star email', async () => {
+      it('S10: flag request reaches a preview, never a direct flag', async () => {
         setUiContext({
           type: 'email',
           data: { accountId: 1, folder: 'INBOX', uid: 101 },
         })
+        const before = mailboxSnapshot()
 
-        const { resultText, error } = await collectEvents(
+        const { error } = await collectEvents(
           aiChat({
             requestId: randomUUID(),
-            prompt: 'Star this email using flag_email tool (accountId=1, folder="INBOX", uids=[101], flagged=true).',
+            prompt: 'Star this email (accountId=1, folder="INBOX", uid=101). Use preview_flag_email.',
             aiProvider: prov.provider,
           }),
         )
 
         expect(error).toBeUndefined()
-        expect(hasSpiedTool('flag_email')).toBe(true)
-        expect(flagCb).toHaveBeenCalled()
-
-        const flagArgs = flagCb.mock.calls[0][0]
-        expect(flagArgs.uids).toContain(101)
-        expect(flagArgs.flagged).toBe(true)
-
-        expect(resultText).toMatch(/star|flag/i)
+        expect(hasSpiedTool('preview_flag_email')).toBe(true)
+        expectNoDirectMutation(['flag_email'], 'preview_flag_email', [flagCb], before)
+        expect(appliedWithToken('apply_flag_email')).toBe(false)
       })
 
       // =====================================================================
@@ -762,8 +925,10 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         expect(turn1.error).toBeUndefined()
         expect(hasSpiedTool('move_email_preview')).toBe(true)
 
-        // Turn 2: confirm
+        // Turn 2: a "yes" typed in chat carries no UI confirmation token
+        const before = mailboxSnapshot()
         toolCalls.length = 0
+        warnings.length = 0
         const turn2 = await collectEvents(
           aiChat({
             requestId: randomUUID(),
@@ -778,42 +943,33 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
         )
 
         expect(turn2.error).toBeUndefined()
-        expect(hasSpiedTool('move_email_apply')).toBe(true)
-        expect(moveCb).toHaveBeenCalled()
-
-        const moveArgs = moveCb.mock.calls[0][0]
-        expect(moveArgs.uids).toContain(108)
-        expect(moveArgs.toFolder).toMatch(/archive/i)
+        expectApplyRefused('move_email_apply', moveCb, before)
       })
 
       // =====================================================================
-      // S12: Add and dismiss follow-up
-      // Tools: add_followup, dismiss_followup
+      // S12: Follow-up — only the preview half is offered
+      // `add_followup` / `dismiss_followup` are not in ALLOWED_TOOLS; the request
+      // must stop at the preview and create nothing.
       // =====================================================================
-      it('S12: add and dismiss follow-up', async () => {
+      it('S12: follow-up request reaches a preview, never a direct follow-up', async () => {
         setUiContext({
           type: 'email',
           data: { accountId: 1, folder: 'INBOX', uid: 101 },
         })
+        const before = mailboxSnapshot()
 
-        const { resultText, error } = await collectEvents(
+        const { error } = await collectEvents(
           aiChat({
             requestId: randomUUID(),
-            prompt: 'Set a follow-up reminder for this email (accountId=1, folder="INBOX", uid=101, toAddr="alice@example.com") to remind in 3 days using add_followup. Then dismiss it with dismiss_followup (followUpId=42).',
+            prompt: 'Set a follow-up reminder for this email (accountId=1, folder="INBOX", uid=101, toAddr="alice@example.com") in 3 days. Use preview_add_followup.',
             aiProvider: prov.provider,
           }),
         )
 
         expect(error).toBeUndefined()
-        expect(hasSpiedTool('add_followup')).toBe(true)
-        expect(followUpAddCb).toHaveBeenCalled()
-
-        const addArgs = followUpAddCb.mock.calls[0][0]
-        expect(addArgs.accountId).toBe(1)
-        expect(addArgs.uid).toBe(101)
-        expect(addArgs.toAddr).toContain('alice')
-
-        expect(resultText).toMatch(/follow.?up|reminder/i)
+        expect(hasSpiedTool('preview_add_followup')).toBe(true)
+        expectNoDirectMutation(['add_followup', 'dismiss_followup'], 'preview_add_followup', [followUpAddCb, followUpDismissCb], before)
+        expect(appliedWithToken('apply_add_followup')).toBe(false)
       })
 
       // =====================================================================
@@ -874,9 +1030,72 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
   }
 
   // =========================================================================
+  // Prompt-cache measurement (opt-in, spends real money)
+  //
+  // `INTEG_CACHE_MEASURE=1 npm run test:integration -- -t "cache measure"`.
+  // Runs one realistic mail question (search, then read) a few times through the
+  // real `aiChat` path and writes per-step token usage, cache reads and writes
+  // and timings to `INTEG_CACHE_MEASURE_OUT` (a JSON file). It asserts nothing
+  // about speed: it reports numbers for a human to compare before and after a
+  // change.
+  // =========================================================================
+  const measureCache = process.env.INTEG_CACHE_MEASURE === '1' && !!ANTHROPIC_KEY
+  ;(measureCache ? describe : describe.skip)('cache measure', () => {
+    const RUNS = Number(process.env.INTEG_CACHE_MEASURE_RUNS || 3)
+    const QUESTION = 'Find the quarterly report email from Bob in my inbox, read it and give me its key points.'
+
+    it('records per-step usage and timing', async () => {
+      currentSettings = {
+        ...currentSettings,
+        aiProvider: 'anthropic-api',
+        aiModel: ANTHROPIC_MODEL,
+        aiMaxTurns: 10,
+        aiMaxBudgetPerRequest: 1,
+      }
+      const runs: unknown[] = []
+      for (let i = 0; i < RUNS; i++) {
+        const steps: Array<Record<string, number | undefined>> = []
+        const t0 = performance.now()
+        stepTap.on = (step) => {
+          const u = (step.usage ?? {}) as {
+            inputTokens?: number; outputTokens?: number
+            inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+          }
+          steps.push({
+            atMs: Math.round(performance.now() - t0),
+            inputTotal: u.inputTokens,
+            noCache: u.inputTokenDetails?.noCacheTokens,
+            cacheRead: u.inputTokenDetails?.cacheReadTokens,
+            cacheWrite: u.inputTokenDetails?.cacheWriteTokens,
+            output: u.outputTokens,
+          })
+        }
+        let firstTextMs: number | undefined
+        let costUsd: number | undefined
+        let error: string | undefined
+        const tools: string[] = []
+        try {
+          for await (const ev of aiChat({ requestId: randomUUID(), prompt: QUESTION, aiProvider: 'anthropic-api' })) {
+            if (ev.type === 'text_delta' && firstTextMs === undefined) firstTextMs = Math.round(performance.now() - t0)
+            if (ev.type === 'tool_use_start') tools.push(ev.toolName)
+            if (ev.type === 'result') costUsd = ev.costUsd
+            if (ev.type === 'error') error = ev.message
+          }
+        } finally {
+          stepTap.on = null
+        }
+        runs.push({ run: i + 1, firstTextMs, totalMs: Math.round(performance.now() - t0), costUsd, tools, error, steps })
+      }
+      const out = process.env.INTEG_CACHE_MEASURE_OUT
+      if (out) fs.writeFileSync(out, JSON.stringify({ model: ANTHROPIC_MODEL, question: QUESTION, runs }, null, 2))
+      expect(runs.length).toBe(RUNS)
+    })
+  })
+
+  // =========================================================================
   // Meta-test: verify all tools appear in at least one scenario
   // =========================================================================
-  it('meta: all 27 tools are covered by test scenarios', () => {
+  it('meta: every tool the scenarios assert on is covered', () => {
     const allTools = [
       'get_email', 'list_emails', 'search_emails', 'list_folders',
       'get_thread', 'get_contacts', 'create_draft', 'get_current_context',
@@ -887,10 +1106,8 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
       'send_email_preview', 'send_email_apply',
       'update_memory',
       'list_attachments', 'read_attachment',
-      'snooze_email', 'unsnooze_email',
-      'flag_email',
+      'preview_snooze_email', 'preview_flag_email', 'preview_add_followup',
       'move_email_preview', 'move_email_apply',
-      'add_followup', 'dismiss_followup',
     ]
 
     // This is a static check — each tool appears in expected tools for at least one scenario
@@ -903,10 +1120,10 @@ describeFn('AI Agent Integration — 27 MCP Tools × 2 Providers', () => {
       S6: ['preview_unsubscribe', 'apply_unsubscribe'],
       S7: ['query_db'],
       S8: ['update_memory', 'create_draft'],
-      S9: ['snooze_email', 'unsnooze_email'],
-      S10: ['flag_email'],
+      S9: ['preview_snooze_email'],
+      S10: ['preview_flag_email'],
       S11: ['move_email_preview', 'move_email_apply'],
-      S12: ['add_followup', 'dismiss_followup'],
+      S12: ['preview_add_followup'],
     }
 
     const covered = new Set(Object.values(scenarioCoverage).flat())

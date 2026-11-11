@@ -28,6 +28,8 @@ Vorschlaege basierend auf frueherer Korrespondenz.
 
 - **Antworten** (**r**), **Allen antworten** (**a**), **Weiterleiten** (**f**).
 
+Antworten (Antworten und Allen antworten) tragen die Standard-Header `In-Reply-To` und `References`, die auf die Nachricht verweisen, auf die Sie antworten; so ordnet das Mailprogramm des Empfängers Ihre Antwort derselben Konversation zu, statt eine neue zu beginnen. Weiterleitungen tragen diese Header nicht. Hat die ursprüngliche Nachricht keinen `Message-ID`-Header oder ist sie nicht mehr im lokalen Cache, wird die Antwort trotzdem gesendet, nur ohne diese Header. Wählen Sie im Verfassen-Fenster einen anderen Absender, ändert das nicht, worauf Sie antworten, die Header bleiben also erhalten. Auch eine als Entwurf gespeicherte Antwort behält sie: Der Entwurf speichert `In-Reply-To` und `References`; öffnen Sie ihn erneut aus **Entwürfe** und senden ihn, wird er wie zuvor der Konversation zugeordnet, solange die ursprüngliche Nachricht im lokalen Cache liegt.
+
 ## Entwuerfe
 
 Automatische Speicherung lokal und im IMAP-Entwuerfe-Ordner.

@@ -1,6 +1,7 @@
-import { createHash, X509Certificate } from 'node:crypto'
+import { X509Certificate } from 'node:crypto'
 import net from 'node:net'
 import tls from 'node:tls'
+import { withoutDistrustedRoots } from './distrustedRoots'
 
 type TlsConfig = {
   tlsPinsSha256?: string[]
@@ -12,19 +13,26 @@ type TlsConfig = {
    * `checkServerIdentity` when chain verification already succeeded (see the
    * long comment above `buildTlsOptions`). Supplying the pinned certificate
    * itself as an explicit trust anchor is what lets such a server verify
-   * WITHOUT weakening `rejectUnauthorized`.
+   * WITHOUT weakening `rejectUnauthorized`. For the private-CA half of that
+   * sentence the anchor is not sufficient on its own — a leaf can only end a
+   * chain under partial chain building, which is why a non-empty list here is
+   * also what turns that flag on (`secureContextFor`).
    *
    * Optional by design: the field is populated once the pin store persists
-   * the certificate body (see `contract_out` — owned by packages/db). While
-   * it is absent, a pinned self-signed server fails closed with a normal
-   * certificate error instead of being silently accepted.
+   * the certificate body (`upsertTlsPin` / `listTlsPinnedCertsPemForEndpoint`
+   * in packages/db, which owns that storage). While it is absent, a pinned
+   * self-signed server fails closed with a normal certificate error instead of
+   * being silently accepted.
    *
    * SECURITY-LOAD-BEARING BEYOND CHAIN BUILDING: presence of a leaf here is
    * also what tells `buildTlsOptions` that the leaf's identity was confirmed
    * by the user through the main-initiated recovery dialog, which is the only
-   * writer of certificate bodies. A leaf pinned by fingerprint alone (the
-   * renderer-writable `tls:addPin` channel) is still hostname-checked. Do not
-   * populate this field from anything a renderer supplies.
+   * writer of certificate bodies — and, once ANY body is known for an
+   * endpoint, the set of bodies known for it is the ONLY thing that endpoint
+   * accepts. A leaf pinned by fingerprint alone (the renderer-writable
+   * `tls:addPin` channel) is hostname-checked on an endpoint with no confirmed
+   * body, and refused outright on one that has any. Do not populate this field
+   * from anything a renderer supplies.
    */
   tlsPinnedCertsPem?: string[]
   /**
@@ -33,9 +41,10 @@ type TlsConfig = {
    *
    * It is also the identity the certificate is verified against wherever a
    * hostname check applies: the unpinned path (Node's own
-   * `checkServerIdentity` prefers `servername` over `host`) and the
-   * fingerprint-only pinned mode. Only an ANCHORED pinned leaf skips the name
-   * check — see `buildTlsOptions`.
+   * `checkServerIdentity` prefers `servername` over `host`) and a pinned
+   * endpoint whose pins are all fingerprint-only. An ANCHORED leaf skips the
+   * name check, and on an endpoint that has any anchor a fingerprint-only leaf
+   * never reaches it — see `buildTlsOptions`.
    */
   servername?: string
 }
@@ -95,6 +104,7 @@ const TLS_TRUST_MESSAGE_RE = new RegExp(
     'certificate chain too long',
     "hostname\\/ip does not match certificate's (?:altnames|subject)",
     'TLS pin mismatch',
+    'TLS pin not confirmed',
     'TLS pin error',
   ].join('|'),
   'i',
@@ -137,11 +147,33 @@ export function isTlsTrustError(err: unknown): boolean {
 type GetCACertificatesFn = (type?: 'default' | 'system' | 'bundled' | 'extra') => string[]
 
 /**
- * CA snapshots expire after this window. Root stores are NOT immutable for
- * the process lifetime: an admin installing or (more importantly) REMOVING a
- * root mid-session must not stay in effect until the app restarts — a revoked
- * interception root would otherwise remain trusted for hours. The TTL keeps
- * the read off the per-connection hot path while bounding staleness.
+ * How long OUR snapshot of the CA lists is reused before it is recomputed.
+ *
+ * This bounds the cost, not the staleness. It once claimed the latter — "an
+ * admin REMOVING a root mid-session must not stay in effect until the app
+ * restarts" — and that promise was false in both directions. Measured on the
+ * shipping runtime (Node 22.22, and identically under Electron 43.4.1):
+ * `tls.getCACertificates(kind)` returns the SAME frozen array object on every
+ * call, for every kind, for the lifetime of the PROCESS. `lib/tls.js` memoizes
+ * it (`systemCACertificates ||= ObjectFreeze(getSystemCACertificates())`) over
+ * a C++ function-local static, so even a `worker_threads` read sees the same
+ * snapshot, and there is no reset API — `tls.setDefaultCACertificates()`
+ * replaces only the 'default' list, which we never call. Re-reading after the
+ * TTL therefore re-reads a frozen snapshot and cannot notice any change to the
+ * OS store.
+ *
+ * Consequence, stated plainly rather than papered over: a root the
+ * administrator installs or removes mid-session — including a revoked
+ * interception root — keeps its previous effect on IMAP/SMTP until the
+ * application is RESTARTED. That is the accepted price, not an oversight; no
+ * refresh mechanism is built here (there is no supported one to build on).
+ *
+ * What the TTL still buys is real and is why it stays: it keeps the dedupe of
+ * ~500 PEM bodies off the per-connection hot path, and its revision counter is
+ * what lets the derived SecureContext cache be invalidated in step with the
+ * snapshot it was built from (see `caRevision`). Both of those are properties
+ * of OUR caches, and they are what the tests pin — Node's memoization is an
+ * implementation detail of Node, not a contract we assert against.
  */
 export const CA_CACHE_TTL_MS = 10 * 60_000
 
@@ -164,10 +196,14 @@ let caFallbackWarned = false
  * the revision of the entry they came from, never against the counter's current
  * value. What the counter guarantees is that a recomputed entry never reuses
  * the number of the snapshot it replaces, so recomputing a snapshot makes
- * everything derived from its previous contents unreachable. That is what keeps
- * the TTL meaningful for the derived value too: a root removed from the OS
- * store stops being trusted at the same moment for `ca` arrays and for the
- * OpenSSL contexts built from them.
+ * everything derived from its previous contents unreachable — the `ca` arrays
+ * and the OpenSSL contexts built from them change over at the same moment,
+ * with no window in which one is fresh and the other is not.
+ *
+ * That is a consistency guarantee between OUR caches, NOT a freshness
+ * guarantee about the OS store: as `CA_CACHE_TTL_MS` explains, the underlying
+ * `tls.getCACertificates` snapshot is frozen for the process lifetime, so a
+ * recompute normally yields identical contents.
  */
 let caRevision = 0
 
@@ -207,7 +243,7 @@ function cachedCaEntry(kind: CaKind, compute: (getCa: GetCACertificatesFn) => st
       caFallbackWarned = true
       // packages/net has no createLogger (layer-pure); console is the local sink.
       console.warn(
-        '[TLS] system CA store unavailable — falling back to bundled-only verification:',
+        '[TLS] CA store unavailable — using the runtime default CA store; the distrusted-root filter is not applied:',
         e instanceof Error ? e.message : String(e),
       )
     }
@@ -239,7 +275,22 @@ function cachedCa(kind: CaKind, compute: (getCa: GetCACertificatesFn) => string[
  * snapshot revision.
  */
 export function getCombinedCaCertificates(): string[] | null {
-  return cachedCa('combined', (getCa) => [...getCa('default'), ...getCa('system')])
+  return cachedCa('combined', computeCombinedCa)
+}
+
+/** Default + system roots minus the explicit distrust set. The ONE definition
+ *  of the combined list: `buildTlsOptions` and `getCombinedCaCertificates`
+ *  both use it, so no consumer of THIS list reads an unfiltered copy. The one
+ *  gap is the `null` fallback in `cachedCaEntry` (`tls.getCACertificates`
+ *  missing or throwing): consumers then omit `ca` and get Node's built-in store as it is,
+ *  denylist not applied. Accepted, not patched: the only other source, a
+ *  filtered `tls.rootCertificates`, holds the bundled roots alone and would
+ *  silently drop `NODE_EXTRA_CA_CERTS` (a corporate root), which is the
+ *  narrower-than-default trust the additive rule above forbids — and the
+ *  situation needs a runtime where `getCACertificates` is missing or throws,
+ *  which Electron 43 is not. */
+function computeCombinedCa(getCa: GetCACertificatesFn): string[] {
+  return withoutDistrustedRoots([...getCa('default'), ...getCa('system')])
 }
 
 /**
@@ -251,7 +302,7 @@ export function getCombinedCaCertificates(): string[] | null {
  * trying to exclude.
  */
 export function getBundledCaCertificates(): string[] | null {
-  return cachedCa('bundled', (getCa) => getCa('bundled'))
+  return cachedCa('bundled', (getCa) => withoutDistrustedRoots(getCa('bundled')))
 }
 
 // ---------------------------------------------------------------------------
@@ -278,35 +329,119 @@ export function getBundledCaCertificates(): string[] | null {
 // from one endpoint to another.
 //
 // Keyed on the revision OF THE SNAPSHOT ENTRY the context was built from,
-// rather than on the certificate bytes, so the TTL that bounds snapshot
-// staleness bounds context staleness by exactly the same window: recomputing
-// that snapshot hands it a fresh revision number, and every context built from
-// the previous contents becomes unreachable. Anchors are part of the key
-// because a pinned endpoint's trust set is the snapshot PLUS its own anchors.
+// rather than on the certificate bytes, so a snapshot recompute hands out a
+// fresh revision number and every context built from the previous contents
+// becomes unreachable. Anchors are part of the key because a pinned endpoint's
+// trust set is the snapshot PLUS its own anchors, and the partial-chain flag is
+// part of the key because it changes HOW that same set is used (see
+// `secureContextFor`).
 type SecureContextEntry = { revision: number; context: tls.SecureContext }
 const secureContextCache = new Map<string, SecureContextEntry>()
 
-/** Digest of the pinned anchor bodies — small (0-2 certificates in practice)
- *  and hashed rather than concatenated so the key stays bounded. */
+/** Identity of the pinned anchor set inside the cache key. The inputs are
+ *  public certificate PEM bodies (0-2 in practice, one per confirmed pin), not
+ *  credentials, so the key carries them as they are: no digest, nothing that
+ *  could be mistaken for hashing secret material. The map is cleared of every
+ *  entry from an older snapshot revision on each miss, so the longer key costs a
+ *  few kilobytes at most. */
 function anchorsKey(anchors: string[]): string {
-  if (anchors.length === 0) return '-'
-  const h = createHash('sha256')
-  for (const pem of anchors) h.update(pem).update('\0')
-  return h.digest('hex')
+  return anchors.length === 0 ? '-' : anchors.join('\0')
 }
 
-/** Shared SecureContext for a trust set, or `undefined` when the caller must
- *  fall back to Node's implicit default context (no `ca` at all). */
-function secureContextFor(revision: number, ca: string[] | null, anchors: string[]): tls.SecureContext | undefined {
-  if (!ca) return undefined
-  const key = `${revision}|${anchorsKey(anchors)}`
+/**
+ * Cache key for a built SecureContext.
+ *
+ * SECURITY-LOAD-BEARING: the key must name EVERY input that changes the object
+ * being cached, `partialChain` included. It is not enough that today's caller
+ * only ever asks for `partialChain: true` together with a non-empty anchor set
+ * (which already gives a distinct `anchorsKey`) — that is a coincidence of the
+ * current call sites, not a property of this cache. If the flag were left out
+ * of the key and some later change asked for it on a set of anchors that some
+ * other endpoint also uses without it, the two endpoints would share one
+ * context and an ordinary connection would silently inherit the relaxed chain
+ * building. Keying on the flag makes that class of mistake impossible instead
+ * of merely unreachable.
+ */
+function secureContextCacheKey(revision: number, anchors: string[], partialChain: boolean): string {
+  return `${revision}|${partialChain ? 'partial' : 'full'}|${anchorsKey(anchors)}`
+}
+
+/**
+ * Shared SecureContext for a trust set, or `undefined` when the caller must
+ * fall back to Node's implicit default context (no `ca` at all).
+ *
+ * `partialChain` maps to OpenSSL's `X509_V_FLAG_PARTIAL_CHAIN` through Node's
+ * `allowPartialTrustChain` option: "treat intermediate (non-self-signed)
+ * certificates in the trust CA certificate list as trusted". Without it a trust
+ * anchor must be SELF-SIGNED, which is why supplying a pinned LEAF as an anchor
+ * only ever helped a genuinely self-signed server. Measured against a server
+ * that presents leaf + intermediate + private self-signed root (the shape of
+ * the incident that motivated this — a mail host that moved to a private CA):
+ *
+ *   ca = store + pinned leaf, flag OFF → SELF_SIGNED_CERT_IN_CHAIN, and
+ *                                        `checkServerIdentity` never runs
+ *   ca = store + pinned leaf, flag ON  → authorized, `checkServerIdentity` runs
+ *   ca = store (no anchor),   flag ON  → SELF_SIGNED_CERT_IN_CHAIN
+ *
+ * The third line is the important one: the flag does not widen trust by itself,
+ * it only lets a certificate that is ALREADY in the trust list terminate the
+ * chain. Combined with the second line it also explains why the user-facing bug
+ * was unfixable before: our own invariant is that Node calls
+ * `checkServerIdentity` only after chain verification succeeded, so the pin was
+ * never even compared — "Trust this certificate" wrote a correct pin and the
+ * next connection failed identically, forever.
+ *
+ * ONLY the pinned path passes `true`, and only when this endpoint actually has
+ * a parsed anchor to terminate on (`buildTlsOptions`). What the flag widens is
+ * real and list-wide: every non-self-signed certificate in the trust list
+ * becomes a standalone end of trust (measured: a bare Sub CA in `ca` verifies
+ * the chain above it on its own), and user OS stores do carry bare
+ * intermediates — `Russian_Trusted_Sub_CA*` in `/usr/local/share/ca-
+ * certificates/` on the affected machine, two such entries in the
+ * 272-certificate store measured here.
+ *
+ * That widening is NOT contained here, and deliberately so. This flag is a
+ * property of the CONTEXT — the whole trust list — while the decision it could
+ * corrupt is taken per PRESENTED certificate, so every containment expressed
+ * through the composition of the list leaked somewhere else: first through bare
+ * intermediates promoted out of the OS store, then (once those were filtered)
+ * through an anchor that is itself a CA, whose own issued descendants the
+ * filter cannot touch because anchors are appended after it. Containment
+ * therefore lives in the one place where the presented certificate is visible:
+ * `checkServerIdentity` in `buildTlsOptions` accepts, on a partial-chain
+ * context, ONLY a leaf that IS one of the anchors. Whatever else the relaxed
+ * chain building lets OpenSSL verify is refused there before it can matter.
+ *
+ * A previous revision reduced the snapshot to its provably self-signed subset
+ * before appending the anchors. It is gone: it was a second mechanism under the
+ * same guarantee (CLAUDE.md §7 — do not stack defences), it cost ~108 ms of
+ * signature verification per snapshot/anchor-set, and it took away the ordinary
+ * chain-LINK role of a store intermediate, so a server that omits an
+ * intermediate and relies on the user's store lost it.
+ */
+function secureContextFor(
+  revision: number,
+  store: string[] | null,
+  anchors: string[],
+  partialChain: boolean,
+): tls.SecureContext | undefined {
+  // Nothing to build a store from and nothing of our own to put in it — the
+  // caller falls back to Node's implicit default context.
+  if (!store && anchors.length === 0) return undefined
+  const key = secureContextCacheKey(revision, anchors, partialChain)
   const hit = secureContextCache.get(key)
   if (hit && hit.revision === revision) return hit.context
   // Entries carrying an older revision belong to snapshot contents that no
   // lookup can ask for again; drop them rather than let the map grow for the
   // lifetime of the process.
   for (const [k, v] of secureContextCache) if (v.revision !== revision) secureContextCache.delete(k)
-  const context = tls.createSecureContext({ ca })
+  const base = store ?? []
+  // Deduplicate only when anchors are actually being merged in — the snapshot
+  // is already deduplicated.
+  const ca = anchors.length ? dedupePem([...base, ...anchors]) : base
+  // Spread rather than `allowPartialTrustChain: partialChain` so the unpinned
+  // path hands OpenSSL exactly the object it always did.
+  const context = tls.createSecureContext({ ca, ...(partialChain && { allowPartialTrustChain: true }) })
   secureContextCache.set(key, { revision, context })
   return context
 }
@@ -317,6 +452,10 @@ export function __resetCombinedCaCacheForTest(): void {
   secureContextCache.clear()
   caFallbackWarned = false
 }
+
+/** @internal — test-only seam for pure helpers that have no observable call
+ *  site of their own. Not part of the public API. */
+export const __testOnly = { secureContextCacheKey, trustErrorCodes: TLS_TRUST_ERROR_CODES }
 
 export type TlsOptions = {
   rejectUnauthorized: boolean
@@ -347,16 +486,39 @@ export type TlsOptions = {
  *  is known) AND fingerprint equality. Pinning narrows trust, it never widens
  *  it.
  *
- *  Identity on the pinned path has TWO modes, decided per PRESENTED
- *  certificate — see the `checkServerIdentity` comment below for the full
- *  reasoning:
+ *  When anchors are present the pinned context is additionally built with
+ *  partial chain building (`allowPartialTrustChain`), because an anchor that is
+ *  a LEAF cannot terminate a chain otherwise. Without it the anchor helped only
+ *  a truly self-signed server (leaf == root), and a server whose leaf is issued
+ *  by a PRIVATE CA — the other half of the case pinning exists for — could
+ *  never be fixed by the recovery dialog at all: the chain kept failing at the
+ *  private root, so this callback never ran and the pin was never compared.
+ *  The flag is scoped to the pinned context for a reason, and what keeps it a
+ *  narrowing is the per-certificate hold below — on a partial-chain context
+ *  only an anchor is accepted; see `secureContextFor`.
+ *
+ *  Identity on the pinned path is decided per PRESENTED certificate — see the
+ *  `checkServerIdentity` comment below for the full reasoning:
  *    - the leaf is one of the pinned ANCHORS (its PEM is stored) → identity is
  *      established by the pinned material itself, the hostname is not checked;
- *    - the leaf is pinned by FINGERPRINT ONLY → the hostname check stays, in
- *      full, exactly as on the unpinned path.
+ *    - the leaf is pinned by FINGERPRINT ONLY on an endpoint that has NO
+ *      anchor → the hostname check stays, in full, exactly as on the unpinned
+ *      path;
+ *    - the leaf is pinned by FINGERPRINT ONLY on an endpoint that HAS an
+ *      anchor → refused (`TLS pin not confirmed`). Such an endpoint runs a
+ *      partial-chain context, and there the hostname check is no longer enough
+ *      to keep a renderer-written pin from redirecting identity; the refusal
+ *      classifies as a trust error, so the recovery dialog can confirm this
+ *      certificate too — on the RECEIVING (IMAP) endpoint. That scope is a
+ *      named limit, not an oversight: the cert-error seam exists only in
+ *      `packages/net/imap.ts` (`CertErrorPayload.protocol` is `'imap'`,
+ *      `certRecovery` hard-codes it, `packages/net/smtp.ts` has no cert
+ *      handling), so on a send endpoint the only remedy is external
+ *      (`NODE_EXTRA_CA_CERTS` or a root in the OS store).
  *
- *  Consequence to keep in mind: while `tlsPinnedCertsPem` is empty, a pinned
- *  SELF-SIGNED server fails closed (certificate error surfaced through the
+ *  Consequence to keep in mind: while `tlsPinnedCertsPem` is empty, a server
+ *  whose chain does not verify against the public roots — self-signed or
+ *  private-CA alike — fails closed (certificate error surfaced through the
  *  normal cert-error UX) instead of being silently accepted. That is a
  *  deliberate trade — silent acceptance was a MITM hole.
  *
@@ -367,17 +529,26 @@ export type TlsOptions = {
  *  pinned `checkServerIdentity` closure and `servername` remain per-connection
  *  options built fresh from THIS cfg on every call. Endpoints with different
  *  anchors get different contexts (anchors are part of the cache key), and a
- *  CA-snapshot refresh orphans every context built from the previous one, so
- *  removing a root takes effect within the same TTL as before. */
+ *  CA-snapshot recompute orphans every context built from the previous
+ *  contents, so the trust list and the OpenSSL context never disagree about
+ *  what is trusted.
+ *
+ *  That last sentence is a consistency property of OUR caches and NOT a
+ *  freshness promise about the OS store. See `CA_CACHE_TTL_MS`: the snapshot
+ *  underneath is frozen for the lifetime of the process, so a root the
+ *  administrator installs or removes mid-session keeps its previous effect
+ *  until the application is restarted. */
 export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
   const pins = (cfg.tlsPinsSha256 || []).map(normalizeFingerprintSha256).filter(Boolean)
   const sni = cfg.servername
-  const snapshot = cachedCaEntry('combined', (getCa) => [...getCa('default'), ...getCa('system')])
+  const snapshot = cachedCaEntry('combined', computeCombinedCa)
   const combined = snapshot.value
 
   if (pins.length === 0) {
     if (!combined && !sni) return undefined
-    const secureContext = secureContextFor(snapshot.revision, combined, [])
+    // `false`: never relax chain building for an endpoint with no pin to
+    // contain it — see `secureContextFor`.
+    const secureContext = secureContextFor(snapshot.revision, combined, [], false)
     return {
       rejectUnauthorized: true,
       ...(secureContext && { secureContext }),
@@ -385,41 +556,82 @@ export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
     }
   }
 
-  const anchors = (cfg.tlsPinnedCertsPem || []).filter((pem) => Boolean(pem && pem.trim()))
-  // When the combined store is unavailable we cannot express "defaults PLUS
-  // anchors" (Node's `ca` replaces the default set wholesale). Passing the
-  // anchors alone narrows trust to the pinned certificates — acceptable on a
-  // pinned connection, where the fingerprint check pins the leaf anyway.
-  const ca = combined ? dedupePem([...combined, ...anchors]) : (anchors.length ? dedupePem(anchors) : null)
+  const storedBodies = (cfg.tlsPinnedCertsPem || []).filter((pem) => Boolean(pem && pem.trim()))
 
   /**
-   * Fingerprints of the pins that came with a certificate BODY, i.e. the pins
-   * that are also trust anchors in `ca` above.
+   * The anchors handed to OpenSSL, and their fingerprints — one loop, so the
+   * two can never disagree about which stored bodies are usable.
+   *
+   * ONLY PARSED BODIES TRAVEL ON. A corrupt row is dropped from the trust list
+   * itself rather than passed to `tls.createSecureContext` in the expectation
+   * that OpenSSL will ignore it. Measured on Node 22.22.1: it does ignore it
+   * (a garbage entry in `ca` neither throws nor disturbs the valid entries
+   * beside it, with and without `allowPartialTrustChain`). That is undocumented
+   * behaviour of someone else's parser, and the cost of it changing is not a
+   * degraded endpoint but a dead one: `createSecureContext` throwing here makes
+   * `buildTlsOptions` throw before any socket, so every connection for the
+   * account fails with an error that does NOT classify as a trust error — the
+   * user gets network-class backoff and never the recovery dialog that could
+   * replace the bad row. Filtering costs nothing and removes the dependency.
+   *
+   * `anchorFingerprints` is the set of pins that came with a certificate BODY,
+   * i.e. the pins that are also trust anchors in `ca`.
    *
    * This set — not "were any anchors supplied at all" — is the discriminator
-   * for the identity mode below. An endpoint can hold both kinds of pin at
-   * once (an anchored one from the recovery dialog plus a fingerprint-only one
-   * added from Settings), and a per-endpoint "has anchors" flag would extend
-   * the anchored certificate's privilege to the fingerprint-only one.
+   * for the identity mode below, AND the switch for partial chain building.
+   * An endpoint can hold both kinds of pin at once (an anchored one from the
+   * recovery dialog plus a fingerprint-only one added from Settings), and a
+   * per-endpoint "has anchors" flag would extend the anchored certificate's
+   * privilege to the fingerprint-only one.
    *
-   * An unparsable anchor contributes NOTHING (rather than throwing): the pin
+   * An unparsable body contributes NOTHING (rather than throwing): the pin
    * store validates PEM bodies on write, so this is a corrupt-row path, and
    * degrading it to "hostname-checked" keeps a bad row from silently widening
    * identity. Note the empty-string guard on `fingerprint256` — a certificate
-   * that cannot name itself must not match a pin that failed to parse either.
+   * that cannot name itself must not match a pin that failed to parse either,
+   * and it is no more usable as an anchor than an unparsable one.
    */
+  const anchors: string[] = []
   const anchorFingerprints = new Set<string>()
-  for (const pem of anchors) {
+  for (const pem of storedBodies) {
     try {
       const fp = normalizeFingerprintSha256(new X509Certificate(pem).fingerprint256 || '')
-      if (fp) anchorFingerprints.add(fp)
+      if (!fp) continue
+      anchors.push(pem)
+      anchorFingerprints.add(fp)
     } catch {
-      // Corrupt stored anchor — it stays in `ca` (where OpenSSL will ignore
-      // it) but grants no identity.
+      // Corrupt stored anchor — it reaches neither `ca`, nor the cache key,
+      // nor the partial-chain decision, so it grants no identity anywhere.
     }
   }
 
-  const secureContext = secureContextFor(snapshot.revision, ca, anchors)
+  /**
+   * Partial chain building, and ONLY with a PARSED anchor present.
+   *
+   * Derived from `anchorFingerprints`, not from the raw `storedBodies` count,
+   * so the set that decides "is the presented leaf an anchor?" is literally
+   * the set that turned the flag on. Two consequences, both wanted: a corrupt
+   * stored body (non-empty, but not a certificate) no longer relaxes chain
+   * building for an endpoint that gained no usable anchor from it, and the hold
+   * below can never face a partial-chain context whose anchor set it cannot
+   * name.
+   *
+   * With no anchors there is nothing of ours for a chain to terminate on, so
+   * the flag would grant every intermediate in the general trust store the
+   * standing of a root while buying this endpoint nothing at all. With anchors
+   * it is what makes a pinned leaf usable as an anchor for a server whose leaf
+   * was issued by a private CA — see `secureContextFor` for the measurement,
+   * and for why the widening it performs is contained per PRESENTED
+   * certificate rather than by composing the trust list.
+   *
+   * When the combined store is unavailable, `secureContextFor` builds from the
+   * anchors alone — Node's `ca` replaces the default set wholesale, so
+   * "defaults PLUS anchors" is not expressible. Narrowing trust to the pinned
+   * certificates is acceptable on a pinned connection, where the fingerprint
+   * check pins the leaf anyway.
+   */
+  const partialChain = anchorFingerprints.size > 0
+  const secureContext = secureContextFor(snapshot.revision, combined, anchors, partialChain)
 
   return {
     rejectUnauthorized: true,
@@ -474,6 +686,40 @@ export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
      * Not relaxed in either mode: a leaf that is not pinned at all is refused
      * (server-side rotation fails closed and re-raises the recovery dialog),
      * and a certificate without a usable fingerprint is refused.
+     *
+     * THE HOLD. On a PARTIAL-CHAIN context (this endpoint has at least one
+     * parsed anchor) a fingerprint-only leaf is refused outright — it never
+     * reaches the hostname check, because on such a context the hostname check
+     * is no longer enough to keep the pin a narrowing of trust.
+     *
+     * Why the hold is here and not in the trust list. `allowPartialTrustChain`
+     * is a property of the CONTEXT: it says "anything in this list may end a
+     * chain", and the list is shared by every certificate the endpoint might
+     * present. Two rounds of review showed the same invariant — "a
+     * fingerprint-only pin gains nothing from the flag" — breaking in a new
+     * place each time it was expressed through the list's composition: first
+     * bare intermediates promoted out of the OS store, then an ANCHOR that is
+     * itself a CA (`basicConstraints: CA:TRUE`), which terminates chains for
+     * every certificate it ever issued. The second case was reproduced with
+     * real handshakes: a descendant of the anchor, pinned by the
+     * renderer-writable `tls:addPin` and carrying a matching name, verified and
+     * was accepted although the human had confirmed a different certificate.
+     * Filtering the store could not have caught it — anchors are appended after
+     * any filter, by construction.
+     *
+     * So the guarantee is stated per presented certificate, where it is
+     * decidable: on an endpoint that holds a human-confirmed certificate BODY,
+     * only confirmed bodies are accepted. The price is named rather than
+     * hidden: a fingerprint-only pin stops working on such an endpoint. Its
+     * remedy is the one the product already offers — the refusal classifies as
+     * a trust error (`isTlsTrustError`), so the normal recovery dialog opens
+     * and confirming that certificate makes it an anchor too. That remedy
+     * reaches only the RECEIVING (IMAP) endpoint: the cert-error seam lives in
+     * `packages/net/imap.ts` alone, so on a send endpoint the refusal has no
+     * in-app remedy and the external trust path applies instead.
+     *
+     * An endpoint with NO parsed anchor is untouched by all of this: full chain
+     * verification plus the full hostname check, exactly as before.
      */
     checkServerIdentity: (hostname, cert) => {
       const fp = normalizeFingerprintSha256(cert.fingerprint256 || '')
@@ -481,6 +727,14 @@ export function buildTlsOptions(cfg: TlsConfig): TlsOptions | undefined {
       if (!pins.includes(fp)) return new Error(`TLS pin mismatch: ${fp}`)
       // Anchored leaf → the pinned material established identity.
       if (anchorFingerprints.has(fp)) return undefined
+      // Fingerprint-only leaf on a partial-chain context → refused. Distinct
+      // message from `TLS pin mismatch`: the pin IS known here, what is missing
+      // is the human-confirmed body, and the two must be tellable apart in a log.
+      if (partialChain) {
+        return new Error(
+          `TLS pin not confirmed: ${fp} — this endpoint accepts only certificates confirmed in the recovery dialog`,
+        )
+      }
       // Fingerprint-only leaf → same identity check as the unpinned path.
       return tls.checkServerIdentity(sni || hostname, cert)
     },

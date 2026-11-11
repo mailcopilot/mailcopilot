@@ -132,11 +132,52 @@ const MAX_REPLAY_RETRIES = 5
 
 export type ReplayResult = { replayed: number; failed: number }
 
+// Single-flight per account, with memory of the skipped trigger (the same shape
+// as the mail-rules runner, CLAUDE.md §5). Replay is triggered from several
+// places (before a folder sync, before IDLE starts, on reconnect), and two
+// passes over the SAME snapshot of the queue send every op twice and move its
+// retry counter by two, so the poison limit is stepped over instead of reached.
+// A call that arrives while a pass is running starts no second pass; it asks
+// for one more pass after the current one and shares its result, so every
+// caller still returns only once the queue has been drained at least as far as
+// it was when the caller asked.
+const replayInFlight = new Map<number, Promise<ReplayResult>>()
+const replayRequestedAgain = new Set<number>()
+
 /**
  * Replay queued offline operations for a single account.
  * Groups ops by folder, checks UIDVALIDITY, then executes in fixed order.
+ * At most one pass per account runs at a time; see `replayInFlight`.
  */
-export async function replayOfflineOps(
+export function replayOfflineOps(
+  accountId: number,
+  getImapConfig: (accountId: number) => Promise<ImapConfig>,
+): Promise<ReplayResult> {
+  const running = replayInFlight.get(accountId)
+  if (running) {
+    replayRequestedAgain.add(accountId)
+    return running
+  }
+  const run = (async (): Promise<ReplayResult> => {
+    try {
+      let total = await replayPass(accountId, getImapConfig)
+      // The flag is cleared before the next pass starts, so a call that arrives
+      // during it asks for yet another one instead of being lost.
+      while (replayRequestedAgain.delete(accountId)) {
+        const next = await replayPass(accountId, getImapConfig)
+        total = { replayed: total.replayed + next.replayed, failed: next.failed }
+      }
+      return total
+    } finally {
+      replayRequestedAgain.delete(accountId)
+      replayInFlight.delete(accountId)
+    }
+  })()
+  replayInFlight.set(accountId, run)
+  return run
+}
+
+async function replayPass(
   accountId: number,
   getImapConfig: (accountId: number) => Promise<ImapConfig>,
 ): Promise<ReplayResult> {
@@ -211,22 +252,9 @@ export async function replayOfflineOps(
       const batches = batchByOpType(folderOps)
 
       for (const batch of batches) {
-        try {
-          await executeBatch(cfg, folder, batch, accountId)
-          for (const op of batch) {
-            deleteOfflineOp(op.id)
-          }
-          replayed += batch.length
-        } catch (err) {
-          log.error(`Failed to replay ${batch[0].opType} batch for folder "${folder}" account #${accountId}:`, err)
-          captureOnce(
-            `replay_batch:${batch[0].opType}:${errorKey(err)}`,
-            err,
-            { source: 'offlineReplay', stage: 'replay_batch', opType: batch[0].opType, accountId },
-          )
-          incrementOfflineOpRetry(batch.map(op => op.id))
-          failed += batch.length
-        }
+        const progress = await executeBatch(cfg, folder, batch, accountId)
+        replayed += progress.replayed
+        failed += progress.failed
       }
     }
 
@@ -259,72 +287,143 @@ function batchByOpType(ops: OfflineOp[]): OfflineOp[][] {
 }
 
 /**
- * Execute a batch of same-type operations via IMAP.
+ * Replay one batch of same-type operations via IMAP.
  *
  * §2.17 Phase 1 — replay runs at the `sync` tier. These ops carry the user's
  * own past intent, so they must complete, but nobody is watching a particular
  * one land: a replay burst must not push the message the user is opening RIGHT
  * NOW behind a hundred STORE/MOVE commands on the same lock.
  *
- * The scope spans the WHOLE batch, not one call: `executeBatchOps` issues
- * several sequential IMAP commands (up to two STOREs, one MOVE per destination
- * folder), and each of them takes and releases the lock on its own. That is the
- * intent, not an oversight — the tier is a property of the reason, and the
- * reason does not change between two STOREs of one batch. Splitting the scope
- * per command would only give an interactive open a chance to slip in BETWEEN
- * them, which it already has: the lock is released after every command, so
- * spanning the batch does not hold it across the batch.
+ * The scope spans the WHOLE batch, not one call: a batch issues several
+ * sequential IMAP commands (a STORE per seen-state, a MOVE per destination),
+ * and each of them takes and releases the lock on its own. That is the intent,
+ * not an oversight — the tier is a property of the reason, and the reason does
+ * not change between two commands of one batch. Splitting the scope per command
+ * would only give an interactive open a chance to slip in BETWEEN them, which
+ * it already has: the lock is released after every command, so spanning the
+ * batch does not hold it across the batch.
  *
  * Nothing is detached inside this scope — every call is awaited — so the tier
  * cannot outlive the batch here. If detached work is ever added below, it must
  * state its own tier (see the "What a scope does NOT promise" note in
  * packages/net/imapScheduler.ts).
  */
-async function executeBatch(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): Promise<void> {
+async function executeBatch(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): Promise<BatchProgress> {
   return withImapPriority('sync', () => executeBatchOps(cfg, folder, batch, accountId))
 }
 
-async function executeBatchOps(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): Promise<void> {
+type BatchProgress = { replayed: number; failed: number }
+
+/**
+ * Run the commands of a batch one after another, recording progress PER
+ * command: a command that succeeded is done, the one that failed is the only
+ * one whose outcome is in question, and the ones after it were never sent, so
+ * their ops stay in the queue untouched.
+ */
+async function executeBatchOps(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): Promise<BatchProgress> {
+  let replayed = 0
+  let failed = 0
+  for (const command of planBatchCommands(cfg, folder, batch, accountId)) {
+    try {
+      await command.run()
+      for (const op of command.ops) deleteOfflineOp(op.id)
+      replayed += command.ops.length
+    } catch (err) {
+      // Any failure, an unknown outcome included, is an ordinary replay error:
+      // this command's ops stay queued, count towards the poison limit and are
+      // tried again by the next replay — what Thunderbird (nsImapOfflineSync)
+      // and K-9 do. Nothing is shown to the user from here: the failure is
+      // logged and reported (deduplicated, consent-gated) to Sentry, and after
+      // MAX_REPLAY_RETRIES the op is purged without notice.
+      // Re-sending is safe for the commands that are queued: a UID MOVE whose
+      // message was already moved finds no such UID and does nothing (RFC 9051
+      // §6.4.9: "A non-existent unique identifier is ignored without any error
+      // message generated"), and +FLAGS / -FLAGS reach the same state when
+      // repeated (§6.4.6). Named limit: on a server WITHOUT MOVE the move is a
+      // COPY followed by a delete, and while the step after the COPY keeps
+      // failing (a server refusal, a lost connection, the operation deadline)
+      // every replay copies again — up to MAX_REPLAY_RETRIES copies of each
+      // message in the batch. Thunderbird and K-9 accept the same risk.
+      log.error(`Failed to replay ${command.ops[0]?.opType} batch for folder "${folder}" account #${accountId}:`, err)
+      captureOnce(
+        `replay_batch:${command.ops[0]?.opType}:${errorKey(err)}`,
+        err,
+        { source: 'offlineReplay', stage: 'replay_batch', opType: command.ops[0]?.opType, accountId },
+      )
+      incrementOfflineOpRetry(command.ops.map(op => op.id))
+      failed += command.ops.length
+      // The rest of the batch was not sent; it stays queued as it is.
+      break
+    }
+  }
+  return { replayed, failed }
+}
+
+/** One IMAP command of a replay batch, and the queued ops it carries out. */
+type ReplayCommand = { ops: OfflineOp[]; run: () => Promise<void> }
+
+/**
+ * Plan a batch of same-type operations as the IMAP commands that carry it out.
+ * Runs under the batch-wide `sync` tier set by `executeBatch`; nothing here is
+ * detached, so the tier cannot outlive the batch.
+ */
+function planBatchCommands(cfg: ImapConfig, folder: string, batch: OfflineOp[], accountId: number): ReplayCommand[] {
   const opType = batch[0].opType
+  const commands: ReplayCommand[] = []
 
   if (opType === 'flag_seen') {
     // Split by seen=true and seen=false
     const seenTrue = batch.filter(op => (op.payload as { seen: boolean })?.seen === true)
     const seenFalse = batch.filter(op => (op.payload as { seen: boolean })?.seen === false)
     if (seenTrue.length > 0) {
-      await setSeen(cfg, folder, seenTrue.map(op => op.uid), true, accountId)
+      commands.push({ ops: seenTrue, run: () => setSeen(cfg, folder, seenTrue.map(op => op.uid), true, accountId) })
     }
     if (seenFalse.length > 0) {
-      await setSeen(cfg, folder, seenFalse.map(op => op.uid), false, accountId)
+      commands.push({ ops: seenFalse, run: () => setSeen(cfg, folder, seenFalse.map(op => op.uid), false, accountId) })
     }
+    // A payload that is neither true nor false has nothing to send; as before, such an op leaves the queue with the batch.
+    const unplannedSeen = batch.filter(op => !seenTrue.includes(op) && !seenFalse.includes(op))
+    if (unplannedSeen.length > 0) commands.push({ ops: unplannedSeen, run: async () => undefined })
   } else if (opType === 'flag_flagged') {
     const flagTrue = batch.filter(op => (op.payload as { flagged: boolean })?.flagged === true)
     const flagFalse = batch.filter(op => (op.payload as { flagged: boolean })?.flagged === false)
     if (flagTrue.length > 0) {
-      await setFlagged(cfg, folder, flagTrue.map(op => op.uid), true, accountId)
+      commands.push({ ops: flagTrue, run: () => setFlagged(cfg, folder, flagTrue.map(op => op.uid), true, accountId) })
     }
     if (flagFalse.length > 0) {
-      await setFlagged(cfg, folder, flagFalse.map(op => op.uid), false, accountId)
+      commands.push({ ops: flagFalse, run: () => setFlagged(cfg, folder, flagFalse.map(op => op.uid), false, accountId) })
     }
+    const unplannedFlag = batch.filter(op => !flagTrue.includes(op) && !flagFalse.includes(op))
+    if (unplannedFlag.length > 0) commands.push({ ops: unplannedFlag, run: async () => undefined })
   } else if (opType === 'move') {
     // Group by destination folder — moves from the same source to different destinations
-    const byDest = new Map<string, number[]>()
+    const byDest = new Map<string, OfflineOp[]>()
+    const withoutDest: OfflineOp[] = []
     for (const op of batch) {
       const dest = (op.payload as { destFolder: string })?.destFolder
-      if (!dest) continue
-      const uids = byDest.get(dest) || []
-      uids.push(op.uid)
-      byDest.set(dest, uids)
+      if (!dest) { withoutDest.push(op); continue }
+      const group = byDest.get(dest) || []
+      group.push(op)
+      byDest.set(dest, group)
     }
-    for (const [dest, uids] of byDest) {
-      await moveMessages(cfg, folder, dest, uids, accountId)
-      // Clean up temporary placeholders in destination — real UIDs will
-      // be populated by the next folder sync after replay completes.
-      try { removeTempPlaceholders(accountId, dest) } catch { /* non-critical */ }
+    for (const [dest, ops] of byDest) {
+      commands.push({
+        ops,
+        run: async () => {
+          await moveMessages(cfg, folder, dest, ops.map(op => op.uid), accountId)
+          // Clean up temporary placeholders in destination — real UIDs will
+          // be populated by the next folder sync after replay completes.
+          try { removeTempPlaceholders(accountId, dest) } catch { /* non-critical */ }
+        },
+      })
     }
+    // Ops with no destination have nothing to send; as before, they leave the queue with the batch.
+    if (withoutDest.length > 0) commands.push({ ops: withoutDest, run: async () => undefined })
   } else if (opType === 'delete') {
-    await deleteMessagesRemote(cfg, folder, batch.map(op => op.uid), accountId)
+    commands.push({ ops: batch, run: () => deleteMessagesRemote(cfg, folder, batch.map(op => op.uid), accountId) })
   } else {
     log.warn(`Unknown op type "${opType}", skipping batch of ${batch.length}`)
+    commands.push({ ops: batch, run: async () => undefined })
   }
+  return commands
 }

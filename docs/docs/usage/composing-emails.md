@@ -33,6 +33,8 @@ As you type a recipient's email address, MailCopilot suggests contacts based on 
 - **Reply All** (shortcut: **a**) -- same as Reply, but includes all original recipients.
 - **Forward** (shortcut: **f**) -- opens a compose window with the original message quoted and "Fwd:" added to the subject. Inline attachments from the original message are preserved.
 
+Replies (Reply and Reply All) carry the standard `In-Reply-To` and `References` headers pointing at the message you are answering, so the recipient's mail client files your reply in the same conversation instead of starting a new one. Forwards do not carry them. If the original message has no `Message-ID` header, or is no longer in the local cache, the reply is still sent, just without these headers. Choosing another sender in the compose window does not change what you are answering, so the headers stay. A reply saved as a draft keeps them too: the draft stores `In-Reply-To` and `References`, and reopening it from **Drafts** and sending it threads as before as long as the original is still in the local cache.
+
 ## Drafts and Autosave
 
 MailCopilot automatically saves your draft as you type. Drafts are saved both locally and to your IMAP Drafts folder (if draft sync is enabled in settings).

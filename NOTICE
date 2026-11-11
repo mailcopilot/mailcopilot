@@ -47,6 +47,10 @@ ai (Vercel AI SDK) — Apache License 2.0
   Copyright (c) Vercel, Inc.
   https://github.com/vercel/ai
 
+@ai-sdk/anthropic — Apache License 2.0
+  Copyright (c) Vercel, Inc.
+  https://github.com/vercel/ai
+
 @ai-sdk/openai-compatible — Apache License 2.0
   Copyright (c) Vercel, Inc.
   https://github.com/vercel/ai
@@ -154,39 +158,8 @@ franc — MIT License
   https://github.com/getsentry/sentry-javascript
 
 --------------------------------------------------------------------------------
-Special Notice: Anthropic Claude Agent SDK
---------------------------------------------------------------------------------
-
-@anthropic-ai/claude-agent-sdk — Proprietary (Anthropic Terms of Service)
-  Copyright (c) Anthropic PBC
-  https://github.com/anthropics/claude-code
-
-  The AI assistant functionality uses the Anthropic Claude Agent SDK, which is
-  distributed under Anthropic's proprietary license (Commercial Terms / Consumer
-  Terms). This SDK is NOT covered by the AGPL-3.0 license of MailCopilot.
-
-  The SDK provides the query() function used for the Claude-based provider
-  (anthropic-api), which authenticates with the user's own Anthropic API key.
-  MCP tools are defined using the standard
-  @modelcontextprotocol/sdk (MIT). OpenAI-compatible providers use the Vercel
-  AI SDK (Apache-2.0) and do not depend on this proprietary SDK.
-
-  MailCopilot functions as an email client without AI features if the SDK
-  is not available.
-
-  Use of the Claude Agent SDK is subject to Anthropic's terms:
-  https://www.anthropic.com/legal/commercial-terms
-  https://www.anthropic.com/legal/consumer-terms
-
---------------------------------------------------------------------------------
 Transitive Dependencies with Non-Permissive Licenses
 --------------------------------------------------------------------------------
-
-@img/sharp-libvips-* — LGPL-3.0-or-later
-  Copyright (c) libvips contributors
-  Transitive dependency of @anthropic-ai/claude-agent-sdk.
-  Distributed as a prebuilt native binary (dynamic linking).
-  LGPL-3.0 is compatible with AGPL-3.0.
 
 @sentry/cli — FSL-1.1-MIT (Functional Source License)
   Copyright (c) Sentry

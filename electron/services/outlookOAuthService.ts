@@ -16,6 +16,7 @@ import {
   testSmtpConnection,
 } from '../../packages/net/index'
 import { authNotConfiguredError } from './accountAuthState'
+import { saveAccountFenced } from './accountSaveFence'
 import type { OAuthConnectStage, OAuthProgress } from '@mailcopilot/types'
 import { z } from 'zod'
 
@@ -559,7 +560,7 @@ async function doConnectOutlookAccount(
 
   emitStage('saving')
 
-  const { id } = await saveAccount({
+  const { id } = await saveAccountFenced(saveAccount, {
     id: existingId,
     // A re-authorization must not overwrite a name the user has edited; the
     // profile name fills in only where the record has none. `||` rather than

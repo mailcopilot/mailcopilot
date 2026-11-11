@@ -14,6 +14,8 @@ const i18nMap: Record<string, string> = {
   'ai.panel.streaming': 'Генерирую...',
   'ai.panel.placeholder': 'Спросите что-нибудь...',
   'ai.panel.send': 'Отправить',
+  'ai.panel.indexIncomplete': 'Результаты могут быть неполными: почта ещё индексируется.',
+  'ai.panel.sources': 'Источники',
   'ai.errors.requestBudgetStopped': 'Запрос остановлен: достигнут лимит стоимости одного запроса.',
   // §2.123 — the turn used destructive tools but armed nothing to confirm.
   'ai.errors.actionNotPrepared': 'Действие не подготовлено: кнопки подтверждения нет, ничего не изменено.',
@@ -42,6 +44,8 @@ const i18nMap: Record<string, string> = {
   'ai.chips.scopeEmail': 'Действия с письмом',
   'ai.errors.authCheck': 'Ошибка проверки авторизации',
   'ai.errors.errorPrefix': 'Ошибка',
+  'ai.errors.endpointNotFound': 'Сервер ответил «не найдено» на этот запрос. Проверьте адрес сервера в Настройки → ИИ.',
+  'ai.errors.modelUnavailable': 'Модель {{model}} недоступна у поставщика. Выберите другую в Настройки → ИИ.',
   // §2.127 closed vocabulary — the only error sentences the panel may render
   // for a failed IPC call.
   'app.errors.presented.auth': 'Вход отклонён',
@@ -74,10 +78,9 @@ const i18nMap: Record<string, string> = {
   'ai.confirmation.emailCount': '{{count}} письмо(а)',
   'ai.confirmation.errorPreviewMissing': 'Действие истекло',
   'ai.confirmation.proceedPrompt': 'Подтверждено; confirmation_token={{token}}',
-  'ai.confirmation.kinds.snooze_email': 'Отложить письма',
+  'ai.confirmation.kinds.snooze_email': 'Отложить письма до {{when}}',
   'ai.confirmation.kinds.flag_email.star': 'Звёздочка письмам',
   // §3.10 P2 egress confirm modal strings.
-  'ai.egress.shieldTooltip': 'Доступ AI к интернету перехватывается',
   'ai.egress.confirmTitle': 'AI хочет обратиться в интернет',
   'ai.egress.confirmAllow': 'Разрешить',
   'ai.egress.confirmDeny': 'Запретить',
@@ -156,6 +159,12 @@ const LOCALES: Record<string, Record<string, unknown>> = {
   de: deLocale as unknown as Record<string, unknown>,
   es: esLocale as unknown as Record<string, unknown>,
   it: itLocale as unknown as Record<string, unknown>,
+}
+
+/** The request id of the newest `ai:chat` call: a result must carry the id of a request the panel really started. */
+function lastChatRequestId(): string {
+  const ids = mockInvoke.mock.calls.filter(c => c[0] === 'ai:chat').map(c => c[1] as string)
+  return ids[ids.length - 1]!
 }
 
 function renderPanel(props: Partial<AiPanelProps> = {}) {
@@ -855,7 +864,8 @@ describe('AiPanel', () => {
       expect(mockRemoveAll).toHaveBeenCalledWith('ai:stream')
       // removeAll is called BEFORE on
       const removeAllOrder = mockRemoveAll.mock.invocationCallOrder[0]
-      const onOrder = mockOn.mock.invocationCallOrder[0]
+      const streamOn = mockOn.mock.calls.findIndex((c: unknown[]) => c[0] === 'ai:stream')
+      const onOrder = mockOn.mock.invocationCallOrder[streamOn]
       expect(removeAllOrder).toBeLessThan(onOrder)
     })
 
@@ -957,7 +967,7 @@ describe('AiPanel', () => {
       // Simulate a stream event
       const handler = getStreamHandler()
       await act(async () => {
-        handler({ type: 'text_delta', requestId: 'test', text: 'Hello' })
+        handler({ type: 'text_delta', requestId: lastChatRequestId(), text: 'Hello' })
       })
 
       // Verify user message is displayed
@@ -975,7 +985,7 @@ describe('AiPanel', () => {
 
       const handler = getStreamHandler()
       await act(async () => {
-        handler({ type: 'status', requestId: 'test', status: 'done' })
+        handler({ type: 'status', requestId: lastChatRequestId(), status: 'done' })
       })
 
       // After done, input should not be disabled
@@ -992,12 +1002,59 @@ describe('AiPanel', () => {
 
       const handler = getStreamHandler()
       await act(async () => {
-        handler({ type: 'error', requestId: 'test', message: 'Something failed' })
+        handler({ type: 'error', requestId: lastChatRequestId(), message: 'Something failed' })
       })
 
       const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
       const lastMsg = assistantMsgs[assistantMsgs.length - 1]
       expect(lastMsg.textContent).toContain('Something failed')
+    })
+
+    it('a model failure shows the readable sentence naming the model, not the provider text', async () => {
+      await act(async () => { renderPanel() })
+
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+
+      const handler = getStreamHandler()
+      await act(async () => {
+        handler({
+          type: 'error', requestId: lastChatRequestId(), failure: 'model', model: 'gemini-2.0-flash',
+          message: 'Gemini API error 404: models/gemini-2.0-flash is not found',
+        })
+      })
+
+      const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
+      const text = assistantMsgs[assistantMsgs.length - 1].textContent ?? ''
+      expect(text).toContain('Модель gemini-2.0-flash недоступна у поставщика. Выберите другую в Настройки → ИИ.')
+      expect(text).not.toContain('is not found')
+    })
+
+    it('an endpoint failure says the server address is wrong and does not blame the model', async () => {
+      await act(async () => { renderPanel() })
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+      await act(async () => {
+        getStreamHandler()({ type: 'error', requestId: lastChatRequestId(), failure: 'endpoint', message: 'Not Found' })
+      })
+      const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
+      const text = assistantMsgs[assistantMsgs.length - 1].textContent ?? ''
+      expect(text).toContain('Проверьте адрес сервера')
+      expect(text).not.toContain('Not Found')
+    })
+
+    it('a model id cannot turn into a link inside the model failure sentence', async () => {
+      await act(async () => { renderPanel() })
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+      await act(async () => {
+        getStreamHandler()({ type: 'error', requestId: lastChatRequestId(), failure: 'model', model: '[x](https://evil.example)', message: 'raw' })
+      })
+      const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
+      expect(assistantMsgs[assistantMsgs.length - 1].textContent).toContain('\\[x\\]\\(https://evil.example\\)')
     })
 
     // §2.51.f2 — a `notice` is NOT an error: main sends a machine-readable code
@@ -1013,7 +1070,7 @@ describe('AiPanel', () => {
       await act(async () => {
         handler({
           type: 'notice',
-          requestId: 'test',
+          requestId: lastChatRequestId(),
           code: 'request_budget_exceeded',
           message: 'Request stopped: the per-request cost limit of $2.00 was reached.',
         })
@@ -1040,7 +1097,7 @@ describe('AiPanel', () => {
       await act(async () => {
         handler({
           type: 'notice',
-          requestId: 'test',
+          requestId: lastChatRequestId(),
           code: 'destructive_action_not_prepared',
           message: 'No action was prepared, so there is no confirmation button and nothing has been changed.',
         })
@@ -1067,7 +1124,7 @@ describe('AiPanel', () => {
       await act(async () => {
         handler({
           type: 'notice',
-          requestId: 'test',
+          requestId: lastChatRequestId(),
           code: 'some_future_notice_code',
           message: 'A future notice the renderer does not know yet.',
         })
@@ -1093,10 +1150,10 @@ describe('AiPanel', () => {
       await act(async () => {
         // Main emits `result` before any notice; the panel must keep that order
         // when writing them, because row order is the reading order on restore.
-        handler({ type: 'result', requestId: 'test', text: 'Here is what I found.', sessionId: 's1' })
+        handler({ type: 'result', requestId: lastChatRequestId(), text: 'Here is what I found.', sessionId: 's1' })
         handler({
           type: 'notice',
-          requestId: 'test',
+          requestId: lastChatRequestId(),
           code: 'destructive_action_not_prepared',
           message: 'No action was prepared, so there is no confirmation button and nothing has been changed.',
         })
@@ -1116,6 +1173,38 @@ describe('AiPanel', () => {
       expect(adds[noticeIdx]).not.toHaveProperty('costUsd')
     })
 
+    // The order main really emits when the turn guard fires (ai.ts: `result`, then `status: done`, then the
+    // notice). The panel used to forget the request on `done`, so the notice that follows was dropped: not shown,
+    // not saved. The test above feeds `result -> notice` and cannot see it.
+    it('keeps the notice that arrives AFTER status:done — shown and saved to the session', async () => {
+      await act(async () => { renderPanel() })
+
+      await act(async () => { fireEvent.change(screen.getByTestId('ai-input'), { target: { value: 'Archive the newsletters' } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+
+      const handler = getStreamHandler()
+      await act(async () => {
+        handler({ type: 'result', requestId: lastChatRequestId(), text: 'Here is what I found.', sessionId: 's1' })
+        handler({ type: 'status', requestId: lastChatRequestId(), status: 'done' })
+        handler({
+          type: 'notice',
+          requestId: lastChatRequestId(),
+          code: 'destructive_action_not_prepared',
+          message: 'No action was prepared, so there is no confirmation button and nothing has been changed.',
+        })
+      })
+
+      const assistantMsgs = screen.getAllByTestId('ai-message-assistant')
+      expect(assistantMsgs[assistantMsgs.length - 1]!.textContent).toContain('Действие не подготовлено')
+      const adds = mockInvoke.mock.calls
+        .filter(c => c[0] === 'aiSession:addMessage')
+        .map(c => c[1] as { sessionId: string; content: string })
+      const assistantIdx = adds.findIndex(a => a.content === 'Here is what I found.')
+      const noticeIdx = adds.findIndex(a => a.content.includes('Действие не подготовлено'))
+      expect(noticeIdx).toBeGreaterThan(assistantIdx)
+      expect(adds[noticeIdx]!.sessionId).toBe('test-session-uuid')
+    })
+
     it('persists the budget notice too — every code the renderer can localize', async () => {
       await act(async () => { renderPanel() })
 
@@ -1125,10 +1214,10 @@ describe('AiPanel', () => {
 
       const handler = getStreamHandler()
       await act(async () => {
-        handler({ type: 'result', requestId: 'test', text: 'Partial answer.', sessionId: 's1' })
+        handler({ type: 'result', requestId: lastChatRequestId(), text: 'Partial answer.', sessionId: 's1' })
         handler({
           type: 'notice',
-          requestId: 'test',
+          requestId: lastChatRequestId(),
           code: 'request_budget_exceeded',
           message: 'Request stopped: the per-request cost limit of $2.00 was reached.',
         })
@@ -1152,10 +1241,10 @@ describe('AiPanel', () => {
 
       const handler = getStreamHandler()
       await act(async () => {
-        handler({ type: 'result', requestId: 'test', text: 'Here is what I found.', sessionId: 's1' })
+        handler({ type: 'result', requestId: lastChatRequestId(), text: 'Here is what I found.', sessionId: 's1' })
         handler({
           type: 'notice',
-          requestId: 'test',
+          requestId: lastChatRequestId(),
           code: 'some_future_notice_code',
           message: 'A future notice the renderer does not know yet.',
         })
@@ -1167,51 +1256,6 @@ describe('AiPanel', () => {
       // The answer is stored; the unknown notice is not.
       expect(adds.some(a => a.content === 'Here is what I found.')).toBe(true)
       expect(adds.some(a => a.content.includes('A future notice'))).toBe(false)
-    })
-
-    it('shows sources from result when aiShowSources=true', async () => {
-      await act(async () => { renderPanel({ aiShowSources: true }) })
-
-      const input = screen.getByTestId('ai-input')
-      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
-      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
-
-      const handler = getStreamHandler()
-      await act(async () => {
-        handler({
-          type: 'result',
-          requestId: 'test',
-          text: 'done',
-          sessionId: 'sid',
-          sources: [{ ref: { accountId: 1, folder: 'INBOX', uid: 101 }, reason: 'mock' }],
-        })
-      })
-
-      // Enriched source: shows #N and fallback folder/uid when no subject
-      expect(screen.getByText('#1')).toBeInTheDocument()
-      expect(screen.getByText('INBOX/101')).toBeInTheDocument()
-    })
-
-    it('hides sources when aiShowSources=false', async () => {
-      await act(async () => { renderPanel({ aiShowSources: false }) })
-
-      const input = screen.getByTestId('ai-input')
-      await act(async () => { fireEvent.change(input, { target: { value: 'Test' } }) })
-      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
-
-      const handler = getStreamHandler()
-      await act(async () => {
-        handler({
-          type: 'result',
-          requestId: 'test',
-          text: 'done',
-          sessionId: 'sid',
-          sources: [{ ref: { accountId: 1, folder: 'INBOX', uid: 101 }, reason: 'mock' }],
-        })
-      })
-
-      // Sources should be hidden — neither the number nor the fallback should appear
-      expect(screen.queryByText('INBOX/101')).toBeNull()
     })
   })
 
@@ -1235,7 +1279,7 @@ describe('AiPanel', () => {
       // Finish stream so isStreaming=false for next send
       const handler = getStreamHandler()
       await act(async () => {
-        handler({ type: 'status', requestId: 'test', status: 'done' })
+        handler({ type: 'status', requestId: lastChatRequestId(), status: 'done' })
       })
     }
 
@@ -1353,6 +1397,9 @@ describe('AiPanel', () => {
         kind: 'snooze_email',
         i18nKey: 'ai.confirmation.kinds.snooze_email',
         description: 'Snooze 2 emails',
+        // The scheduling verb interpolates the instant the action is set for;
+        // a summary without it falls back to `description` by design.
+        scheduledAt: '2026-04-30T09:00:00.000Z',
         accountId: 1,
         emailCount: 2,
         folder: 'INBOX',
@@ -1402,7 +1449,7 @@ describe('AiPanel', () => {
       // Block renders inside the chat flow with the localized verb.
       expect(screen.getByTestId('ai-pending-actions')).toBeInTheDocument()
       expect(screen.getByTestId('ai-action-confirmation')).toBeInTheDocument()
-      expect(screen.getByText('Отложить письма')).toBeInTheDocument()
+      expect(screen.getByText(/^Отложить письма до /)).toBeInTheDocument()
     })
 
     it('does NOT refresh pending actions for non-preview/non-apply tools', async () => {
@@ -1804,20 +1851,9 @@ describe('AiPanel', () => {
       expect(screen.getByText('https://second.com')).toBeInTheDocument()
     })
 
-    it('Shield icon visible in header when policy is not allow', async () => {
-      await act(async () => { renderPanel({ aiEgressPolicy: 'default-deny' }) })
-      expect(screen.getByTestId('ai-egress-shield')).toBeInTheDocument()
-    })
-
-    it('Shield icon not visible when policy is allow', async () => {
-      await act(async () => { renderPanel({ aiEgressPolicy: 'allow' }) })
+    it.each(['default-deny', 'ask', 'allow'] as const)('has no shield icon in the header (policy %s)', async () => {
+      await act(async () => { renderPanel() })
       expect(screen.queryByTestId('ai-egress-shield')).toBeNull()
-    })
-
-    it('Shield icon tooltip contains shield text', async () => {
-      await act(async () => { renderPanel({ aiEgressPolicy: 'default-deny' }) })
-      const shield = screen.getByTestId('ai-egress-shield')
-      expect(shield).toHaveAttribute('title', 'Доступ AI к интернету перехватывается')
     })
 
     it('ignores payload without requestId — modal does not appear', async () => {
@@ -1905,8 +1941,6 @@ describe('AiPanel', () => {
       expect(screen.getByText('Загрузка URL:')).toBeInTheDocument()
     })
   })
-
-  // --- Chips layout ---
 
   describe('Chips layout', () => {
     it('chips have title and aria-label attributes', async () => {
@@ -2017,6 +2051,131 @@ describe('AiPanel', () => {
       expect(body.contains(confirmBlock)).toBe(false)
     })
   })
+
+  // --- §3.3 B3: the verdict main produced, the stored answer, the index note ---
+
+  describe('Answer verdict and index note (§3.3 B3)', () => {
+    function getStreamHandler(): (event: Record<string, unknown>) => void {
+      const call = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'ai:stream')
+      if (!call) throw new Error('ai:stream handler not found')
+      return call[1] as (event: Record<string, unknown>) => void
+    }
+    const chatRequestIds = (): string[] =>
+      mockInvoke.mock.calls.filter(c => c[0] === 'ai:chat').map(c => c[1] as string)
+    async function ask(text: string): Promise<string> {
+      const input = screen.getByTestId('ai-input')
+      await act(async () => { fireEvent.change(input, { target: { value: text } }) })
+      await act(async () => { fireEvent.click(screen.getByTitle('Отправить')) })
+      const ids = chatRequestIds()
+      return ids[ids.length - 1]!
+    }
+    const addMessageCalls = (): Array<Record<string, unknown>> =>
+      mockInvoke.mock.calls.filter(c => c[0] === 'aiSession:addMessage').map(c => c[1] as Record<string, unknown>)
+
+    it('shows no Sources list when the answer links nothing', async () => {
+      await act(async () => { renderPanel({ aiShowSources: true }) })
+      const requestId = await ask('Find invoices')
+      await act(async () => {
+        getStreamHandler()({ type: 'result', requestId, text: 'no links here', sessionId: 'sid' })
+      })
+      expect(document.querySelector('.ai-sources')).toBeNull()
+    })
+
+    it('stores the assistant answer without a request id or any statement about its sources', async () => {
+      await act(async () => { renderPanel() })
+      const requestId = await ask('Find invoices')
+      await act(async () => {
+        getStreamHandler()({
+          type: 'result',
+          requestId,
+          text: 'the answer',
+          sessionId: 'sid',
+          costUsd: 0.02,
+        })
+      })
+      const stored = addMessageCalls().find(c => c.role === 'assistant')
+      expect(stored).toEqual({ sessionId: 'test-session-uuid', role: 'assistant', content: 'the answer', costUsd: 0.02 })
+      expect(stored).not.toHaveProperty('sources')
+      expect(stored).not.toHaveProperty('requestId')
+    })
+
+    it('shows the cost badge and the session total only for an answer main priced', async () => {
+      await act(async () => { renderPanel() })
+      const priced = await ask('first')
+      await act(async () => {
+        getStreamHandler()({ type: 'result', requestId: priced, text: 'priced answer', sessionId: 'sid', costUsd: 0.02 })
+      })
+      expect(document.querySelectorAll('.ai-cost-badge')).toHaveLength(1)
+      expect(document.querySelector('.ai-session-cost')?.textContent).toBe('$0.02')
+
+      // A model without a first-party price comes back with no costUsd: no badge, no tooltip, total unchanged.
+      const unpriced = await ask('second')
+      await act(async () => {
+        getStreamHandler()({ type: 'result', requestId: unpriced, text: 'unpriced answer', sessionId: 'sid' })
+      })
+      expect(document.querySelectorAll('.ai-cost-badge')).toHaveLength(1)
+      expect(document.querySelector('.ai-session-cost')?.textContent).toBe('$0.02')
+      expect(addMessageCalls().filter(c => c.role === 'assistant').pop()).not.toHaveProperty('costUsd', expect.any(Number))
+    })
+
+    it('stores the user message without a request id or sources', async () => {
+      await act(async () => { renderPanel() })
+      await ask('Find invoices')
+      const stored = addMessageCalls().find(c => c.role === 'user')
+      expect(stored).toBeDefined()
+      expect(stored).not.toHaveProperty('sources')
+      expect(stored).not.toHaveProperty('requestId')
+    })
+
+    it('shows the index note under the answer of the matching request only', async () => {
+      await act(async () => { renderPanel() })
+      const first = await ask('First question')
+      await act(async () => { getStreamHandler()({ type: 'result', requestId: first, text: 'first answer', sessionId: 'sid' }) })
+      const second = await ask('Second question')
+      await act(async () => { getStreamHandler()({ type: 'result', requestId: second, text: 'second answer', sessionId: 'sid' }) })
+      expect(second).not.toBe(first)
+      expect(screen.queryByTestId('ai-index-note')).toBeNull()
+
+      await act(async () => { getStreamHandler()({ type: 'index_incomplete', requestId: second }) })
+
+      const notes = screen.getAllByTestId('ai-index-note')
+      expect(notes).toHaveLength(1)
+      expect(notes[0]).toHaveTextContent('Результаты могут быть неполными: почта ещё индексируется.')
+      const answers = screen.getAllByTestId('ai-message-assistant')
+      expect(answers[0]!.querySelector('[data-testid="ai-index-note"]')).toBeNull()
+      expect(answers[1]!.querySelector('[data-testid="ai-index-note"]')).not.toBeNull()
+    })
+
+    it('shows the index note for the first answer when that request is the matching one', async () => {
+      await act(async () => { renderPanel() })
+      const first = await ask('First question')
+      await act(async () => { getStreamHandler()({ type: 'result', requestId: first, text: 'first answer', sessionId: 'sid' }) })
+      const second = await ask('Second question')
+      await act(async () => { getStreamHandler()({ type: 'result', requestId: second, text: 'second answer', sessionId: 'sid' }) })
+
+      await act(async () => { getStreamHandler()({ type: 'index_incomplete', requestId: first }) })
+
+      const answers = screen.getAllByTestId('ai-message-assistant')
+      expect(answers[0]!.querySelector('[data-testid="ai-index-note"]')).not.toBeNull()
+      expect(answers[1]!.querySelector('[data-testid="ai-index-note"]')).toBeNull()
+    })
+
+    it('ignores an index_incomplete event for a request that has no answer in the panel', async () => {
+      await act(async () => { renderPanel() })
+      const requestId = await ask('Question')
+      await act(async () => { getStreamHandler()({ type: 'result', requestId, text: 'answer', sessionId: 'sid' }) })
+      await act(async () => { getStreamHandler()({ type: 'index_incomplete', requestId: 'someone-elses-request' }) })
+      expect(screen.queryByTestId('ai-index-note')).toBeNull()
+    })
+
+    it('does not show the note without the event', async () => {
+      await act(async () => { renderPanel() })
+      const requestId = await ask('Question')
+      await act(async () => { getStreamHandler()({ type: 'result', requestId, text: 'answer', sessionId: 'sid' }) })
+      expect(screen.queryByTestId('ai-index-note')).toBeNull()
+    })
+  })
+
 })
 
 // ---------------------------------------------------------------------------

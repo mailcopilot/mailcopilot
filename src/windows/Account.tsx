@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Save, Plug, Loader2, Plus, CheckCircle, LogIn, AlertCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { TranslatedError, presentedError } from '../utils/errorPresentation'
+import { TranslatedError, presentedError, presentedTaggedText } from '../utils/errorPresentation'
 import type { AccountConfig, AccountMeta, AutoconfigResult, TlsPin } from '../../packages/net/types'
 import type { OAuthConnectStage, OAuthProgress } from '@mailcopilot/types'
 import WindowTitlebar from '../components/WindowTitlebar'
 import OAuthWaiting from '../components/OAuthWaiting'
 import { recordEvent, providerFromHost } from '../utils/metrics'
 import { captureException } from '../sentry'
+import { useGoogleSignInAvailability } from '../hooks/useGoogleSignInAvailability'
+import { googleRefusalMessage } from '../utils/googleRefusal'
 
 // §2.127 — `presentedError` / `TranslatedError` live in src/utils/errorPresentation.ts.
 // The account wizard is where this matters most: it is the first screen a new
@@ -34,7 +36,7 @@ function isOAuthConnectStage(value: unknown): value is OAuthConnectStage {
 
 const defaultImap: AccountConfig['imap'] = { host: '', port: 993, secure: true, user: '', pass: '', tlsPinsSha256: [] }
 const defaultSmtp: AccountConfig['smtp'] = { host: '', port: 465, secure: true, user: '', pass: '', tlsPinsSha256: [] }
-type WizardStep = 'provider' | 'oauth' | 'type' | 'credentials' | 'detected' | 'manual'
+type WizardStep = 'provider' | 'oauth' | 'gmailPassword' | 'type' | 'credentials' | 'detected' | 'manual'
 type ProviderId = 'gmail' | 'outlook' | 'generic-imap'
 
 // ---------------------------------------------------------------------------
@@ -69,14 +71,20 @@ function OutlookLogo() {
 // ---------------------------------------------------------------------------
 interface ProviderPickerProps {
   onSelect: (provider: ProviderId) => void
+  /** Gmail card leads to the app-password path instead of Google sign-in. */
+  gmailViaAppPassword?: boolean
 }
 
-function ProviderPicker({ onSelect }: ProviderPickerProps) {
+function ProviderPicker({ onSelect, gmailViaAppPassword }: ProviderPickerProps) {
   const { t } = useTranslation()
   const [focused, setFocused] = useState<ProviderId>('gmail')
 
   const providers: Array<{ id: ProviderId; labelKey: string; descKey: string; disabled?: boolean }> = [
-    { id: 'gmail', labelKey: 'account.wizard.provider.gmail.label', descKey: 'account.wizard.provider.gmail.desc' },
+    {
+      id: 'gmail',
+      labelKey: 'account.wizard.provider.gmail.label',
+      descKey: gmailViaAppPassword ? 'account.wizard.provider.gmail.descAppPassword' : 'account.wizard.provider.gmail.desc',
+    },
     { id: 'outlook', labelKey: 'account.wizard.provider.outlook.label', descKey: 'account.wizard.provider.outlook.desc' },
     { id: 'generic-imap', labelKey: 'account.wizard.provider.generic.label', descKey: 'account.wizard.provider.generic.desc' },
   ]
@@ -138,6 +146,17 @@ function ProviderPicker({ onSelect }: ProviderPickerProps) {
       </div>
     </section>
   )
+}
+
+/** Google's own instructions for app passwords (first-party source). */
+const GOOGLE_APP_PASSWORD_HELP_URL = 'https://support.google.com/accounts/answer/185833'
+
+/** Our FAQ entry for accounts that have no app-passwords option. The site keeps
+ *  the English pages at the root and the others under their language code. */
+function appPasswordsFaqUrl(language: string | undefined): string {
+  const code = (language || 'en').split('-')[0].toLowerCase()
+  const prefix = ['ru', 'fr', 'de', 'es', 'it'].includes(code) ? `${code}/` : ''
+  return `https://docs.mailcopilot.io/${prefix}faq#app-passwords-missing`
 }
 
 function normalizeFingerprintSha256(fpRaw: string): string {
@@ -222,7 +241,7 @@ function mapMetaToForm(meta: AccountMeta): {
 }
 
 export default function Account({ initialMode = 'new', initialEditId }: { initialMode?: 'new' | 'edit'; initialEditId?: number }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [, setAccounts] = useState<AccountMeta[]>([])
   const [selected, setSelected] = useState<number | 'new'>(initialMode === 'edit' && initialEditId != null ? initialEditId : 'new')
   const [form, setForm] = useState<{
@@ -239,6 +258,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
     imap: defaultImap,
     smtp: defaultSmtp,
   })
+  const googleSignIn = useGoogleSignInAvailability()
   const [testing, setTesting] = useState(false)
   const [connectingGoogle, setConnectingGoogle] = useState(false)
   const [connectingMicrosoft, setConnectingMicrosoft] = useState(false)
@@ -253,6 +273,9 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
   // mount-once progress listener, so it has to be a ref rather than state.
   const activeOAuthProviderRef = useRef<'gmail' | 'outlook' | null>(null)
   const [smtpSeparateAuth, setSmtpSeparateAuth] = useState(false)
+  // The Gmail card was chosen: server settings come from the gmail.com preset
+  // whatever domain the address is on (Workspace domains have no autoconfig).
+  const [gmailCardChosen, setGmailCardChosen] = useState(false)
   const [tlsPins, setTlsPins] = useState<TlsPin[]>([])
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
@@ -511,8 +534,8 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       // `.trim() ||` rather than a bare `||`: a whitespace-only string from the
       // server is truthy, and would render as a bare "IMAP:" with nothing after
       // it — a message that says less than the generic word does.
-      const imapMsg = imapRes.error?.trim() || t('common.error')
-      const smtpMsg = smtpRes.error?.trim() || t('common.error')
+      const imapMsg = (imapRes.error ? presentedTaggedText(t, imapRes.error) : '').trim() || t('common.error')
+      const smtpMsg = (smtpRes.error ? presentedTaggedText(t, smtpRes.error) : '').trim() || t('common.error')
       if (!imapRes.ok && !smtpRes.ok) {
         setError(t('account.errors.imapSmtp', { imap: imapMsg, smtp: smtpMsg }))
       } else if (!imapRes.ok) {
@@ -608,7 +631,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
     setError('')
     setStatus('')
     try {
-      const cfg = await window.api.invoke('accounts:autoconfig', email) as AutoconfigResult | null
+      const cfg = await window.api.invoke('accounts:autoconfig', email, gmailCardChosen ? 'gmail' : undefined) as AutoconfigResult | null
       if (!cfg) {
         recordEvent('onboarding.autoconfig_result', { success: false, provider: providerFromHost(email.split('@')[1] || '') })
         setWizardStep('manual')
@@ -650,7 +673,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
     } finally {
       setAutoconfiguring(false)
     }
-  }, [form.imap.pass, form.imap.user, form.name, form.smtp.user, smtpSeparateAuth, t])
+  }, [form.imap.pass, form.imap.user, form.name, form.smtp.user, gmailCardChosen, smtpSeparateAuth, t])
 
   const saveAccount = useCallback(async (closeAfter: boolean) => {
     try {
@@ -716,14 +739,15 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       // If editing an existing Google account — re-authorize. Otherwise create a new one.
       const existingId = (selected !== 'new' && isGmailOAuth(form.authType, form.providerId)) ? selected : undefined
       const res = await window.api.invoke('oauth:google:connect', existingId) as {
-        ok: boolean; id: number; email: string
+        ok: boolean; id: number; email: string; refusal?: unknown
         tlsCertRequired?: { imap?: { host: string; port: number }; smtp?: { host: string; port: number } }
       }
       if (!res.ok) {
         // Failure is reported by the catch block below — avoid double-counting.
         // TranslatedError so `presentedError` keeps this copy instead of
-        // replacing it with the generic vocabulary sentence.
-        throw new TranslatedError(t('account.errors.googleOAuthFailed'))
+        // replacing it with the generic vocabulary sentence. Refusals come from
+        // main (§2.297) as a verdict, never as free text.
+        throw new TranslatedError(googleRefusalMessage(res.refusal, form.imap.user, t))
       }
       accountPersisted = true
       persistedAccountId = res.id
@@ -799,7 +823,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       setConnectingGoogle(false)
       if (activeOAuthProviderRef.current === 'gmail') activeOAuthProviderRef.current = null
     }
-  }, [form.authType, form.providerId, refreshTlsPins, selected, t])
+  }, [form.authType, form.providerId, form.imap.user, refreshTlsPins, selected, t])
 
   const connectMicrosoft = useCallback(async () => {
     const isOnboarding = selected === 'new'
@@ -891,7 +915,13 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
 
   /** Handle provider selection on the first wizard step. */
   const handleProviderSelect = useCallback((provider: ProviderId) => {
-    if (provider === 'gmail') {
+    if (provider === 'gmail' && !googleSignIn.newMailboxes) {
+      // §2.297 — a new Gmail mailbox does not go through Google sign-in in this
+      // build; the card leads to the app-password path with its instructions.
+      setForm(prev => ({ ...prev, providerId: 'generic-imap', transportType: 'imap-smtp', authType: 'password' }))
+      setGmailCardChosen(true)
+      setWizardStep('gmailPassword')
+    } else if (provider === 'gmail') {
       setForm(prev => ({ ...prev, providerId: 'gmail', transportType: 'imap-smtp' }))
       // Leave the picker immediately: it must not stay clickable while the
       // flow runs, or a second click starts a competing connection (§2.94).
@@ -901,6 +931,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       // Proceed directly to OAuth — skip the manual credentials step
       void connectGoogle()
     } else if (provider === 'outlook') {
+      setGmailCardChosen(false)
       setForm(prev => ({ ...prev, providerId: 'outlook', transportType: 'imap-smtp' }))
       setOauthProvider('outlook')
       setOauthStage('browser')
@@ -908,10 +939,11 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       // Proceed directly to Microsoft OAuth — same pattern as Gmail
       void connectMicrosoft()
     } else if (provider === 'generic-imap') {
+      setGmailCardChosen(false)
       setForm(prev => ({ ...prev, providerId: 'generic-imap', transportType: 'imap-smtp', authType: 'password' }))
       setWizardStep('type')
     }
-  }, [connectGoogle, connectMicrosoft])
+  }, [connectGoogle, connectMicrosoft, googleSignIn.newMailboxes])
 
   return (
     <>
@@ -929,11 +961,36 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
       {selected === 'new' ? (
         <>
           {wizardStep === 'provider' && (
-            <ProviderPicker onSelect={handleProviderSelect} />
+            <ProviderPicker onSelect={handleProviderSelect} gmailViaAppPassword={!googleSignIn.newMailboxes} />
           )}
 
           {wizardStep === 'oauth' && (
             <OAuthWaiting provider={oauthProvider} stage={oauthStage} />
+          )}
+
+          {wizardStep === 'gmailPassword' && (
+            <section className="form-section" data-testid="account-wizard-gmail-password">
+              <h3>{t('account.wizard.stepGmailPassword.title')}</h3>
+              <p className="hint">{t('account.wizard.stepGmailPassword.intro')}</p>
+              <ol className="hint">
+                <li>{t('account.wizard.stepGmailPassword.step1')}</li>
+                <li>{t('account.wizard.stepGmailPassword.step2')}</li>
+                <li>{t('account.wizard.stepGmailPassword.step3')}</li>
+              </ol>
+              <p className="hint">{t('account.wizard.stepGmailPassword.orgNote')}</p>
+              <div className="form-actions">
+                <button onClick={() => setWizardStep('provider')}>{t('account.actions.back')}</button>
+                <button onClick={() => void window.api.invoke('ui:openExternal', GOOGLE_APP_PASSWORD_HELP_URL)}>
+                  {t('account.wizard.stepGmailPassword.openHelp')}
+                </button>
+                <button data-testid="account-wizard-gmail-password-faq" onClick={() => void window.api.invoke('ui:openExternal', appPasswordsFaqUrl(i18n.language))}>
+                  {t('account.wizard.stepGmailPassword.openFaq')}
+                </button>
+                <button data-testid="account-wizard-gmail-password-next" className="btn-primary" onClick={() => setWizardStep('credentials')}>
+                  <Plus size={14} /> {t('account.actions.next')}
+                </button>
+              </div>
+            </section>
           )}
 
           {wizardStep === 'type' && (
@@ -1025,7 +1082,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
                 )}
               </div>
               <div className="form-actions">
-                <button onClick={() => setWizardStep('type')}>{t('account.actions.back')}</button>
+                <button data-testid="account-wizard-credentials-back" onClick={() => setWizardStep(gmailCardChosen ? 'gmailPassword' : 'type')}>{t('account.actions.back')}</button>
                 <button data-testid="account-wizard-next" className="btn-primary" onClick={() => void detectWizardServers()} disabled={autoconfiguring}>
                   {autoconfiguring ? <Loader2 size={14} className="spin" /> : <Plug size={14} />}
                   {t('account.actions.next')}
@@ -1170,10 +1227,12 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
 
           {/* Account actions */}
           <div className="form-actions">
-            <button onClick={() => void connectGoogle()} disabled={connectingGoogle}>
-              {connectingGoogle ? <Loader2 size={14} className="spin" /> : <LogIn size={14} />}
-              {isGoogle ? t('account.actions.googleReauth') : t('account.actions.googleSignIn')}
-            </button>
+            {googleSignIn.configured && (isGoogle || googleSignIn.newMailboxes) && (
+              <button onClick={() => void connectGoogle()} disabled={connectingGoogle}>
+                {connectingGoogle ? <Loader2 size={14} className="spin" /> : <LogIn size={14} />}
+                {isGoogle ? t('account.actions.googleReauth') : t('account.actions.googleSignIn')}
+              </button>
+            )}
             <button onClick={() => void connectMicrosoft()} disabled={connectingMicrosoft}>
               {connectingMicrosoft ? <Loader2 size={14} className="spin" /> : <LogIn size={14} />}
               {isOutlook ? t('account.actions.microsoftReauth') : t('account.actions.microsoftSignIn')}
@@ -1185,6 +1244,10 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
               </button>
             )}
           </div>
+
+          {isGoogle && !googleSignIn.configured && (
+            <p className="hint" data-testid="account-google-unavailable">{t('account.errors.googleMailboxUnavailable')}</p>
+          )}
 
           {/* IMAP / SMTP — aligned columns */}
           <div className="form-grid-2col">
@@ -1200,6 +1263,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
                 <input
                   placeholder={t('account.fields.user')}
                   value={form.imap.user}
+                  readOnly={isGoogle}
                   onChange={e => {
                     const v = e.target.value
                     setForm(prev => {
@@ -1224,7 +1288,7 @@ export default function Account({ initialMode = 'new', initialEditId }: { initia
                   <input type="checkbox" checked={form.smtp.secure} onChange={e => setForm(prev => ({ ...prev, smtp: { ...prev.smtp, secure: e.target.checked } }))} />
                   {t('account.fields.ssl')}
                 </label>
-                <input placeholder={t('account.fields.user')} value={form.smtp.user} onChange={e => setForm(prev => ({ ...prev, smtp: { ...prev.smtp, user: e.target.value } }))} />
+                <input placeholder={t('account.fields.user')} value={form.smtp.user} readOnly={isGoogle} onChange={e => setForm(prev => ({ ...prev, smtp: { ...prev.smtp, user: e.target.value } }))} />
                 {!isOAuthAccount && (
                   <input placeholder={t('account.fields.password')} type="password" value={form.smtp.pass || ''} onChange={e => setForm(prev => ({ ...prev, smtp: { ...prev.smtp, pass: e.target.value } }))} />
                 )}

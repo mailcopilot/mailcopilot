@@ -74,5 +74,9 @@
     "target": [{ "target": "nsis", "arch": ["x64"] }],
     "artifactName": "mailcopilot-${version}-setup.${ext}"
   },
+  // The Windows installer's privacy-notice page comes from build/license_<lang>.txt.
+  // electron-builder's DMG target picks up the very same files by name, so the DMG
+  // license is switched off explicitly: the notice belongs to the NSIS installer only.
+  "dmg": { "license": null },
   "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true }
 }

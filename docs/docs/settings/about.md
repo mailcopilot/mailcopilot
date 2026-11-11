@@ -33,6 +33,14 @@ This information is useful when reporting bugs or checking compatibility.
 
 The **Updates** section lets you control how MailCopilot keeps itself up to date.
 
+### Check for updates in the background
+
+When this option is enabled, MailCopilot looks for new versions when it starts and then about once an hour. Each check is an ordinary HTTPS request to our update server for a small metadata file. The server sees your IP address and, from the name of the file requested, the type of your operating system and processor architecture. The check itself does not send the version of MailCopilot you run, and neither is anything about your mail, accounts or usage. Downloading an update does reveal versions: the names of the files requested contain version numbers, and a differential download also requests the block-map file of your currently installed version (named like `mailcopilot-<current-version>-setup.exe.blockmap` on Windows), which tells the server which version is running.
+
+This setting is **enabled by default**. No restart is needed: switching it off stops new automatic checks as soon as you save. A check or an automatic download that the update library has already started may still complete (a download that has begun is not cancelled; a check can be partway through reading its configuration, and it retries a refused connection a few times). It is also offered on the first-run screen, in an **Updates** block that is separate from the diagnostics question and independent of your answer to it. Automatic checks are held back only on a brand-new installation (a profile with no earlier answer to the first-run screen and no mail account): there they wait until the first-run screen is answered, and closing it without answering records nothing. Every existing profile keeps checking, including one that has to answer the first-run screen again after a change to the disclosure. The setting is here in **Settings → About**.
+
+Apart from that, when this option is disabled, MailCopilot never contacts the update server on its own: no check at start and no hourly check. You can still use the **Check for updates** button below at any time.
+
 ### Automatically download updates in the background
 
 When this option is enabled, MailCopilot silently downloads new versions as they become available. Once a download is complete, you are prompted to restart the application to apply the update. No action is needed until you are ready to restart.
@@ -41,9 +49,11 @@ When this option is disabled, MailCopilot notifies you that an update is availab
 
 This setting is **disabled by default** (opt-in). Enable it to let MailCopilot download updates without a manual click.
 
+This option has an effect only while **Check for updates in the background** is enabled, because an automatic download cannot happen without a check. While background checks are off, the checkbox stays available and a note explains this; your choice is kept and applies again as soon as background checks are turned back on. In that state, a manual check that finds an update shows the **Download** button, and no new automatic download starts (one already under way may still finish).
+
 ### Check for updates
 
-Click the **Check for updates** button to manually trigger an update check at any time. The button and status area reflect the current state of the update process:
+Click the **Check for updates** button to manually trigger an update check at any time. It works whether or not background checks are enabled, because clicking it is an explicit request. The button and status area reflect the current state of the update process:
 
 - **idle** -- the **Check for updates** button is visible and ready to use.
 - **Checking…** — an update check is in progress; the button is disabled until the check completes.

@@ -21,6 +21,7 @@ import {
   validateDecisionFolder,
   dedupeAiRuleActions,
   estimateAiRuleCostUsd,
+  hasListedPrice,
   nullUsageReservationUsd,
   AI_RULE_NULL_USAGE_COST_FLOOR,
   AI_RULE_MAX_OUTPUT_TOKENS,
@@ -764,8 +765,149 @@ describe('estimateAiRuleCostUsd — real token accounting', () => {
 
   it('prices from real token counts (haiku)', () => {
     const cost = estimateAiRuleCostUsd('claude-haiku-4-5-20251001', { inputTokens: 1000, outputTokens: 1000 })
-    // 1k input @0.0008 + 1k output @0.004 = 0.0048
-    expect(cost).toBeCloseTo(0.0048, 6)
+    // Haiku 4.5: $1 / $5 per MTok -> 1k in @0.001 + 1k out @0.005 = 0.006
+    expect(cost).toBeCloseTo(0.006, 6)
+  })
+
+  // Per-model list prices, pinned against the first-party pages the table cites
+  // (Anthropic pricing page and OpenAI pricing page, read 2026-11-10). A change
+  // here must come with a newer reading of those pages, not with a test edit.
+  describe('rate table (first-party list prices, USD per million tokens)', () => {
+    // Input is priced from a 100k-token call and scaled, so a tiered row (Haiku 5.5)
+    // is read at its base tier, the one a normal prompt falls in.
+    const perMTok = (model: string) => ({
+      input: estimateAiRuleCostUsd(model, { inputTokens: 100_000, outputTokens: 0 })! * 10,
+      output: estimateAiRuleCostUsd(model, { inputTokens: 0, outputTokens: 1_000_000 })!,
+    })
+
+    it.each([
+      ['claude-fable-5-2', 8, 40],
+      ['claude-mythos-5-2', 8, 40],
+      ['claude-fable-5-1', 10, 50],
+      ['claude-mythos-5-1', 10, 50],
+      ['claude-fable-5', 10, 50],
+      ['claude-mythos-5', 10, 50],
+      ['claude-opus-5-5', 4, 20],
+      ['claude-opus-5', 5, 25],
+      ['claude-opus-4-8', 5, 25],
+      ['claude-opus-4-7', 5, 25],
+      ['claude-opus-4-6', 5, 25],
+      ['claude-opus-4-5', 5, 25],
+      ['claude-opus-4-1', 15, 75],
+      ['claude-opus-4', 15, 75],
+      ['claude-sonnet-5-5', 2, 10],
+      ['claude-sonnet-5', 2, 10],
+      ['claude-sonnet-4-6', 3, 15],
+      ['claude-sonnet-4-5', 3, 15],
+      ['claude-sonnet-4', 3, 15],
+      ['claude-haiku-5-5', 0.1, 0.5],
+      ['claude-haiku-4-5', 1, 5],
+      ['gpt-4o', 2.5, 10],
+      ['gpt-4o-mini', 0.15, 0.6],
+    ])('%s costs $%d in / $%d out', (model, input, output) => {
+      const p = perMTok(model)
+      expect(p.input).toBeCloseTo(input, 6)
+      expect(p.output).toBeCloseTo(output, 6)
+    })
+
+    it('reads dated, dotted and gateway-prefixed ids as the same model', () => {
+      for (const id of [
+        'claude-sonnet-4-5-20250929', 'anthropic/claude-sonnet-4.5', 'CLAUDE-SONNET-4-5',
+      ]) expect(perMTok(id).input).toBeCloseTo(3, 6)
+      expect(perMTok('claude-sonnet-4-20250514').input).toBeCloseTo(3, 6) // Sonnet 4, not "4-20"
+      expect(perMTok('claude-haiku-5-5-20260601').input).toBeCloseTo(0.1, 6)
+      expect(perMTok('anthropic/claude-haiku-5.5').input).toBeCloseTo(0.1, 6)
+    })
+
+    it('prices a version missing from the table at its family\'s most expensive row', () => {
+      expect(perMTok('claude-sonnet-9-1').input).toBeCloseTo(3, 6)
+      expect(perMTok('claude-opus-9').input).toBeCloseTo(15, 6)
+      expect(perMTok('claude-haiku-9-9').input).toBeCloseTo(1, 6)
+    })
+
+    it('bills a Haiku 5.5 call whose prompt is over 100,000 tokens at the dear tier', () => {
+      const call = (input: number, output = 0) => estimateAiRuleCostUsd('claude-haiku-5-5', { inputTokens: input, outputTokens: output })!
+      expect(call(100_000)).toBeCloseTo(100 * 0.0001, 8) // up to 100k: $0.10 per MTok
+      expect(call(100_001)).toBeCloseTo(100.001 * 0.0005, 8) // over 100k: $0.50 per MTok
+      expect(call(0, 1_000_000)).toBeCloseTo(0.5, 8)
+      expect(call(150_000, 1_000_000)).toBeCloseTo(75 * 0.001 + 2.5, 8) // $0.50 in, $2.50 out per MTok
+    })
+
+    it('keeps the previous $5 / $15 for the older gpt-4o snapshots the page no longer lists', () => {
+      // No first-party price to refresh them from, so they stay as they were and must
+      // not be swept into the refreshed `gpt-4o` row by its substring match.
+      for (const id of ['gpt-4o-2024-05-13', 'chatgpt-4o-latest']) {
+        expect(estimateAiRuleCostUsd(id, { inputTokens: 100_000, outputTokens: 0 })).toBeCloseTo(0.5, 8)
+        expect(estimateAiRuleCostUsd(id, { inputTokens: 0, outputTokens: 100_000 })).toBeCloseTo(1.5, 8)
+      }
+    })
+
+    it('leaves rows absent from the first-party pages as they were', () => {
+      expect(perMTok('gpt-4').input).toBeCloseTo(10, 6) // the OpenAI page does not list it
+      expect(perMTok('claude-3-5-haiku-20241022').input).toBeCloseTo(0.8, 6) // legacy id, not on the page
+      expect(perMTok('gemini-1.5-flash').input).toBeCloseTo(0.075, 6)
+      expect(perMTok('some-future-unknown-model-v9').input).toBeCloseTo(1, 6)
+    })
+  })
+
+  describe('prompt-cache pricing (terms are named by the caller)', () => {
+    const CLAUDE = 'claude-haiku-4-5-20251001' // $1 per MTok = $0.001 / 1k input
+    const ANTHROPIC = { cacheTerms: 'anthropic' as const }
+    const plain = (input: number) => estimateAiRuleCostUsd(CLAUDE, { inputTokens: input, outputTokens: 0 })!
+
+    it('bills cache reads at 0.1x and 5-minute cache writes at 1.25x of the input rate', () => {
+      const cost = estimateAiRuleCostUsd(CLAUDE, {
+        inputTokens: 10_000, outputTokens: 0, cacheReadTokens: 6_000, cacheWriteTokens: 2_000,
+      }, ANTHROPIC)!
+      // 2k uncached + 6k read x0.1 + 2k write x1.25 = 5.1k effective input tokens
+      expect(cost).toBeCloseTo(5.1 * 0.001, 8)
+    })
+
+    it('uses the page\'s own read multiplier for the newest rows', () => {
+      const read = (model: string) => estimateAiRuleCostUsd(model, {
+        inputTokens: 100_000, outputTokens: 0, cacheReadTokens: 100_000,
+      }, ANTHROPIC)! * 10 // per million tokens, from a 100k call (Haiku 5.5's base tier)
+      expect(read('claude-sonnet-5-5')).toBeCloseTo(0.1, 8) // $0.10 / MTok
+      expect(read('claude-opus-5-5')).toBeCloseTo(0.2, 8) // $0.20 / MTok
+      expect(read('claude-fable-5-2')).toBeCloseTo(0.2, 8) // $0.20 / MTok
+      expect(read('claude-haiku-5-5')).toBeCloseTo(0.01, 8) // $0.01 / MTok
+      expect(read('claude-sonnet-4-5')).toBeCloseTo(0.3, 8) // $0.30 / MTok
+      expect(read('claude-sonnet-9-9')).toBeCloseTo(0.3, 8) // unknown version: standard 0.1x of the dearest row
+    })
+
+    it('treats inputTokens as the total, so a fully cached prompt is a tenth of the price', () => {
+      const cost = estimateAiRuleCostUsd(CLAUDE, { inputTokens: 20_000, outputTokens: 0, cacheReadTokens: 20_000 }, ANTHROPIC)!
+      expect(cost).toBeCloseTo(plain(20_000) * 0.1, 8)
+    })
+
+    it('does not discount output tokens', () => {
+      const withCache = estimateAiRuleCostUsd(CLAUDE, { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 1000 }, ANTHROPIC)!
+      expect(withCache).toBeCloseTo(0.1 * 0.001 + 0.005, 8)
+    })
+
+    it('claims NO discount unless the caller names the terms, even for a claude-named model', () => {
+      // An OpenAI-compatible gateway can serve `anthropic/claude-…`, report cached
+      // tokens and bill them in full: the model id alone must not buy a discount.
+      const reported = { inputTokens: 10_000, outputTokens: 0, cacheReadTokens: 9_000, cacheWriteTokens: 500 }
+      for (const model of [CLAUDE, 'anthropic/claude-sonnet-4.5', 'gpt-4o']) {
+        const full = estimateAiRuleCostUsd(model, { inputTokens: 10_000, outputTokens: 0 })!
+        expect(estimateAiRuleCostUsd(model, reported)).toBeCloseTo(full, 10)
+        expect(estimateAiRuleCostUsd(model, reported, {})).toBeCloseTo(full, 10)
+      }
+    })
+
+    it('clamps nonsense cache counts instead of pricing below the discount or below zero', () => {
+      const fullyCached = plain(1_000) * 0.1
+      expect(estimateAiRuleCostUsd(CLAUDE, { inputTokens: 1_000, outputTokens: 0, cacheReadTokens: 5_000_000 }, ANTHROPIC)).toBeCloseTo(fullyCached, 10)
+      for (const bad of [-5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(estimateAiRuleCostUsd(CLAUDE, { inputTokens: 1_000, outputTokens: 0, cacheReadTokens: bad, cacheWriteTokens: bad }, ANTHROPIC))
+          .toBeCloseTo(plain(1_000), 10)
+      }
+    })
+
+    it('is unchanged when no cache counts are reported', () => {
+      expect(estimateAiRuleCostUsd(CLAUDE, { inputTokens: 1000, outputTokens: 1000 }, ANTHROPIC)).toBeCloseTo(0.006, 8)
+    })
   })
 
   it('prices gpt-4o-mini distinctly from gpt-4o', () => {
@@ -784,7 +926,7 @@ describe('estimateAiRuleCostUsd — real token accounting', () => {
   it('clamps negative token counts to zero', () => {
     const cost = estimateAiRuleCostUsd('gpt-4o', { inputTokens: -50, outputTokens: 1000 })!
     // only the 1000 output tokens are priced
-    expect(cost).toBeCloseTo((1000 / 1000) * 0.015, 6)
+    expect(cost).toBeCloseTo((1000 / 1000) * 0.01, 6)
   })
 
   it('falls back to a conservative default rate for an unrecognized model', () => {
@@ -881,14 +1023,19 @@ describe('nullUsageReservationUsd — model-aware fail-closed reservation', () =
     // ("Why the raise is SHARED and not per-contour"): raising the yardstick
     // lifts the reservation floor for EVERY contour, including the streaming one
     // whose own limits did not move, so the cost of sharing it must be measured
-    // rather than asserted. At the current yardstick every tier except gpt-4
-    // prices its worst case at or under the flat floor, so only gpt-4 moved
-    // ($0.08 → $0.10). Note gpt-4o sits EXACTLY on the flat floor here — it is
-    // the next tier to move, and this test is where that will show up.
-    for (const m of ['gpt-4o', 'gpt-4o-mini', 'claude-haiku-4-5', 'gemini-1.5-flash', 'weird-model']) {
+    // rather than asserted. Among the non-Claude tiers only gpt-4 prices its worst
+    // case above the flat floor ($0.08 → $0.10 with the raise); gpt-4o ($0.031
+    // after the 2026-11 price refresh) now sits below it. The Claude rows were
+    // refreshed from the first-party price page and the dear ones (Opus 4.6 and
+    // later, Opus 4 / 4.1, Fable, Mythos) reserve above the floor on their own
+    // rates, which is the table doing its job rather than a raise side effect.
+    for (const m of ['gpt-4o', 'gpt-4o-mini', 'claude-haiku-4-5', 'claude-sonnet-4-5', 'gemini-1.5-flash', 'weird-model']) {
       expect(nullUsageReservationUsd(m)).toBe(AI_RULE_NULL_USAGE_COST_FLOOR)
     }
     expect(nullUsageReservationUsd('gpt-4')).toBeGreaterThan(AI_RULE_NULL_USAGE_COST_FLOOR)
+    for (const m of ['claude-opus-4-5', 'claude-opus-4-6', 'claude-opus-4-1', 'claude-opus-5-5', 'claude-fable-5-2', 'claude-mythos-5']) {
+      expect(nullUsageReservationUsd(m)).toBeGreaterThan(AI_RULE_NULL_USAGE_COST_FLOOR)
+    }
   })
 
   it('is always finite and positive', () => {
@@ -897,5 +1044,42 @@ describe('nullUsageReservationUsd — model-aware fail-closed reservation', () =
       expect(Number.isFinite(r)).toBe(true)
       expect(r).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('hasListedPrice — an estimate may be shown only from a first-party row', () => {
+  it.each([
+    'claude-sonnet-4-5-20250929', 'claude-haiku-4-5', 'claude-opus-5-5', 'anthropic/claude-sonnet-5.5',
+    'gpt-4o', 'gpt-4o-mini', 'gpt-4o-2024-08-06', 'gpt-4o-mini-2024-07-18', 'openai/gpt-4o-mini', 'GPT-4O-MINI',
+    'gpt-6-luna', 'openai/gpt-6-luna', 'gpt-6-luna-2026-11-01',
+  ])('lists %s', model => {
+    expect(hasListedPrice(model)).toBe(true)
+  })
+
+  it.each([
+    // The reported defect: contains "gpt-4", so the gpt-4 row ($10 / $30 per MTok) priced it.
+    'gpt-4.1-mini', 'gpt-4.1', 'gpt-4.5-preview', 'gpt-4-turbo',
+    // The fall-through rate.
+    'default', 'gpt-5', 'deepseek-chat', 'llama3', '',
+    // Rows the table documents as having no first-party source.
+    'gpt-4o-2024-05-13', 'chatgpt-4o-latest', 'claude-3-haiku-20240307', 'gemini-2.0-flash',
+    // A Claude version the table lacks is priced as its family's dearest sibling: an invention.
+    'claude-opus-9-9',
+    // A listed name inside a longer, different model.
+    'gpt-4o-realtime-preview', 'gpt-4o-mini-tts', 'gpt-6-luna-mini', 'gpt-6-astra',
+  ])('does not list %s', model => {
+    expect(hasListedPrice(model)).toBe(false)
+  })
+
+  it('prices gpt-6-luna at the OpenAI page rate: $0.10 in / $0.50 out per MTok', () => {
+    const cost = estimateAiRuleCostUsd('gpt-6-luna', { inputTokens: 1_000_000, outputTokens: 1_000_000 })
+    expect(cost).toBeCloseTo(0.6, 6)
+  })
+
+  it('leaves the rates the ledger uses alone: an unlisted model is still priced, only not displayed', () => {
+    // gpt-4.1-mini still resolves to the dear gpt-4 row for budgeting (the safe, over-estimating side).
+    const usage = { inputTokens: 21_000, outputTokens: 0 }
+    expect(estimateAiRuleCostUsd('gpt-4.1-mini', usage)).toBeCloseTo(0.21, 6)
+    expect(estimateAiRuleCostUsd('default', usage)).toBeCloseTo(0.021, 6)
   })
 })

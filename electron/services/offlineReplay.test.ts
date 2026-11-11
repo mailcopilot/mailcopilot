@@ -50,6 +50,8 @@ import { currentImapPriority } from '../../packages/net/imapScheduler'
 import { replayOfflineOps, captureOnce, resetOfflineReplayCaptureGate } from './offlineReplay'
 import { getOfflineOps, deleteOfflineOp, deleteOfflineOpsForFolder } from '../../packages/db'
 import { setSeen, setFlagged, moveMessages, deleteMessagesRemote, getMailboxStatus } from '../../packages/net/imap'
+import { markImapOutcomeUndetermined } from '@mailcopilot/core/transportFailure'
+import { incrementOfflineOpRetry } from '../../packages/db'
 
 const mockImapConfig = { host: 'imap.test.com', port: 993, user: 'test@test.com', pass: 'pass' }
 const getImapConfig = vi.fn().mockResolvedValue(mockImapConfig)
@@ -64,6 +66,146 @@ describe('offlineReplay', () => {
     vi.mocked(moveMessages).mockResolvedValue(undefined)
     vi.mocked(deleteMessagesRemote).mockResolvedValue(undefined)
     startMetricSpan.mockImplementation(() => ({ end: spanEnd, setAttributes: spanSetAttributes }))
+  })
+
+  it('an op whose outcome is unknown stays queued, counts towards the poison limit and is retried by the next replay', async () => {
+    const queue = [
+      { id: 7, accountId: 1, folder: 'INBOX', uid: 100, opType: 'move', payload: { destFolder: 'Archive' }, uidValidity: 42, createdAt: '2026-01-01' },
+    ]
+    vi.mocked(getOfflineOps).mockImplementation(() => queue as never)
+    const unknown = Object.assign(new Error('Unexpected close'), { code: 'NoConnection' })
+    markImapOutcomeUndetermined(unknown)
+    vi.mocked(moveMessages).mockRejectedValue(unknown)
+
+    const first = await replayOfflineOps(1, getImapConfig)
+    const second = await replayOfflineOps(1, getImapConfig)
+
+    expect(first).toEqual({ replayed: 0, failed: 1 })
+    expect(second).toEqual({ replayed: 0, failed: 1 })
+    expect(moveMessages).toHaveBeenCalledTimes(2) // retried, like any other failure
+    expect(incrementOfflineOpRetry).toHaveBeenCalledTimes(2)
+    expect(incrementOfflineOpRetry).toHaveBeenCalledWith([7])
+    expect(deleteOfflineOp).not.toHaveBeenCalled() // nothing leaves the queue but through success or the poison limit
+  })
+
+  describe('progress is recorded per IMAP command of a batch', () => {
+    const op = (id: number, uid: number, destFolder: string) => ({ id, accountId: 1, folder: 'INBOX', uid, opType: 'move', payload: { destFolder }, uidValidity: 42, createdAt: '2026-01-01' })
+    const unknownOutcome = () => {
+      const err = Object.assign(new Error('Unexpected close'), { code: 'NoConnection' })
+      markImapOutcomeUndetermined(err)
+      return err
+    }
+
+    it('a failure on the first destination counts only ITS ops; the second destination was never sent and is left untouched', async () => {
+      vi.mocked(getOfflineOps).mockReturnValue([op(1, 100, 'Projects'), op(2, 101, 'Projects'), op(3, 200, 'Receipts')] as never)
+      vi.mocked(moveMessages).mockRejectedValueOnce(unknownOutcome())
+
+      const result = await replayOfflineOps(1, getImapConfig)
+
+      expect(moveMessages).toHaveBeenCalledTimes(1) // Receipts was never attempted
+      expect(incrementOfflineOpRetry).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(incrementOfflineOpRetry).mock.calls[0]![0].sort()).toEqual([1, 2])
+      expect(deleteOfflineOp).not.toHaveBeenCalled()
+      expect(result).toEqual({ replayed: 0, failed: 2 })
+    })
+
+    it('a destination that succeeded is done; the failing one is counted; the one after it stays untouched', async () => {
+      vi.mocked(getOfflineOps).mockReturnValue([op(1, 100, 'A'), op(2, 200, 'B'), op(3, 300, 'C')] as never)
+      vi.mocked(moveMessages)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(unknownOutcome())
+
+      const result = await replayOfflineOps(1, getImapConfig)
+
+      expect(moveMessages).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(deleteOfflineOp).mock.calls.map(([id]) => id)).toEqual([1]) // only A is done
+      expect(incrementOfflineOpRetry).toHaveBeenCalledWith([2])
+      expect(result).toEqual({ replayed: 1, failed: 1 })
+    })
+
+    it('two seen-states: a failure on the first leaves the second STORE unsent and untouched', async () => {
+      vi.mocked(getOfflineOps).mockReturnValue([
+        { id: 1, accountId: 1, folder: 'INBOX', uid: 100, opType: 'flag_seen', payload: { seen: true }, uidValidity: 42, createdAt: '2026-01-01' },
+        { id: 2, accountId: 1, folder: 'INBOX', uid: 101, opType: 'flag_seen', payload: { seen: false }, uidValidity: 42, createdAt: '2026-01-01' },
+      ] as never)
+      vi.mocked(setSeen).mockRejectedValueOnce(unknownOutcome())
+
+      await replayOfflineOps(1, getImapConfig)
+
+      expect(setSeen).toHaveBeenCalledTimes(1)
+      expect(incrementOfflineOpRetry).toHaveBeenCalledWith([1])
+      expect(deleteOfflineOp).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('replay is single-flight per account', () => {
+    const queued = (accountId: number) => ({ id: accountId * 10, accountId, folder: 'INBOX', uid: 100, opType: 'move', payload: { destFolder: 'Archive' }, uidValidity: 42, createdAt: '2026-01-01' })
+    const slowFailingMove = () => {
+      const state = { running: 0, maxRunning: 0 }
+      vi.mocked(moveMessages).mockImplementation(async () => {
+        state.running++
+        state.maxRunning = Math.max(state.maxRunning, state.running)
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        state.running--
+        throw new Error('IMAP MOVE was rejected by the server')
+      })
+      return state
+    }
+
+    it('two simultaneous calls never run two passes in parallel: one MOVE per op per pass, the counter moves by one per pass', async () => {
+      vi.mocked(getOfflineOps).mockImplementation(((accountId?: number) => [queued(accountId ?? 1)]) as never)
+      const state = slowFailingMove()
+
+      const [first, second] = await Promise.all([replayOfflineOps(1, getImapConfig), replayOfflineOps(1, getImapConfig)])
+
+      expect(state.maxRunning).toBe(1) // never two passes at once
+      // The second call did not start a pass of its own: it asked for ONE more pass
+      // after the running one, so there are two sequential passes, not three, and
+      // each increments the counter once (the old overlap moved it by two).
+      expect(moveMessages).toHaveBeenCalledTimes(2)
+      expect(incrementOfflineOpRetry).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(incrementOfflineOpRetry).mock.calls.every(([ids]) => ids.length === 1 && ids[0] === 10)).toBe(true)
+      expect(second).toBe(first) // both callers share the outcome
+    })
+
+    it('any number of calls during a pass ask for only one more pass', async () => {
+      vi.mocked(getOfflineOps).mockImplementation(((accountId?: number) => [queued(accountId ?? 1)]) as never)
+      slowFailingMove()
+
+      await Promise.all([1, 2, 3, 4].map(() => replayOfflineOps(1, getImapConfig)))
+
+      expect(moveMessages).toHaveBeenCalledTimes(2)
+    })
+
+    it('different accounts do not wait for each other', async () => {
+      vi.mocked(getOfflineOps).mockImplementation(((accountId?: number) => [queued(accountId ?? 1)]) as never)
+      const state = slowFailingMove()
+
+      await Promise.all([replayOfflineOps(1, getImapConfig), replayOfflineOps(2, getImapConfig)])
+
+      expect(state.maxRunning).toBe(2)
+      expect(moveMessages).toHaveBeenCalledTimes(2)
+    })
+
+    it('a pass that throws releases the slot, so the next call runs', async () => {
+      vi.mocked(getOfflineOps).mockReturnValueOnce([queued(1)] as never)
+      getImapConfig.mockRejectedValueOnce(new Error('no config'))
+      await expect(replayOfflineOps(1, getImapConfig)).resolves.toEqual({ replayed: 0, failed: 1 })
+
+      vi.mocked(getOfflineOps).mockReturnValue([queued(1)] as never)
+      vi.mocked(moveMessages).mockResolvedValue(undefined)
+      await expect(replayOfflineOps(1, getImapConfig)).resolves.toEqual({ replayed: 1, failed: 0 })
+    })
+  })
+
+  it('an ordinary failure still stays in the queue and counts towards the poison limit', async () => {
+    vi.mocked(getOfflineOps).mockReturnValue([
+      { id: 8, accountId: 1, folder: 'INBOX', uid: 100, opType: 'move', payload: { destFolder: 'Archive' }, uidValidity: 42, createdAt: '2026-01-01' },
+    ] as never)
+    vi.mocked(moveMessages).mockRejectedValue(new Error('IMAP MOVE was rejected by the server'))
+    await replayOfflineOps(1, getImapConfig)
+    expect(incrementOfflineOpRetry).toHaveBeenCalledWith([8])
+    expect(deleteOfflineOp).not.toHaveBeenCalled()
   })
 
   it('returns zero counts when no pending ops', async () => {

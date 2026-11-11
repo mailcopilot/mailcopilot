@@ -227,4 +227,40 @@ describe('AiConsentMatrix', () => {
     expect(screen.getByTestId('settings-ai-consent-empty')).toBeInTheDocument()
     expect(screen.queryByTestId('settings-ai-consent-all-translate')).not.toBeInTheDocument()
   })
+  describe('the legend of what each feature does', () => {
+    const FEATURES = ['threadSummary', 'instantReply', 'proofread', 'translate'] as const
+    const HELP: Record<(typeof FEATURES)[number], string> = {
+      threadSummary: 'Summarises long threads.',
+      instantReply: 'Drafts quick replies.',
+      proofread: 'Checks what you wrote.',
+      translate: 'Translates messages and drafts.',
+    }
+    const TITLE: Record<(typeof FEATURES)[number], string> = {
+      threadSummary: 'Thread AI Summary', instantReply: 'Instant Reply', proofread: 'AI Proofread', translate: 'AI Translate',
+    }
+
+    it.each(FEATURES)('has one collapsed <details> for %s that still holds its full help text', feature => {
+      renderMatrix()
+      const entry = screen.getByTestId(`settings-ai-consent-legend-${feature}`)
+
+      expect(entry.tagName).toBe('DETAILS')
+      expect(entry).not.toHaveAttribute('open')
+      expect(entry.querySelector('summary')).toHaveTextContent(TITLE[feature])
+      expect(entry).toHaveTextContent(HELP[feature])
+    })
+
+    it('is collapsed for every feature at once, so the four paragraphs are not on screen together', () => {
+      const { container } = renderMatrix()
+      const entries = container.querySelectorAll('.ai-consent-legend details')
+      expect(entries).toHaveLength(4)
+      for (const e of Array.from(entries)) expect(e).not.toHaveAttribute('open')
+    })
+
+    it('opens an entry on its own summary without touching a consent', () => {
+      const { props } = renderMatrix()
+      const entry = screen.getByTestId('settings-ai-consent-legend-translate') as HTMLDetailsElement
+      fireEvent.click(entry.querySelector('summary')!)
+      expect(props.onChangeFeature).not.toHaveBeenCalled()
+    })
+  })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeIsE2E } from './e2eFlag'
+import { computeIsE2E, mayRunAlongsideOtherInstances } from './e2eFlag'
 
 /**
  * The e2e opt-in decides whether ~60 branches in `main.ts` serve in-memory
@@ -65,5 +65,50 @@ describe('computeIsE2E — the opt-in value itself', () => {
     }
     expect(computeIsE2E(env, true)).toBe(false)
     expect(reads).toBe(0)
+  })
+})
+
+describe('mayRunAlongsideOtherInstances — the single-instance lock decision', () => {
+  // Two instances on one profile share the send queue; the second one resends a
+  // send the first is still performing. Only the e2e harness may skip the lock.
+  const lock = (granted: boolean) => {
+    let calls = 0
+    return { request: () => { calls += 1; return granted }, calls: () => calls }
+  }
+
+  it('a packaged build takes the lock even with the e2e environment variable set', () => {
+    const granted = lock(true)
+    expect(mayRunAlongsideOtherInstances({ MAILCOPILOT_E2E: '1' }, true, granted.request)).toBe(true)
+    expect(granted.calls()).toBe(1)
+    // ...and quits when another instance holds it.
+    const refused = lock(false)
+    expect(mayRunAlongsideOtherInstances({ MAILCOPILOT_E2E: '1' }, true, refused.request)).toBe(false)
+    expect(refused.calls()).toBe(1)
+  })
+
+  it('a packaged build without the variable takes the lock too', () => {
+    const refused = lock(false)
+    expect(mayRunAlongsideOtherInstances({}, true, refused.request)).toBe(false)
+    expect(refused.calls()).toBe(1)
+  })
+
+  it('an unpackaged run without the variable takes the lock (a plain dev run)', () => {
+    const refused = lock(false)
+    expect(mayRunAlongsideOtherInstances({}, false, refused.request)).toBe(false)
+    expect(refused.calls()).toBe(1)
+  })
+
+  it('the e2e harness (unpackaged and opted in) skips the lock and never asks for it', () => {
+    const refused = lock(false)
+    expect(mayRunAlongsideOtherInstances({ MAILCOPILOT_E2E: '1' }, false, refused.request)).toBe(true)
+    expect(refused.calls()).toBe(0)
+  })
+
+  it('reads the same opt-in value as computeIsE2E, nothing looser', () => {
+    for (const value of ['0', 'true', '', ' 1']) {
+      const refused = lock(false)
+      expect(mayRunAlongsideOtherInstances({ MAILCOPILOT_E2E: value }, false, refused.request)).toBe(false)
+      expect(refused.calls()).toBe(1)
+    }
   })
 })

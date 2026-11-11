@@ -298,10 +298,10 @@ describe('composeAi — §5 wrapUntrusted: neutralization of forged boundary mar
     const prompt = vi.mocked(deps.chat).mock.calls[0][2]
 
     // Exactly one real START and one real END in the full prompt.
-    const startMatches = [...prompt.matchAll(new RegExp(DATA_BOUNDARY_START.replace(/[<>]/g, '\\$&'), 'g'))]
-    const endMatches = [...prompt.matchAll(new RegExp(DATA_BOUNDARY_END.replace(/[<>]/g, '\\$&'), 'g'))]
-    expect(startMatches).toHaveLength(1)
-    expect(endMatches).toHaveLength(1)
+    // Counted as literal substrings: no regexp, so no hand-made escaping.
+    const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1
+    expect(countOf(prompt, DATA_BOUNDARY_START)).toBe(1)
+    expect(countOf(prompt, DATA_BOUNDARY_END)).toBe(1)
 
     // The injected instruction text is still present (as inert data inside the
     // boundary), proving neutralization rather than deletion.

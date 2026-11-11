@@ -26,12 +26,12 @@ MailCopilot can send a small amount of diagnostic and usage data — but only af
 
 ## First-run consent
 
-The first time you start MailCopilot, before the account setup wizard opens, you see a consent screen titled **Send diagnostic data?**. It lists what would be sent if you allow it and what is never sent, and offers two equally sized buttons: **Allow** and **Don't allow**. Neither button is pre-selected or emphasized, and there is no pre-ticked checkbox — you have to make an active choice.
+The first time you start MailCopilot, before the account setup wizard opens, you see a consent screen titled **Send diagnostic data?**. It lists what would be sent if you allow it and what is never sent, and offers two equally sized buttons: **Allow** and **Don't allow**. Neither button is pre-selected or emphasized, and there is no pre-ticked checkbox — you have to make an active choice. The same screen also has a separate **Updates** block with a **Check for updates in the background** checkbox, on by default and independent of your diagnostics answer -- see [About](../settings/about).
 
 A few things follow from that:
 
 - **Nothing is collected before you answer, not just nothing sent.** The counters and buffers behind diagnostics and usage data are never opened while consent is pending — MailCopilot does not quietly accumulate a backlog and flush it once you allow it. Whatever happened before you answered is simply gone; the moment you allow it, counting starts fresh from then on (a session-duration measurement, for example, starts counting from the moment of consent, not from app launch).
-- **Closing the screen or pressing Escape counts as "Don't allow".** There is no way to dismiss the screen and end up opted in.
+- **Pressing Escape counts as "Don't allow".** Closing the window without answering records nothing: the screen comes back at the next start, nothing is collected in the meantime, and, on a brand-new installation, no automatic update check runs until you answer. There is no way to dismiss the screen and end up opted in.
 - **Your decision is remembered together with the version of this disclosure.** MailCopilot only shows the screen again if the list of what is collected genuinely widens — a new category of data, a new destination, or broader collection than before. Ordinary app updates, wording fixes, and bug fixes never trigger a re-ask.
 - **If you had already turned diagnostics off** in Settings → About before this screen existed, that refusal is honored and you are not asked again. Everyone else has diagnostics switched off automatically, and is asked once on the next start.
 - **You can change your mind at any time** in **Settings → About**. Until you answer the initial question, the toggle there is shown off and disabled, with a note explaining that it will take effect once you respond to the consent screen.
@@ -241,7 +241,7 @@ What is guaranteed is one `eml.parse_dispatch` event per EML file MailCopilot ac
 | --- | --- | --- | --- | --- |
 | `imap.cert_error` | event | yes (10s window) | `provider` | An IMAP operation failed with a certificate-classified TLS error (self-signed, untrusted chain, pin mismatch, hostname mismatch). |
 | `cert.recovery_dialog_shown` | event | no | `provider` | The certificate recovery dialog was shown for a host, once per storm-guard window. |
-| `cert.trust_clicked` | event | no | `provider`, `pem` | You accepted a presented certificate, storing a TLS pin and triggering a resync. `pem` records only whether the certificate body was captured with the pin, which determines whether a self-signed server can be trusted going forward. |
+| `cert.trust_clicked` | event | no | `provider`, `pem` | You accepted a presented certificate, storing a TLS pin and triggering a resync. `pem` records only whether the certificate body was captured with the pin, which determines whether a self-signed or private-CA server can be trusted going forward. |
 | `cert.trust_rejected` | event | no | `provider`, `reason` | A trust attempt did not end in a stored pin — for example you declined the confirmation, or the certificate the server presented did not match what the recovery dialog had shown. |
 | `cert.interception_notice_shown` | event | no | `provider` | A one-time notice was shown that your mail server's certificate chain only verifies against your operating system's certificate store, not against the bundled public root list — the signature of antivirus software or a corporate proxy inspecting the connection. |
 
@@ -336,7 +336,7 @@ None of these three carry an account id, email address, mail provider, or server
 
 | Event | Kind | Aggregated | Tags | Purpose |
 | --- | --- | --- | --- | --- |
-| `update.check_triggered` | event | no | `source` | An update check was issued, either by the hourly background timer or by your Settings → About click. |
+| `update.check_triggered` | event | no | `source` | An update check was issued, either by the hourly background timer (which runs only while background update checks are on) or by your Settings → About click. |
 | `update.check_result` | event | no | `result`, `error_class` | An update check finished: up to date, an update is available, or it failed. |
 | `update.download_started` | event | no | `source` | An update download began, either automatically or from your click. |
 | `update.download_completed` | event | no | — | An update download finished successfully and is staged to install on your next restart. |

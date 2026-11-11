@@ -105,6 +105,7 @@ jobs:
       # app-update.yml carried the placeholder. Linux was never affected — its
       # value comes from the CI variable in .gitlab-ci.yml.
       MAILCOPILOT_UPDATE_URL: ${{ inputs.update_url }}
+      MAILCOPILOT_OFFICIAL_BUILD: '1'
 
       # §2.255 — everything the release guard and the build both need lives at
       # JOB level, so the guard step below judges the exact values the build

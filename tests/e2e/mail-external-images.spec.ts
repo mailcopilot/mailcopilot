@@ -87,6 +87,13 @@ test('§3.10 P0: renderer never makes direct HTTP requests for external email im
       // The raw external URL from the fixture must NOT appear in the
       // rendered iframe doc (either inlined or replaced with placeholder).
       expect(srcdocAllowed).not.toContain('https://tracker.example.test/pixel.png')
+
+      // Images are swapped into the LIVE iframe document as they arrive
+      // (§2.308), so the same invariant is asserted on the document the user
+      // actually sees: no raw external URL at any moment, whatever arrived.
+      const liveFrame = await (await iframe.elementHandle())!.contentFrame()
+      expect(liveFrame).not.toBeNull()
+      expect(await liveFrame!.content()).not.toContain('tracker.example.test')
     }
 
     // Give the iframe a beat to make any direct HTTP requests it might try.

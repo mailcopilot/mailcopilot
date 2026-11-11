@@ -374,10 +374,11 @@ describe('detectTextLanguage — the synchronous pass is bounded (§3.3.B6.f2)',
     expect(Date.now() - started).toBeLessThan(1000)
   })
 
-  it('equals the reading path input cap, so part 1 answers cannot change', () => {
-    // `TRANSLATE_INPUT_CHAR_CAP` (electron/services/aiTranslate.ts) refuses
-    // anything longer BEFORE detecting, so this cap is inert there. Lowering it
-    // would silently change labels part 1 already gives.
+  it('equals the per-request translation budget and does not follow the reading limit', () => {
+    // `TRANSLATE_INPUT_CHAR_CAP` (electron/services/aiTranslate.ts) is the budget
+    // of one request and the draft limit. The reading limit (60 000) is NOT this
+    // number: a long message is sliced here, and the slice is what keeps the
+    // synchronous detector pass bounded on the main process.
     expect(LANGUAGE_DETECTION_MAX_INPUT_CHARS).toBe(3000)
   })
 })

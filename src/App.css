@@ -287,21 +287,6 @@
   align-items: center;
   gap: 2px;
   width: 100%;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
-}
-
-.sidebar-folders::-webkit-scrollbar {
-  width: 3px;
-}
-
-.sidebar-folders::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.sidebar-folders::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
 }
 
 /* Раскрывающийся sidebar */
@@ -1764,6 +1749,16 @@
   outline-offset: -2px;
 }
 
+/* Keyboard cursor inside the thread (§3.3.C-thread.4). Same ring as
+   :focus-visible and on the same element, so the two never stack: this one only
+   guarantees the ring is drawn when focus was moved programmatically by j / k.
+   Bound to :focus so the ring cannot outlive the focus it claims to show — the
+   cursor is remembered after Tab moves focus to the toolbar, the ring is not. */
+.thread-card-focused > .thread-card-header:focus {
+  outline: 2px solid var(--btn-primary-bg, #4f46e5);
+  outline-offset: -2px;
+}
+
 .thread-card-header-meta {
   flex: 1;
   min-width: 0;
@@ -2560,6 +2555,10 @@
   padding: 6px;
 }
 
+.address-context-menu {
+  min-width: 180px;
+}
+
 .ctx-item {
   width: 100%;
   border: none;
@@ -2747,6 +2746,14 @@
   margin-bottom: 16px;
 }
 
+/* The spell-checking notes ("no dictionaries chosen", "up to N at a time", "no dictionaries in this
+   build") are sibling spans with no text between them; as inline boxes they ran together into one
+   sentence. Each one gets its own line. */
+.window-container .hint.settings-spellcheck-hint {
+  display: block;
+  margin-bottom: 4px;
+}
+
 .form-section {
   border: 1px solid var(--mailcopilot-border);
   border-radius: 10px;
@@ -2765,6 +2772,9 @@
    fractional pixels. */
 .ai-consent-matrix {
   width: 100%;
+  /* Fixed layout: the five feature columns share what is left after the account column, so the grid never
+     grows wider than a default-size Settings window. */
+  table-layout: fixed;
   border-collapse: collapse;
   margin: 4px 0 12px;
   font-size: 13px;
@@ -2773,7 +2783,7 @@
 .ai-consent-matrix th,
 .ai-consent-matrix td {
   border-bottom: 1px solid var(--mailcopilot-border);
-  padding: 6px 8px;
+  padding: 6px 4px;
   text-align: left;
   vertical-align: middle;
 }
@@ -2786,11 +2796,22 @@
 .ai-consent-account-head,
 .ai-consent-feature-head {
   font-weight: 600;
-  white-space: nowrap;
 }
 
+.ai-consent-account-head {
+  width: 28%;
+}
+
+/* Headings wrap at spaces so five feature columns fit a narrow Settings window. */
 .ai-consent-feature-head {
   text-align: center;
+  font-size: 12px;
+  vertical-align: bottom;
+}
+
+.ai-consent-feature-head input {
+  display: block;
+  margin: 0 auto 4px;
 }
 
 .ai-consent-feature-name {
@@ -2801,8 +2822,7 @@
    that can be long; it wraps instead of stretching the feature columns. */
 .ai-consent-account-cell {
   font-weight: 400;
-  white-space: normal;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .ai-consent-cell {
@@ -2816,13 +2836,14 @@
   gap: 8px;
 }
 
-.ai-consent-legend-item dt {
+.ai-consent-legend-item summary {
   font-weight: 600;
   font-size: 13px;
+  cursor: pointer;
 }
 
-.ai-consent-legend-item dd {
-  margin: 2px 0 0;
+.ai-consent-legend-item p {
+  margin: 4px 0 0;
 }
 
 /* Provider picker (account wizard step 1) */
@@ -3267,12 +3288,6 @@
 .ai-egress-confirm-actions {
   display: flex;
   gap: 6px;
-}
-
-/* Shield icon in header — non-interactive indicator */
-.ai-egress-shield {
-  cursor: default;
-  opacity: 0.7;
 }
 
 /* ===== AI mutating-action confirmation cards (AiActionConfirmation) =====
@@ -3794,6 +3809,21 @@
   background-attachment: local, local, scroll, scroll;
 }
 
+/* The background update check option: a separate question from the one the
+   buttons answer, pinned like them so it is on screen at every window size. */
+.consent-dialog-updates {
+  flex: 0 0 auto;
+  padding-top: 12px;
+  margin-top: 8px;
+  border-top: 1px solid var(--mailcopilot-border);
+}
+
+.consent-dialog-updates-text {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* The answer row. `flex: 0 0 auto` is the invariant the regression test guards:
    it must never be compressed or scrolled out of view. */
 .consent-dialog .confirm-dialog-actions {
@@ -3804,7 +3834,9 @@
 
 /* ===== Compose: To row + Cc/Bcc toggle ===== */
 .compose-to-row {
-  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 .compose-address-field {
@@ -3812,7 +3844,8 @@
 }
 
 .compose-to-row .compose-address-field {
-  padding-right: 72px;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .compose-address-chips {
@@ -3918,10 +3951,15 @@
 }
 
 .compose-cc-toggle {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
+  /* A flex sibling of the To field, so it never overlaps the field whatever
+     the label length; it is as tall as the field's first line and centred on it. */
+  flex: none;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 38px;
+  white-space: nowrap;
   background: transparent;
   border: none;
   color: var(--muted);
@@ -4856,8 +4894,6 @@
   list-style: none;
   margin: 0;
   padding: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
 }
 
 .mc-select__option {
@@ -5114,4 +5150,276 @@
 
 .account-auth-badge-action:hover {
   background: var(--warn-border);
+}
+
+.ask-ai-dialog {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  width: min(720px, calc(100vw - 48px));
+  /* Centred by `margin: auto`, so the gap above equals the gap below: 44px each stays clear of the
+     36px title-bar drag region (at 32px the dialog's top 4px dragged the window). */
+  max-height: calc(100vh - 88px);
+  margin: auto;
+  gap: 10px;
+  padding: 16px 20px;
+  overflow: hidden;
+}
+
+/* `display` only while open: a rule on the bare class would override the UA's
+   `dialog:not([open]) { display: none }` and leave a suspended dialog on screen. */
+.ask-ai-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.ask-ai-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.ask-ai-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ask-ai-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.ask-ai-mailboxes {
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0;
+}
+
+.ask-ai-mailbox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+/* Checkbox beside its text: the global input rules would otherwise stack it above the label. */
+.ask-ai-mailboxes label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ask-ai-mailboxes input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.ask-ai-mailboxes label.is-off {
+  color: var(--muted);
+}
+
+.ask-ai-enable {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.ask-ai-enable[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ask-ai-enable-confirm {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ask-ai-enable-confirm p {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
+.ask-ai-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 80px;
+}
+
+.ask-ai-turn {
+  margin-bottom: 14px;
+}
+
+/* Turns are told apart by a rule and by the question sitting in its own band. */
+.ask-ai-turn + .ask-ai-turn {
+  border-top: 1px solid var(--mailcopilot-border);
+  padding-top: 14px;
+}
+
+.ask-ai-question {
+  font-weight: 600;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--mail-selected-bg);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.ask-ai-block {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ask-ai-block.is-forming {
+  opacity: 0.7;
+}
+
+.ask-ai-citation {
+  font: inherit;
+  font-size: 12px;
+  padding: 0 4px;
+  margin-right: 2px;
+  background: none;
+  border: none;
+  color: var(--btn-primary-bg);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.ask-ai-citation.is-unconfirmed {
+  color: var(--muted);
+  cursor: help;
+  text-decoration: line-through;
+}
+
+.ask-ai-sources,
+.ask-ai-phase,
+.ask-ai-stopped {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ask-ai-disclosure {
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.ask-ai-notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: 8px;
+}
+
+.ask-ai-composer textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.ask-ai-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+/* Model text is isolated from the markers the app draws beside it, so neither
+   bidi controls nor look-alike text can pass for a citation or the sources line. */
+.ask-ai-text {
+  unicode-bidi: isolate;
+}
+
+.ask-ai-citation {
+  background: var(--mail-selected-bg);
+  border: 1px solid var(--mailcopilot-border);
+  border-radius: 10px;
+  padding: 0 6px;
+  text-decoration: none;
+}
+
+.ask-ai-citation.is-unconfirmed {
+  background: none;
+  border-style: dashed;
+}
+
+.ask-ai-sources {
+  border-left: 3px solid var(--mailcopilot-border);
+  padding-left: 8px;
+}
+
+.ask-ai-sources ol {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+.ask-ai-sources-title {
+  font-weight: 600;
+}
+
+.ask-ai-source {
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 1px 0;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.ask-ai-source:hover .ask-ai-source-n,
+.ask-ai-source:focus-visible .ask-ai-source-n {
+  text-decoration: underline;
+}
+
+.ask-ai-source-n {
+  color: var(--btn-primary-bg);
+}
+
+.ask-ai-source-meta,
+.ask-ai-sources .is-unconfirmed {
+  color: var(--muted);
+}
+
+/* Index note: quiet, one line of small text. The border and fill still mark it as drawn by the app, not by the model. */
+.ask-ai-coverage {
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-left: 3px solid var(--warn-border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ask-ai-coverage p {
+  margin: 2px 0;
+}
+
+/* App-drawn trust notes. Model text cannot reproduce the border, fill or weight. */
+.ask-ai-unverified,
+.ask-ai-limited {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--warn-border);
+  border-left-width: 4px;
+  background: var(--warn-bg);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
 }

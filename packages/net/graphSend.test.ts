@@ -48,6 +48,21 @@ describe('packages/net/graphSend', () => {
     setNetTelemetrySink(null)
   })
 
+  it('posts a MIME that carries the reply threading headers', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(makeResponse(202))
+
+    await sendMailViaGraph({
+      accessToken: 't',
+      options: { ...baseOptions, inReplyTo: '<parent@example.com>', references: '<root@example.com> <parent@example.com>' },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    const body = (fetchImpl.mock.calls[0][1] as { body: string }).body
+    const mime = Buffer.from(body, 'base64').toString('utf8')
+    expect(mime).toMatch(/^In-Reply-To: <parent@example\.com>\r?$/m)
+    expect(mime).toMatch(/^References: <root@example\.com> <parent@example\.com>\r?$/m)
+  })
+
   it('POSTs base64-encoded MIME to the correct Graph endpoint with bearer token', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(makeResponse(202))
 

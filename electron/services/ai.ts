@@ -1,25 +1,32 @@
 /**
- * AI service: MCP server, query(), streaming.
- * Uses @anthropic-ai/claude-agent-sdk for agent-based interaction (Claude providers).
- * Uses Vercel AI SDK + standard MCP for OpenAI-compatible providers.
+ * AI service: MCP server, provider streaming, MCP tool definitions.
+ *
+ * §2.283 — ONE agentic path for every tool-calling provider: Vercel AI SDK
+ * (`streamText` + `stepCountIs`) driving our in-process MCP server through
+ * `@ai-sdk/mcp`. Anthropic and the OpenAI-compatible contour differ only in
+ * which `LanguageModelV3` they hand to `streamVercelChat` and which
+ * provider-executed tools they add on top; everything downstream — the
+ * preview/apply gate, the turn guard, `wrapUntrusted()`, the egress gate and
+ * the per-request cost ceiling — is shared code, not two implementations that
+ * have to be kept in step.
  */
-import { query } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createMCPClient } from '@ai-sdk/mcp'
 import { streamText, stepCountIs, extractReasoningMiddleware, wrapLanguageModel, APICallError } from 'ai'
+import { abortableDelay, isRetryableStreamFailure, toStreamError, createAttemptFence, describeStreamErrorForLog } from './aiStreamRetry'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import fs from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
 import { app } from 'electron'
-import { execSync } from 'node:child_process'
 import { randomUUID, createHash } from 'node:crypto'
-import { ProxyAgent, fetch as undiciFetch } from 'undici'
+import { fetch as undiciFetch } from 'undici'
+import { getAiDispatcher, resetAiDispatchers, resolveFetchInput } from './aiHttpDispatcher'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import net from 'node:net'
 import { createLogger } from '../logger'
+import { describeErrorReason } from '../unwrapAggregate'
 import { startInactiveSpan, sentryLogger, wrapMcpServerWithSentry, reportKeychainUnavailable, captureException } from '../sentry'
 import { markFeatureUsed } from '../featureReach'
 
@@ -61,13 +68,18 @@ import {
   DATA_BOUNDARY_END as CORE_DATA_BOUNDARY_END,
   wrapUntrusted as coreWrapUntrusted,
   estimateAiRuleCostUsd,
+  hasListedPrice,
   nullUsageReservationUsd,
   AI_RULE_NULL_USAGE_COST_FLOOR,
   analyzeTableReferences,
   findEncodedMailRuleRefusal,
   formatMailRuleRefusal,
   type SqlGuardRefusalReason,
+  DEFAULT_AI_MODELS,
+  ANTHROPIC_ONE_SHOT_MODEL,
+  type AiModelListResult,
 } from '../../packages/core'
+import { fetchAiModelList } from './aiModelList'
 // §2.162 — wording of a mail rule refusal and resolution of the half an update
 // omits. The refusal DECISION stays in packages/core; this module holds no list
 // of fields or actions of its own.
@@ -81,6 +93,7 @@ import type { AttachmentMeta, MessageParseCap, UnsubscribeAttemptResult } from '
 // dependency wiring is here (CLAUDE.md §5 hotspot policy, §3.3.B4.f1).
 import { generateProofread, type ProofreadDeps } from './composeAi'
 import type { ProofreadRequest, ProofreadResult } from '@mailcopilot/types'
+import { classifyAiFailure, type AiFailureKind } from './aiFailureKind'
 // §2.51.f2 iteration 6 — the CANONICAL "not a public internet host" predicates,
 // reused (not reimplemented) so the budget's notion of "local" can never drift
 // from the SSRF one. See `isLocalInferenceEndpoint`.
@@ -96,6 +109,14 @@ import { secretStore } from './secretStore'
 // §2.119 — the single source of truth for "what address does a request
 // actually go to", shared with the destination-change guard.
 import { openAiBaseUrlForRequest, UnusableAiEndpointError } from './aiDestination'
+// Scheduling instants supplied by the model (`wakeAt`, `remindAt`) are
+// validated and canonicalised to UTC before anything downstream sees them —
+// firing is a string comparison, so the stored form IS the contract.
+import {
+  normalizeScheduleInstant,
+  localIsoWithOffset,
+  type ScheduleInstantResult,
+} from './aiScheduleInput'
 import {
   registerPendingAction,
   RegisterRateLimitError,
@@ -114,7 +135,7 @@ import {
   type PendingActionPayload,
 } from './aiPendingActions'
 import { recordEvent as recordEventForAi, startMetricSpan } from '../metrics'
-import { isTelemetryCollectionAllowed } from '../telemetryGate'
+import { isTelemetryCollectionAllowed, telemetryCollectionEpoch } from '../telemetryGate'
 import { bucketCount } from '../metricsBuckets'
 // Type-only: the bucket helper below returns the exact `ai_quick_action_length_bucket`
 // domain so a value the schema would reject fails at compile time, not in CI.
@@ -141,7 +162,7 @@ import {
   registerGate as registerInternetGate,
   unregisterGate as unregisterInternetGate,
   interceptInternetTool,
-  isInternetTool,
+  recordProviderExecutedEgress,
   deniedToolResult,
   type InternetGate,
 } from './aiInternetGate'
@@ -149,6 +170,8 @@ import {
 // nothing" and the fruitless-search limiter. All the logic lives in the module;
 // this file only creates the guard, feeds it observed tool names, and yields
 // the resulting notice (hotspot policy, CLAUDE.md §5).
+import { anthropicWebTools, createAnthropicChatModel } from './aiAnthropicProvider'
+import { chatRequestParams, normalizeMessagesForProvider, oneShotOpenAiParams } from './aiProviderTransform'
 import {
   createTurnGuard,
   currentTurnGuard,
@@ -158,8 +181,16 @@ import {
 
 // --- Types ---
 
+import { createIndexProbe } from './aiIndexCoverage'
+import { citationFor, withCitation } from './aiCitations'
+
+/** A message named by its place. */
 export type MessageRef = { accountId: number; folder: string; uid: number }
-export type AiSource = { ref: MessageRef; reason?: string; subject?: string; from?: string; date?: string }
+
+/** Appended after a tool result that was cut at the size cap, outside the untrusted-data boundary. */
+function truncationNotice(maxChars: number): string {
+  return `\n... [TRUNCATED — result exceeded ${maxChars} chars. Use more specific queries or smaller limits.]`
+}
 /**
  * The AI providers MailCopilot can run against. Every member is key-based
  * (BYOK): the user supplies their own API key and the provider bills them
@@ -174,10 +205,15 @@ export type AiSource = { ref: MessageRef; reason?: string; subject?: string; fro
  * Do NOT re-add a member here that authenticates via someone else's consumer
  * session.
  *
- * The Claude Agent SDK and `findClaudeExecutable()` deliberately STAY: the
- * `anthropic-api` provider streams through the same `streamClaudeChat`, which
- * runs the SDK against a user-supplied `ANTHROPIC_API_KEY`. That is ordinary
- * API usage and is unaffected by the Consumer Terms.
+ * §2.283 — the Claude Agent SDK and the `findClaudeExecutable()` CLI hunt are
+ * GONE. `anthropic-api` now streams through the same `streamVercelChat` as the
+ * OpenAI-compatible contour, over `@ai-sdk/anthropic` (Apache-2.0) against a
+ * user-supplied `ANTHROPIC_API_KEY`. That is ordinary API usage and is
+ * unaffected by the Consumer Terms. Do NOT re-introduce a provider that shells
+ * out to a locally installed agent binary: the proprietary dependency is what
+ * blocked free installer signing (SignPath Foundation terms forbid any
+ * proprietary component), and a second agentic implementation is what §2.283
+ * removed.
  */
 export type AiProvider = 'anthropic-api' | 'openai-api' | 'gemini-api'
 /**
@@ -308,8 +344,14 @@ export type AiStreamEvent =
   | { type: 'tool_use_start'; requestId: string; toolName: string; toolInput: unknown }
   | { type: 'tool_use_end'; requestId: string; toolName: string; result: string }
   | { type: 'thinking'; requestId: string; text: string }
-  | { type: 'result'; requestId: string; text: string; sessionId: string; costUsd?: number; sources?: AiSource[] }
-  | { type: 'error'; requestId: string; message: string }
+  | {
+      type: 'result'; requestId: string; text: string; sessionId: string; costUsd?: number
+    }
+  /** Sent after `result` when a mail search ran against a local index that is still incomplete (§3.3 B3). */
+  | { type: 'index_incomplete'; requestId: string }
+  // `model` accompanies `failure: 'model'`: the id the provider did not accept, so
+  // the renderer can name it (main has no i18next instance).
+  | { type: 'error'; requestId: string; message: string; failure?: AiFailureKind; model?: string }
   | { type: 'notice'; requestId: string; code: AiStreamNoticeCode; message: string }
   | { type: 'status'; requestId: string; status: 'thinking' | 'using_tool' | 'streaming' | 'done' }
 
@@ -328,6 +370,7 @@ export interface AiChatOptions {
   aiProvider?: AiProvider
   /** Conversation history for multi-turn (OpenAI/Gemini) */
   history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  /** Sources confirmed for earlier answers of this session; loaded by main from the session's stored messages. */
   /**
    * Per-request egress consent (§3.10 P1). When `true`, allows outbound
    * tools (WebSearch / WebFetch / external MCP) for THIS turn only — does
@@ -409,7 +452,7 @@ type ProviderStreamRequest = {
  * through a new stream event would put internal accounting on the renderer-facing
  * protocol; a mutable handle owned by the request is the smaller surface.
  *
- * Both fields are advisory: the Claude (Agent SDK) path never writes them, and
+ * Both fields are advisory: the non-agentic Gemini path never writes them, and
  * `aiChat` falls back to exactly its previous behaviour when they are absent.
  */
 export interface RequestSpendEvidence {
@@ -633,6 +676,30 @@ function previewRateLimitedResult(toolName: string): { content: { type: 'text'; 
   }
 }
 
+/**
+ * Refuse a `*_preview` call whose scheduling instant is unusable, in the shape
+ * the model already handles for every other preview refusal.
+ *
+ * The refusal is the whole point: nothing is registered, nothing is written,
+ * and the model is told exactly which parameter is wrong and what shape it
+ * must have, so it can re-derive the instant or ask the user instead of
+ * leaving behind a row that fires late — or, for a non-ISO string, never.
+ */
+function scheduleInstantRefusalResult(
+  toolName: string,
+  refusal: Extract<ScheduleInstantResult, { ok: false }>,
+): { content: { type: 'text'; text: string }[] } {
+  // The raw value is NOT logged: it is attacker-influencable text from a model
+  // turn that may itself be carrying injected email content.
+  logAI.warn(`MCP ${toolName} → schedule instant rejected: ${refusal.reason}`)
+  return {
+    content: [{
+      type: 'text' as const,
+      text: JSON.stringify({ ok: false, reason: refusal.reason, message: refusal.message }),
+    }],
+  }
+}
+
 async function runApplyTool<K extends PendingActionKind, R extends ApplyResult>(args: {
   kind: K
   toolName: string
@@ -700,7 +767,10 @@ async function runApplyTool<K extends PendingActionKind, R extends ApplyResult>(
     }
     return { content: [{ type: 'text' as const, text: JSON.stringify({ previewId, ...result }) }] }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    // §2.307: an AggregateError from a multi-address connect has an EMPTY
+    // message; the shared formatter reads its members and keeps the text to the
+    // class/code, so the model and the log both get a reason.
+    const msg = describeErrorReason(err)
     logAI.error(`MCP ${toolName} → callback threw: ${msg}`)
     return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, message: `${toolName} failed: ${msg}` }) }] }
   }
@@ -795,56 +865,6 @@ export function setReadLaterCallback(cb: (input: ReadLaterRequest) => Promise<Re
 let mcpClientManagerRef: import('./mcpClient').McpClientManager | null = null
 export function setMcpClientManager(mgr: import('./mcpClient').McpClientManager) { mcpClientManagerRef = mgr }
 
-function sourceKey(ref: MessageRef): string {
-  return `${ref.accountId}:${ref.folder}:${ref.uid}`
-}
-
-function parseRefCandidate(value: unknown): MessageRef | null {
-  if (!value || typeof value !== 'object') return null
-  const obj = value as Record<string, unknown>
-  const accountId = obj.accountId
-  const folder = obj.folder
-  const uid = obj.uid
-  if (typeof accountId !== 'number' || !Number.isFinite(accountId) || accountId <= 0) return null
-  if (typeof folder !== 'string' || !folder.trim()) return null
-  if (typeof uid !== 'number' || !Number.isFinite(uid) || uid <= 0) return null
-  return {
-    accountId: Math.trunc(accountId),
-    folder: folder.trim(),
-    uid: Math.trunc(uid),
-  }
-}
-
-const MAX_REF_DEPTH = 8
-
-function collectRefsFromUnknown(value: unknown, out: MessageRef[] = [], depth = 0): MessageRef[] {
-  if (depth > MAX_REF_DEPTH) return out
-  const ref = parseRefCandidate(value)
-  if (ref) out.push(ref)
-  if (Array.isArray(value)) {
-    for (const item of value) collectRefsFromUnknown(item, out, depth + 1)
-    return out
-  }
-  if (value && typeof value === 'object') {
-    for (const v of Object.values(value as Record<string, unknown>)) collectRefsFromUnknown(v, out, depth + 1)
-  }
-  return out
-}
-
-function extractRefsFromText(text: string): MessageRef[] {
-  const refs: MessageRef[] = []
-  const rx = /accountId\s*[:=]\s*(\d+)\s*,\s*folder\s*[:=]\s*([A-Za-z0-9_./-]+)\s*,\s*uid\s*[:=]\s*(\d+)/g
-  let match: RegExpExecArray | null
-  while ((match = rx.exec(text)) !== null) {
-    refs.push({
-      accountId: Number(match[1]),
-      folder: String(match[2]),
-      uid: Number(match[3]),
-    })
-  }
-  return refs
-}
-
 export function stopRequest(requestId: string) {
   const ctrl = activeRequests.get(requestId)
   if (ctrl) {
@@ -934,8 +954,7 @@ function stripMessageForList(msg: MessageRow, includeBodyPreview = false): Omit<
  */
 function truncateToolResult(text: string): string {
   if (text.length <= TOOL_RESULT_MAX_CHARS) return text
-  return text.slice(0, TOOL_RESULT_MAX_CHARS) +
-    '\n... [TRUNCATED — result exceeded ' + TOOL_RESULT_MAX_CHARS + ' chars. Use more specific queries or smaller limits.]'
+  return text.slice(0, TOOL_RESULT_MAX_CHARS) + truncationNotice(TOOL_RESULT_MAX_CHARS)
 }
 
 // --- Untrusted data boundary markers for prompt injection defense ---
@@ -1188,6 +1207,13 @@ const GET_EMAIL_CACHE_MAX = 200
  */
 const getEmailCacheStorage = new AsyncLocalStorage<Map<string, string>>()
 
+/**
+ * The session whose citation registry a mail tool issues tickets into (§3.3 B3). Bound per request by `aiChat`; a
+ * tool that runs outside a request scope (the MCP export server, stdio, a request without a session) sees none and
+ * gives the model no link to copy.
+ */
+const citationSessionStorage = new AsyncLocalStorage<string | undefined>()
+
 /** Build a fresh per-request cache; the aiChat() scope owns one of these. */
 function createGetEmailCache(): Map<string, string> { return new Map<string, string>() }
 
@@ -1320,7 +1346,9 @@ function registerMailTools(
         return { content: [{ type: 'text' as const, text: 'Email not found' }] }
       }
       logAI.info(`MCP get_email → found subject="${(msg.subject || '').slice(0, 60)}"`)
-      const raw = JSON.stringify(msg)
+      // The ticket is issued on the row just read, before it is serialised or wrapped; the cache below holds this JSON
+      // (with its ticket) for the rest of the request, and the registry answers the same ticket for the same row.
+      const raw = JSON.stringify(withCitation(citationSessionStorage.getStore(), msg, msg))
       // §3.3 B1.f2 — memory bound. Cache holds RAW pre-wrap JSON for audit
       // integrity (so `wrapUntrusted` runs on every read and `wrapCounter`
       // increments uniformly). The previous implementation cached the
@@ -1355,7 +1383,8 @@ function registerMailTools(
       const lastUid = rows.length > 0 ? rows[rows.length - 1].uid : null
       const hasMore = rows.length === limit && lastUid !== null
       logAI.info(`MCP list_emails → ${rows.length} emails, hasMore=${hasMore}`)
-      const slim = rows.map(r => stripMessageForList(r, includeBodyPreview))
+      const sessionId = citationSessionStorage.getStore()
+      const slim = rows.map(r => withCitation(sessionId, r, stripMessageForList(r, includeBodyPreview)))
       return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify({ emails: slim, hasMore, nextBeforeUid: hasMore ? lastUid : null }))) }] }
     },
   )
@@ -1421,7 +1450,8 @@ function registerMailTools(
       const rows = searchMessages(accountId, folder, q, limit, offset)
       logAI.info(`MCP search_emails → ${rows.length} results`)
       turnGuard?.noteSearchResult(searchKey, rows.length)
-      const slim = rows.map(r => stripMessageForList(r, includeBodyPreview))
+      const sessionId = citationSessionStorage.getStore()
+      const slim = rows.map(r => withCitation(sessionId, r, stripMessageForList(r, includeBodyPreview)))
       return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(slim))) }] }
     },
   )
@@ -1474,7 +1504,8 @@ function registerMailTools(
       logAI.info(`MCP get_thread accountId=${accountId} folder=${folder} uid=${uid}`)
       const thread = getThread(accountId, folder, uid)
       logAI.info(`MCP get_thread → ${thread.length} messages in thread`)
-      const slim = thread.map(r => stripMessageForList(r))
+      const sessionId = citationSessionStorage.getStore()
+      const slim = thread.map(r => withCitation(sessionId, r, stripMessageForList(r)))
       return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(slim))) }] }
     },
   )
@@ -2252,10 +2283,20 @@ function registerMailTools(
       accountId: z.number().int().positive(),
       folder: z.string().min(1),
       uids: z.array(z.number().int().positive()).min(1).max(100),
-      wakeAt: z.string().min(1).describe('ISO 8601 datetime when the email should reappear'),
+      wakeAt: z.string().min(1).describe(
+        'Absolute instant when the email should reappear: ISO 8601 WITH an explicit UTC offset, ' +
+        'e.g. "2026-09-23T09:00:00+03:00" or "2026-09-23T06:00:00Z". A wall-clock time with no ' +
+        'offset and natural language ("tomorrow 09:00") are rejected — resolve them against the ' +
+        'current time given at the top of the conversation first. Must be in the future.'
+      ),
     },
     async ({ accountId, folder, uids, wakeAt }) => {
-      logAI.info(`MCP preview_snooze_email accountId=${accountId} folder=${folder} uids=${uids.length} wakeAt=${wakeAt}`)
+      // Normalise BEFORE anything is registered or logged: the stored string
+      // is compared lexicographically against `toISOString()` when the poller
+      // decides what is due, so a non-canonical value fires late or never.
+      const wake = normalizeScheduleInstant(wakeAt, 'wakeAt')
+      if (!wake.ok) return scheduleInstantRefusalResult('preview_snooze_email', wake)
+      logAI.info(`MCP preview_snooze_email accountId=${accountId} folder=${folder} uids=${uids.length} wakeAt=${wake.iso}`)
       // §2.20 PR1-A — empty-guard. (zod schema enforces uids.length >= 1
       // already; this is defence-in-depth in case the schema is widened.)
       if (uids.length === 0) {
@@ -2269,13 +2310,13 @@ function registerMailTools(
       }
       const reg = tryRegisterPendingAction({
         kind: 'snooze_email',
-        data: { accountId, folder, uids, wakeAt },
+        data: { accountId, folder, uids, wakeAt: wake.iso },
       })
       if (!reg.ok) return previewRateLimitedResult('preview_snooze_email')
       const previewId = reg.previewId
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({
-          previewId, accountId, folder, emailCount: uids.length, uids, wakeAt,
+          previewId, accountId, folder, emailCount: uids.length, uids, wakeAt: wake.iso,
           note: 'Wait for user click on Apply, then call apply_snooze_email with previewId AND confirmation_token.',
         }) }],
       }
@@ -2551,19 +2592,28 @@ function registerMailTools(
       uid: z.number().int().positive(),
       toAddr: z.string().min(1).describe('Recipient email address to watch for reply'),
       subject: z.string().optional(),
-      remindAt: z.string().min(1).describe('ISO 8601 datetime for the reminder'),
+      remindAt: z.string().min(1).describe(
+        'Absolute instant for the reminder: ISO 8601 WITH an explicit UTC offset, e.g. ' +
+        '"2026-09-23T09:00:00+03:00" or "2026-09-23T06:00:00Z". A wall-clock time with no offset ' +
+        'and natural language ("tomorrow 09:00") are rejected — resolve them against the current ' +
+        'time given at the top of the conversation first. Must be in the future.'
+      ),
     },
     async ({ accountId, folder, uid, toAddr, subject, remindAt }) => {
-      logAI.info(`MCP preview_add_followup accountId=${accountId} folder=${folder} uid=${uid} toAddr=${toAddr} remindAt=${remindAt}`)
+      // Same contract as `wakeAt`: `remind_at <= ?` in the follow-up poller is
+      // a string comparison, so only canonical UTC fires when it should.
+      const remind = normalizeScheduleInstant(remindAt, 'remindAt')
+      if (!remind.ok) return scheduleInstantRefusalResult('preview_add_followup', remind)
+      logAI.info(`MCP preview_add_followup accountId=${accountId} folder=${folder} uid=${uid} toAddr=${toAddr} remindAt=${remind.iso}`)
       const reg = tryRegisterPendingAction({
         kind: 'add_followup',
-        data: { accountId, folder, uid, toAddr, subject, remindAt },
+        data: { accountId, folder, uid, toAddr, subject, remindAt: remind.iso },
       })
       if (!reg.ok) return previewRateLimitedResult('preview_add_followup')
       const previewId = reg.previewId
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({
-          previewId, accountId, folder, uid, toAddr, subject, remindAt,
+          previewId, accountId, folder, uid, toAddr, subject, remindAt: remind.iso,
           note: 'Wait for user click on Apply, then call apply_add_followup with previewId AND confirmation_token.',
         }) }],
       }
@@ -3068,7 +3118,6 @@ Capabilities:
 - Sending emails (via send_email_preview → send_email_apply, ONLY with user confirmation).
 - Searching user's email (via search_emails; the folder parameter selects the folder).
 - SQL queries to the local cache (via query_db, SELECT only).
-- Searching the internet (via WebSearch, WebFetch).
 - Extracting tasks, dates, key decisions from conversations.
 - Priority analysis and unread digest.
 - Listing emails with pagination (via list_emails, default limit=20). Use beforeUid from the response to fetch next pages.
@@ -3083,12 +3132,18 @@ Capabilities:
   via external tools (e.g. VirusTotal get_file_report) — it is much lighter than read_attachment.
   IMPORTANT: When scanning attachments for threats, ALWAYS use get_attachment_hash instead of read_attachment
   to avoid context overflow with large files.
-- Snoozing emails to reappear later (via preview_snooze_email → apply_snooze_email). wakeAt is ISO 8601 datetime.
+- Snoozing emails to reappear later (via preview_snooze_email → apply_snooze_email).
+  wakeAt MUST be an absolute future instant in ISO 8601 form WITH an explicit UTC offset
+  ("2026-09-23T09:00:00+03:00" or "2026-09-23T06:00:00Z"). Resolve what the user said
+  ("tomorrow morning", "in 2 hours") against "Current time" above before calling; a wall-clock
+  time without an offset or a natural-language string is rejected and nothing is scheduled.
 - Removing snooze (via preview_unsnooze_email → apply_unsnooze_email). Find snooze IDs via query_db: SELECT id, account_id, folder, uid, wake_at FROM snoozed.
 - Starring/unstarring emails (via preview_flag_email → apply_flag_email).
 - Moving emails between folders (via move_email_preview → move_email_apply).
   Use list_folders to discover available folder names before moving.
-- Setting follow-up reminders (via preview_add_followup → apply_add_followup). The user will be notified if no reply by remindAt.
+- Setting follow-up reminders (via preview_add_followup → apply_add_followup). The user will be
+  notified if no reply by remindAt. remindAt follows the same rule as wakeAt: an absolute future
+  instant in ISO 8601 form WITH an explicit UTC offset.
 - Dismissing follow-up reminders (via preview_dismiss_followup → apply_dismiss_followup). Find IDs via query_db: SELECT id, to_addr, subject, remind_at, status FROM follow_ups WHERE status IN ('pending','notified').
 - Marking emails for read later (via preview_mark_read_later → apply_mark_read_later). Emails stay in their folder but also appear in the Read Later virtual folder.
   To remove from Read Later, call preview_mark_read_later with add=false. Find entries via query_db: SELECT id, account_id, folder, uid FROM read_later.
@@ -3186,17 +3241,21 @@ Rules:
 - When reading memory, consider the context but do not explicitly mention its existence in responses.
 - Be concise and specific.
 - When summarizing, highlight: key points, action items, deadlines.
+- MAILBOX NAMES — MANDATORY: accountId is an internal number the user never sees. NEVER write
+  "account 2", "accountId 2" or any account number in a reply. When you must name a mailbox, use its email
+  address (get_account_info returns it) or its name; when it is the only mailbox, do not name it at all.
 - CRITICAL EMAIL REFERENCE FORMAT — MANDATORY:
   NEVER show raw email UIDs (numeric IDs like 134626) to the user — they are meaningless numbers.
-  Every time you mention a specific email, you MUST format it as a clickable mailref link:
-  [Email Subject](mailref://accountId/folder/uid)
-  This is NON-NEGOTIABLE. Any output containing a bare UID number without a mailref link is WRONG.
+  Every email row a tool returns (and the open email in the context) has a "cite" field: a ready link such as
+  mailref://c/k3f2x7ab. Every time you mention a specific email that has a "cite" field, link it, copying the
+  value of "cite" EXACTLY, character for character:
+  [Email Subject](value of the cite field)
+  NEVER compose or edit a mailref link yourself, and never write accountId, folder or uid into a link. If a row
+  has no "cite" field, mention the email by subject and sender without a link.
   Examples:
   BAD: "uid 134626 — Комитет по кадрам" ← WRONG, bare UID
-  BAD: "134626 (Комитет по кадрам): has 2 attachments" ← WRONG, bare UID
-  BAD: "Email from Иванов И.И. (uid: 4523)" ← WRONG, bare UID
-  GOOD: "[Re: Комитет по кадрам](mailref://1/INBOX/134626) — has 2 attachments" ← CORRECT
-  GOOD: "[Weekly Report](mailref://2/INBOX/4523) from Иванов И.И." ← CORRECT
+  BAD: "[Weekly Report](mailref://2/INBOX/4523)" ← WRONG, a link you composed yourself
+  GOOD: "[Re: Комитет по кадрам](mailref://c/k3f2x7ab) — has 2 attachments" ← CORRECT, cite copied exactly
   Use the email subject as link text. If subject is empty, use sender name.
 - Source references are collected automatically — do not list them manually at the end.
 
@@ -3254,10 +3313,10 @@ or organize their inbox, follow the GTD (Getting Things Done) methodology:
 - Archive = archive (preview_mail_action → apply_mail_action)
 
 ### Output format for triage results:
-When presenting triage results, ALWAYS use mailref links for every email:
-- Archive: [Email Subject](mailref://accountId/folder/uid) — reason
-- Star: [Email Subject](mailref://accountId/folder/uid) — reason
-- Snooze: [Email Subject](mailref://accountId/folder/uid) — snoozed until date
+When presenting triage results, link every email that has a "cite" field, copying its value exactly:
+- Archive: [Email Subject](cite value) — reason
+- Star: [Email Subject](cite value) — reason
+- Snooze: [Email Subject](cite value) — snoozed until date
 NEVER output bare UIDs like "uid 12345" or "12345 (subject)". This is a hard requirement.
 
 ### Rules:
@@ -3271,6 +3330,39 @@ NEVER output bare UIDs like "uid 12345" or "12345 (subject)". This is a hard req
 - Use query_db only as a fallback for advanced/bulk queries that cannot be done via get_email or search_emails.
 - If an account has a connection error (connError in context), note that cached data may be stale — mention this to the user.
 `
+
+/**
+ * Where {@link composeSystemPrompt} splices the web-search capability in. A
+ * literal from the template above; `ai.test.ts` pins that the template still
+ * contains it, so a reworded prompt fails loudly instead of silently dropping
+ * the capability line.
+ */
+const WEB_SEARCH_PROMPT_ANCHOR = '- Summarizing emails and threads.'
+
+/**
+ * The system prompt actually sent for one request.
+ *
+ * §2.283 — the base prompt promises only what EVERY provider can do. Web search
+ * is the exception: it exists solely on the Anthropic contour, and only when the
+ * provider-executed `web_search` / `web_fetch` tools were included this turn
+ * (which depends on the egress gate — see `streamAnthropicChat`). Promising it
+ * unconditionally was a standing lie to two of three providers: the
+ * OpenAI-compatible contour reaches the web only through an external MCP server,
+ * and Gemini has no tools at all. A model told it can search, that cannot, either
+ * fabricates results or reports a broken tool.
+ *
+ * Deliberately additive: the capability line is APPENDED to the capability list
+ * rather than the prompt being assembled from fragments, so the single template
+ * above stays the one place the prompt is read and reviewed.
+ */
+function composeSystemPrompt(caps: { webSearch: boolean }): string {
+  if (!caps.webSearch) return MAILCOPILOT_SYSTEM_PROMPT
+  return MAILCOPILOT_SYSTEM_PROMPT.replace(
+    WEB_SEARCH_PROMPT_ANCHOR,
+    `${WEB_SEARCH_PROMPT_ANCHOR}\n- Searching the internet (via web_search, web_fetch). Cite the pages you used.`,
+  )
+}
+
 
 // --- Building prompt with context ---
 
@@ -3331,8 +3423,40 @@ function describeExternalMcpTools(): string {
   return `[External MCP servers connected]:\n${lines.join('\n')}\nUse list_external_tools to discover available tools, then call_external_tool to invoke them.\n\n`
 }
 
-function buildPrompt(userPrompt: string, context?: EmailContext): string {
-  let prefix = `Today's date: ${new Date().toISOString().slice(0, 10)}\n\n`
+/**
+ * The open message of the UI context with its ticket, when this request has a session: the context says which
+ * message the user is looking at, and the model may cite it. The row comes from our own database; no row, no
+ * Message-ID or no session means no ticket and the context is unchanged.
+ */
+function contextWithCitation(sessionId: string | undefined, data: unknown): unknown {
+  if (!sessionId || !data || typeof data !== 'object') return data
+  const d = data as { accountId?: unknown; folder?: unknown; uid?: unknown }
+  if (typeof d.accountId !== 'number' || typeof d.folder !== 'string' || typeof d.uid !== 'number') return data
+  let row: ReturnType<typeof getMessageByUid>
+  try { row = getMessageByUid(d.accountId, d.folder, d.uid) } catch { return data }
+  const cite = row ? citationFor(sessionId, row) : undefined
+  if (!cite) return data
+  // The context is written by the renderer: a `cite` of its own must not stand in for the one main issues.
+  const rest: Record<string, unknown> = { ...(data as object) }
+  delete rest.cite
+  return { cite, ...rest }
+}
+
+function buildPrompt(userPrompt: string, context?: EmailContext, sessionId?: string): string {
+  // The local instant with its offset is here because the scheduling tools
+  // refuse a wall-clock time: without the user's offset the model could not
+  // turn "tomorrow at 9" into the absolute instant those tools require, and
+  // the refusal would be a dead end.
+  //
+  // BOTH lines are sliced out of the SAME local rendering. `Today's date`
+  // used to come from `toISOString()`, i.e. the UTC calendar day, while the
+  // second line was local — so for the hours around midnight the model was
+  // handed two different dates and counted "tomorrow" from the wrong one.
+  // The direction of the error follows the sign of the offset: east of UTC
+  // "today" lagged a day, west of it "today" ran a day ahead.
+  const localNow = localIsoWithOffset(new Date())
+  let prefix = `Today's date: ${localNow.slice(0, 10)}\n`
+    + `Current time (user's local timezone, ISO 8601 with offset): ${localNow}\n\n`
 
   const memoryContent = readMemory()
   if (memoryContent) {
@@ -3346,10 +3470,10 @@ function buildPrompt(userPrompt: string, context?: EmailContext): string {
 
   switch (context.type) {
     case 'email':
-      prefix += `Context: an email is open.\n${wrapUntrusted(JSON.stringify(context.data))}\n\n`
+      prefix += `Context: an email is open.\n${wrapUntrusted(JSON.stringify(contextWithCitation(sessionId, context.data)))}\n\n`
       break
     case 'thread':
-      prefix += `Context: a thread (email chain) is open.\n${wrapUntrusted(JSON.stringify(context.data))}\n\n`
+      prefix += `Context: a thread (email chain) is open.\n${wrapUntrusted(JSON.stringify(contextWithCitation(sessionId, context.data)))}\n\n`
       break
     case 'folder': {
       const fd = context.data as Record<string, unknown>
@@ -3379,9 +3503,6 @@ function buildPrompt(userPrompt: string, context?: EmailContext): string {
 }
 
 // --- HTTP proxy for AI requests ---
-
-let _proxyAgent: ProxyAgent | null = null
-let _proxyUrl: string | null = null
 
 /** Stands in for a proxy address this module could not parse. */
 export const PROXY_LOG_UNPARSEABLE = '<unparseable>'
@@ -3428,32 +3549,59 @@ export function describeProxyForLog(proxyUrl: string): string {
   return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}`
 }
 
-/** fetch with HTTP proxy support. If proxyUrl is set — uses undici ProxyAgent. */
+/**
+ * The single egress point for AI provider HTTP requests. Always goes through
+ * npm undici with a dispatcher from `aiHttpDispatcher.ts`, which carries the
+ * same CA set mail uses (Node default + OS system roots) — on BOTH the direct
+ * and the proxy path. Never Electron's global `fetch`: it would neither trust
+ * the OS store nor accept an npm-undici dispatcher (version mismatch).
+ *
+ * Synchronous up to the returned promise: a malformed proxy URL throws from
+ * `new ProxyAgent()` before anything is dispatched (see aiChatSimpleOutcome).
+ */
 function aiFetch(url: string, init: RequestInit, proxyUrl?: string): Promise<Response> {
-  if (!proxyUrl) return fetch(url, init)
-  if (_proxyUrl !== proxyUrl) {
-    _proxyAgent?.close().catch(() => {})
-    _proxyAgent = new ProxyAgent(proxyUrl)
-    _proxyUrl = proxyUrl
+  const { dispatcher, proxyAgentCreated } = getAiDispatcher(proxyUrl)
+  if (proxyAgentCreated && proxyUrl) {
     logAI.info(`ProxyAgent created: ${describeProxyForLog(proxyUrl)}`)
   }
-  return undiciFetch(url, { ...init, dispatcher: _proxyAgent! } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
+  return undiciFetch(url, { ...init, dispatcher } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
 }
 
-/** Reset ProxyAgent cache (for tests) */
-export function resetProxyAgent(): void {
-  if (_proxyAgent) {
-    _proxyAgent.close().catch(() => {})
-    _proxyAgent = null
-    _proxyUrl = null
+/**
+ * The custom `fetch` handed to every Vercel AI SDK provider. Always set — an
+ * `undefined` here would let the SDK fall back to global `fetch` and skip the
+ * trust store above whenever no proxy is configured.
+ */
+function providerFetch(proxyUrl?: string): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+  return (input, init) => {
+    const resolved = resolveFetchInput(input, init)
+    return aiFetch(resolved.url, resolved.init, proxyUrl)
   }
 }
 
-// --- Getting env for provider ---
+/** Reset the cached AI dispatchers, proxy and direct (for tests). */
+export function resetProxyAgent(): void {
+  resetAiDispatchers()
+}
 
-const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-5-20250929'
-const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini'
-const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash'
+// --- Provider models and API keys ---
+
+// Shared with the Settings provider switch (packages/core/aiModels.ts): one copy.
+const DEFAULT_CLAUDE_MODEL: string = DEFAULT_AI_MODELS['anthropic-api']
+const DEFAULT_OPENAI_MODEL: string = DEFAULT_AI_MODELS['openai-api']
+const DEFAULT_GEMINI_MODEL: string = DEFAULT_AI_MODELS['gemini-api']
+
+/**
+ * The model id an interactive chat turn really runs on. The three provider
+ * streamers and the price gate in `aiChat` all read it here: the id in
+ * `settings.aiModel` is empty for a profile that never picked a model, and
+ * `aiChat`'s own `'default'` stand-in is not a model any provider answers to.
+ */
+function resolveChatModel(provider: AiProvider, settings: Settings): string {
+  if (provider === 'openai-api') return settings.aiModel || DEFAULT_OPENAI_MODEL
+  if (provider === 'gemini-api') return (settings.aiModel || DEFAULT_GEMINI_MODEL).replace(/^models\//, '')
+  return settings.aiModel || DEFAULT_CLAUDE_MODEL
+}
 
 function getApiKeyId(provider: ApiKeyProvider): string {
   switch (provider) {
@@ -3647,7 +3795,7 @@ async function readApiKeyForAuth(provider: ApiKeyProvider): Promise<ApiKeyReadOu
  * an interactive auth check was the caller that hit it, and which provider —
  * so it keeps its own fingerprint rather than being folded into that latch.
  */
-function storeUnavailableStatus(provider: ApiKeyProvider, err: unknown): AuthStatus {
+function storeUnavailableStatus(provider: ApiKeyProvider, err: unknown, source = 'ai.checkAuth.secret_store'): AuthStatus {
   try {
     logSecretStore.warn('ai auth check hit an unavailable secret store', {
       provider,
@@ -3657,35 +3805,8 @@ function storeUnavailableStatus(provider: ApiKeyProvider, err: unknown): AuthSta
   } catch { /* diagnostics must never alter the auth-check result */ }
   const synthetic = new Error('AI key secret store unavailable during auth check')
   synthetic.name = 'AiKeyStoreUnavailable'
-  captureException(synthetic, { source: 'ai.checkAuth.secret_store', provider })
+  captureException(synthetic, { source, provider })
   return { status: 'store_unavailable' }
-}
-
-async function getProviderEnv(settings: Settings): Promise<Record<string, string>> {
-  // Proxy for the Claude Agent SDK (anthropic-api) — passed via env in query()
-  const baseEnv: Record<string, string> = {}
-  if (settings.aiProxyUrl) {
-    baseEnv.HTTPS_PROXY = settings.aiProxyUrl
-    baseEnv.HTTP_PROXY = settings.aiProxyUrl
-  }
-
-  if (!settings.aiProvider) return baseEnv
-  if (settings.aiProvider === 'anthropic-api') {
-    const key = await getApiKey('anthropic-api')
-    if (key) return { ...baseEnv, ANTHROPIC_API_KEY: key }
-    return baseEnv
-  }
-  if (settings.aiProvider === 'openai-api') {
-    const key = await getApiKey('openai-api')
-    if (key) return { ...baseEnv, OPENAI_API_KEY: key }
-    return baseEnv
-  }
-  if (settings.aiProvider === 'gemini-api') {
-    const key = await getApiKey('gemini-api')
-    if (key) return { ...baseEnv, GEMINI_API_KEY: key }
-    return baseEnv
-  }
-  return baseEnv
 }
 
 function chunkText(text: string, chunkSize = 256): string[] {
@@ -3697,84 +3818,59 @@ function chunkText(text: string, chunkSize = 256): string[] {
   return chunks
 }
 
-// --- Claude Code CLI discovery ---
-
-let _claudeExecutable: string | undefined
-
-/** Reset Claude CLI path cache (for tests) */
-export function resetClaudeExecutableCache() {
-  _claudeExecutable = undefined
-}
-
-/** Find the path to the Claude Code CLI executable */
-function findClaudeExecutable(): string | undefined {
-  if (_claudeExecutable) return _claudeExecutable
-
-  logAI.debug('Searching for Claude CLI...')
-  const isWin = process.platform === 'win32'
-
-  // 1. Check standard installation paths
-  const candidates: string[] = []
-  if (isWin) {
-    const appData = process.env.APPDATA
-    if (appData) {
-      candidates.push(path.join(appData, 'npm', 'claude.cmd'))
-      candidates.push(path.join(appData, 'npm', 'claude'))
-    }
-    candidates.push(path.join(os.homedir(), '.npm-global', 'claude.cmd'))
-  } else {
-    candidates.push(
-      path.join(os.homedir(), '.local', 'bin', 'claude'),
-      path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
-      '/usr/local/bin/claude',
-      '/usr/bin/claude',
-    )
-  }
-
-  for (const p of candidates) {
-    try {
-      if (fs.statSync(p).isFile()) {
-        logAI.info(`Claude CLI found: ${p}`)
-        _claudeExecutable = p
-        return p
-      }
-    } catch { /* not found */ }
-  }
-
-  // 2. Search via which (Unix) / where (Windows)
-  try {
-    const cmd = isWin ? 'where claude' : 'which claude'
-    const result = execSync(cmd, { encoding: 'utf-8', timeout: 3000 }).trim().split(/\r?\n/)[0]
-    if (result) {
-      logAI.info(`Claude CLI found via ${isWin ? 'where' : 'which'}: ${result}`)
-      _claudeExecutable = result
-      return result
-    }
-  } catch { /* not found */ }
-
-  // 3. Fallback: use the built-in CLI from @anthropic-ai/claude-agent-sdk
-  try {
-    const sdkCli = require.resolve('@anthropic-ai/claude-agent-sdk/cli.js')
-    if (fs.statSync(sdkCli).isFile()) {
-      logAI.info(`Claude CLI (SDK fallback): ${sdkCli}`)
-      _claudeExecutable = sdkCli
-      return sdkCli
-    }
-  } catch { /* sdk not found */ }
-
-  logAI.warn('Claude CLI not found')
-  return undefined
-}
-
 // --- Allowed tools list ---
 
-// §3.10 P0: ALLOWED_TOOLS contains preview_* / apply_* pairs ONLY. The direct
-// mutating variants (snooze_email, flag_email, add_followup, dismiss_followup,
-// mark_read_later, create_mail_rule, update_mail_rule, delete_mail_rule, plus
-// the existing mail_action / unsubscribe / send_email / move_email families)
-// have been removed from this whitelist so the AI cannot mutate state without
-// going through the preview→apply confirmation gate.
-const ALLOWED_TOOLS = [
+// §2.283 — HOW THIS LIST IS ENFORCED NOW. It used to be handed to the Claude
+// Agent SDK as `allowedTools`. With one shared `streamText` loop there is no
+// such option, so the list is applied by us, in `streamVercelChat`, as a filter
+// over the assembled toolset (MCP tools + provider-executed tools). That is
+// strictly MORE coverage than before: the OpenAI-compatible contour never had
+// this gate at all — it simply received whatever the MCP server had registered.
+// The list is a superset of the registered MCP tools today, so the filter is a
+// no-op for existing tools and a fail-closed guard for the next tool added
+// without a whitelist entry.
+//
+// §3.10 P0: for DESTRUCTIVE MAIL ACTIONS AND SENDING, ALLOWED_TOOLS carries
+// preview_* / apply_* pairs ONLY. The direct mutating variants (snooze_email,
+// flag_email, add_followup, dismiss_followup, mark_read_later,
+// create_mail_rule, update_mail_rule, delete_mail_rule, plus the mail_action /
+// unsubscribe / send_email / move_email families) were removed from this
+// whitelist, so the AI cannot take one of THOSE actions without the
+// preview→apply confirmation gate.
+//
+// SCOPE OF THAT SENTENCE, stated precisely because the broader reading is
+// false. This is NOT "the AI cannot change any state without confirmation."
+// Three whitelisted tools change state with no preview/apply pair, each a
+// deliberate decision rather than an oversight:
+//
+//   - `create_draft`   — opens Compose with the draft filled in. It writes no
+//                        mail and sends nothing; the user still reviews and
+//                        presses send. (No auto-send, ever — CLAUDE.md §1.)
+//   - `update_memory`  — writes AI memory, which re-enters every later answer.
+//                        It has NO structural gate at all: the only thing
+//                        holding it is a system-prompt rule that the model must
+//                        call it solely on an explicit user request. That is
+//                        policy, not enforcement, and the prompt says so
+//                        outright. It is also why memory is excluded from the
+//                        MCP export surface.
+//   - `call_external_tool` — the external MCP bridge. Whether the far side
+//                        mutates anything is not ours to know, which is exactly
+//                        why it is gated by the internet consent gate instead
+//                        of by preview/apply.
+//
+// `aiChat`'s registration-derived test pins this list: a newly registered tool
+// that is neither read-only nor a preview/apply half nor one of these three
+// fails the suite, so the exception list cannot grow silently.
+/**
+ * EXPORTED for tests only (§2.283). Until the Agent SDK was removed the list
+ * was observable through the `allowedTools` option handed to `query()`; with
+ * one shared `streamText` loop it is applied by `filterToWhitelist` and is not
+ * visible in any call argument, so the structural assertions about it
+ * (preview/apply pairs only, no direct mutating variant, nothing outside the
+ * mailcopilot namespace) need the list itself. No production code outside this
+ * module reads it.
+ */
+export const ALLOWED_TOOLS = [
   // --- Read-only MailCopilot MCP tools ---
   'mcp__mailcopilot__get_email',
   'mcp__mailcopilot__list_emails',
@@ -3825,47 +3921,51 @@ const ALLOWED_TOOLS = [
   // External MCP bridge tools
   'mcp__mailcopilot__list_external_tools',
   'mcp__mailcopilot__call_external_tool',
-  // Built-in Claude Code tools
-  'WebSearch',
-  'WebFetch',
+  // Provider-executed internet tools (§2.283). Anthropic runs these inside its
+  // own /v1/messages call; they replace the Claude Agent SDK's `WebSearch` /
+  // `WebFetch` built-ins one for one, and the names are Anthropic's own (see
+  // `aiAnthropicProvider.anthropicWebTools`).
+  'web_search',
+  'web_fetch',
 ] as const
 
-// --- Runtime provider adapters ---
+/**
+ * Bare (unprefixed) form of every whitelisted tool. The Vercel `@ai-sdk/mcp`
+ * client keys mailcopilot tools by their bare MCP name while `ALLOWED_TOOLS`
+ * spells them the Claude way (`mcp__mailcopilot__*`); provider-executed tools
+ * carry no prefix at all. Normalising once here means the whitelist is written
+ * in ONE spelling and matched in both.
+ */
+const ALLOWED_TOOL_BARE_NAMES: ReadonlySet<string> = new Set(
+  ALLOWED_TOOLS.map((name) => name.replace(/^mcp__mailcopilot__/, '')),
+)
 
-function createSourceCollector(context?: EmailContext) {
-  const collected = new Map<string, AiSource>()
-  const add = (refs: MessageRef[], reason: string) => {
-    for (const ref of refs) {
-      const key = sourceKey(ref)
-      if (collected.has(key)) continue
-      collected.set(key, { ref, reason })
+/**
+ * Drop anything the model is not whitelisted to see (§3.10 P0 / §2.283).
+ *
+ * Fail-closed by construction: the predicate is membership in an allow list, so
+ * a tool nobody thought about is absent rather than present. A dropped tool is
+ * logged by NAME ONLY — never arguments, never schema — so an operator can see
+ * that a registration is missing a whitelist entry without anything from the
+ * user's mailbox reaching the log.
+ */
+function filterToWhitelist(tools: Record<string, unknown>): Record<string, unknown> {
+  const kept: Record<string, unknown> = {}
+  const dropped: string[] = []
+  for (const [name, tool] of Object.entries(tools)) {
+    if (ALLOWED_TOOL_BARE_NAMES.has(name.replace(/^mcp__mailcopilot__/, ''))) {
+      kept[name] = tool
+    } else {
+      dropped.push(name)
     }
   }
-  if (context?.data) {
-    const ctxRefs = collectRefsFromUnknown(context.data)
-    if (ctxRefs.length > 0) add(ctxRefs, 'context')
+  if (dropped.length > 0) {
+    logAI.warn(`Tools withheld — not in ALLOWED_TOOLS: ${dropped.join(', ')}`)
   }
-  return {
-    addFromUnknown(value: unknown, reason: string) {
-      const refs = collectRefsFromUnknown(value)
-      if (refs.length > 0) add(refs, reason)
-    },
-    addFromText(text: string, reason: string) {
-      const refs = extractRefsFromText(text)
-      if (refs.length > 0) add(refs, reason)
-    },
-    list() {
-      if (collected.size === 0) return undefined
-      const enriched: AiSource[] = []
-      for (const src of collected.values()) {
-        const msg = getMessageByUid(src.ref.accountId, src.ref.folder, src.ref.uid)
-        enriched.push({ ...src, subject: msg?.subject, from: msg?.from, date: msg?.date })
-      }
-      return enriched
-    },
-  }
+  return kept
 }
 
+// --- Runtime provider adapters ---
 
 function parseGeminiText(payload: unknown): string {
   if (!payload || typeof payload !== 'object') return ''
@@ -3892,10 +3992,9 @@ async function* streamSimpleResult(params: {
   abortController: AbortController
   sessionId?: string
   text: string
-  sources?: AiSource[]
   costUsd?: number
 }): AsyncGenerator<AiStreamEvent> {
-  const { requestId, abortController, sessionId, text, sources, costUsd } = params
+  const { requestId, abortController, sessionId, text, costUsd } = params
   for (const chunk of chunkText(text)) {
     if (abortController.signal.aborted) break
     yield { type: 'status', requestId, status: 'streaming' }
@@ -3908,264 +4007,9 @@ async function* streamSimpleResult(params: {
       text,
       sessionId: sessionId || randomUUID(),
       costUsd,
-      sources,
     }
     yield { type: 'status', requestId, status: 'done' }
   }
-}
-
-async function* streamClaudeChat(req: ProviderStreamRequest): AsyncGenerator<AiStreamEvent> {
-  yield { type: 'status', requestId: req.requestId, status: 'thinking' }
-  const sourceCollector = createSourceCollector(req.context)
-  const env = await getProviderEnv(req.settings)
-  const prompt = buildPrompt(req.prompt, req.context || getUiContext() || undefined)
-  const model = req.settings.aiModel || DEFAULT_CLAUDE_MODEL
-
-  const claudePath = findClaudeExecutable()
-  if (!claudePath) {
-    yield {
-      type: 'error',
-      requestId: req.requestId,
-      message: 'Claude Code CLI not found. Install it: npm install -g @anthropic-ai/claude-code',
-    }
-    return
-  }
-
-  // §3.10 P2: internet tools (WebSearch / WebFetch / external MCP bridge)
-  // are ALWAYS exposed to the model. The previous P1 structural pre-flight
-  // filter is replaced by an interactive interceptor (`canUseTool` for
-  // built-ins, in-handler `interceptInternetTool` for the MCP bridge).
-  // The SDK still locks the toolset at `query()` construction, but because
-  // the toolset no longer depends on the gate state, that limitation is no
-  // longer load-bearing — the gate runs at the moment of execution.
-  //
-  // We still keep the legacy `shouldDenyEgress` pre-flight as
-  // defence-in-depth: when no per-turn consent has been granted yet AND
-  // policy says deny, the SDK filter is left intact for built-ins so the
-  // pre-P2 contract still holds for callers without an interceptor wired.
-  // For the interactive path that goes through `aiChat()` proper, `canUseTool`
-  // owns the decision and the filter is bypassed.
-  const builtinTools: string[] = ['WebSearch', 'WebFetch']
-  const allowedTools = [...ALLOWED_TOOLS]
-  if (shouldDenyEgress(req.egressGate)) {
-    // Telemetry remains: even though tools are visible, every actual tool
-    // call still gets observed by the interceptor and its outcome is
-    // recorded via `ai.egress.intercepted`. The pre-flight `ai.egress.blocked`
-    // emit kept here is per-request, NOT per-tool-call, so it counts the
-    // requests where the gate was active rather than every single egress
-    // attempt.
-    recordEgressBlocked({ toolName: 'WebSearch' /* representative */ })
-    logAI.info('Claude egress gate active: interactive interceptor enabled (tools remain visible)')
-  }
-
-  // §2.51.f2 — ONE resolver decides the per-request ceiling for BOTH providers.
-  // `aiMaxBudgetPerRequest` is documented (Settings + docs) as "0 = no ceiling",
-  // and `resolveRequestBudgetUsd` is where that convention lives (shared with the
-  // daily/monthly windows). Passing the raw setting straight through to the Agent
-  // SDK made 0 provider-dependent: the Vercel path read it as "unlimited" while
-  // Claude got a literal `maxBudgetUsd: 0`, whose meaning the SDK does not
-  // document and which plausibly means "stop immediately" — i.e. the same numeric
-  // field would silently brick one provider and free the other. When the ceiling
-  // resolves to "unlimited" the option is OMITTED entirely rather than sent as 0,
-  // so the SDK sees no ceiling at all instead of an ambiguous zero.
-  //
-  // §2.218 — UNCONDITIONAL since the `subscription` provider was removed. It
-  // was the only caller of this streamer that carried no per-call price, and
-  // therefore the only reason for a per-provider exemption here. Every provider
-  // that reaches `streamClaudeChat` today is metered API usage, so every one of
-  // them gets the ceiling.
-  const claudeRequestBudgetUsd = resolveRequestBudgetUsd(req.settings.aiMaxBudgetPerRequest)
-
-  // Create a fresh MCP server per request — the SDK closes the transport when
-  // the query ends, so a singleton would show "failed" on the next call.
-  const makeQueryOptions = (resumeId?: string) => ({
-    pathToClaudeCodeExecutable: claudePath,
-    mcpServers: { mailcopilot: { type: 'sdk' as const, name: 'mailcopilot', instance: createMailMcpServer(undefined, req.egressGate, req.internetGate, req.abortController.signal) } },
-    systemPrompt: MAILCOPILOT_SYSTEM_PROMPT,
-    tools: builtinTools,
-    model,
-    maxTurns: req.settings.aiMaxTurns ?? 30,
-    ...(claudeRequestBudgetUsd !== null ? { maxBudgetUsd: claudeRequestBudgetUsd } : {}),
-    resume: resumeId,
-    abortController: req.abortController,
-    allowedTools,
-    includePartialMessages: true,
-    env,
-    // §3.10 P2: pre-tool-use interceptor. Claude Agent SDK calls this
-    // synchronously before every tool execution (built-ins included). We
-    // gate ONLY the internet-class tools — every other tool returns
-    // `behavior: 'allow'` immediately so the existing preview/apply
-    // confirmation path for mutating tools is untouched.
-    canUseTool: async (toolName: string, input: Record<string, unknown>) => {
-      if (!isInternetTool(toolName)) {
-        return { behavior: 'allow' as const, updatedInput: input }
-      }
-      const decision = await interceptInternetTool({
-        gate: req.internetGate,
-        toolName,
-        toolInput: input,
-        abortSignal: req.abortController.signal,
-      })
-      if (decision === 'approved') {
-        return { behavior: 'allow' as const, updatedInput: input }
-      }
-      bumpInjectionBlocked()
-      return {
-        behavior: 'deny' as const,
-        message: deniedToolResult(toolName).message,
-      }
-    },
-  })
-
-  let lastText = ''
-  let sessionId = ''
-  const activeTools = new Map<number, string>() // index -> toolName
-  let sdkMsgCount = 0
-
-  // Try with resume first; on stale-session error, retry without resume (at most once).
-  const attempts: Array<string | undefined> = req.sessionId ? [req.sessionId, undefined] : [undefined]
-
-  for (const resumeId of attempts) {
-  const conversation = query({ prompt, options: makeQueryOptions(resumeId) })
-  let staleSession = false
-  logAI.info(`Starting Claude query() requestId=${req.requestId} model=${model} resume=${resumeId || 'none'}`)
-  try {
-  for await (const message of conversation) {
-    sdkMsgCount++
-    if (req.abortController.signal.aborted) break
-    const msg = message as Record<string, unknown>
-    logAI.debug(`  Claude SDK msg #${sdkMsgCount} type=${msg.type as string}`)
-
-    // Log init message with available tools
-    if (msg.type === 'system' && (msg as Record<string, unknown>).subtype === 'init') {
-      const initMsg = msg as Record<string, unknown>
-      logAI.info(`  SDK init: tools=${JSON.stringify(initMsg.tools)} mcp_servers=${JSON.stringify(initMsg.mcp_servers)}`)
-    }
-
-    if (typeof msg.session_id === 'string') sessionId = msg.session_id
-
-    if (msg.type === 'stream_event' && msg.event && typeof msg.event === 'object') {
-      const event = msg.event as Record<string, unknown>
-      if (event.type === 'content_block_delta' && event.delta && typeof event.delta === 'object') {
-        const delta = event.delta as Record<string, unknown>
-        if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-          lastText += delta.text
-          yield { type: 'status', requestId: req.requestId, status: 'streaming' }
-          yield { type: 'text_delta', requestId: req.requestId, text: delta.text }
-        }
-      }
-      if (event.type === 'content_block_start' && event.content_block && typeof event.content_block === 'object') {
-        const block = event.content_block as Record<string, unknown>
-        if (block.type === 'tool_use' && typeof block.name === 'string') {
-          const index = typeof event.index === 'number' ? event.index : -1
-          activeTools.set(index, block.name)
-          logAI.info(`  tool_use: ${block.name}`)
-          // §3.10 P1: propagate taint as soon as we see an email-data tool
-          // call, so subsequent turns in the same request keep egress denied
-          // even if the model originally had no EmailContext.
-          markEgressTaint(req.egressGate, block.name)
-          sourceCollector.addFromUnknown(block.input, `tool:${block.name}`)
-          yield { type: 'status', requestId: req.requestId, status: 'using_tool' }
-          yield {
-            type: 'tool_use_start',
-            requestId: req.requestId,
-            toolName: block.name,
-            toolInput: block.input,
-          }
-        }
-      }
-      if (event.type === 'content_block_stop' && typeof event.index === 'number') {
-        const toolName = activeTools.get(event.index)
-        if (toolName) {
-          activeTools.delete(event.index)
-          yield {
-            type: 'tool_use_end',
-            requestId: req.requestId,
-            toolName,
-            result: '',
-          }
-        }
-      }
-      continue
-    }
-
-    if (msg.type === 'assistant' && msg.message && typeof msg.message === 'object') {
-      const betaMsg = msg.message as Record<string, unknown>
-      if (Array.isArray(betaMsg.content)) {
-        let fullText = ''
-        for (const block of betaMsg.content as Array<Record<string, unknown>>) {
-          if (block.type === 'text' && typeof block.text === 'string') fullText += block.text
-        }
-        if (fullText.length > lastText.length) {
-          const delta = fullText.slice(lastText.length)
-          lastText = fullText
-          yield { type: 'status', requestId: req.requestId, status: 'streaming' }
-          yield { type: 'text_delta', requestId: req.requestId, text: delta }
-        }
-      }
-      continue
-    }
-
-    if (msg.type === 'result') {
-      const costStr = typeof msg.total_cost_usd === 'number' ? `$${msg.total_cost_usd.toFixed(4)}` : 'n/a'
-      logAI.info(`  result: is_error=${msg.is_error ?? false} cost=${costStr} subtype=${msg.subtype ?? 'none'}`)
-      if (msg.is_error && Array.isArray(msg.errors)) {
-        logAI.warn(`  result errors: ${(msg.errors as string[]).join('; ')}`)
-      }
-
-      // Stale session: SDK returns is_error with "No conversation found" in result/errors.
-      // Break out of the inner loop to retry without resume via the outer attempts loop.
-      const resultStr = typeof msg.result === 'string' ? msg.result : ''
-      const errorsStr = Array.isArray(msg.errors) ? (msg.errors as string[]).join('; ') : ''
-      const combinedErr = `${resultStr} ${errorsStr}`
-      if (msg.is_error && resumeId && /no conversation found/i.test(combinedErr)) {
-        logAI.warn(`Stale Claude session ${resumeId} — will retry without resume`)
-        staleSession = true
-        lastText = ''
-        sessionId = ''
-        activeTools.clear()
-        sdkMsgCount = 0
-        break
-      }
-
-      const resultText = resultStr || (Array.isArray(msg.errors) ? (msg.errors as string[]).join('; ') : lastText)
-      sourceCollector.addFromText(resultText, 'explicit')
-      yield {
-        type: 'result',
-        requestId: req.requestId,
-        text: resultText,
-        sessionId,
-        costUsd: typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : undefined,
-        sources: sourceCollector.list(),
-      }
-      if (msg.is_error) {
-        const errMsg = Array.isArray(msg.errors) ? (msg.errors as string[]).join('; ') : String(msg.subtype)
-        yield { type: 'error', requestId: req.requestId, message: errMsg }
-      }
-      continue
-    }
-  }
-  } catch (err: unknown) {
-    // Process crash with stale session error — retry without resume.
-    const errMsg = err instanceof Error ? err.message : String(err)
-    if (resumeId && /no conversation found/i.test(errMsg)) {
-      logAI.warn(`Claude process crashed with stale session ${resumeId}: ${errMsg} — retrying without resume`)
-      staleSession = true
-      lastText = ''
-      sessionId = ''
-      activeTools.clear()
-      sdkMsgCount = 0
-    } else {
-      throw err
-    }
-  }
-  // If the session was stale, continue the outer loop to retry without resume.
-  if (staleSession) continue
-  // Otherwise we're done — break the attempts loop.
-  break
-  }
-  const aborted = req.abortController.signal.aborted
-  logAI.info(`Claude query() completed requestId=${req.requestId} sdkMessages=${sdkMsgCount} textLen=${lastText.length} aborted=${aborted}`)
 }
 
 /** Trim conversation history to fit within a character budget (most recent messages first). */
@@ -4182,18 +4026,61 @@ function trimHistory(history: Array<{ role: 'user' | 'assistant'; content: strin
   return result
 }
 
+/**
+ * What {@link streamVercelChat} needs to know that differs between providers.
+ *
+ * §2.283 — everything NOT in this record is shared by construction: the MCP
+ * toolset, the preview/apply gate, the turn guard, `wrapUntrusted()`, the
+ * egress interceptor, the retry loop and the per-request cost ceiling. A new
+ * provider is a new value of this type, never a second streamer.
+ */
+type VercelChatConfig = {
+  /**
+   * Provider id. NOT telemetry-only: besides attributing metrics and the audit
+   * row, it selects the outgoing message normalisation in
+   * `normalizeMessagesForProvider` (§2.283). Getting it wrong sends a request
+   * shaped for the wrong vendor, so it is a functional field, not a label.
+   */
+  provider: AiProvider
+  /** Model id as sent to the provider (also what the cost table is asked about). */
+  model: string
+  /** Ready-to-use language model, middleware already applied. */
+  languageModel: Parameters<typeof streamText>[0]['model']
+  /**
+   * Tools the PROVIDER executes on its own side (Anthropic server tools).
+   * Merged on top of the MCP toolset. Empty for contours that have none.
+   *
+   * §3.10 P2 — a provider-executed tool has no local execution point, so
+   * `interceptInternetTool` cannot run for it. Whether such a tool is offered
+   * at all is therefore decided by the caller from the gate state at request
+   * build time; see `anthropicWebTools()` at the call site.
+   */
+  providerTools: Record<string, unknown>
+  /**
+   * Charge booked for a provider call that reports no usable usage. 0 for a
+   * self-hosted endpoint — nobody bills you for a model on your own machine.
+   */
+  fabricatedCallFloorUsd: number
+  /**
+   * Whether the system prompt may tell the model it can search the web. True
+   * only when `providerTools` actually carries the web tools this turn.
+   */
+  advertiseWebSearch: boolean
+  /** Representative egress tool name for the per-request `ai.egress.blocked` emit. */
+  egressTelemetryToolName: string
+}
+
+/** OpenAI-compatible contour: user-supplied base URL, no provider-side tools. */
 async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiStreamEvent> {
-  const model = req.settings.aiModel || DEFAULT_OPENAI_MODEL
+  const model = resolveChatModel('openai-api', req.settings)
   logAI.info(`Starting OpenAI chat requestId=${req.requestId} model=${model}`)
   yield { type: 'status', requestId: req.requestId, status: 'thinking' }
   const key = await getApiKey('openai-api')
   if (!key) {
-    yield { type: 'error', requestId: req.requestId, message: 'OpenAI API key not found' }
+    yield { type: 'error', requestId: req.requestId, message: 'OpenAI API key not found', failure: 'access' }
     return
   }
 
-  const contextPrompt = buildPrompt(req.prompt, req.context || getUiContext() || undefined)
-  const sourceCollector = createSourceCollector(req.context)
   // §2.119 — a stored endpoint that cannot be turned into an unambiguous
   // request base is refused rather than concatenated onto (see
   // `parseAiEndpointBase`). This is the one call site whose throw would leave
@@ -4213,41 +4100,178 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
     return
   }
 
-  // Build multi-turn messages from conversation history + current prompt
-  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = req.history?.length
+  // Create OpenAI-compatible provider with optional proxy
+  const provider = createOpenAICompatible({
+    name: 'mailcopilot-openai',
+    apiKey: key,
+    baseURL: `${baseUrl}/v1`,
+    fetch: providerFetch(req.settings.aiProxyUrl),
+  })
+
+  // Wrap model to extract <think>...</think> reasoning tags (qwen, deepseek, etc.)
+  const wrappedModel = wrapLanguageModel({
+    model: provider(model),
+    middleware: extractReasoningMiddleware({ tagName: 'think' }),
+  })
+
+  yield* streamVercelChat(req, {
+    provider: 'openai-api',
+    model,
+    languageModel: wrappedModel,
+    // The OpenAI-compatible contour has NO provider-executed web tools: an
+    // arbitrary base URL is not OpenAI, and the Responses-API search tool is
+    // not part of the chat-completions shape we speak here. Internet access on
+    // this contour goes through the external-MCP bridge, which the in-handler
+    // interceptor gates at execution time.
+    providerTools: {},
+    advertiseWebSearch: false,
+    // §2.51.f2 iteration 6 — a SELF-HOSTED endpoint gets NO floor at all (0),
+    // which the ledger already documents as "no floor available → measurement
+    // only". Nobody bills you for a model on your own machine, so there is no
+    // real charge for a conservative estimate to stand in for. Measured cost, if
+    // such a server does report usage, is still counted honestly.
+    fabricatedCallFloorUsd: isLocalInferenceEndpoint('openai-api', req.settings)
+      ? 0
+      : conservativeReservationUsd(model),
+    egressTelemetryToolName: 'mcp__mailcopilot__call_external_tool',
+  })
+}
+
+/**
+ * Anthropic contour (§2.283). Host-pinned to `api.anthropic.com` via
+ * `@ai-sdk/anthropic` (Apache-2.0) — the same `streamText` loop as every other
+ * tool-calling provider, replacing the proprietary Claude Agent SDK and its
+ * hunt for a locally installed `claude` binary.
+ */
+async function* streamAnthropicChat(req: ProviderStreamRequest): AsyncGenerator<AiStreamEvent> {
+  const model = resolveChatModel('anthropic-api', req.settings)
+  logAI.info(`Starting Anthropic chat requestId=${req.requestId} model=${model}`)
+  yield { type: 'status', requestId: req.requestId, status: 'thinking' }
+  const key = await getApiKey('anthropic-api')
+  if (!key) {
+    yield { type: 'error', requestId: req.requestId, message: 'Anthropic API key not found', failure: 'access' }
+    return
+  }
+
+  // §3.10 P2 — THE ONE PLACE the internet consent decision is made for
+  // Anthropic's SERVER-EXECUTED web tools, and it is made HERE, at request
+  // build time, because there is nowhere else it could be made: `web_search`
+  // and `web_fetch` run inside Anthropic's own `/v1/messages` call, so no
+  // local hook (`interceptInternetTool`) is ever reached for them and no
+  // consent prompt can be raised mid-call.
+  //
+  // The predicate is the EXISTING canonical one, not a new mechanism:
+  // `shouldDenyEgress` is exactly what `aiChat()` uses to pre-seed
+  // `internetGate.consentForTurn = 'approved'`. So the tools are offered iff
+  // the gate is already in the approved state for this turn — policy `allow`,
+  // or the user's per-turn egress consent. Under `default-deny` / `ask`
+  // without consent they are simply absent from the request, which is the
+  // fail-closed direction.
+  //
+  // CONTRACT CHANGE, stated out loud (§2.283): the Agent SDK path kept
+  // `WebSearch`/`WebFetch` visible at all times and let its `canUseTool` hook
+  // prompt on first use. A server-side tool cannot be prompted on first use, so
+  // the "ask" policy now means "not offered" rather than "offered, then asked".
+  //
+  // HOW THE USER ACTUALLY ENABLES IT — checked, not assumed. There is exactly
+  // ONE route today: Settings → AI → Internet access → "Always allow"
+  // (`aiEgressPolicy = 'allow'`). The per-turn path (`perRequestEgressConsent`)
+  // is plumbed end-to-end through `aiChat` and the `ai:chat` IPC, but NO
+  // shipping UI sets it: `ai:chat` takes it as a sixth argument and the only
+  // production caller, `src/components/AiPanel.tsx`, passes five.
+  //
+  // Do not describe it as a chip the user can flip. An earlier draft of this
+  // comment did, and the danger is specific: the obvious way to make the
+  // sentence true is to have the renderer start sending that sixth argument —
+  // which would create a renderer-writable permission to reach the internet
+  // without anyone having decided that such a permission should exist.
+  const webToolsAllowed = !shouldDenyEgress(req.egressGate)
+  const providerTools = webToolsAllowed ? anthropicWebTools() : {}
+
+  yield* streamVercelChat(req, {
+    provider: 'anthropic-api',
+    model,
+    languageModel: createAnthropicChatModel({
+      apiKey: key,
+      model,
+      // Same egress plumbing every other Vercel-path provider uses: always our
+      // fetch (proxy or not), so the request carries the mail CA set. The Agent
+      // SDK got the proxy through `HTTPS_PROXY` in the spawned CLI's env; with
+      // no CLI to spawn, it is an ordinary custom `fetch`.
+      fetch: providerFetch(req.settings.aiProxyUrl),
+    }),
+    providerTools,
+    advertiseWebSearch: webToolsAllowed,
+    // Host-pinned to a paid cloud API — never a local endpoint, so the
+    // conservative floor always applies.
+    fabricatedCallFloorUsd: conservativeReservationUsd(model),
+    egressTelemetryToolName: 'WebSearch',
+  })
+}
+
+/**
+ * EXPORTED for tests only (§3.3 B3). Production reaches it through the provider
+ * streamers; a test needs it to stand in for a streamer that forgets to call
+ * `bindProfileKey` and to prove such a request cannot take a model step.
+ */
+export async function* streamVercelChat(
+  req: ProviderStreamRequest,
+  cfg: VercelChatConfig,
+): AsyncGenerator<AiStreamEvent> {
+  const { model } = cfg
+  // Counts, beside the model's work, whether the searched mailboxes are fully indexed (`aiIndexCoverage.ts`).
+  const indexProbe = createIndexProbe(req.abortController.signal)
+
+  // Build multi-turn messages from conversation history + current prompt.
+  //
+  // §2.283 — this is now the ONLY continuation mechanism, Anthropic included.
+  // The Agent SDK resumed a conversation the CLI held; history lives in our own
+  // `ai_sessions` / `ai_messages` tables, and `electron/main.ts` loads it into
+  // `req.history`.
+  const assembled: Array<{ role: 'user' | 'assistant'; content: string }> = req.history?.length
     ? trimHistory(req.history)
     : []
-  messages.push({ role: 'user', content: contextPrompt })
+  assembled.push({ role: 'user', content: buildPrompt(req.prompt, req.context || getUiContext() || undefined, req.sessionId) })
+  // §2.283 — one loop does not make the providers identical. Each vendor
+  // rejects a slightly different set of otherwise reasonable message shapes,
+  // and those differences live in ONE table (`aiProviderTransform.ts`) rather
+  // than as branches here, because §2.287 brings Gemini onto this path with a
+  // longer list of its own. Dropping is the only operation, so what the model
+  // sees is always a subsequence of what we assembled.
+  const messages = normalizeMessagesForProvider(cfg.provider, assembled)
 
   // §3.10 P2: visibility — emit per-request telemetry when the gate is
   // active. Per-tool-call outcomes are surfaced by the in-handler
   // interceptor (`ai.egress.intercepted`); this `ai.egress.blocked` emit
   // is per-request to keep the existing dashboard signal continuous.
   if (shouldDenyEgress(req.egressGate)) {
-    recordEgressBlocked({ toolName: 'mcp__mailcopilot__call_external_tool' /* representative */ })
-    logAI.info('OpenAI egress gate active: interactive interceptor enabled (tools remain visible)')
+    recordEgressBlocked({ toolName: cfg.egressTelemetryToolName /* representative */ })
+    logAI.info(`${cfg.provider} egress gate active: interactive interceptor enabled (MCP tools remain visible)`)
   }
 
   // Connect MCP server via in-memory transport for tool calling.
   // Both resources must be closed in finally, even if connect/create throws.
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
-  // §3.10 P2: thread the internet gate through to the MCP handlers — the
-  // in-handler interceptor is the gate for the Vercel path because
-  // `@ai-sdk/mcp` does not expose a `canUseTool`-equivalent hook. Every
+  // §3.10 P2: thread the internet gate through to the MCP handlers. The
+  // in-handler interceptor is THE gate for locally-executed egress: every
   // `list_external_tools` / `call_external_tool` invocation runs through
   // `interceptInternetTool` synchronously before any cross-process call.
   // The parent abort signal is forwarded so that cancelling the AI request
   // unblocks any pending consent prompt (otherwise the user would have to
   // wait for the 30s consent timeout, and a stale Allow click could let
-  // the external MCP call proceed after cancellation). Symmetric with
-  // `canUseTool` in the Claude path which threads `req.abortController.signal`.
+  // the external MCP call proceed after cancellation).
+  //
+  // Provider-executed tools (Anthropic's `web_search` / `web_fetch`) do NOT
+  // pass through here at all — they are gated by declaration at request-build
+  // time and audited after the fact; see `streamAnthropicChat` and
+  // `recordProviderExecutedEgress`.
   const reqMcpServer = createMailMcpServer(undefined, req.egressGate, req.internetGate, req.abortController.signal)
   let mcpClient: Awaited<ReturnType<typeof createMCPClient>> | undefined
   try {
     await reqMcpServer.connect(serverTransport)
     mcpClient = await createMCPClient({
       transport: clientTransport,
-      name: 'mailcopilot-openai',
+      name: `mailcopilot-${cfg.provider}`,
       version: '1.0.0',
     })
     const rawTools = await mcpClient.tools()
@@ -4255,29 +4279,25 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
     // interceptor handles consent + denial. The legacy P1 filter still
     // runs as defence-in-depth for callers that didn't wire an
     // `internetGate` (none in production: `aiChat()` always wires one).
-    const tools = req.internetGate
+    const gatedMcpTools = req.internetGate
       ? rawTools
       : (filterVercelEgressTools(rawTools, req.egressGate) as typeof rawTools)
+    // Provider-executed tools are merged AFTER the MCP toolset and are never
+    // subject to `filterVercelEgressTools`: that filter matches our own egress
+    // tool names, and these are not ours to intercept at all. Their gate ran at
+    // request build time — `cfg.providerTools` is already empty when the
+    // internet gate would have had to ask (see `streamAnthropicChat`).
+    // The whole toolset (MCP tools plus provider-executed ones); each retry
+    // attempt wraps it in its own fence (`createAttemptFence`, §2.288) inside
+    // the loop below, and the fence guards only the entries that execute here.
+    const baseTools = filterToWhitelist(
+      { ...gatedMcpTools, ...cfg.providerTools },
+    ) as typeof gatedMcpTools
 
-    // Create OpenAI-compatible provider with optional proxy
-    const provider = createOpenAICompatible({
-      name: 'mailcopilot-openai',
-      apiKey: key,
-      baseURL: `${baseUrl}/v1`,
-      fetch: req.settings.aiProxyUrl
-        ? (input, init) => aiFetch(String(input), init as RequestInit, req.settings.aiProxyUrl)
-        : undefined,
-    })
-
-    // Wrap model to extract <think>...</think> reasoning tags (qwen, deepseek, etc.)
-    const wrappedModel = wrapLanguageModel({
-      model: provider(model),
-      middleware: extractReasoningMiddleware({ tagName: 'think' }),
-    })
-
-    // §2.51.f2 — per-request cost ceiling (`aiMaxBudgetPerRequest`). The Claude
-    // path passes the same setting to the Agent SDK as `maxBudgetUsd`; this is the
-    // parity implementation for the Vercel path. Composed with the turn cap as an
+    // §2.51.f2 — per-request cost ceiling (`aiMaxBudgetPerRequest`), resolved by
+    // the ONE resolver `resolveRequestBudgetUsd` for every provider that reaches
+    // this loop (§2.283 removed the Agent SDK's separate `maxBudgetUsd` option
+    // along with the second streamer). Composed with the turn cap as an
     // ARRAY of stop conditions (the idiomatic `stopWhen` form in ai@6): the loop
     // ends at N turns OR at the cost ceiling, whichever fires first. WHY it
     // stopped is classified afterwards from the accumulated spend rather than
@@ -4301,18 +4321,21 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
     // more than the user's own "one request costs at most $X". Real measured cost
     // is unaffected — see `fabricationCapUsd`.
     //
-    // §2.51.f2 iteration 6 — a SELF-HOSTED endpoint gets NO floor at all (0),
-    // which the ledger already documents as "no floor available → measurement
-    // only". Nobody bills you for a model on your own machine, so there is no
-    // real charge for a conservative estimate to stand in for. Measured cost, if
-    // such a server does report usage, is still counted honestly.
-    const fabricatedCallFloorUsd = isLocalInferenceEndpoint('openai-api', req.settings)
-      ? 0
-      : conservativeReservationUsd(model)
+    // §2.51.f2 iteration 6 — the floor for an unpriceable call is a per-provider
+    // fact (a self-hosted endpoint gets 0), resolved by the caller into
+    // `cfg.fabricatedCallFloorUsd`.
+    // Provider-reported cache counts are priced with Anthropic's cache terms only
+    // on the pinned Anthropic contour, which is the one that sets the cache
+    // markers and whose host reports the counts. An OpenAI-compatible gateway can
+    // serve a claude-named model and report cached tokens it still bills in full,
+    // so the terms are never guessed from the model id (the ledger, the ceiling
+    // guard below and `accumulatedStepCostUsd` all take them from here).
+    const cacheTerms = cfg.provider === 'anthropic-api' ? ('anthropic' as const) : undefined
     const spendLedger = createRequestSpendLedger(
       model,
-      fabricatedCallFloorUsd,
+      cfg.fabricatedCallFloorUsd,
       requestBudgetUsd,
+      cacheTerms,
     )
     /**
      * Publish the ledger's verdict to the caller's settle path. Called from the
@@ -4327,22 +4350,62 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
       if (spendLedger.isAmbiguous()) req.spend.ambiguous = true
     }
 
-    // Retry loop for transient network errors (ECONNRESET, 429, etc.)
+    // Retry loop for transient failures (§2.288).
+    //
+    // A retry re-issues the WHOLE request, so it is only safe while nothing of
+    // the failed attempt has reached the outside. The attempt's fence flips the
+    // moment a local tool starts, a text chunk is handed to the consumer, a tool call is generated
+    // (providers may run it on their side, we may run it locally), a tool
+    // result arrives or a step finishes; from then on the failure is terminal.
+    // Replaying after that would show the user two glued answers and run the
+    // tools a second time — `create_draft` and `update_memory` are not covered
+    // by the preview/apply pair, and `call_external_tool` can reach a service
+    // that changes state. Whether the failure is transient is read from
+    // structure (`isRetryableStreamFailure`), never from the message text.
+    //
+    // Layering: `streamText` keeps its own default retry of the initial call
+    // (the SDK repeats a refused connection / 429 / 5xx before any part exists);
+    // its `RetryError` is terminal here so the two layers do not multiply.
     for (let attempt = 0; attempt <= STREAM_MAX_RETRIES; attempt++) {
+      // §2.288 — the authoritative half of the retry gate, per attempt: a local
+      // tool that starts raises `progressed`, and once the attempt has failed
+      // the fence is closed BEFORE the decision reads it, so a tool the SDK had
+      // queued behind the failure is refused instead of replayed (see
+      // `createAttemptFence`). Stream parts feed the same flag for what a tool
+      // start cannot show: text, a generated tool call, a finished step.
+      const fence = createAttemptFence()
+      // Tool calls this attempt has already shown the consumer, counted per
+      // (tool, provider-assigned call id): an endpoint that reuses an id must not
+      // hide a second call that ran.
+      const shownToolCalls = new Map<string, number>()
+      // Per-attempt cancellation, on top of the request's own signal. Throwing
+      // out of the `for await` below only closes OUR branch of `fullStream`; the
+      // SDK's upstream stages (the provider fetch, its wait for tool results,
+      // further steps) would keep running for an attempt nobody reads while the
+      // next one is issued. It is aborted as soon as the attempt fails and again
+      // in the `finally`; the fence, not this abort, is what keeps a queued tool
+      // from running.
+      const attemptAbort = new AbortController()
       try {
         // Fresh guard per attempt (the SDK's `steps` array restarts), seeded with
         // what earlier attempts already spent so the ceiling stays REQUEST-scoped.
         // The seed is a baseline, not a pre-tripped flag — `stopWhen` only runs
         // after a completed step, so it cannot abort the retry before its first.
-        const budgetGuard = createRequestBudgetGuard(model, requestBudgetUsd, spendLedger.measuredUsd())
+        const budgetGuard = createRequestBudgetGuard(model, requestBudgetUsd, spendLedger.measuredUsd(), cacheTerms)
         const result = streamText({
-          model: wrappedModel,
-          system: MAILCOPILOT_SYSTEM_PROMPT,
+          model: cfg.languageModel,
+          system: composeSystemPrompt({ webSearch: cfg.advertiseWebSearch }),
           messages,
-          tools,
+          tools: fence.wrap(baseTools),
           stopWhen: [stepCountIs(req.settings.aiMaxTurns ?? 30), budgetGuard.stopWhen],
-          abortSignal: req.abortController.signal,
-          temperature: 0.2,
+          abortSignal: AbortSignal.any([req.abortController.signal, attemptAbort.signal]),
+          // The SDK's default handler prints the whole error object to stderr, and
+          // a provider error carries the request body (the prompt, email content
+          // included). Errors already arrive as `error` parts; log name + status.
+          onError: ({ error }) => { logAI.debug(`${cfg.provider} stream error: ${describeStreamErrorForLog(error)}`) },
+          // Sampling/reasoning parameters come from the provider table (aiProviderTransform): a reasoning model
+          // rejects the combination a plain chat model accepts.
+          ...chatRequestParams(cfg.provider, model),
         })
 
         let lastText = ''
@@ -4357,10 +4420,40 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
         let lastFinishReason: string | undefined
 
         for await (const event of result.fullStream) {
+          // §2.283 fix-wave 3 (codex High) — AUDIT BEFORE THE CANCELLATION
+          // SHORT-CIRCUIT, and deliberately above the `break` below.
+          //
+          // This event is ALREADY IN OUR HANDS, which means the provider has
+          // ALREADY performed the egress — a provider-executed tool runs inside
+          // Anthropic's own /v1/messages call and is reported to us after the
+          // fact. Cancellation cannot un-send it. Letting the abort check run
+          // first threw the event away unrecorded, so a user pressing Stop
+          // turned a request that DID reach the internet into one that left no
+          // trace — precisely the "an absent row reads as 'no egress happened'"
+          // failure the comment on the tool-call branch calls unacceptable.
+          //
+          // WHAT THIS STILL DOES NOT COVER, stated rather than papered over: if
+          // the transport dies before the event reaches us, the call may have
+          // happened and we will never know. That gap is not closeable from
+          // here — it is the difference between "we observed it" and "it
+          // occurred" — and no amount of ordering in this loop changes it. The
+          // guarantee is "every provider-executed call WE ARE TOLD ABOUT is
+          // recorded", not "every call is recorded". Parts that arrive after a
+          // terminal `error` part (§2.288) or an abort are not read, so "told
+          // about" means "before the failure".
+          if (event.type === 'tool-call' && event.providerExecuted === true) {
+            recordProviderExecutedEgress({
+              provider: cfg.provider,
+              toolName: event.toolName,
+              toolInput: event.input,
+            })
+          }
+
           if (req.abortController.signal.aborted) break
 
           switch (event.type) {
             case 'text-delta':
+              fence.noteProgress()
               // Generated tokens — the provider is billing for this attempt even if
               // it never reaches a priced step boundary (§2.51.f2 High-1).
               spendLedger.noteGeneratedOutput()
@@ -4370,20 +4463,42 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
               break
 
             case 'tool-call':
+              fence.noteProgress()
+              {
+                const key = `${event.toolName}\u0000${event.toolCallId}`
+                shownToolCalls.set(key, (shownToolCalls.get(key) ?? 0) + 1)
+              }
               // A tool call is generated output too — same billing evidence.
               spendLedger.noteGeneratedOutput()
               // §3.10 P1: propagate taint on observed email-data tool use.
               markEgressTaint(req.egressGate, event.toolName)
-              sourceCollector.addFromUnknown(event.input, `tool:${event.toolName}`)
+              // §2.283 — THE EGRESS AUDIT ROW FOR A PROVIDER-EXECUTED TOOL IS
+              // WRITTEN AT THE TOP OF THIS LOOP, not here, so that it survives
+              // cancellation (see the comment there). `providerExecuted` marks a
+              // tool Anthropic ran inside its own /v1/messages call
+              // (`server_tool_use` → a `tool-call` part with the flag set): the
+              // interceptor cannot gate those, because there is no local
+              // execution point and the request has already left by the time we
+              // see the event. But EXECUTION being theirs does not make
+              // OBSERVATION theirs — an email-injected exfiltration attempt
+              // lives exactly here, and an absent row would read as "no egress
+              // happened", which is the one thing it must never mean. The
+              // query/URL is HASHED by the interceptor's own helper; raw text
+              // never reaches disk.
+              indexProbe.noteCall(event.toolName, event.input)
               yield { type: 'status', requestId: req.requestId, status: 'using_tool' }
               yield { type: 'tool_use_start', requestId: req.requestId, toolName: event.toolName, toolInput: event.input }
               break
 
             case 'tool-result':
+              fence.noteProgress()
+              // A preliminary (streamed) tool output is superseded by the final one and is not what the next step carries.
+              indexProbe.noteResult(event.toolName)
               yield { type: 'tool_use_end', requestId: req.requestId, toolName: event.toolName, result: String(event.output) }
               break
 
             case 'finish-step': {
+              fence.noteProgress()
               lastFinishReason = event.finishReason
               // One completed step = one paid provider call. The ledger decides
               // whether it is priceable (and what an unpriceable one costs); this
@@ -4406,14 +4521,30 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
               break
             }
 
+            // §2.288 — a stream error is TERMINAL for the attempt. It used to be
+            // yielded and then `break`ing the `switch` only, so control fell
+            // through to `result` and `status: done` and a truncated answer was
+            // stored as a finished one. Throwing sends it through the one
+            // classification below: either a retry (nothing started or reached
+            // the outside — the attempt's fence decides the first half) or a
+            // rethrow, which `aiChat` turns into exactly ONE `error` event with
+            // no `result` and no `done`. Nothing after the error part is read.
+            //
+            // Money is never LESS than before: an `error` part used to be
+            // followed by a `result`, which made `aiChat` settle the
+            // conservative floor for the dispatched request. The attempt is
+            // still marked ambiguous here so a terminal error settles that floor
+            // instead of releasing the hold to 0 (a provider that answered with
+            // a stream cannot be proven unbilled from the error part alone). A
+            // retried error part, or one right after a priced step, may now
+            // settle one floor more — the safe direction.
             case 'error':
-              yield { type: 'error', requestId: req.requestId, message: String(event.error) }
-              break
+              spendLedger.markAmbiguous()
+              throw toStreamError(event.error)
           }
         }
 
         if (!req.abortController.signal.aborted) {
-          sourceCollector.addFromText(lastText, 'explicit')
           yield {
             type: 'result',
             requestId: req.requestId,
@@ -4425,10 +4556,14 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
             // without any step boundary, `finalizeAttempt()` adds that charge
             // afterwards and the published evidence carries the higher number.
             // `aiChat` settles on the maximum of the two, which is why the badge
-            // can never be higher than what the cap is charged.
+            // can never be higher than what the cap is charged. (For a model
+            // without a first-party price row `aiChat` drops the number before
+            // it reaches the user: see `priceShown`.)
             costUsd: spendLedger.billedUsd(),
-            sources: sourceCollector.list(),
           }
+          // After the answer, never before it, and never waited for: only a count that
+          // had already settled says anything (§3.3 B3).
+          if (indexProbe.incompleteNow()) yield { type: 'index_incomplete', requestId: req.requestId }
           // §2.51.f2 — the loop stopped because the per-request cost ceiling was
           // reached, not because the model was finished. Emitted AFTER the result
           // so the answer keeps its own cost badge in the panel and the notice
@@ -4476,7 +4611,7 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
             // tool arguments or mail content.
             try {
               recordEventForAi('ai.request_budget.stopped', {
-                provider: 'openai-api',
+                provider: cfg.provider,
                 steps: spendLedger.stepCount(),
               })
             } catch { /* telemetry must never break the stream */ }
@@ -4491,10 +4626,14 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
         }
         {
           const tokens = spendLedger.measuredTokens()
-          logAI.info(`OpenAI chat completed requestId=${req.requestId} textLen=${lastText.length} tokens=${tokens.inputTokens}+${tokens.outputTokens}`)
+          logAI.info(`${cfg.provider} chat completed requestId=${req.requestId} textLen=${lastText.length} tokens=${tokens.inputTokens}+${tokens.outputTokens}`)
         }
         break // Success — exit retry loop
       } catch (retryErr: unknown) {
+        // FIRST, before anything is read or awaited: close the attempt's fence,
+        // so every tool start is either already visible in `fence.progressed`
+        // (read below) or refused from here on.
+        fence.close()
         // §2.51.f2 fix-wave (High-4) — carry the 4xx/5xx policy the one-shot
         // surfaces got onto the MAIN chat surface. The AI SDK wraps a non-2xx in
         // `APICallError` with the numeric status, so no error-message parsing is
@@ -4507,14 +4646,37 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
         // below is the single place that publishes, so there is exactly one
         // writer of the caller's evidence.
         if (isAmbiguousProviderFailure(retryErr)) spendLedger.markAmbiguous()
-        if (req.abortController.signal.aborted) throw retryErr
-        if (attempt < STREAM_MAX_RETRIES && isRetryableError(retryErr)) {
+        attemptAbort.abort()
+        // Normalised once: a non-`Error` payload (an SSE error object) or an
+        // exotic thrown value reaches `aiChat` as a plain `Error`, same identity
+        // for everything that already was one.
+        const failure = toStreamError(retryErr)
+        if (req.abortController.signal.aborted) throw failure
+        if (!fence.progressed && attempt < STREAM_MAX_RETRIES && isRetryableStreamFailure(failure)) {
           const backoffMs = 1000 * Math.pow(2, attempt)
-          logAI.warn(`Retryable error in streamOpenAiChat (attempt ${attempt + 1}/${STREAM_MAX_RETRIES}): ${retryErr instanceof Error ? retryErr.message : retryErr}, retrying in ${backoffMs}ms`)
-          await delay(backoffMs)
-          continue
+          logAI.warn(`Retryable error in streamVercelChat provider=${cfg.provider} (attempt ${attempt + 1}/${STREAM_MAX_RETRIES}): ${describeStreamErrorForLog(failure)}, retrying in ${backoffMs}ms`)
+          // The wait ends the moment the request is cancelled, and a cancelled
+          // request starts no further attempt: rethrowing with the signal
+          // aborted is the silent exit `aiChat` already handles.
+          if (await abortableDelay(backoffMs, req.abortController.signal)) continue
+          throw failure
         }
-        throw retryErr
+        // Terminal. A local tool the SDK started behind the failure ran exactly
+        // once but its `tool-call` part was never read; name it now, so the turn
+        // counters (`ai.tool_call_count` / `ai.tools_used`) and, when it is the
+        // turn's first tool, the audit row's `toolName` still know it ran (the
+        // log of what the AI did is the product's promise). The turn guard is
+        // told as well but gives no verdict on an errored turn.
+        for (const started of fence.startedTools()) {
+          const key = `${started.toolName}\u0000${started.toolCallId}`
+          const alreadyShown = shownToolCalls.get(key) ?? 0
+          if (started.toolCallId !== undefined && alreadyShown > 0) {
+            shownToolCalls.set(key, alreadyShown - 1)
+            continue
+          }
+          yield { type: 'tool_use_start', requestId: req.requestId, toolName: started.toolName, toolInput: started.input }
+        }
+        throw failure
       } finally {
         // §2.51.f2 iteration 4 — THE single finalization point for an attempt.
         // A `finally` inside the retry loop is the only construct reached by ALL
@@ -4530,6 +4692,8 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
         // remembering to add a call.
         spendLedger.finalizeAttempt()
         publishSpend()
+        fence.close()
+        attemptAbort.abort()
       }
     }
   } finally {
@@ -4545,9 +4709,9 @@ async function* streamOpenAiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
 // differently from the ledger that charges it.
 
 // §2.51.f2 — NOTE ON THE PER-REQUEST COST CEILING. `aiMaxBudgetPerRequest` is a
-// ceiling on the accumulated cost of an AGENTIC LOOP: the Claude Agent SDK stops
-// iterating at `maxBudgetUsd`, and the Vercel path stops at the equivalent
-// `stopWhen` condition (see `streamOpenAiChat`). The Gemini path below is a
+// ceiling on the accumulated cost of an AGENTIC LOOP: every tool-calling
+// provider stops at the `stopWhen` cost condition in `streamVercelChat`
+// (§2.283 — one loop, one ceiling). The Gemini path below is a
 // SINGLE, non-agentic `generateContent` call with no tools and no step loop —
 // there is no second step to withhold, and a call already in flight cannot be
 // priced or stopped mid-generation. Bounding a single call before it starts
@@ -4572,9 +4736,8 @@ async function* streamGeminiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
     return
   }
 
-  const contextPrompt = buildPrompt(req.prompt, req.context || getUiContext() || undefined)
-  const sourceCollector = createSourceCollector(req.context)
-  const model = (req.settings.aiModel || DEFAULT_GEMINI_MODEL).replace(/^models\//, '')
+  const contextPrompt = buildPrompt(req.prompt, req.context || getUiContext() || undefined, req.sessionId)
+  const model = resolveChatModel('gemini-api', req.settings)
 
   // Build multi-turn contents from history + current prompt (Gemini uses 'model' instead of 'assistant')
   const trimmed = req.history?.length ? trimHistory(req.history) : []
@@ -4589,7 +4752,7 @@ async function* streamGeminiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: MAILCOPILOT_SYSTEM_PROMPT }] },
+      system_instruction: { parts: [{ text: composeSystemPrompt({ webSearch: false }) }] },
       contents,
     }),
     signal: req.abortController.signal,
@@ -4605,20 +4768,25 @@ async function* streamGeminiChat(req: ProviderStreamRequest): AsyncGenerator<AiS
       req.spend.ambiguous = true
     }
     const body = await response.text().catch(() => '')
-    yield { type: 'error', requestId: req.requestId, message: `Gemini API error ${response.status}: ${body || response.statusText}` }
+    // This request names the model in its own URL on a host we pin, so a 404 is
+    // the provider not serving that model.
+    yield {
+      type: 'error',
+      requestId: req.requestId,
+      message: `Gemini API error ${response.status}: ${body || response.statusText}`,
+      ...(response.status === 404 ? { failure: 'model' as const, model } : {}),
+    }
     return
   }
 
   const payload = await response.json()
   const finalText = parseGeminiText(payload) || 'Empty response from Gemini'
   logAI.info(`Gemini chat completed requestId=${req.requestId} textLen=${finalText.length}`)
-  sourceCollector.addFromText(finalText, 'explicit')
   yield* streamSimpleResult({
     requestId: req.requestId,
     abortController: req.abortController,
     sessionId: req.sessionId,
     text: finalText,
-    sources: sourceCollector.list(),
   })
 }
 
@@ -4635,7 +4803,7 @@ const anthropicAdapter: AgentProviderAdapter = {
     if (!read.key.startsWith('sk-ant-')) return { status: 'invalid_key' }
     return { status: 'authenticated' }
   },
-  streamChat: streamClaudeChat,
+  streamChat: streamAnthropicChat,
   capabilities() {
     return { toolCalling: true, structuredOutput: true, externalNetwork: true }
   },
@@ -5088,7 +5256,7 @@ export function admitBudgetedCall(
 function resolveSimpleModel(provider: AiProvider, settings: Settings): string {
   if (provider === 'openai-api') return settings.aiModel || DEFAULT_OPENAI_MODEL
   if (provider === 'gemini-api') return (settings.aiModel || DEFAULT_GEMINI_MODEL).replace(/^models\//, '')
-  if (provider === 'anthropic-api') return 'claude-haiku-4-5-20251001'
+  if (provider === 'anthropic-api') return ANTHROPIC_ONE_SHOT_MODEL
   // Fallback for a provider with no one-shot contour (a future local/T2.5 one).
   //
   // §2.218 — this comment used to claim the caller "never reserves" for such a
@@ -5321,29 +5489,6 @@ function resolveLocalProvider(settings: Settings): AiProvider | null {
 
 export const STREAM_MAX_RETRIES = 2
 
-export const RETRYABLE_ERROR_PATTERNS = [
-  /ECONNRESET/i,
-  /ETIMEDOUT/i,
-  /EPIPE/i,
-  /socket hang up/i,
-  /network error/i,
-  /fetch failed/i,
-  /ENOTFOUND/i,
-  /503/,
-  /429/,
-  /rate.?limit/i,
-  /overloaded/i,
-]
-
-export function isRetryableError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err)
-  return RETRYABLE_ERROR_PATTERNS.some(re => re.test(msg))
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
 // --- Main chat function ---
 
 export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEvent> {
@@ -5364,7 +5509,6 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
   const effectiveSettings = { ...settings, aiProvider: provider }
   const adapter = getProviderAdapter(provider)
   const model = effectiveSettings.aiModel || 'default'
-
   // §2.51 — atomic, fail-closed budget admission. Re-check the cap and, if it
   // passes, ATOMICALLY reserve a conservative amount BEFORE the async provider
   // stream begins. All the work between here and the streaming loop below is
@@ -5386,7 +5530,7 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
       ? 'AI budget check failed (metering unavailable). Try again shortly or adjust Settings → AI.'
       : checkBudgetLimits(effectiveSettings) ??
         'Daily/monthly AI budget limit reached. Adjust in Settings → AI.'
-    yield { type: 'error', requestId: options.requestId, message }
+    yield { type: 'error', requestId: options.requestId, message, failure: 'limit' }
     return
   }
   reservation = admission.reservation
@@ -5401,6 +5545,11 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
   // throw, release the reservation to 0 (no completion → no spend) and re-throw so
   // the caller still sees the original failure. Vars the loop/finally need are
   // pre-declared here so they remain in scope after the guard.
+  // The consent window this request began in. Its counters (tool calls, tools used, cost) accumulate while it
+  // runs, so they are reported only if no consent transition happened meanwhile (§2.82: nothing gathered before an
+  // opt-in is shipped after it). Compared by the gate's monotonic epoch, never by time.
+  const consentEpoch = telemetryCollectionEpoch()
+
   type InactiveSpan = ReturnType<typeof startInactiveSpan>
   // Definite-assignment (`!`): these are assigned inside the setup guard's try;
   // its catch RE-THROWS, so any path that reaches the code after the guard has
@@ -5423,6 +5572,8 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
   const toolNames = new Set<string>()
   let errorOccurred = false
   let costUsd: number | undefined
+  // May an estimate be shown for this model at all? See `hasListedPrice`.
+  const priceShown = hasListedPrice(resolveChatModel(provider, effectiveSettings))
   // §2.51 (Blocker 2) — did a `result` event actually arrive? A completion
   // occurred iff we saw one, REGARDLESS of whether the provider priced it. Used in
   // the finally block to decide whether to charge the conservative floor (completed
@@ -5549,7 +5700,9 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
   activeRequests.set(options.requestId, abortController)
 
   if (options.signal) {
-    options.signal.addEventListener('abort', () => abortController.abort(), { once: true })
+    // An already-aborted signal never fires `abort`: honour it up front.
+    if (options.signal.aborted) abortController.abort()
+    else options.signal.addEventListener('abort', () => abortController.abort(), { once: true })
   }
 
   // §3.3 B1 — open ALS scopes around the streaming work. SDK tool callbacks
@@ -5622,10 +5775,12 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
     wrapCounterStorage.run(wrapCounter, () =>
       injectionBlockedStorage.run(injectionBlockedCounter, () =>
         getEmailCacheStorage.run(getEmailCache, () =>
-          // §2.123 — same rebinding discipline as the counters above: tool
-          // callbacks (the preview registration funnel, the search limiter)
-          // must reach THIS request's guard even when two chats interleave.
-          runWithTurnGuard(turnGuard, fn))))
+          // The citation registry of THIS request's session: a mail tool issues its tickets there.
+          citationSessionStorage.run(options.sessionId, () =>
+            // §2.123 — same rebinding discipline as the counters above: tool
+            // callbacks (the preview registration funnel, the search limiter)
+            // must reach THIS request's guard even when two chats interleave.
+            runWithTurnGuard(turnGuard, fn)))))
 
   try {
     while (true) {
@@ -5662,7 +5817,12 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
       if (event.type === 'error') {
         errorOccurred = true
       }
-      yield event
+      // The price the user SEES comes from the provider or is not shown (BACKLOG
+      // §2.60): for a model without a first-party price row the number is our
+      // fallback guess (measured: gpt-4.1-mini shown at ~86x its real bill), so
+      // the answer carries no price at all. Only the display and the audit row
+      // are affected; `costUsd` above still feeds the settle below unchanged.
+      yield event.type === 'result' && !priceShown ? { ...event, costUsd: undefined } : event
     }
 
     // §2.123 — the turn ran to completion. If it reached for the destructive
@@ -5693,7 +5853,14 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
     errorOccurred = true
     const message = err instanceof Error ? err.message : String(err)
     if (!abortController.signal.aborted) {
-      yield { type: 'error', requestId: options.requestId, message }
+      const failure = classifyAiFailure(err)
+      yield {
+        type: 'error',
+        requestId: options.requestId,
+        message,
+        failure,
+        ...(failure === 'model' ? { model: resolveChatModel(provider, effectiveSettings) } : {}),
+      }
     }
   } finally {
     activeRequests.delete(options.requestId)
@@ -5764,8 +5931,13 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
       // that priced at $0.001 must settle at $0.001, not be rounded up to the
       // reservation. Where a floor IS owed for an unpriceable provider call, the
       // spend ledger has already added it INSIDE `knownSpendUsd` — this line only
-      // covers paths that produced no number at all (notably the Claude adapter,
-      // which keeps no ledger).
+      // covers paths that produced no number at all.
+      //
+      // §2.283 — that used to name "the Claude adapter, which keeps no ledger".
+      // It does now: Anthropic runs through `streamVercelChat` and its ledger
+      // like every other tool-calling provider. The remaining ledger-less path
+      // is Gemini (single-shot `generateContent`, no step loop — §2.287), plus
+      // any future caller that streams without one.
       //
       // §2.51.f2 iteration 6 — and there is nothing to fall back TO for
       // self-hosted inference: no provider, no bill, so an unmeasured request
@@ -5789,14 +5961,17 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
     // Finalize telemetry span. All Sentry operations are best-effort and
     // wrapped individually — none of this can throw back into the caller.
     const aborted = abortController.signal.aborted
+    const sameConsentWindow = telemetryCollectionEpoch() === consentEpoch
     if (span) {
       try {
-        span.setAttributes({
-          'ai.tool_call_count': toolCallCount,
-          'ai.tools_used': [...toolNames].join(','),
-          'ai.aborted': aborted,
-          ...(costUsd !== undefined ? { 'ai.cost_usd': costUsd } : {}),
-        })
+        if (sameConsentWindow) {
+          span.setAttributes({
+            'ai.tool_call_count': toolCallCount,
+            'ai.tools_used': [...toolNames].join(','),
+            'ai.aborted': aborted,
+            ...(costUsd !== undefined ? { 'ai.cost_usd': costUsd } : {}),
+          })
+        }
         span.setStatus(aborted
           ? { code: 1, message: 'cancelled' }
           : errorOccurred ? { code: 2, message: 'internal_error' } : { code: 1 })
@@ -5810,7 +5985,7 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
     // at the source rather than relying on the SDK's `enabled` flag, which is a
     // different mechanism with a different lifetime.
     try {
-      if (isTelemetryCollectionAllowed()) {
+      if (sameConsentWindow && isTelemetryCollectionAllowed()) {
         sentryLogger.info('AI chat completed', {
           'ai.provider': provider,
           'ai.model': model,
@@ -5854,7 +6029,7 @@ export async function* aiChat(options: AiChatOptions): AsyncGenerator<AiStreamEv
         // is passed through and `null` now means only "the streamer named no
         // price" — still the canonical "we don't know", never a fabricated 0.
         // Historical rows written by the removed provider keep their `null`.
-        costUsd: costUsd ?? null,
+        costUsd: priceShown ? costUsd ?? null : null,
         untrustedWrapped: wrapCounter.value,
         injectionBlocked: injectionBlockedCounter.value,
         outcome,
@@ -6716,8 +6891,7 @@ export async function aiChatSimpleOutcome(
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          max_tokens: maxOutputTokens,
-          temperature: 0.2,
+          ...oneShotOpenAiParams(model, maxOutputTokens),
         }),
       })
       // Non-2xx: 4xx is a refusal before generation (release); 5xx may be a
@@ -6810,7 +6984,7 @@ export async function aiChatSimpleOutcome(
     if (provider === 'anthropic-api') {
       const key = await getApiKey('anthropic-api')
       if (!key) return { kind: 'unbilled', reason: 'no_key' }
-      const model = 'claude-haiku-4-5-20251001'
+      const model = ANTHROPIC_ONE_SHOT_MODEL
       const res = await dispatch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -7853,6 +8027,30 @@ export function parseInstantReplyDrafts(text: string): Array<{ text: string; ton
   return out
 }
 
+// --- Model list (Settings picker) ---
+
+/**
+ * The provider's model list, read with the STORED key (never one handed in by
+ * the renderer) through the same egress point and proxy as chat. The store read
+ * is classified before any network call, so a keychain fault is never reported
+ * as a rejected key.
+ */
+export async function listModels(settings: Settings): Promise<AiModelListResult> {
+  const provider = settings.aiProvider
+  if (provider !== 'anthropic-api' && provider !== 'openai-api' && provider !== 'gemini-api') {
+    return { ok: false, reason: 'no_key' }
+  }
+  const read = await readApiKeyForAuth(provider)
+  if (!read.ok) {
+    storeUnavailableStatus(provider, read.err, 'ai.listModels.secret_store')
+    return { ok: false, reason: 'store_unavailable' }
+  }
+  if (!read.key) return { ok: false, reason: 'no_key' }
+  return fetchAiModelList(provider, read.key, settings.aiOpenAiBaseUrl, {
+    fetch: (url, init) => aiFetch(url, init, settings.aiProxyUrl),
+  })
+}
+
 // --- Auth check ---
 
 export async function checkAuth(settings: Settings): Promise<AuthStatus> {
@@ -7878,6 +8076,10 @@ export async function saveApiKey(key: string, provider: ApiKeyProvider): Promise
   if (!isApiKeyProvider(provider)) {
     throw new Error('saveApiKey requires an explicit provider')
   }
+  await writeApiKey(key, provider)
+}
+
+async function writeApiKey(key: string, provider: ApiKeyProvider): Promise<void> {
   // §2.33 PR2b — write through secretStore so AI keys inherit the machine-bound
   // AES-256-GCM disk fallback (no D-Bus hang, no user re-entry prompt) when the
   // OS keychain is unreachable. The 'ai_keys' surface tags any once-per-session
@@ -7915,6 +8117,10 @@ export async function deleteApiKey(provider: ApiKeyProvider): Promise<void> {
   if (!isApiKeyProvider(provider)) {
     throw new Error('deleteApiKey requires an explicit provider')
   }
+  await removeApiKey(provider)
+}
+
+async function removeApiKey(provider: ApiKeyProvider): Promise<void> {
   try {
     // §2.33 PR2b — delete through secretStore (keytar OR disk fallback).
     await secretStore.delete(getApiKeyId(provider), 'ai_keys')

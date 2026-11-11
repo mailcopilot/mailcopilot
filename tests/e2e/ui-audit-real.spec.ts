@@ -24,6 +24,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import {
+  electronLaunchArgs,
   getFreePort,
   hasDisplayServer,
   terminateProcess,
@@ -84,7 +85,7 @@ async function launchReal(): Promise<RealCtx> {
   delete env.MAILCOPILOT_E2E_CDP_PORT
   delete env.ELECTRON_RUN_AS_NODE
 
-  const electronArgs = ['.', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+  const electronArgs = electronLaunchArgs()
   const proc = hasDisplayServer()
     ? spawn(electronBinary, electronArgs, { env, stdio: 'pipe' })
     : spawn('xvfb-run', ['-a', electronBinary, ...electronArgs], { env, stdio: 'pipe' })

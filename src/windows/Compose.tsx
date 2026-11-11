@@ -410,6 +410,13 @@ export default function Compose() {
   const [followUpEnabled, setFollowUpEnabled] = useState(false)
   const [followUpDays, setFollowUpDays] = useState(3)
   const [replyRef, setReplyRef] = useState<{ accountId: number; folder: string; uid: number } | null>(null)
+  // `replyRef` (the message the user opened) is the threading pointer AND the Send
+  // & Archive target. `threadRef` is what main restored for a reopened draft by
+  // Message-ID, which can match several copies of one message (a copy in Trash or
+  // Junk, a Gmail label, a forged duplicate): it threads the reply and is never
+  // archived. Two fields, not one plus a flag, so the difference survives the
+  // send queue, Undo and Outbox Edit.
+  const [threadRef, setThreadRef] = useState<{ accountId: number; folder: string; uid: number } | null>(null)
   const [originalRecipients, setOriginalRecipients] = useState<string[]>([])
   const [archiveFolder, setArchiveFolder] = useState<string | null>(null)
   const [focusedField, setFocusedField] = useState<RecipientField | null>(null)
@@ -645,6 +652,12 @@ export default function Compose() {
       // round trip. Falls back to null so the normal reply-match / default
       // pick kicks in for every other entry point.
       setInitialIdentityId(typeof init?.identityId === 'string' && init.identityId ? init.identityId : null)
+      // Set OR reset on every init, like `compose:getInit` does for the first
+      // open: this window is reused for every reply, forward and new message,
+      // and a pointer left over from the previous one would thread the next
+      // message under the wrong parent (or hide the right one).
+      setReplyRef(init?.replyRef ?? null)
+      setThreadRef(init?.threadRef ?? null)
       const hasInit = init && (
         typeof init.to === 'string' || typeof init.cc === 'string' ||
         typeof init.bcc === 'string' || typeof init.subject === 'string' ||
@@ -813,6 +826,7 @@ export default function Compose() {
             isTranslateLanguageCode(ctxInit.suggestedTargetLang) ? ctxInit.suggestedTargetLang : null,
           )
           if (ctxInit.replyRef) setReplyRef(ctxInit.replyRef)
+          if (ctxInit.threadRef) setThreadRef(ctxInit.threadRef)
           if (Array.isArray(ctxInit.originalRecipients)) {
             setOriginalRecipients(ctxInit.originalRecipients)
             setOriginalRecipientsForIdentity(ctxInit.originalRecipients.join(','))
@@ -1197,7 +1211,10 @@ export default function Compose() {
     if (typeof accountId !== 'number' || !draftsMailbox || !draftId) return
     if (sending) return
 
-    const payload = { to: toValue, cc: ccValue, bcc: bccValue, subject, text }
+    // `replyRef` makes main write In-Reply-To / References into the saved draft
+    // message, so a reply that is reopened from Drafts still answers its parent.
+    const draftPointer = replyRef ?? threadRef
+    const payload = { to: toValue, cc: ccValue, bcc: bccValue, subject, text, ...(draftPointer ? { replyRef: draftPointer } : {}) }
     const hasAny = Boolean(toValue.trim() || ccValue.trim() || bccValue.trim() || subject.trim() || text.trim())
     if (!hasAny) return
     const key = JSON.stringify(payload)
@@ -1221,7 +1238,7 @@ export default function Compose() {
     }, 1500)
 
     return () => window.clearTimeout(id)
-  }, [accountId, bccValue, ccValue, draftSyncEnabled, draftsMailbox, draftId, sending, subject, t, text, toValue])
+  }, [accountId, bccValue, ccValue, draftSyncEnabled, draftsMailbox, draftId, replyRef, sending, subject, t, text, threadRef, toValue])
 
   const buildSendPayload = useCallback(() => {
     const resolvedTo = toValue.trim()
@@ -1239,8 +1256,12 @@ export default function Compose() {
       // canonical From header (displayName + email) from AccountMeta.identities
       // regardless of what the transport wrapper sees as `from` here.
       identityId: identitySelection.selectedId || undefined,
+      // Pointer to the message being replied to: main derives In-Reply-To /
+      // References from its own copy of the parent's headers (RFC 5322 §3.6.4).
+      replyRef: replyRef ?? undefined,
+      threadRef: threadRef ?? undefined,
     }
-  }, [attachments, bccValue, ccValue, fromEmail, identitySelection.selectedId, subject, text, toValue])
+  }, [attachments, bccValue, ccValue, fromEmail, identitySelection.selectedId, replyRef, subject, text, threadRef, toValue])
 
   const finalizeAfterDispatch = useCallback(async (statusText: string) => {
     if (typeof accountId === 'number' && draftSyncEnabled && draftsMailbox && draftId) {

@@ -99,7 +99,7 @@ The status bar is always visible while sync or indexing work is in progress, not
 A bell icon in the mail list header opens the notification center. It collects two kinds of notifications:
 
 - **Follow-up reminders** -- when a follow-up you set on a sent message becomes due (see [Composing Emails](./composing-emails) for details).
-- **Send failures** -- when a message in the send queue gives up after permanent delivery errors (SMTP or, for Outlook accounts, Microsoft Graph).
+- **Send failures** -- when a message in the send queue gives up after permanent delivery errors (SMTP or, for Outlook accounts, Microsoft Graph), or when the delivery outcome could not be confirmed.
 
 The bell shows a small unread badge with the number of new notifications. Click the bell to open the dropdown panel, where you can read each notification, mark it as read, mark them all as read at once, or delete individual entries. Notifications are stored locally in the SQLite cache so they survive app restarts; entries older than 30 days are purged automatically.
 

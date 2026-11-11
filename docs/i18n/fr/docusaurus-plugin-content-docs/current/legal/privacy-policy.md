@@ -6,7 +6,7 @@ title: Politique de confidentialité
 # Politique de confidentialité
 
 **Date d'effet :** 13 février 2026
-**Dernière mise à jour :** 13 février 2026
+**Dernière mise à jour :** 4 novembre 2026
 
 ## 1. Introduction
 
@@ -143,7 +143,7 @@ Plus précisément :
 
 ## 7. Google OAuth 2.0
 
-Lorsque vous connectez un compte Gmail, MailCopilot utilise Google OAuth 2.0 avec PKCE (RFC 7636) pour obtenir l'accès. Nous demandons les autorisations suivantes :
+Lorsque vous connectez un compte Gmail avec la connexion Google, MailCopilot utilise Google OAuth 2.0 avec PKCE (RFC 7636) pour obtenir l'accès. Dans la version officielle de MailCopilot, la connexion Google n'est plus proposée pour les nouvelles boîtes Gmail (elles se connectent avec un mot de passe d'application via IMAP/SMTP) ; elle reste disponible pour les boîtes qui l'utilisent déjà et pour les versions compilées à partir du code source avec leur propre client Google. Lorsque la connexion Google est utilisée, nous demandons les autorisations suivantes :
 
 | Autorisation | Objectif |
 |---|---|
@@ -196,7 +196,11 @@ Nous mettons en œuvre les mesures de sécurité suivantes :
 
 ## 12. Mises à jour automatiques
 
-MailCopilot vérifie périodiquement la disponibilité de mises à jour. Les métadonnées de mise à jour (numéro de version, empreinte du fichier) sont téléchargées depuis notre dépôt de versions. **Aucune donnée personnelle n'est envoyée** lors de la vérification des mises à jour. Vous pouvez désactiver la vérification automatique des mises à jour dans les Paramètres.
+MailCopilot recherche les mises à jour en arrière-plan : au démarrage, puis environ une fois par heure. Une vérification de mise à jour est une requête HTTPS ordinaire envoyée à notre serveur de mises à jour pour obtenir un petit fichier de métadonnées (numéro de version et empreinte du fichier). Comme pour toute requête web, le serveur voit votre adresse IP et, d'après le nom du fichier demandé, le type de votre système d'exploitation et l'architecture de votre processeur. La vérification elle-même n'envoie pas la version de MailCopilot que vous utilisez (l'application compare les versions localement), et aucun courrier, détail de compte ou donnée d'utilisation n'est inclus. La requête ne comporte que des en-têtes HTTP ordinaires, par exemple un agent utilisateur générique. Un en-tête de compatibilité que la bibliothèque de mise à jour utilise pour les déploiements progressifs est envoyé avec une valeur fixe composée de zéros, identique pour toutes les installations ; il n'identifie donc rien. Le téléchargement d'une mise à jour est différent : il révèle des versions, car les noms des fichiers demandés contiennent des numéros de version et, lorsqu'un téléchargement différentiel est utilisé, la requête du fichier block map de la version actuellement installée (nom du type `mailcopilot-<current-version>-setup.exe.blockmap` sous Windows) indique au serveur quelle version est en cours d'exécution.
+
+C'est vous qui décidez. **Rechercher les mises à jour en arrière-plan** est activé par défaut et peut être désactivé dans Paramètres → À propos → Mises à jour, ou sur l'écran du premier lancement. Aucun redémarrage n'est nécessaire : la désactivation arrête les nouvelles vérifications automatiques dès que vous enregistrez. Une vérification ou un téléchargement automatique que la bibliothèque de mise à jour a déjà lancé peut tout de même se terminer (un téléchargement commencé n'est pas annulé ; une vérification peut être en train de lire sa configuration, et elle retente plusieurs fois une connexion refusée). En dehors de cela, lorsque l'option est désactivée, MailCopilot ne contacte jamais le serveur de mises à jour de lui-même : ni vérification au démarrage, ni vérification toutes les heures. Le bouton **Rechercher les mises à jour** continue de fonctionner, car un clic de votre part est une demande explicite. Un nouveau téléchargement automatique ne peut pas démarrer sans vérification ; l'option « Télécharger automatiquement les mises à jour en arrière-plan » n'a donc aucun effet tant que la vérification en arrière-plan est désactivée. Sur une installation entièrement neuve (un profil sans réponse antérieure à l'écran du premier lancement et sans compte de messagerie), MailCopilot n'envoie aucune requête de mise à jour automatique tant que vous n'avez pas répondu à cet écran ; le fermer sans répondre n'enregistre rien, l'attente se poursuit donc. Tous les profils existants continuent de vérifier, y compris celui à qui l'écran du premier lancement est présenté de nouveau après une modification de l'information fournie.
+
+Sous Windows, le programme d'installation affiche, avant les étapes d'installation, une page d'information sur la confidentialité (un bref résumé avec un lien vers la présente politique), dans la langue du programme d'installation (anglais, russe, français, allemand, espagnol ou italien ; les autres langues affichent l'anglais). Vous devez l'accepter pour continuer. Cette page n'est pas affichée lors des installations silencieuses ni des mises à jour automatiques. Les paquets Linux et macOS n'ont pas de page d'installation ; pour eux, l'écran du premier lancement et les Paramètres sont les endroits où ces informations et ce choix sont présentés.
 
 ## 13. Confidentialité des enfants
 

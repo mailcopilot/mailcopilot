@@ -9,6 +9,8 @@ declare const __APP_VERSION__: string
 // electron/googleOAuthConfig.ts.
 declare const __GOOGLE_OAUTH_CLIENT_ID__: string
 declare const __GOOGLE_OAUTH_CLIENT_SECRET__: string
+// false in official builds (see electron/googleOAuthConfig.ts).
+declare const __GOOGLE_NEW_MAILBOXES__: boolean
 
 declare namespace NodeJS {
   interface ProcessEnv {
@@ -56,6 +58,7 @@ interface Window {
         // companion of the `accounts:authStateChanged` broadcast.
         | 'accounts:authState'
         | 'oauth:google:connect'
+        | 'oauth:google:availability'
         | 'oauth:microsoft:connect'
         | 'net:testImap'
         | 'net:testSmtp'
@@ -155,6 +158,8 @@ interface Window {
         | 'ai:chat'
         | 'ai:stop'
         | 'ai:newSession'
+        | 'ai:resolveCitations'
+        | 'ai:openCitation'
         | 'ai:quickAction'
         // §3.3 B4 Compose Quick Actions + Instant Reply. Renderer contract:
         //   ai:quickAction:rewrite  — request { accountId, preset, text } →
@@ -229,6 +234,7 @@ interface Window {
         | 'ai:translate:draft'
         | 'ai:setContext'
         | 'ai:checkAuth'
+        | 'ai:listModels'
         | 'ai:openProviderSetup'
         | 'ai:saveApiKey'
         | 'ai:deleteApiKey'

@@ -18,6 +18,13 @@
 
 MailCopilot is a modern desktop email client built with Electron, React, and TypeScript. It connects to your existing accounts via standard IMAP/SMTP and keeps your data under your control.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/hero-dark.png">
+    <img src=".github/assets/hero-light.png" alt="MailCopilot inbox with a message open" width="900">
+  </picture>
+</p>
+
 ## Features
 
 - **Multiple accounts** — connect several accounts and switch instantly, or use the unified inbox
@@ -34,6 +41,23 @@ MailCopilot is a modern desktop email client built with Electron, React, and Typ
 - **Dark & light themes**
 - **6 languages** — English, Russian, French, German, Spanish, Italian
 - **Privacy-first** — HTML emails rendered in a secure sandbox, external images blocked by default, passwords stored in system keychain
+
+## A closer look
+
+<p align="center">
+  <img src=".github/assets/ai-assistant.png" alt="AI assistant panel beside an open message" width="900">
+  <br><sub>The assistant works on the mail in front of you — with your own API key, or a model running on your machine.</sub>
+</p>
+
+<p align="center">
+  <img src=".github/assets/compose.png" alt="Compose window with AI quick actions" width="900">
+  <br><sub>Write with quick actions at hand: improve, shorten, make it formal, check the writing, translate.</sub>
+</p>
+
+<p align="center">
+  <img src=".github/assets/search.png" alt="Search results across folders and accounts" width="900">
+  <br><sub>Full-text search across folders and accounts, narrowed by unread, attachments or flags.</sub>
+</p>
 
 ## Platforms
 

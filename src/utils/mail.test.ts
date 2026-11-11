@@ -25,6 +25,7 @@ import {
   prefixSubject,
   quoteText,
   replaceCidImages,
+  blockUnresolvedCidImages,
   sortFolders,
   uniqEmails,
   BLOCKED_IMAGE_PLACEHOLDER_DATA_URI,
@@ -1201,5 +1202,76 @@ describe('external image hardening', () => {
     expect(out).not.toContain('https://s.test/sheet.png')
     // Placeholder sits in the <style> rule.
     expect(out).toContain(BLOCKED_IMAGE_PLACEHOLDER_DATA_URI)
+  })
+})
+
+describe('blockUnresolvedCidImages', () => {
+  const placeholder = BLOCKED_IMAGE_PLACEHOLDER_DATA_URI
+
+  it('turns a cid: image source nobody resolved into the blocked-image placeholder', () => {
+    const out = blockUnresolvedCidImages('<p>hi</p><img src="cid:gone@x" alt="gap">')
+    expect(out).toContain(`src="${placeholder}"`)
+    expect(out).toContain('alt="gap"')
+    expect(out.toLowerCase()).not.toContain('cid:')
+  })
+
+  it('covers every image-bearing position: case, whitespace, srcset, inline style and <style>', () => {
+    const out = blockUnresolvedCidImages(
+      '<img src="  CID:a@x"><img srcset="cid:b@x 1x, cid:c@x 2x"><input type="image" src="cid:d@x">'
+      + '<div style="background:url(cid:e@x)"></div><div style="background:url(\'cid:f@x\')"></div>'
+      + '<style>.k{background-image:url("cid:g@x")}</style>',
+    )
+    expect(out.toLowerCase()).not.toContain('cid:')
+    expect(out.split(placeholder).length - 1).toBeGreaterThanOrEqual(7)
+  })
+
+  it('leaves text that merely mentions cid: and every other attribute alone', () => {
+    const html = '<p>Reference cid:12345 in the ticket</p><img src="data:image/png;base64,AAAA" alt="cid:keep">'
+    expect(blockUnresolvedCidImages(html)).toBe(html)
+  })
+
+  it('handles spacing, case, comments, unterminated urls and mixed srcset entries, and is idempotent', () => {
+    const html = '<div style="background:url( &quot;cid:a@x&quot; )"></div><div style="background:URL(CID:b@x)"></div>'
+      + '<div style="background:url(/**/cid:c@x)"></div><div style="background:url(cid:d@x"></div>'
+      + '<img srcset="data:image/png;base64,AAAA 1x, cid:e@x 2x, https://t.test/p.png 3x">'
+    const once = blockUnresolvedCidImages(html)
+    expect(once.toLowerCase()).not.toContain('cid:')
+    expect(once).toContain('https://t.test/p.png 3x')
+    expect(once).toContain('data:image/png;base64,AAAA 1x')
+    expect(blockUnresolvedCidImages(once)).toBe(once)
+  })
+
+  it('stays linear on hostile style text that never closes its url(', () => {
+    // Two regex forms of this scan were each quadratic on a different shape (never-closed `url(cid:`,
+    // `url(cid:` + a long run of spaces + `(`): 320 KB took ~18 s in the renderer.
+    const hostile = 'url(cid:'.repeat(40_000)
+    const hostileQuoted = 'url("cid:x'.repeat(40_000)
+    const hostileSpaces = `url(cid:${' '.repeat(300_000)}(`
+    const hostileQuotedSpaces = `url("cid:x"${' '.repeat(300_000)}x`
+    const started = performance.now()
+    blockUnresolvedCidImages(`<div style="${hostile}"></div>`)
+    blockUnresolvedCidImages(`<style>${hostile}</style>`)
+    blockUnresolvedCidImages(`<style>${hostileQuoted}</style>`)
+    for (const css of [hostileSpaces, hostileQuotedSpaces]) {
+      blockUnresolvedCidImages(`<div style="${css}"></div>`)
+      blockUnresolvedCidImages(`<style>${css}</style>`)
+    }
+    expect(performance.now() - started).toBeLessThan(2_000)
+  })
+
+  it('returns the input untouched when there is no cid: at all', () => {
+    expect(blockUnresolvedCidImages('<p>plain</p>')).toBe('<p>plain</p>')
+    expect(blockUnresolvedCidImages('')).toBe('')
+  })
+})
+
+describe('style comment stripping stays linear and keeps its meaning', () => {
+  it('removes closed comments, keeps an unterminated one, and does not rescan a body that never closes any', () => {
+    const html = '<div style="background:url(/*a*/https://t.test/p.png)"></div>'
+    expect(extractExternalImageUrls(html)).toEqual(['https://t.test/p.png'])
+    expect(extractExternalImageUrls('<div style="background:url(https://t.test/q.png) /* open"></div>')).toEqual(['https://t.test/q.png'])
+    const started = performance.now()
+    extractExternalImageUrls(`<style>${'/*a'.repeat(120_000)}</style>`)
+    expect(performance.now() - started).toBeLessThan(2_000)
   })
 })

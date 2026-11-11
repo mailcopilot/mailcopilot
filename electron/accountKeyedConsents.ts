@@ -3,8 +3,9 @@
  *
  * WHAT WENT WRONG. The four per-account AI opt-ins (`aiThreadSummaryEnabled`,
  * `aiInstantReplyEnabled`, `aiProofreadEnabled`, `aiTranslateEnabled`) are
- * `Record<stringified account id, boolean>` maps, and account ids are handed
- * out as `max(existing) + 1` — so a freed number can come back. Deleting an
+ * `Record<stringified account id, boolean>` maps. Account ids used to be handed
+ * out as `max(existing) + 1`, so a freed number came back; now they are issued once
+ * and never reused, and what follows stays as defence in depth. Deleting an
  * account purges its entries (`forgetAccountAiConsents`, packages/net/config.ts),
  * but that purge is not the last word, because the store has a SECOND writer.
  * The settings window loads all four maps once (a `[]`-dependency effect) and

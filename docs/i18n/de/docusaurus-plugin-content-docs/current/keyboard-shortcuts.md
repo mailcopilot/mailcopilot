@@ -42,6 +42,21 @@ Druecken Sie **?** fuer die Uebersicht. Standard-Preset: **Gmail**.
 | **p** | Nachricht anheften / lösen |
 | **Ctrl+P** | Nachricht drucken |
 
+## Innerhalb der Konversation
+
+Wenn Sie eine Konversation mit mehr als einer Nachricht öffnen, erhalten ihre Karten eigene Tastaturkürzel. Solange die Konversation so geöffnet ist, bewegen **j** / **k** nicht mehr die Nachrichtenliste, sondern einen Cursor zwischen den Karten, und **r** / **a** / **f** wirken auf die Karte, auf der sich der Cursor gerade befindet, statt auf die geöffnete Nachricht.
+
+| Kuerzel | Aktion |
+|---------|--------|
+| **j** / **k** | Nächste / vorherige Nachricht in der Konversation |
+| **Enter** / **Leertaste** | Ausgewählte Nachricht aus- / einklappen |
+| **r** | Auf ausgewählte Nachricht antworten |
+| **a** | Allen auf ausgewählte Nachricht antworten |
+| **f** | Ausgewählte Nachricht weiterleiten |
+| **Escape** | Navigation in der Konversation verlassen (**j** / **k** steuern wieder die Nachrichtenliste) |
+
+**↑** / **↓** werden hier nicht abgefangen -- sie bewegen weiterhin die Nachrichtenliste, auch während eine Konversation geöffnet ist, sodass Sie andere Konversationen durchsuchen können, ohne zuerst **Escape** zu drücken. Keine dieser Tastenkombinationen wirkt, während Sie in ein Textfeld tippen oder ein Dialog geöffnet ist.
+
 ## KI
 
 | Kuerzel | Aktion |

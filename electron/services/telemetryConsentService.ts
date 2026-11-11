@@ -68,14 +68,32 @@ import {
 
 const log = createLogger('TelemetryConsent')
 
-/** Payload of `telemetry:setConsent`. Strict: nothing else is accepted. */
-const setConsentSchema = z.object({ granted: z.boolean() }).strict()
+/**
+ * Payload of `telemetry:setConsent`. Strict: nothing else is accepted.
+ *
+ * `updateCheckEnabled` is the answer to the second thing the first-run screen
+ * asks: whether MailCopilot may check for updates in the background. It is NOT
+ * part of the diagnostics consent (the two answers are independent and neither
+ * implies the other); it rides on this channel only because the screen is the
+ * one place the user sees both, and one write keeps them atomic. Omitted =
+ * leave the stored setting alone.
+ */
+const setConsentSchema = z.object({
+  granted: z.boolean(),
+  updateCheckEnabled: z.boolean().optional(),
+}).strict()
 
 export interface TelemetryConsentState {
   /** True when the consent screen must be shown. */
   needed: boolean
   /** Disclosure-composition version the screen must describe. */
   version: number
+  /**
+   * Current background-update-check setting, so the screen shows what is in force.
+   * ABSENT when the settings could not be read: the screen then shows its display
+   * default and must not write that default back as if it were the stored value.
+   */
+  updateCheckEnabled?: boolean
 }
 
 export type SetConsentResult =
@@ -116,6 +134,12 @@ export interface TelemetryConsentDeps {
    * silently accepting writes from any window.
    */
   isMainWindowSender: (sender: unknown) => boolean
+  /**
+   * Called once an answer has been persisted (the update scheduler re-evaluates).
+   * Receives the object that was just written, so the caller needs no second read
+   * of the store (a transient read failure there used to cost the whole update).
+   */
+  onConsentRecorded?: (persisted: Settings) => void
 }
 
 function defaultApplyTelemetryEnabled(enabled: boolean): void {
@@ -196,7 +220,7 @@ function isE2EConsentBypass(deps: TelemetryConsentDeps): boolean {
 export function getTelemetryConsentState(overrides?: Partial<TelemetryConsentDeps>): TelemetryConsentState {
   const deps = withDefaults(overrides)
   const version = TELEMETRY_CONSENT_VERSION
-  if (isE2EConsentBypass(deps)) return { needed: false, version }
+  if (isE2EConsentBypass(deps)) return { needed: false, version, updateCheckEnabled: true }
   let settings: Settings | undefined
   try {
     settings = deps.getSettings()
@@ -208,7 +232,11 @@ export function getTelemetryConsentState(overrides?: Partial<TelemetryConsentDep
     log.warn('consent state: settings unreadable, asking again')
     return { needed: true, version }
   }
-  return { needed: evaluateConsent(settings) === 'needed', version }
+  return {
+    needed: evaluateConsent(settings) === 'needed',
+    version,
+    updateCheckEnabled: settings.updateCheckEnabled !== false,
+  }
 }
 
 /**
@@ -258,6 +286,9 @@ export function applyTelemetryConsent(
       // Keep the Settings → About switch in agreement with the answer, so the
       // withdrawal path (GDPR art. 7(3)) starts from the right position.
       sentryEnabled: granted,
+      ...(parsed.data.updateCheckEnabled === undefined
+        ? {}
+        : { updateCheckEnabled: parsed.data.updateCheckEnabled }),
     }
     deps.saveSettings(next)
   } catch (err) {
@@ -282,6 +313,9 @@ export function applyTelemetryConsent(
   try {
     deps.broadcastSettings?.(next)
   } catch { /* a destroyed window must not fail the consent write */ }
+  try {
+    deps.onConsentRecorded?.(next)
+  } catch { /* the update scheduler must not fail the consent write */ }
 
   log.info(`consent recorded granted=${granted} version=${TELEMETRY_CONSENT_VERSION}`)
   return { ok: true, granted }

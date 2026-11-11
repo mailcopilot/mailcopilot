@@ -83,7 +83,23 @@ describe('telemetryConsentService', () => {
     it('asks on a fresh install', async () => {
       const { getTelemetryConsentState } = await import('./telemetryConsentService')
       const { deps } = makeDeps({})
-      expect(getTelemetryConsentState(deps)).toEqual({ needed: true, version: TELEMETRY_CONSENT_VERSION })
+      expect(getTelemetryConsentState(deps))
+        .toEqual({ needed: true, version: TELEMETRY_CONSENT_VERSION, updateCheckEnabled: true })
+    })
+
+    it('reports updateCheckEnabled true when the key is absent and false when stored false', async () => {
+      const { getTelemetryConsentState } = await import('./telemetryConsentService')
+      expect(getTelemetryConsentState(makeDeps({}).deps).updateCheckEnabled).toBe(true)
+      expect(getTelemetryConsentState(makeDeps({ updateCheckEnabled: true }).deps).updateCheckEnabled).toBe(true)
+      expect(getTelemetryConsentState(makeDeps({ updateCheckEnabled: false }).deps).updateCheckEnabled).toBe(false)
+    })
+
+    it('reports NO updateCheckEnabled when settings cannot be read, so the screen cannot write a default back', async () => {
+      const { getTelemetryConsentState } = await import('./telemetryConsentService')
+      const { deps } = makeDeps({})
+      const state = getTelemetryConsentState({ ...deps, getSettings: () => { throw new Error('x') } })
+      expect(state.needed).toBe(true)
+      expect('updateCheckEnabled' in state).toBe(false)
     })
 
     it('does not ask once an answer for the current version exists', async () => {
@@ -271,6 +287,100 @@ describe('telemetryConsentService', () => {
       })
     })
 
+    describe('updateCheckEnabled (first-run update-check option)', () => {
+      it('persists the option from setConsent alongside the answer', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps, saveSettings } = makeDeps({})
+        expect(applyTelemetryConsent({ granted: false, updateCheckEnabled: false }, deps))
+          .toEqual({ ok: true, granted: false })
+        expect(saveSettings.mock.calls[0][0].updateCheckEnabled).toBe(false)
+      })
+
+      it('persists an explicit true over a stored false', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps, saveSettings } = makeDeps({ updateCheckEnabled: false })
+        applyTelemetryConsent({ granted: true, updateCheckEnabled: true }, deps)
+        expect(saveSettings.mock.calls[0][0].updateCheckEnabled).toBe(true)
+      })
+
+      it('leaves the stored value alone when the payload omits it', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps, saveSettings } = makeDeps({ updateCheckEnabled: false })
+        applyTelemetryConsent({ granted: true }, deps)
+        expect(saveSettings.mock.calls[0][0].updateCheckEnabled).toBe(false)
+      })
+
+      it('does not write the key at all when omitted and never stored', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps, saveSettings } = makeDeps({})
+        applyTelemetryConsent({ granted: true }, deps)
+        expect('updateCheckEnabled' in saveSettings.mock.calls[0][0]).toBe(false)
+      })
+
+      it('keeps the strict schema: other keys and a non-boolean option are rejected', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps } = makeDeps({})
+        for (const bad of [
+          { granted: true, updateCheckEnabled: 'no' },
+          { granted: true, updateCheckEnabled: 0 },
+          { granted: true, updateCheckEnabled: false, autoUpdateEnabled: true },
+          { granted: true, sentryEnabled: true },
+        ]) {
+          expect(applyTelemetryConsent(bad, deps)).toEqual({ ok: false, reason: 'invalid_payload' })
+        }
+        expect(deps.saveSettings).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('onConsentRecorded', () => {
+      it('is called exactly once after a persisted answer, once the store holds it', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps, store } = makeDeps({})
+        let seen: unknown
+        const onConsentRecorded = vi.fn(() => { seen = (store as Record<string, unknown>).telemetryConsent })
+        applyTelemetryConsent({ granted: false }, { ...deps, onConsentRecorded })
+        expect(onConsentRecorded).toHaveBeenCalledTimes(1)
+        // The caller gets the object that was just persisted, not a reason to read again.
+        expect(onConsentRecorded).toHaveBeenCalledWith(expect.objectContaining({ telemetryConsent: seen, sentryEnabled: false }))
+        expect(seen).toEqual({ granted: false, version: TELEMETRY_CONSENT_VERSION, at: NOW })
+      })
+
+      it('is not called when the write is refused as not_pending', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps } = makeDeps({
+          telemetryConsent: { granted: true, version: TELEMETRY_CONSENT_VERSION, at: NOW },
+        })
+        const onConsentRecorded = vi.fn()
+        expect(applyTelemetryConsent({ granted: false }, { ...deps, onConsentRecorded }))
+          .toEqual({ ok: false, reason: 'not_pending' })
+        expect(onConsentRecorded).not.toHaveBeenCalled()
+      })
+
+      it('is not called on an invalid payload or a failed save', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps } = makeDeps({})
+        const onConsentRecorded = vi.fn()
+        applyTelemetryConsent({ granted: 'yes' }, { ...deps, onConsentRecorded })
+        applyTelemetryConsent({ granted: true }, {
+          ...deps,
+          onConsentRecorded,
+          saveSettings: () => { throw new Error('disk full') },
+        })
+        expect(onConsentRecorded).not.toHaveBeenCalled()
+      })
+
+      it('a throwing callback does not fail the write', async () => {
+        const { applyTelemetryConsent } = await import('./telemetryConsentService')
+        const { deps, saveSettings } = makeDeps({})
+        const res = applyTelemetryConsent({ granted: true }, {
+          ...deps,
+          onConsentRecorded: () => { throw new Error('scheduler exploded') },
+        })
+        expect(res).toEqual({ ok: true, granted: true })
+        expect(saveSettings).toHaveBeenCalledTimes(1)
+      })
+    })
+
     it('does not fail the write when broadcasting throws', async () => {
       const { applyTelemetryConsent } = await import('./telemetryConsentService')
       const { deps } = makeDeps({})
@@ -409,7 +519,8 @@ describe('telemetryConsentService', () => {
       const stateHandler = handleIpcMock.mock.calls[0][1] as (e: unknown) => TelemetryConsentStateLike
       const setHandler = handleIpcMock.mock.calls[1][1] as (e: unknown, p: unknown) => unknown
 
-      expect(stateHandler({})).toEqual({ needed: true, version: TELEMETRY_CONSENT_VERSION })
+      expect(stateHandler({}))
+        .toEqual({ needed: true, version: TELEMETRY_CONSENT_VERSION, updateCheckEnabled: true })
       expect(setHandler({ sender: MAIN_SENDER }, { granted: true })).toEqual({ ok: true, granted: true })
       expect(saveSettings).toHaveBeenCalledTimes(1)
       expect(stateHandler({}).needed).toBe(false)

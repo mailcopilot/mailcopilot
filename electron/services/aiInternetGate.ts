@@ -12,9 +12,11 @@
  * P2 keeps the same security invariants but moves the gate from
  * pre-flight tool filtering to runtime interception:
  *
- *   1. All internet tools are ALWAYS exposed to the LLM. The model can
- *      propose `WebSearch("foo")` / `WebFetch(url)` / `call_external_tool`
- *      whenever it judges them useful.
+ *   1. Every internet tool THIS MODULE GATES is always exposed to the LLM.
+ *      The model can propose `list_external_tools` / `call_external_tool`
+ *      whenever it judges them useful. §2.283 narrowed what that covers —
+ *      see "Two kinds of internet tool" below; the tools named here are the
+ *      ones WE execute.
  *   2. Just before the tool actually executes, the gate intercepts the
  *      call and emits an `ai:internet-tool-pending` IPC event with a
  *      structured `{ requestId, toolName, query?, url? }` shape. The
@@ -24,8 +26,8 @@
  *   4. On approve — the tool executes normally and the LLM gets the real
  *      result. On deny — the LLM gets `{ error: "User denied internet
  *      access for this tool call" }` and continues without the data.
- *   5. Per-turn consent: one approval covers EVERY internet-tool call
- *      in the same response. If the model fires five `WebSearch`es in a
+ *   5. Per-turn consent: one approval covers EVERY intercepted call in the
+ *      same response. If the model fires five `call_external_tool`s in a
  *      row, the user is asked once; subsequent calls in the same turn
  *      execute without re-prompting. State resets at the start of every
  *      new user turn.
@@ -34,16 +36,40 @@
  *      user said no once. The user can still grant consent on a fresh
  *      turn.
  *
+ * ## Two kinds of internet tool (§2.283) — this module gates only one
+ *
+ * The six points above describe tools MailCopilot executes: the external-MCP
+ * bridge (`list_external_tools` / `call_external_tool`). For those, the tool is
+ * always visible and the decision happens at EXECUTION time, here.
+ *
+ * Anthropic's `web_search` / `web_fetch` are a different thing, and THE
+ * INTERCEPTOR never sees them — the module does, through the audit function
+ * below. They are PROVIDER-EXECUTED: Anthropic runs them inside its
+ * own `/v1/messages` call, so there is no local execution point, no callback,
+ * and no moment at which a prompt could be raised — by the time the call
+ * appears in our process it has already happened. Their gate is therefore at
+ * REQUEST-BUILD time, in `streamAnthropicChat`: they are declared if and only
+ * if `shouldDenyEgress` already says egress is permitted for this turn. Under
+ * `default-deny` / `ask` they are absent from the request entirely, so they are
+ * neither offered nor intercepted.
+ *
+ * What this module still owns for them is the AUDIT ROW —
+ * {@link recordProviderExecutedEgress}. Execution is Anthropic's; observation
+ * is ours, and the append-only log must not go quiet exactly where an
+ * email-injected exfiltration attempt would live.
+ *
+ * (The predecessor of `web_search` / `web_fetch` was the Claude Agent SDK's
+ * `WebSearch` / `WebFetch`, gated through its `canUseTool` hook. Both the SDK
+ * and that hook were removed in §2.283.)
+ *
  * Defence-in-depth (CLAUDE.md §5):
  *
- *   - The interceptor itself is the primary gate. Bypass requires a bug
- *     in the SDK callback wiring — both Claude Agent SDK's `canUseTool`
- *     hook and our in-process MCP tool handlers run synchronously before
- *     dispatch, so there is no async window.
+ *   - The interceptor itself is the primary gate for locally-executed
+ *     egress. Bypass requires a bug in our in-process MCP tool handlers,
+ *     which run synchronously before dispatch — there is no async window.
  *   - The MCP tool handlers (`list_external_tools`, `call_external_tool`)
- *     ALSO consult `gate.consentForTurn` directly as a second-line check.
- *     If a future SDK regression reaches the handler without going
- *     through `canUseTool`, the handler still default-denies.
+ *     ALSO consult `gate.consentForTurn` directly as a second-line check,
+ *     so a handler reached by some other route still default-denies.
  *   - `wrapUntrusted()` is the responsibility of the renderer when
  *     rendering `query` / `url` (they come from the LLM, which is itself
  *     potentially driven by prompt-injected email content). The main
@@ -78,18 +104,21 @@ const log = createLogger('AI-InternetGate')
 // ---------------------------------------------------------------------------
 
 /**
- * Tool names that the interceptor watches for. Matches the catalogue in
- * `aiEgressPolicy.EGRESS_TOOLS` plus the bare external-MCP names exposed
- * by the Vercel `@ai-sdk/mcp` client. A tool name is "internet" if it
- * matches any of:
- *   - `WebSearch`, `WebFetch` (Claude Agent SDK built-ins),
+ * Tool names the interceptor watches for — i.e. LOCALLY EXECUTED egress, the
+ * only kind this module can gate. A tool name is "internet" if it matches:
  *   - `mcp__mailcopilot__list_external_tools` / `..._call_external_tool`
- *     (Claude prefixed form),
+ *     (prefixed form),
  *   - `list_external_tools` / `call_external_tool` (Vercel bare form).
+ *
+ * §2.283 — `web_search` / `web_fetch` are deliberately ABSENT. They are
+ * provider-executed (Anthropic runs them inside its own call), so there is no
+ * moment at which this predicate could be consulted before dispatch; listing
+ * them would advertise a gate that never runs. Their gate is the
+ * request-build-time decision in `streamAnthropicChat`, and their audit row
+ * comes from {@link recordProviderExecutedEgress}. The legacy `WebSearch` /
+ * `WebFetch` entries named the Claude Agent SDK built-ins and went with it.
  */
 const INTERNET_TOOL_NAMES = new Set<string>([
-  'WebSearch',
-  'WebFetch',
   'mcp__mailcopilot__list_external_tools',
   'mcp__mailcopilot__call_external_tool',
   'list_external_tools',
@@ -351,12 +380,20 @@ function hashQueryOrUrl(value: string | null | undefined): string {
 function pickDisplayFields(toolName: string, args: unknown): { query?: string; url?: string } {
   if (!args || typeof args !== 'object') return {}
   const obj = args as Record<string, unknown>
-  if (toolName === 'WebSearch' || toolName.endsWith('list_external_tools')) {
+  // `web_search` / `web_fetch` (§2.283) are Anthropic's PROVIDER-EXECUTED
+  // tools. They never reach the interceptor — nothing local runs them — but
+  // they do reach the audit path below, and their argument shapes are the same
+  // as the Agent SDK built-ins they replaced.
+  if (
+    toolName === 'WebSearch'
+    || toolName === 'web_search'
+    || toolName.endsWith('list_external_tools')
+  ) {
     const q = obj.query
     if (typeof q === 'string') return { query: q }
     return {}
   }
-  if (toolName === 'WebFetch') {
+  if (toolName === 'WebFetch' || toolName === 'web_fetch') {
     const u = obj.url
     if (typeof u === 'string') return { url: u }
     return {}
@@ -370,6 +407,61 @@ function pickDisplayFields(toolName: string, args: unknown): { query?: string; u
     return {}
   }
   return {}
+}
+
+/**
+ * Record ONE audit row for an internet tool the PROVIDER executed on its own
+ * side (§2.283, security review HIGH).
+ *
+ * WHY THIS EXISTS SEPARATELY FROM {@link interceptInternetTool}. Anthropic runs
+ * `web_search` / `web_fetch` inside its own `/v1/messages` call, so there is no
+ * local execution point and the interceptor can never run for them — it has
+ * nothing to gate, because by the time we learn of the call it has already
+ * happened. The tempting conclusion is "cannot intercept ⇒ cannot record", and
+ * it is WRONG: execution is owned by Anthropic, but OBSERVATION is owned by us.
+ * The call and its arguments arrive in this process as a `tool-call` part on
+ * `fullStream` (`providerExecuted: true`) before the answer completes.
+ *
+ * Reading it the wrong way would have silently narrowed the append-only audit
+ * log exactly where an email-injected exfiltration attempt would live: the
+ * model is talked into searching for the user's data, the request leaves, and
+ * the privacy panel shows nothing at all. A missing row would read as "no
+ * egress happened", which is the one thing it must never mean.
+ *
+ * SAME PII DISCIPLINE, ONE IMPLEMENTATION. The query / URL is hashed by the
+ * same {@link hashQueryOrUrl} the interceptor uses — deliberately not a second
+ * copy, because a divergent hash rule is how one of the two paths eventually
+ * starts writing raw text. The raw string never touches disk.
+ *
+ * `decision` is deliberately NOT part of the goal tag. A decision implies we
+ * had a say; here we did not. The tag says what actually happened — the
+ * provider executed this, and we are recording it after the fact.
+ */
+export function recordProviderExecutedEgress(input: {
+  provider: EgressAttribution
+  toolName: string
+  toolInput: unknown
+}): void {
+  try {
+    const display = pickDisplayFields(input.toolName, input.toolInput)
+    const hash = hashQueryOrUrl(display.query ?? display.url ?? '')
+    appendAiActionLog({
+      provider: input.provider,
+      model: null,
+      goal: `egress_provider_executed:${input.toolName}${hash ? `:${hash}` : ''}`,
+      toolName: input.toolName,
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      untrustedWrapped: 0,
+      // Not an injection block: the request already left. Counting it as one
+      // would claim we stopped something we did not.
+      injectionBlocked: 0,
+      outcome: 'ok',
+    })
+  } catch {
+    /* audit append must never throw */
+  }
 }
 
 /**

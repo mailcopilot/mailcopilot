@@ -56,6 +56,7 @@ function baseState(overrides: Partial<CertRecoveryDialogState> = {}): CertRecove
       fingerprintSha256: 'AA:BB:CC:DD',
       systemOnly: true,
       rawMessage: 'self-signed certificate in certificate chain',
+      reason: 'selfSigned',
     },
     // The on-screen certificate — what the primary button will pin. Starts out
     // equal to the payload and is replaced wholesale by a probe result.
@@ -152,17 +153,17 @@ describe('CertRecoveryDialog — rendering', () => {
     expect(screen.queryByTestId('cert-recovery-interception')).not.toBeInTheDocument()
   })
 
-  it('truncates an overly long raw message', () => {
-    const long = 'x'.repeat(600)
-    renderDialog(baseState({ request: { ...baseState().request, rawMessage: long } }))
-    const raw = screen.getByTestId('cert-recovery-raw').textContent ?? ''
-    expect(raw.length).toBeLessThanOrEqual(501)
-    expect(raw.endsWith('…')).toBe(true)
+  it('Details shows the localized reason, never the raw runtime message', () => {
+    const advice = 'unable to get local issuer certificate. If the issue is related to missing system CAs, try running Node.js with --use-system-ca'
+    renderDialog(baseState({ request: { ...baseState().request, rawMessage: advice, reason: 'unknownIssuer' } }))
+    const details = screen.getByTestId('cert-recovery-raw')
+    expect(details).toHaveTextContent('app.certRecovery.reason.unknownIssuer')
+    expect(document.body.textContent ?? '').not.toContain('use-system-ca')
   })
 
-  it('omits the raw-message block when the message is empty', () => {
-    renderDialog(baseState({ request: { ...baseState().request, rawMessage: '' } }))
-    expect(screen.queryByTestId('cert-recovery-raw')).not.toBeInTheDocument()
+  it.each(['expired', 'selfSigned', 'nameMismatch', 'unknown'] as const)('renders the %s reason', (reason) => {
+    renderDialog(baseState({ request: { ...baseState().request, reason } }))
+    expect(screen.getByTestId('cert-recovery-raw')).toHaveTextContent(`app.certRecovery.reason.${reason}`)
   })
 
   it('renders untrusted server strings as text, not HTML', () => {
@@ -239,7 +240,6 @@ describe('CertRecoveryDialog — untrusted field hardening', () => {
         ...baseState().request,
         // Oversized values plus newline / bidi-override / zero-width controls.
         host: 'h'.repeat(400) + '\u202E.evil.example',
-        rawMessage: 'line one\nline two\u202Especial' + 'z'.repeat(900),
       },
       issuerCn: 'Ka\u0000spersky\u202E Root\nCA\u200B' + 'y'.repeat(400),
       subjectCn: 'imap\u202E.evil.example' + 'w'.repeat(400),
@@ -252,7 +252,6 @@ describe('CertRecoveryDialog — untrusted field hardening', () => {
       'cert-recovery-issuer',
       'cert-recovery-subject',
       'cert-recovery-fingerprint',
-      'cert-recovery-raw',
     ]
     for (const id of ids) {
       const el = screen.getByTestId(id)

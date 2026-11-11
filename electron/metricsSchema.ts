@@ -2370,7 +2370,7 @@ export const ELECTRON_SPANS = {
   // SOURCE language, the subject, the addresses, the folder name and the account
   // id NEVER appear here.
   'ai.translate.message': {
-    purpose: 'One message translation (§3.3 B6): cached message text → provider call → translated plain text. Emitted for cache hits too (cache_hit distinguishes them); opt-out/empty/too-long/no-provider/budget refusals emit no span. source_labeled says only WHETHER a source language was determined, never which.',
+    purpose: 'One message translation (§3.3 B6): cached message text → one or more provider calls (a long message is translated in pieces, all or nothing; tokens are summed over the calls) → translated plain text. Emitted for cache hits too (cache_hit distinguishes them); opt-out/empty/too-long/no-provider/budget refusals before any call emit no span. source_labeled says only WHETHER a source language was determined, never which.',
     attributes: {
       provider: 'ai_provider',
       was_local: 'boolean',

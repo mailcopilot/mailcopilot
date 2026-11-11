@@ -1,0 +1,13 @@
+﻿MailCopilot - privacy notice
+
+Please read this notice before installing. The full privacy policy: https://docs.mailcopilot.io/legal/privacy-policy
+
+Besides talking to the mail servers you set up, MailCopilot contacts these on its own:
+
+1. Update check. About once an hour MailCopilot asks our update server whether a new version exists. The server sees your IP address and the type of your operating system and processor. Nothing about your mail, accounts or usage is sent. On a new installation a choice is shown at the first start, before the first check; you can change it at any time in Settings > About. When it is off, MailCopilot starts no new checks on its own; a check or download already under way may still finish.
+
+2. Diagnostic and usage data. Off until you allow it; you are asked on the first start. It never contains the content of your mail.
+
+3. AI assistant. Optional. Requests go only to the provider you set up, with your own key.
+
+4. Sender photos. By default, sender photos are loaded from Gravatar: a hash of the sender's address and your IP address go to Gravatar. You can turn this off in Settings.

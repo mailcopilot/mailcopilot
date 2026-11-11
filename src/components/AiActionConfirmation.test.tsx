@@ -10,14 +10,15 @@ const i18nMap: Record<string, string> = {
   'ai.confirmation.applied': 'Applied',
   'ai.confirmation.cancel': 'Cancel',
   'ai.confirmation.account': '{{email}}',
-  'ai.confirmation.accountFallback': 'Account #{{accountId}}',
+  'ai.confirmation.accountFallback': 'A mailbox that is no longer available',
   'ai.confirmation.crossAccount_one': '{{count}} account',
   'ai.confirmation.crossAccount_other': '{{count}} accounts',
   'ai.confirmation.folder': 'Folder: {{folder}}',
   'ai.confirmation.emailCount': '{{count}} email(s)',
   'ai.confirmation.folderCount_one': '{{count}} folder',
   'ai.confirmation.folderCount_other': '{{count}} folders',
-  'ai.confirmation.kinds.snooze_email': 'Snooze emails',
+  'ai.confirmation.kinds.snooze_email': 'Snooze emails until {{when}}',
+  'ai.confirmation.kinds.add_followup': 'Add follow-up reminder for {{when}}',
   'ai.confirmation.kinds.flag_email.star': 'Star emails',
   'ai.confirmation.kinds.flag_email.unstar': 'Unstar emails',
   'ai.confirmation.kinds.send_email': 'Send email',
@@ -61,7 +62,8 @@ function makeSummary(overrides: Partial<PendingActionSummary> = {}): PendingActi
     previewId: 'preview-uuid-1',
     kind: 'snooze_email',
     i18nKey: 'ai.confirmation.kinds.snooze_email',
-    description: 'Snooze 2 emails until 2026-04-30',
+    description: 'Snooze 2 emails until 2026-04-30T09:00:00.000Z',
+    scheduledAt: '2026-04-30T09:00:00.000Z',
     accountId: 1,
     accountEmail: 'default@example.com',
     emailCount: 2,
@@ -92,7 +94,7 @@ describe('AiActionConfirmation', () => {
       onCancel,
     }))
     expect(screen.getByTestId('ai-action-confirmation')).toBeInTheDocument()
-    expect(screen.getByText('Snooze emails')).toBeInTheDocument()
+    expect(screen.getByText(/^Snooze emails until /)).toBeInTheDocument()
   })
 
   it('falls back to description when i18n key missing', () => {
@@ -106,6 +108,79 @@ describe('AiActionConfirmation', () => {
       onCancel,
     }))
     expect(screen.getByText('Made-up description text')).toBeInTheDocument()
+  })
+
+  /**
+   * Security finding: the card resolved a localized verb ("Snooze emails")
+   * and only fell back to `description` when the key was missing — which it
+   * never was. So the user clicked Apply on a scheduling action without ever
+   * being shown WHEN it was scheduled for, while the apply wrote a specific
+   * instant. The instant now travels as a structured field and is rendered.
+   */
+  describe('a scheduling action always shows the instant it is set for', () => {
+    const iso = '2026-04-30T09:00:00.000Z'
+    const expected = new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+
+    it('snooze: the verb carries the scheduled instant, formatted for the viewer', () => {
+      render(React.createElement(AiActionConfirmation, {
+        summary: makeSummary({ scheduledAt: iso }),
+        onApply,
+        onCancel,
+      }))
+      expect(screen.getByText(`Snooze emails until ${expected}`)).toBeInTheDocument()
+      // Rendered for the viewer, not dumped as machine text.
+      expect(screen.queryByText(new RegExp(iso))).not.toBeInTheDocument()
+    })
+
+    it('follow-up: the same rule applies to remindAt', () => {
+      render(React.createElement(AiActionConfirmation, {
+        summary: makeSummary({
+          kind: 'add_followup',
+          i18nKey: 'ai.confirmation.kinds.add_followup',
+          description: `Add follow-up reminder for a@b.c at ${iso}`,
+          scheduledAt: iso,
+        }),
+        onApply,
+        onCancel,
+      }))
+      expect(screen.getByText(`Add follow-up reminder for ${expected}`)).toBeInTheDocument()
+    })
+
+    it('without an instant it declines the placeholder key and spells it out instead', () => {
+      // Defence in depth: a summary from a producer that forgot the field must
+      // never render a raw `{{when}}` nor drop the time silently.
+      render(React.createElement(AiActionConfirmation, {
+        summary: makeSummary({ scheduledAt: undefined }),
+        onApply,
+        onCancel,
+      }))
+      expect(screen.queryByText(/\{\{when\}\}/)).not.toBeInTheDocument()
+      expect(screen.getByText('Snooze 2 emails until 2026-04-30T09:00:00.000Z')).toBeInTheDocument()
+    })
+
+    it('an unparseable instant degrades to the raw string, never to nothing', () => {
+      render(React.createElement(AiActionConfirmation, {
+        summary: makeSummary({ scheduledAt: 'not-a-date' }),
+        onApply,
+        onCancel,
+      }))
+      expect(screen.getByText('Snooze emails until not-a-date')).toBeInTheDocument()
+    })
+
+    it('a non-scheduling kind is unaffected — no time, no placeholder', () => {
+      render(React.createElement(AiActionConfirmation, {
+        summary: makeSummary({
+          kind: 'send_email',
+          i18nKey: 'ai.confirmation.kinds.send_email',
+          description: 'Send email',
+          scheduledAt: undefined,
+        }),
+        onApply,
+        onCancel,
+      }))
+      expect(screen.getByText('Send email')).toBeInTheDocument()
+      expect(screen.queryByText(/\{\{when\}\}/)).not.toBeInTheDocument()
+    })
   })
 
   it('shows account email / folder / email count meta when provided', () => {
@@ -196,13 +271,14 @@ describe('AiActionConfirmation', () => {
     expect(screen.queryByText(/аккаунт/i)).not.toBeInTheDocument()
   })
 
-  it('single-account fallback: shows Account #id when email is null', () => {
+  it('single-account fallback: names no number when the email is null', () => {
     render(React.createElement(AiActionConfirmation, {
       summary: makeSummary({ accountId: 5, accountEmail: null, folder: null, emailCount: null }),
       onApply,
       onCancel,
     }))
-    expect(screen.getByText('Account #5')).toBeInTheDocument()
+    expect(screen.getByText('A mailbox that is no longer available')).toBeInTheDocument()
+    expect(screen.queryByText(/#5|\b5\b/)).not.toBeInTheDocument()
     expect(screen.queryByText('user@example.com')).not.toBeInTheDocument()
   })
 
@@ -320,7 +396,7 @@ describe('AiActionConfirmation', () => {
     expect(folderTexts.some((t) => t.includes('a@x.com: INBOX (10)'))).toBe(true)
     expect(folderTexts.some((t) => t.includes('b@y.com: Archive (8)'))).toBe(true)
     // Null-email slot gets fallback label
-    expect(folderTexts.some((t) => t.includes('Account #3: Important (6)'))).toBe(true)
+    expect(folderTexts.some((t) => t.includes('A mailbox that is no longer available: Important (6)'))).toBe(true)
   })
 
   it('multi-account multi-folder cross product: all 4 breakdown entries rendered', () => {
@@ -387,7 +463,8 @@ describe('AiActionConfirmation', () => {
     expect(screen.getByText(/a@x\.com/)).toBeInTheDocument()
     expect(screen.getByText(/c@z\.com/)).toBeInTheDocument()
     // Null slot must render as fallback label, not blank.
-    expect(screen.getByText(/Account #2/)).toBeInTheDocument()
+    expect(screen.getByText(/A mailbox that is no longer available/)).toBeInTheDocument()
+    expect(screen.queryByText(/#2/)).not.toBeInTheDocument()
     // No empty comma-comma sequences visible (no blank slot).
     const emailsSpan = document.querySelector('.ai-action-confirmation-meta-emails')
     expect(emailsSpan?.textContent).not.toMatch(/,\s*,/)
@@ -456,9 +533,9 @@ describe('AiActionConfirmation — i18n integration (real i18next)', () => {
     expect(t('ai.confirmation.crossAccount', { count: 21 })).toBe('21 аккаунт')
   })
 
-  it('RU accountFallback resolves to "Аккаунт №7"', async () => {
+  it('RU accountFallback names no number', async () => {
     const t = (await getInst()).t.bind(await getInst())
-    expect(t('ai.confirmation.accountFallback', { accountId: 7 })).toBe('Аккаунт №7')
+    expect(t('ai.confirmation.accountFallback', { accountId: 7 })).toBe('Ящик, который больше недоступен')
   })
 
   it('EN crossAccount_other used for count >= 2', async () => {

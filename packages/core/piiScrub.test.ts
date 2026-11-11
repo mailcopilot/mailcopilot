@@ -225,6 +225,76 @@ describe('scrubEmailAddressesShape', () => {
     expect(scrubEmailAddressesShape('root@localhost')).toBe('root@localhost')
     expect(scrubEmailAddressesShape('no at sign here')).toBe('no at sign here')
   })
+
+  // The ASCII-only pattern shipped these to Sentry in full. They became
+  // storable mailbox addresses when the account schema moved off zod's
+  // ASCII-only `z.email()` (packages/core/emailAddress.ts), so the promise
+  // "addresses are never sent" stopped holding for the app's own primary
+  // locale until this was widened.
+  it.each([
+    ['a cyrillic local part', 'иван@example.com'],
+    ['a cyrillic domain', 'user@почта.рф'],
+    ['both sides cyrillic', 'пользователь@почта.рф'],
+    ['the punycode spelling of the same domain', 'info@xn--80a1acny.xn--p1ai'],
+    ['a devanagari address whose labels carry combining marks', 'उपयोगकर्ता@डाटामेल.भारत'],
+  ])('redacts %s', (_label, address) => {
+    expect(scrubEmailAddressesShape(address)).toBe('<email>')
+  })
+
+  it('redacts a unicode address inside third-party server text', () => {
+    expect(scrubEmailAddressesShape('NO [AUTH] Authentication failed for иван@example.com, retry later'))
+      .toBe('NO [AUTH] Authentication failed for <email>, retry later')
+  })
+
+  it('redacts a punycode address WHOLE, leaving no tail behind', () => {
+    // Regression: the letters-only TLD rule matched only up to `…xn` and left
+    // `--p1ai` in the payload — a partial redaction that reads like a working
+    // one. The ACE (`xn--`) alternative is what closes it.
+    const out = scrubEmailAddressesShape('to info@xn--80a1acny.xn--p1ai now')
+    expect(out).toBe('to <email> now')
+    expect(out).not.toContain('p1ai')
+  })
+
+  it('is idempotent on unicode addresses too', () => {
+    const once = scrubEmailAddressesShape('от иван@почта.рф кому user@example.com')
+    expect(scrubEmailAddressesShape(once)).toBe(once)
+    expect(once).toBe('от <email> кому <email>')
+  })
+
+  it('still refuses a single-letter TLD and a label starting with a hyphen', () => {
+    expect(scrubEmailAddressesShape('a@b.c')).toBe('a@b.c')
+    expect(scrubEmailAddressesShape('bad@-leading.com')).toBe('bad@-leading.com')
+  })
+
+  // CLAUDE.md §5: a regex applied to untrusted text must be linear. This one
+  // runs inside `beforeSend` in the MAIN process, so a superlinear match
+  // freezes the IDLE loop, the send queue and every IPC handler. The previous
+  // ASCII pattern was quadratic (×4 per doubling: 102 ms at 12.5k chars →
+  // 6754 ms at 100k) and widening its classes to `\p{L}` without also bounding
+  // its quantifiers took the same 100k input to 115 SECONDS on cyrillic.
+  //
+  // Asserted as a RATIO, not a wall-clock budget: absolute timings are machine-
+  // and load-dependent, but quadratic growth shows up as ~4× per doubling no
+  // matter how fast the machine is, and linear growth cannot reach it.
+  it('matches in linear time on adversarial input', () => {
+    const run = (n: number) => {
+      // Reachable: the function only short-circuits on strings with NO `@`.
+      // Cyrillic because that is precisely what the widened classes made
+      // expensive; a run with no dotted TLD forces the longest search.
+      const input = `и@${'п'.repeat(n)}`
+      const started = performance.now()
+      expect(scrubEmailAddressesShape(input)).toBe(input)
+      return performance.now() - started
+    }
+    // Warm the JIT so the first sample is not the outlier.
+    run(20_000)
+    const small = run(50_000)
+    const large = run(200_000)
+    // 4× the input. Linear predicts ~4×, quadratic predicts ~16×. A generous
+    // ceiling of 8× separates the two without being flaky on a loaded machine;
+    // the floor guards against the measurement collapsing to noise.
+    expect(large).toBeLessThan(Math.max(small, 1) * 8)
+  })
 })
 
 describe('scrubEventPiiWith — address redaction', () => {

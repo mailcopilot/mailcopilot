@@ -66,6 +66,16 @@ scripts/run-native-tests.test.mjs
 # that silently disappears in one environment is worse than coverage that lives
 # in one repository.
 scripts/check-release-vars.test.mjs
+# §2.297: reads .gitlab-ci.yml, which the mirror does not carry (same case as above).
+scripts/official-build-flag.test.mjs
+
+# Internal capture tooling: the OAuth-verification video recorder and the
+# marketing screenshot gallery. Neither is a test of the product — they drive the
+# app to produce a video and a set of images for the site and the README, they
+# are gated behind PW_DEMO=1 so no ordinary run touches them, and the gallery
+# writes outside the repo entirely. They stay in the internal repo.
+tests/e2e/demo-oauth.spec.ts
+tests/e2e/marketing.gallery.spec.ts
 
 # AI agents and internal instructions
 CLAUDE.md

@@ -11,7 +11,9 @@
  * Covered here (the parts that only exist end-to-end):
  *   - AC (c)/AC4: the screen precedes the app — no mail list, no account wizard
  *     behind it on a fresh profile
- *   - AC5: two equally-weighted buttons, nothing focused, no checkbox, and
+ *   - AC5: two equally-weighted buttons, nothing focused, no checkbox in the
+ *     diagnostics question (the one checkbox on the screen is the separate,
+ *     default-on background update check, outside the answer row), and
  *     Escape producing the exact same stored record as "don't allow"
  *   - AC7: a refusal survives a restart — the screen does not come back and
  *     telemetry stays off
@@ -45,6 +47,7 @@ import {
 type StoredSettings = {
   sentryEnabled?: boolean
   telemetryConsent?: { granted: boolean; version: number; at: string }
+  updateCheckEnabled?: boolean
 }
 
 /** Read the persisted settings through the real preload bridge. */
@@ -85,13 +88,18 @@ test.describe('§2.82 telemetry consent — first run', () => {
     await expect(page.getByTestId('telemetry-consent-titlebar')).toBeVisible()
     await expect(page.getByTestId('window-titlebar-close')).toBeVisible()
 
-    // AC5 — equal weight, no autofocus, no checkbox.
+    // AC5 — equal weight, no autofocus, no checkbox in the diagnostics question.
     const allow = page.getByTestId('telemetry-consent-allow')
     const deny = page.getByTestId('telemetry-consent-deny')
     await expect(allow).toBeVisible()
     await expect(deny).toBeVisible()
     expect(await allow.getAttribute('class')).toBe(await deny.getAttribute('class'))
-    expect(await dialog.locator('input').count()).toBe(0)
+    // The only input is the background update check option: its own block,
+    // outside the answer row, on by default.
+    expect(await dialog.locator('input').count()).toBe(1)
+    const updateBox = page.getByTestId('telemetry-consent-update-check')
+    await expect(updateBox).toBeChecked()
+    expect(await updateBox.evaluate(el => el.closest('.confirm-dialog-actions') === null)).toBe(true)
     const focusedTestId = await page.evaluate(() =>
       document.activeElement?.getAttribute('data-testid') ?? null)
     expect(focusedTestId).not.toBe('telemetry-consent-allow')
@@ -113,6 +121,28 @@ test.describe('§2.82 telemetry consent — first run', () => {
     const before = await readSettings(ctx)
     expect(before.telemetryConsent).toBeUndefined()
     expect(before.sentryEnabled).toBe(false)
+  })
+
+  test('the update check option is independent of the diagnostics answer and is persisted', async () => {
+    // Left on, "don't allow" for diagnostics: the update option stays on.
+    ctx = await launchAppWithConsentGate()
+    await expect(ctx.page.getByTestId('telemetry-consent-dialog')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await ctx.page.getByTestId('telemetry-consent-deny').click()
+    await expect(ctx.page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    const left = await readSettings(ctx)
+    expect(left.telemetryConsent?.granted).toBe(false)
+    expect(left.updateCheckEnabled).toBe(true)
+    await cleanupApp(ctx)
+
+    // Switched off, diagnostics allowed: the update option is off, the grant is kept.
+    ctx = await launchAppWithConsentGate()
+    await expect(ctx.page.getByTestId('telemetry-consent-dialog')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await ctx.page.getByTestId('telemetry-consent-update-check').uncheck()
+    await ctx.page.getByTestId('telemetry-consent-allow').click()
+    await expect(ctx.page.getByTestId('inbox-list')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    const off = await readSettings(ctx)
+    expect(off.telemetryConsent?.granted).toBe(true)
+    expect(off.updateCheckEnabled).toBe(false)
   })
 
   test('Escape records a refusal identical to the "don\'t allow" button', async () => {

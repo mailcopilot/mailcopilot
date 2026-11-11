@@ -46,6 +46,23 @@ describe('queueItemToComposeInit', () => {
     expect(init.replyRef).toBeUndefined()
   })
 
+  it('restores the reply pointer stored in the payload when there is no archiveRef', () => {
+    const replyRef = { accountId: 7, folder: 'INBOX', uid: 42 }
+    expect(queueItemToComposeInit({ ...base, replyRef }).replyRef).toEqual(replyRef)
+  })
+
+  it('prefers archiveRef over the stored reply pointer', () => {
+    const archive = { accountId: 7, folder: 'INBOX', uid: 43, archiveFolder: 'Archive' } as never
+    expect(queueItemToComposeInit({ ...base, replyRef: { accountId: 7, folder: 'INBOX', uid: 42 } }, archive).replyRef?.uid).toBe(43)
+  })
+
+  it('keeps a restored thread pointer as threadRef and does not turn it into the archive target', () => {
+    const threadRef = { accountId: 7, folder: 'INBOX', uid: 42 }
+    const init = queueItemToComposeInit({ ...base, threadRef })
+    expect(init.threadRef).toEqual(threadRef)
+    expect(init.replyRef).toBeUndefined()
+  })
+
   it('omits identityId when the queued payload did not carry one', () => {
     // Legacy send queued before the 2.3-B identity selector existed — must
     // not invent an id, Compose's normal default-pick path handles it.

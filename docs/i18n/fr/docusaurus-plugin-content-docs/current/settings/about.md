@@ -33,6 +33,14 @@ Ces informations sont utiles lors du signalement de bugs ou de la vérification 
 
 La section **Mises à jour** vous permet de contrôler la façon dont MailCopilot se met à jour.
 
+### Rechercher les mises à jour en arrière-plan
+
+Lorsque cette option est activée, MailCopilot recherche les nouvelles versions au démarrage, puis environ une fois par heure. Chaque vérification est une requête HTTPS ordinaire envoyée à notre serveur de mises à jour pour obtenir un petit fichier de métadonnées. Le serveur voit votre adresse IP et, d'après le nom du fichier demandé, le type de votre système d'exploitation et l'architecture de votre processeur. La vérification elle-même n'envoie pas la version de MailCopilot que vous utilisez, pas plus que quoi que ce soit concernant votre courrier, vos comptes ou votre utilisation. Le téléchargement d'une mise à jour, lui, révèle des versions : les noms des fichiers demandés contiennent des numéros de version, et un téléchargement différentiel demande aussi le fichier block map de la version actuellement installée (nom du type `mailcopilot-<current-version>-setup.exe.blockmap` sous Windows), ce qui indique au serveur quelle version est en cours d'exécution.
+
+Ce paramètre est **activé par défaut**. Aucun redémarrage n'est nécessaire : la désactivation arrête les nouvelles vérifications automatiques dès que vous enregistrez. Une vérification ou un téléchargement automatique que la bibliothèque de mise à jour a déjà lancé peut tout de même se terminer (un téléchargement commencé n'est pas annulé ; une vérification peut être en train de lire sa configuration, et elle retente plusieurs fois une connexion refusée). Il est aussi proposé sur l'écran du premier lancement, dans un bloc **Mises à jour** distinct de la question sur les diagnostics et indépendant de votre réponse à celle-ci. Les vérifications automatiques ne sont retenues que sur une installation entièrement neuve (un profil sans réponse antérieure à l'écran du premier lancement et sans compte de messagerie) : elles y attendent que l'écran du premier lancement soit validé, et le fermer sans répondre n'enregistre rien. Tous les profils existants continuent de vérifier, y compris celui qui doit répondre de nouveau à l'écran du premier lancement après une modification de l'information fournie. Le paramètre se trouve ici, dans **Paramètres → À propos**.
+
+En dehors de cela, lorsque cette option est désactivée, MailCopilot ne contacte jamais le serveur de mises à jour de lui-même : ni vérification au démarrage, ni vérification horaire. Vous pouvez toujours utiliser le bouton **Rechercher les mises à jour** ci-dessous à tout moment.
+
 ### Télécharger automatiquement les mises à jour en arrière-plan
 
 Lorsque cette option est activée, MailCopilot télécharge silencieusement les nouvelles versions au fur et à mesure de leur disponibilité. Une fois le téléchargement terminé, vous êtes invité à redémarrer l'application pour appliquer la mise à jour. Aucune action n'est nécessaire jusqu'à ce que vous soyez prêt à redémarrer.
@@ -41,9 +49,11 @@ Lorsque cette option est désactivée, MailCopilot vous informe qu'une mise à j
 
 Ce paramètre est **désactivé par défaut** (activation volontaire requise). Activez-le pour que MailCopilot télécharge les mises à jour sans intervention manuelle.
 
+Cette option n'a d'effet que lorsque **Rechercher les mises à jour en arrière-plan** est activé, car un téléchargement automatique est impossible sans vérification. Tant que la vérification en arrière-plan est désactivée, la case reste disponible et une note l'explique ; votre choix est conservé et s'applique de nouveau dès que la vérification en arrière-plan est réactivée. Dans cet état, une vérification manuelle qui trouve une mise à jour affiche le bouton **Télécharger**, et aucun nouveau téléchargement automatique ne démarre (un téléchargement déjà en cours peut tout de même se terminer).
+
 ### Rechercher les mises à jour
 
-Cliquez sur le bouton **Rechercher les mises à jour** pour déclencher manuellement une vérification à tout moment. Le bouton et la zone d'état reflètent l'état actuel du processus de mise à jour :
+Cliquez sur le bouton **Rechercher les mises à jour** pour déclencher manuellement une vérification à tout moment. Il fonctionne que la vérification en arrière-plan soit activée ou non, car un clic de votre part est une demande explicite. Le bouton et la zone d'état reflètent l'état actuel du processus de mise à jour :
 
 - **inactif** — le bouton **Rechercher les mises à jour** est visible et prêt à être utilisé.
 - **Vérification…** — une vérification des mises à jour est en cours ; le bouton est désactivé jusqu'à la fin de la vérification.

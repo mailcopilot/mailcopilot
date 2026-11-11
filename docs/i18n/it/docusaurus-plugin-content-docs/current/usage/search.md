@@ -57,3 +57,11 @@ Quando cerchi in una cartella specifica, MailCopilot può anche interrogare il s
 ## Classificazione per rilevanza
 
 I risultati sono classificati per rilevanza. Le corrispondenze nell'oggetto sono classificate più in alto rispetto a quelle nel corpo del messaggio.
+
+## Chiedere all'assistente IA sulla tua posta
+
+La ricerca trova i messaggi. Se preferisci porre una domanda con parole tue, usa l'assistente IA: apri il pannello della chat IA dalla barra laterale.
+
+- **Stessa cache e stesso indice.** Quando l'assistente cerca nella tua posta, usa la cache locale e l'indice di ricerca descritti in questa pagina, quindi tutto ciò che è scritto in [Completezza della ricerca](#completezza-della-ricerca) vale anche per le sue risposte: un messaggio non ancora indicizzato può sfuggire. Se l'indice di una casella consultata è ancora incompleto, una riga sotto la risposta lo segnala.
+
+Come funziona l'assistente, cosa invia al tuo provider IA e come contrassegna i link a messaggi che non ha ricevuto è descritto in [Assistente IA](../ai-assistant#aprire-il-pannello-ia).

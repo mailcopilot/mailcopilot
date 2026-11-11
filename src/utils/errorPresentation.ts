@@ -79,6 +79,18 @@ export function presentedError(translate: Translate, e: unknown): string {
   return translate(ERROR_PRESENTATION_I18N_KEYS[key])
 }
 
+/**
+ * Text that main stored, broadcast or returned from a connection test: if it
+ * opens with a vocabulary tag, show that tag's translated sentence; any other
+ * text (a server's own refusal reason, which is what the user needs for a 5xx)
+ * is returned unchanged. The tag is read only where the producer puts it
+ * (`readIpcFailureTag`), so server prose cannot forge it.
+ */
+export function presentedTaggedText(translate: Translate, text: string): string {
+  const tag = readIpcFailureTag(text)
+  return tag ? translate(ERROR_PRESENTATION_I18N_KEYS[tag.key]) : text
+}
+
 // ---------------------------------------------------------------------------
 // Telemetry side of the same boundary
 // ---------------------------------------------------------------------------
@@ -124,6 +136,8 @@ export type IpcFailureTag = {
 const IPC_FAILURE_NOISE_KEYS: ReadonlySet<ErrorPresentationKey> = new Set<ErrorPresentationKey>([
   'offline',
   'timeout',
+  'pre_greeting',
+  'delivery_unknown',
 ])
 
 /** True when the tagged failure is network state, not an app defect. */

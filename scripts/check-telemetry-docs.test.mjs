@@ -86,6 +86,9 @@ import {
   parseArgs,
 } from './check-telemetry-docs.mjs'
 
+/** Escape a literal for use inside a RegExp — backslash included. */
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
 const SCRIPT_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'check-telemetry-docs.mjs')
 
 /** Languages every synthetic tree claims to ship. Independent of the real repo. */
@@ -1292,7 +1295,7 @@ test('CLI: a name absent from the canonical page fails with that exact name', ()
   })
   assert.equal(res.status, 1)
   assert.match(res.stderr, /sync\.folder/)
-  assert.match(res.stderr, new RegExp(CANON_RELPATH.replace(/[./]/g, '\\$&')))
+  assert.match(res.stderr, new RegExp(escapeRegExp(CANON_RELPATH)))
   assert.match(res.stderr, /canonical page/)
   assert.doesNotMatch(res.stderr, /- app\.session_started/)
 })
@@ -1313,7 +1316,7 @@ test('CLI: a page that describes every name in prose instead of a table fails, a
     writeFileDeep(root, CANON_RELPATH, prosePage)
     const res = runCli(root)
     assert.equal(res.status, 1, `stdout: ${res.stdout}`)
-    for (const name of names) assert.match(res.stderr, new RegExp(name.replace(/\./g, '\\.')))
+    for (const name of names) assert.match(res.stderr, new RegExp(escapeRegExp(name)))
     // The message states the rule, not just the missing names.
     assert.match(res.stderr, /TABLE ENTRY/)
     assert.match(res.stderr, /whole content of the\nFIRST cell of a table row/)
@@ -1561,7 +1564,7 @@ test('CLI: the canonical page existing as a directory (unreadable as a file) fai
     mkdirSync(path.join(root, CANON_RELPATH))
     const res = runCli(root)
     assert.equal(res.status, 1)
-    assert.match(res.stderr, new RegExp(CANON_RELPATH.replace(/[./]/g, '\\$&')))
+    assert.match(res.stderr, new RegExp(escapeRegExp(CANON_RELPATH)))
     assert.match(res.stderr, /canonical/)
     assert.match(res.stderr, /fails closed/)
   } finally {
@@ -1641,7 +1644,7 @@ for (const name of TAG_NAMES_THAT_ARE_NOT_METRICS) {
       tags: TAG_NAMES_THAT_ARE_NOT_METRICS,
     })
     assert.equal(res.status, 1, `stdout: ${res.stdout}`)
-    assert.match(res.stderr, new RegExp(`- ${name.replace(/\./g, '\\.')}\\b`))
+    assert.match(res.stderr, new RegExp(`- ${escapeRegExp(name)}\\b`))
     assert.match(res.stderr, /only as a MENTION/)
     assert.match(res.stderr, /Tags column/)
     // The metrics that DO have entries are not dragged into the complaint.

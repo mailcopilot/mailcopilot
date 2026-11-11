@@ -253,10 +253,21 @@ const CSS_URL_RE = /url\(\s*(?:"((?:https?:)?\/\/[^"]+)"|'((?:https?:)?\/\/[^']+
  * {@link replaceExternalImages}.
  */
 function stripCssComments(css: string): string {
-  // Non-greedy match — CSS comments do not nest, so `.*?` with the `s`-like
-  // `[\s\S]` class is structurally safe. `u` flag kept off to match the rest
-  // of the file's regex conventions.
-  return css.replace(/\/\*[\s\S]*?\*\//g, '')
+  // CSS comments do not nest. One left-to-right pass with `indexOf`: the regex form
+  // (`/\/\*[\s\S]*?\*\//g`) rescanned to the end of the text from every `/*` of a body
+  // that never closes one, quadratic on attacker-controlled style text. An unterminated
+  // comment is left as it is, exactly as that regex left it.
+  let out = ''
+  let from = 0
+  for (;;) {
+    const open = css.indexOf('/*', from)
+    if (open < 0) break
+    const close = css.indexOf('*/', open + 2)
+    if (close < 0) break
+    out += css.slice(from, open)
+    from = close + 2
+  }
+  return from === 0 ? css : out + css.slice(from)
 }
 
 /**
@@ -483,6 +494,131 @@ export function replaceExternalImages(html: string, urlToReplacement: Record<str
   }
 
   return serializeBody(doc)
+}
+
+const CID_PREFIX_RE = /^\s*cid:/i
+
+const isCssSpace = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f'
+
+function skipCssSpace(css: string, from: number): number {
+  let i = from
+  while (i < css.length && isCssSpace(css[i])) i++
+  return i
+}
+
+/** `css` has `needle` (lowercase ASCII) at `at`, compared case-insensitively, without lowercasing the whole string. */
+function hasAsciiPrefixAt(css: string, at: number, needle: string): boolean {
+  if (at < 0 || at + needle.length > css.length) return false
+  for (let k = 0; k < needle.length; k++) {
+    let c = css.charCodeAt(at + k)
+    if (c >= 65 && c <= 90) c += 32
+    if (c !== needle.charCodeAt(k)) return false
+  }
+  return true
+}
+
+/**
+ * Replace each `url( ... cid:... )` token of a piece of CSS with `url("<placeholder>")`.
+ *
+ * A single left-to-right scan, no regular expression: the text is attacker-controlled and two
+ * regex forms of this (`[^)]*`, then `[^()]*` before a shared `\s*`) were each quadratic on a
+ * different hostile input (a body of `url(cid:` never closed, or `url(cid:` plus a long run of
+ * spaces and a `(`). Here every start scans forward only up to the next quote or paren, and a
+ * start that does not match resumes right after its own `url(`, so the work is linear.
+ * An unquoted url ends at `)`, a quoted one at its closing quote plus `)`; a url the value never
+ * closes is still a url token to the CSS parser (it ends with the value), so end of input closes it.
+ */
+function blockCssCidUrls(css: string, onBlocked: () => void): string {
+  const n = css.length
+  let out = ''
+  let copied = 0
+  let from = 0
+  for (;;) {
+    let open = -1
+    for (let i = from; i + 4 <= n; i++) {
+      if (hasAsciiPrefixAt(css, i, 'url(')) { open = i; break }
+    }
+    if (open < 0) break
+    from = open + 4
+    let j = skipCssSpace(css, from)
+    const quote = css[j] === '"' || css[j] === "'" ? css[j]! : ''
+    if (quote) j = skipCssSpace(css, j + 1)
+    if (!hasAsciiPrefixAt(css, j, 'cid:')) continue
+    let end: number
+    if (quote) {
+      const close = css.indexOf(quote, j)
+      end = close < 0 ? n : skipCssSpace(css, close + 1)
+      if (end < n) {
+        if (css[end] !== ')') continue
+        end++
+      }
+    } else {
+      end = j
+      while (end < n && css[end] !== '(' && css[end] !== ')') end++
+      if (end < n) {
+        if (css[end] === '(') continue
+        end++
+      }
+    }
+    out += css.slice(copied, open) + `url("${BLOCKED_IMAGE_PLACEHOLDER_DATA_URI}")`
+    copied = end
+    from = end
+    onBlocked()
+  }
+  return out + css.slice(copied)
+}
+
+/**
+ * Replace every `cid:` image reference that is STILL in the (sanitized) body
+ * with the blocked-image placeholder.
+ *
+ * `replaceCidImages` only knows the `Content-ID`s of parts it was given. A body
+ * can point at one that was not given: no such part in the message (the sender's client
+ * dropped the part, the reference is a typo) or one past the inlining ceiling
+ * (never fetched), and such a reference used to stay `cid:` in the iframe, where
+ * the browser drew its own broken-image icon next to the `alt` text instead of
+ * the placeholder every other image that does not arrive ends as. Same positions
+ * as the external-image pass: `src` and `srcset`, inline `style`, `<style>` text.
+ * Text that only mentions `cid:` is not a URL position and is left alone, and a
+ * body with nothing to change comes back byte-identical.
+ */
+export function blockUnresolvedCidImages(html: string): string {
+  if (!html || !/cid:/i.test(html)) return html
+  const doc = parseHtmlDocument(html)
+  if (!doc.querySelectorAll) return html
+  let changed = false
+
+  const blockCss = (css: string): string => blockCssCidUrls(css, () => { changed = true })
+
+  for (const el of Array.from(doc.querySelectorAll('*')) as Element[]) {
+    const src = el.getAttribute('src')
+    if (src && CID_PREFIX_RE.test(src)) {
+      el.setAttribute('src', BLOCKED_IMAGE_PLACEHOLDER_DATA_URI)
+      changed = true
+    }
+    const srcset = el.getAttribute('srcset')
+    if (srcset && /cid:/i.test(srcset)) {
+      el.setAttribute('srcset', srcset.split(',').map(entry => {
+        const trimmed = entry.trim()
+        if (!CID_PREFIX_RE.test(trimmed)) return entry
+        const spaceIdx = trimmed.search(/\s/)
+        changed = true
+        return spaceIdx === -1 ? BLOCKED_IMAGE_PLACEHOLDER_DATA_URI : `${BLOCKED_IMAGE_PLACEHOLDER_DATA_URI}${trimmed.slice(spaceIdx)}`
+      }).join(','))
+    }
+    const style = el.getAttribute('style')
+    if (style && /cid:/i.test(style)) {
+      const next = blockCss(stripCssComments(style))
+      if (next !== style) el.setAttribute('style', next)
+    }
+  }
+  for (const styleEl of Array.from(doc.querySelectorAll('style')) as Element[]) {
+    const text = styleEl.textContent || ''
+    if (!/cid:/i.test(text)) continue
+    const next = blockCss(stripCssComments(text))
+    if (next !== text) styleEl.textContent = next
+  }
+  return changed ? serializeBody(doc) : html
 }
 
 /**

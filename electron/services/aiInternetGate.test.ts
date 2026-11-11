@@ -76,13 +76,29 @@ function makeGate(): InternetGate {
 }
 
 describe('isInternetTool', () => {
-  it('matches the catalogue (Claude prefixed + Vercel bare + built-ins)', () => {
-    expect(isInternetTool('WebSearch')).toBe(true)
-    expect(isInternetTool('WebFetch')).toBe(true)
+  it('matches the locally-executed egress catalogue (prefixed + Vercel bare)', () => {
     expect(isInternetTool('mcp__mailcopilot__list_external_tools')).toBe(true)
     expect(isInternetTool('mcp__mailcopilot__call_external_tool')).toBe(true)
     expect(isInternetTool('list_external_tools')).toBe(true)
     expect(isInternetTool('call_external_tool')).toBe(true)
+  })
+
+  // §2.283 — provider-executed tools are deliberately NOT in this catalogue.
+  // Anthropic runs `web_search` / `web_fetch` inside its own /v1/messages call,
+  // so the interceptor is never reached for them and claiming otherwise would
+  // advertise a gate that cannot run. Their gate is the request-build-time
+  // decision in `streamAnthropicChat` (declared only when egress is already
+  // permitted); their audit row comes from `recordProviderExecutedEgress`.
+  // Pinned in the NEGATIVE so a future edit cannot quietly add them here and
+  // leave everyone believing they are intercepted.
+  it('does NOT claim to intercept the provider-executed web tools', () => {
+    expect(isInternetTool('web_search')).toBe(false)
+    expect(isInternetTool('web_fetch')).toBe(false)
+  })
+
+  it('no longer matches the removed Claude Agent SDK built-ins', () => {
+    expect(isInternetTool('WebSearch')).toBe(false)
+    expect(isInternetTool('WebFetch')).toBe(false)
   })
 
   it('does not match other tool names', () => {

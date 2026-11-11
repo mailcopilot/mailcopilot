@@ -44,6 +44,21 @@ The shortcuts below follow the **Gmail** preset (the default). You can switch to
 | **p** | Pin / unpin message |
 | **Ctrl+P** | Print message |
 
+## Inside a Conversation
+
+When you open a conversation with more than one message, the cards it is made of get their own keyboard shortcuts. While a conversation is open this way, **j** / **k** stop moving the message list and instead move a cursor between its cards, and **r** / **a** / **f** act on whichever card the cursor is on rather than the message you have open.
+
+| Shortcut | Action |
+|----------|--------|
+| **j** / **k** | Next / previous message in the conversation |
+| **Enter** / **Space** | Expand / collapse the focused message |
+| **r** | Reply to the focused message |
+| **a** | Reply all to the focused message |
+| **f** | Forward the focused message |
+| **Escape** | Leave conversation navigation (**j** / **k** return to moving the message list) |
+
+**↑** / **↓** are not captured here -- they keep moving the message list even while a conversation is open, so you can browse other conversations without first pressing **Escape**. None of the shortcuts above fire while you are typing in a text field or a dialog is open.
+
 ## AI
 
 | Shortcut | Action |

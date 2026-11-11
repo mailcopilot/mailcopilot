@@ -6,7 +6,7 @@ title: Politica de Privacidad
 # Politica de Privacidad
 
 **Fecha de entrada en vigor:** 13 de febrero de 2026
-**Ultima actualizacion:** 13 de febrero de 2026
+**Ultima actualizacion:** 4 de noviembre de 2026
 
 ## 1. Introduccion
 
@@ -143,7 +143,7 @@ Especificamente:
 
 ## 7. Google OAuth 2.0
 
-Cuando conecta una cuenta de Gmail, MailCopilot utiliza Google OAuth 2.0 con PKCE (RFC 7636) para obtener acceso. Solicitamos los siguientes permisos:
+Cuando conecta una cuenta de Gmail mediante el inicio de sesión de Google, MailCopilot utiliza Google OAuth 2.0 con PKCE (RFC 7636) para obtener acceso. En la compilación oficial de MailCopilot, el inicio de sesión de Google ya no se ofrece para los buzones nuevos de Gmail (estos se conectan con una contraseña de aplicación mediante IMAP/SMTP); sigue disponible para los buzones que ya lo utilizan y para las compilaciones hechas a partir del código fuente con su propio cliente de Google. Cuando se utiliza el inicio de sesión de Google, solicitamos los siguientes permisos:
 
 | Permiso | Proposito |
 |---|---|
@@ -196,7 +196,11 @@ Implementamos las siguientes medidas de seguridad:
 
 ## 12. Actualizaciones automaticas
 
-MailCopilot busca actualizaciones periodicamente. Los metadatos de actualizacion (numero de version, hash del archivo) se descargan de nuestro repositorio de versiones. **No se envian datos personales** durante la verificacion de actualizaciones. Puede desactivar las verificaciones automaticas de actualizacion en Configuracion.
+MailCopilot busca actualizaciones en segundo plano: al iniciarse y después aproximadamente una vez por hora. Una búsqueda de actualizaciones es una solicitud HTTPS normal a nuestro servidor de actualizaciones para obtener un pequeño archivo de metadatos (número de versión y hash del archivo). Como en cualquier solicitud web, el servidor ve su dirección IP y, por el nombre del archivo solicitado, el tipo de su sistema operativo y la arquitectura de su procesador. La propia búsqueda no envía la versión de MailCopilot que usa (la aplicación compara las versiones localmente), y no se incluye correo, datos de cuentas ni datos de uso. La solicitud lleva únicamente cabeceras HTTP normales, como un agente de usuario genérico. Una cabecera de compatibilidad que la biblioteca de actualización usa para los despliegues escalonados se envía con un valor fijo de ceros, idéntico para todas las instalaciones, por lo que no identifica nada. La descarga de una actualización es distinta: sí revela versiones, porque los nombres de los archivos solicitados contienen números de versión y, cuando se usa una descarga diferencial, la solicitud del archivo block map de la versión instalada actualmente (con un nombre como `mailcopilot-<current-version>-setup.exe.blockmap` en Windows) indica al servidor qué versión se está ejecutando.
+
+Usted decide si esto ocurre. **Buscar actualizaciones en segundo plano** está activada de forma predeterminada y se puede desactivar en Configuración → Acerca de → Actualizaciones, o en la pantalla del primer inicio. No hace falta reiniciar: al desactivarla, las nuevas búsquedas automáticas se detienen en cuanto guarda. Una búsqueda o una descarga automática que la biblioteca de actualización ya haya iniciado aún puede completarse (una descarga ya comenzada no se cancela; una búsqueda puede estar a mitad de la lectura de su configuración y reintenta varias veces una conexión rechazada). Aparte de eso, cuando está desactivada, MailCopilot nunca contacta por sí mismo con el servidor de actualizaciones: ni búsqueda al iniciar ni búsqueda cada hora. El botón **Buscar actualizaciones** sigue funcionando, porque al pulsarlo usted hace una solicitud explícita. Una nueva descarga automática no puede iniciarse sin una búsqueda, de modo que la opción «Descargar automáticamente las actualizaciones en segundo plano» no tiene efecto mientras la búsqueda en segundo plano esté desactivada. En una instalación completamente nueva (un perfil sin respuesta anterior a la pantalla del primer inicio y sin cuenta de correo), MailCopilot no envía ninguna solicitud automática de actualización hasta que usted haya respondido a esa pantalla; cerrarla sin responder no registra nada, así que la espera continúa. Todos los perfiles existentes siguen buscando, incluido uno al que se le vuelve a mostrar la pantalla del primer inicio tras un cambio en la información proporcionada.
+
+En Windows, el instalador muestra, antes de los pasos de instalación, una página con un aviso de privacidad (un breve resumen con un enlace a esta política) en el idioma del instalador (inglés, ruso, francés, alemán, español o italiano; con otros idiomas del instalador se muestra en inglés). Debe aceptarlo para continuar. Esta página no se muestra en las instalaciones silenciosas ni en las actualizaciones automáticas. Los paquetes de Linux y macOS no tienen página de instalador; para ellos, la pantalla del primer inicio y Configuración son los lugares donde se presentan esta información y la opción.
 
 ## 13. Privacidad de los menores
 

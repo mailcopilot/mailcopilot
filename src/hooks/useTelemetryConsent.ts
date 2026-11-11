@@ -112,6 +112,11 @@ export interface UseTelemetryConsentReturn {
   /** Record the user's answer. `false` is produced by the "don't allow" button
    *  AND by Escape — the two are the same code path, so they cannot diverge. */
   decide: (granted: boolean) => void
+  /** The background update check option shown on the screen. Independent of the
+   *  diagnostics answer: neither button changes it, and Escape sends whatever
+   *  it currently shows. */
+  updateCheckEnabled: boolean
+  setUpdateCheckEnabled: (next: boolean) => void
   /** How many `telemetry:consentState` attempts have been started (§2.236
    *  AC1(c)). Surfaced so the retry is observable from outside the hook —
    *  `src/Root.tsx` mirrors it onto `<html>`, which makes "we had to ask twice"
@@ -146,6 +151,7 @@ export interface UseTelemetryConsentOptions {
  */
 interface ConsentStateReply {
   needed: boolean
+  updateCheckEnabled?: boolean
 }
 
 /** Why an attempt produced no answer. Closed set — the only thing about a
@@ -156,7 +162,7 @@ interface ConsentStateReply {
 type ConsentUnavailableReason = 'no_bridge' | 'rejected' | 'malformed' | 'timeout'
 
 export type ConsentStateRead =
-  | { kind: 'answer'; needed: boolean }
+  | { kind: 'answer'; needed: boolean; updateCheckEnabled: boolean | undefined }
   | { kind: 'unavailable'; reason: ConsentUnavailableReason; error?: unknown }
 
 /**
@@ -178,7 +184,15 @@ export function parseConsentReply(payload: unknown): ConsentStateRead {
   if (!payload || typeof payload !== 'object') return { kind: 'unavailable', reason: 'malformed' }
   const needed = (payload as Partial<ConsentStateReply>).needed
   if (typeof needed !== 'boolean') return { kind: 'unavailable', reason: 'malformed' }
-  return { kind: 'answer', needed }
+  // Display default only, never validated: the update option's initial position
+  // must not be able to turn a well-formed `needed` into "could not determine"
+  // (same reasoning as the narrowing note on `ConsentStateReply`). The option is
+  // on unless main says it is off — that is the product default.
+  // `undefined` = main did not report a value (it could not read the settings).
+  // Kept apart from `true` so that the display default is never written back as
+  // if it were the stored setting (see `decide`).
+  const reported = (payload as Partial<ConsentStateReply>).updateCheckEnabled
+  return { kind: 'answer', needed, updateCheckEnabled: typeof reported === 'boolean' ? reported : undefined }
 }
 
 /** The `ok: false` reasons main can answer `telemetry:setConsent` with
@@ -301,6 +315,17 @@ export function useTelemetryConsent(options?: UseTelemetryConsentOptions): UseTe
   const [phase, setPhase] = useState<TelemetryConsentPhase>('checking')
   const [attempts, setAttempts] = useState(0)
   const [submitting, setSubmitting] = useState(false)
+  const [updateCheckEnabled, setUpdateCheckEnabledState] = useState(true)
+  // The click handlers read the latest value through a ref, so Escape (bound
+  // once per phase) sends what the option shows now, not what it showed then.
+  // `undefined` = neither main reported a value nor did the user toggle the
+  // option: the field is then left out of `telemetry:setConsent`, so the stored
+  // value stays as it is.
+  const updateCheckRef = useRef<boolean | undefined>(undefined)
+  const setUpdateCheckEnabled = useCallback((next: boolean) => {
+    updateCheckRef.current = next
+    setUpdateCheckEnabledState(next)
+  }, [])
   // Synchronous re-entry latch: `submitting` only becomes observable after a
   // render, so a double click (or Escape while a click is in flight) would
   // otherwise send two `telemetry:setConsent` payloads.
@@ -325,7 +350,7 @@ export function useTelemetryConsent(options?: UseTelemetryConsentOptions): UseTe
      * `needed: true` must still ask, not be discarded because a stopwatch ran
      * out first.
      */
-    const applyAnswer = (needed: boolean, attempt: number, elapsedMs: number) => {
+    const applyAnswer = (needed: boolean, updateCheck: boolean | undefined, attempt: number, elapsedMs: number) => {
       if (cancelled || settled) return
       if (gaveUp) {
         // Deliberately NOT applied. `<App/>` is already mounted at this point
@@ -343,6 +368,8 @@ export function useTelemetryConsent(options?: UseTelemetryConsentOptions): UseTe
       // its own half (§2.236 retired), so this line stands alone rather than
       // bracketing anything.
       logConsent('info', 'consentState answered', { attempt, elapsedMs, needed })
+      updateCheckRef.current = updateCheck
+      setUpdateCheckEnabledState(updateCheck ?? true)
       setPhase(needed ? 'required' : 'resolved')
     }
 
@@ -357,7 +384,7 @@ export function useTelemetryConsent(options?: UseTelemetryConsentOptions): UseTe
       const read = readConsentState().then(result => {
         const elapsedMs = Date.now() - attemptStartedAt
         if (result.kind === 'answer') {
-          applyAnswer(result.needed, attempt, elapsedMs)
+          applyAnswer(result.needed, result.updateCheckEnabled, attempt, elapsedMs)
           return 'answered' as const
         }
         // Closed reason enum only — never the error's text (module header).
@@ -433,9 +460,13 @@ export function useTelemetryConsent(options?: UseTelemetryConsentOptions): UseTe
         if (typeof invoke !== 'function') {
           notRecorded('no_bridge')
         } else {
-          // `granted` is the entire payload: main stamps the disclosure version
-          // and the timestamp itself, and rejects anything else (strict schema).
-          const ack = parseSetConsentReply(await window.api.invoke('telemetry:setConsent', { granted }))
+          // `granted` and the update option are the entire payload: main stamps
+          // the disclosure version and the timestamp itself, and rejects
+          // anything else (strict schema).
+          const ack = parseSetConsentReply(await window.api.invoke('telemetry:setConsent', {
+            granted,
+            ...(updateCheckRef.current === undefined ? {} : { updateCheckEnabled: updateCheckRef.current }),
+          }))
           if (ack.kind === 'recorded') {
             outcome = 'resolved'
             // AC1(b) — the other half of the handshake, with the same latency
@@ -476,7 +507,7 @@ export function useTelemetryConsent(options?: UseTelemetryConsentOptions): UseTe
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [phase, decide])
 
-  return { phase, submitting, decide, attempts }
+  return { phase, submitting, decide, attempts, updateCheckEnabled, setUpdateCheckEnabled }
 }
 
 /**

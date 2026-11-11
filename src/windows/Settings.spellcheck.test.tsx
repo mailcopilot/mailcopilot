@@ -27,6 +27,8 @@
  *     `undefined`), which is what lets main tell "no change requested" apart
  *     from "check nothing" (`Array.isArray` on the main side).
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
@@ -297,5 +299,28 @@ describe('§2.103 Settings — an accepted save', () => {
     fireEvent.click(screen.getByTestId('settings-save'))
     await waitFor(() => expect(closeSpy).toHaveBeenCalled())
     expect(screen.queryByTestId('settings-spellcheck-declined')).toBeNull()
+  })
+})
+
+describe('spell-checking notes are separate lines, not one run-on sentence', () => {
+  it('"none chosen" and "up to N" render as two distinct block-styled elements', async () => {
+    await mountGeneralTab({
+      ...BASE,
+      spellcheckEnabled: true,
+      spellcheckLanguages: [],
+      spellcheckAvailable: { languages: ['en-US'], platformOwned: false, max: 8, at: 'now' },
+    })
+    const none = screen.getByTestId('settings-spellcheck-none')
+    const limit = screen.getByTestId('settings-spellcheck-limit')
+    expect(none).not.toBe(limit)
+    expect(none.textContent).toBe('settings.spellcheck.none')
+    expect(limit.textContent).toBe('settings.spellcheck.limit')
+    // Adjacent siblings: without a block display they would be glued together.
+    expect(none.nextElementSibling).toBe(limit)
+    for (const el of [none, limit]) expect(el).toHaveClass('settings-spellcheck-hint')
+
+    // jsdom does not load App.css, so pin the rule that makes the class mean "own line".
+    const css = readFileSync(join(__dirname, '..', 'App.css'), 'utf8')
+    expect(css).toMatch(/\.window-container \.hint\.settings-spellcheck-hint \{[^}]*display:\s*block/)
   })
 })

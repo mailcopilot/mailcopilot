@@ -95,9 +95,10 @@
       "sync": "Sync error: {{error}}",
       "load": "Load error: {{error}}",
       "loadMessage": "Message load error: {{error}}",
+      "sourceNotFound": "This message is no longer available.",
       "bodyNotAvailableOffline": "Message body is not available offline. Only headers are cached.",
       "bodyLoadTimedOut": "The message did not load within the time allowed. That can happen when background work is using the connection, when the server is slow, or when the message is very large. You can try again.",
-      "bodyLoadFailed": "MailCopilot could not load the body of this message — only its headers are shown. You can try again.",
+      "bodyLoadFailed": "MailCopilot could not load the body of this message, so only its headers are shown. You can try again.",
       "delete": "Delete error: {{error}}",
       "archive": "Archive error: {{error}}",
       "search": "Search error: {{error}}",
@@ -113,6 +114,9 @@
         "offline": "No connection to the mail server. MailCopilot will keep retrying.",
         "timeout": "The mail server did not respond in time. MailCopilot will keep retrying.",
         "auth": "Sign-in was rejected. Check the account password, or re-authorize the account in Settings.",
+        "starttls_required": "The server does not offer an encrypted connection (STARTTLS), so MailCopilot sent no password or message. Check the port and security settings, or contact the mail provider.",
+        "pre_greeting": "Could not reach the mail server before it responded. This often means the network or a VPN blocks outgoing mail ports. Check your connection or VPN settings and try again.",
+        "delivery_unknown": "The connection to the mail server broke before the send was confirmed, so it is not known whether the message went out. If you send it again, the recipient may receive it twice.",
         "unknown": "Could not complete the request. Please try again."
       }
     },
@@ -151,8 +155,8 @@
       "dismiss": "Dismiss"
     },
     "accountAuth": {
-      "message": "“{{account}}” is not receiving mail — its sign-in has expired. Sign in again to resume syncing.",
-      "messageNoAccount": "A mailbox is not receiving mail — its sign-in has expired. Sign in again to resume syncing.",
+      "message": "“{{account}}” is not receiving mail: its sign-in has expired. Sign in again to resume syncing.",
+      "messageNoAccount": "A mailbox is not receiving mail: its sign-in has expired. Sign in again to resume syncing.",
       "action": "Sign in again"
     },
     "certRecovery": {
@@ -167,26 +171,37 @@
       "copyFingerprint": "Copy the SHA-256 fingerprint",
       "copied": "Copied",
       "detailsLabel": "Details",
+      "reason": {
+        "expired": "The server’s certificate has expired.",
+        "notYetValid": "The server’s certificate is not valid yet. Check that your computer’s date and time are correct.",
+        "selfSigned": "The certificate is self-signed, so it was not issued by a certificate authority this device trusts.",
+        "unknownIssuer": "The certificate was issued by an authority this device does not trust, or the server did not send the full certificate chain.",
+        "nameMismatch": "The certificate was issued for a different server name than the one you are connecting to.",
+        "revoked": "The certificate has been revoked by its issuer.",
+        "pinMismatch": "The server’s certificate differs from the one you confirmed earlier.",
+        "untrusted": "The certificate chain cannot be verified or is not trusted.",
+        "unknown": "The server’s certificate could not be verified."
+      },
       "interception": "It looks like this connection is being inspected by an antivirus or proxy ({{issuer}}).",
       "trust": "Trust and continue",
       "readCertificate": "Read the certificate",
       "trusting": "Trusting…",
-      "trustingHint": "Checking the server’s certificate — this can take a few seconds.",
+      "trustingHint": "Checking the server’s certificate. This can take a few seconds.",
       "reprobing": "Checking…",
       "cancel": "Cancel",
       "dismissing": "Dismissing…",
       "review": {
         "fetched": "These details were read from the server just now. Check them and confirm only if they are what you expect.",
-        "updated": "The server’s certificate changed after this window opened, so nothing was trusted. Below is the certificate the server presents right now — check it and confirm only if you expected the change."
+        "updated": "The server’s certificate changed after this window opened, so nothing was trusted. Below is the certificate the server presents right now. Check it and confirm only if you expected the change."
       },
       "error": {
         "trustFailed": "Could not save trust for this certificate. Please try again.",
-        "trustFingerprintMismatch": "The server’s certificate changed after this window opened, so nothing was trusted — and the new certificate could not be read. Trusting is unavailable.",
+        "trustFingerprintMismatch": "The server’s certificate changed after this window opened, so nothing was trusted, and the new certificate could not be read. Trusting is unavailable.",
         "trustPinWriteFailed": "Could not remember this certificate as trusted. Please try again.",
         "trustNotOffered": "This warning is out of date, so the confirmation was not accepted. Close it and wait for the next warning about this server.",
         "reprobeFailed": "Could not read the certificate from the server. Trusting is unavailable.",
         "dismissFailed": "Could not dismiss this prompt. Please try again.",
-        "dismissNotPending": "This warning is no longer current — you can close it."
+        "dismissNotPending": "This warning is no longer current. You can close it."
       },
       "notice": {
         "message": "The connection to {{host}} is being inspected.",
@@ -296,7 +311,7 @@
     "stdioWarning": "Stdio MCP servers launch local child processes with your user privileges. They can read files, access the network, and run further commands. Enabling requires a native confirmation dialog.",
     "stdioEnabled": "Stdio MCP is enabled. Each connection still needs its own approval below.",
     "requestStdioEnable": "Enable stdio MCP…",
-    "needsApproval": "Needs approval — review command and args before connecting",
+    "needsApproval": "Needs approval: review command and args before connecting",
     "approved": "Approved",
     "approve": "Approve…",
     "env": "Environment variables",
@@ -310,7 +325,7 @@
     "connecting": "Connecting",
     "disconnected": "Disconnected",
     "error": "Error",
-    "testSuccess": "OK — {{count}} tools",
+    "testSuccess": "OK, {{count}} tools",
     "saveError": {
       "forbiddenEnvKey": "Environment variable {{keys}} is not allowed for security reasons.",
       "unapprovedCommand": "This command is not in the built-in allowlist. Contact support to request its addition.",
@@ -383,20 +398,17 @@
       "targetLabel": "Translate into",
       "sourceLabel": "Language of the original",
       "sourcePlaceholder": "Choose a language",
-      "sourceOffer": "The language of the original could not be identified, so the translation above is not labelled with it. Naming it is optional: it updates the label and reuses the translation already produced, without asking the provider for a new one.",
-      "sourceApply": "Update the label",
-      "sourceRestate": "Not the right language?",
-      "sourceRestateHint": "State the language of the original yourself. It only changes the label above: the translation you are reading stays as it is and is reused, without asking the provider for a new one.",
-      "produced": "Machine translation into {{target}}. The original is one click away.",
-      "producedFrom": "Machine translation from {{source}} into {{target}}. The original is one click away.",
-      "textProjection": "Translated from the plain-text version of the message, so its formatting and images are not part of the translation.",
+      "sourceApply": "Apply",
+      "sourceRestate": "Set the original language",
+      "produced": "Translated into {{target}}",
+      "producedFrom": "Translated from {{source}} into {{target}}",
       "refusal": {
         "budget": "The AI budget for this period is used up. Raise it in Settings → AI, or wait for the next period.",
         "no_provider": "No AI provider is set up yet. Add one in Settings → AI.",
-        "provider_error": "The AI provider did not return a translation, and did not say why. Another attempt sends the message to the provider again.",
-      "answer_too_long": "The translation does not fit within the AI provider's answer limit, so it came back cut off and is not shown. Another attempt would end the same way: neither this message nor the limit has changed.",
+        "provider_error": "The AI provider did not return a translation. Try again.",
+        "answer_too_long": "The translation did not fit in the provider's answer limit and is not shown. Trying again gives the same result.",
         "empty_input": "There is no downloaded text for this message yet. Try again once the message has loaded.",
-        "too_long": "This message is too long to translate in one go, and there is no way to translate only part of it — the whole message counts towards the limit, including any earlier correspondence quoted inside it.",
+        "too_long": "This message is too long to translate.",
         "opt_out": "Translation is turned off for this account. Turn it on in Settings → AI → Translate messages."
       },
       "languages": {
@@ -421,7 +433,7 @@
     "parseCap": {
       "hard": {
         "title": "This message is too large to open",
-        "body": "It is larger than {{limit}}, the most MailCopilot can safely read, so its text and attachments were not opened. The message itself is untouched on the server — you can open it in another mail app."
+        "body": "It is larger than {{limit}}, the most MailCopilot can safely read, so its text and attachments were not opened. The message itself is untouched on the server. You can open it in another mail app."
       },
       "soft": {
         "banner": "Only the beginning of this message is shown.",
@@ -439,7 +451,7 @@
       "warningIdnSimple": "The domain uses IDN/punycode: {{ascii}}.",
       "warningHttp": "The link uses http (not encrypted).",
       "warningMismatch": "The link text shows {{shown}}, but it actually goes to {{real}}.",
-      "warningRawExternalLink": "This link bypassed the standard URL rewriter — proceed only if you trust the source."
+      "warningRawExternalLink": "This link bypassed the standard URL rewriter. Proceed only if you trust the source."
     },
     "attachments": {
       "download": "Download attachment",
@@ -496,7 +508,8 @@
     "pinned": "Pinned",
     "print": "Print",
     "context": {
-      "selected": "{{count}} messages selected"
+      "selected": "{{count}} messages selected",
+      "copyAddress": "Copy address"
     }
   },
   "settings": {
@@ -603,10 +616,10 @@
     "spellcheck": {
       "title": "Spell checking",
       "enabled": "Check spelling as I type",
-      "hint": "Off by default. Turning on a language downloads its dictionary from an outside server, and MailCopilot asks you first — every time a new language is added.",
+      "hint": "Off by default. Turning on a language downloads its dictionary from an outside server, and MailCopilot asks you first for every new language.",
       "languagesLabel": "Dictionaries",
       "addLanguage": "Add a language…",
-      "none": "No dictionaries chosen — spell checking stays off.",
+      "none": "No dictionaries chosen, so spell checking stays off.",
       "remove": "Remove",
       "macOwned": "macOS checks spelling with its own dictionaries, chosen in System Settings → Keyboard → Text Input. MailCopilot cannot change that list, and nothing is downloaded.",
       "unavailable": "This build reports no spelling dictionaries.",
@@ -616,7 +629,7 @@
       "enabled": "Show tray icon",
       "closeToTray": "Close window to tray",
       "launchAtLogin": "Launch at login",
-      "linuxNoTrayNote": "Some Linux desktops draw no tray icon. The window still hides — launch MailCopilot again to bring it back.",
+      "linuxNoTrayNote": "Some Linux desktops draw no tray icon. The window still hides; launch MailCopilot again to bring it back.",
       "launchAtLoginUnsupported": "This build or platform cannot register autostart, so the setting has no effect here.",
       "launchAtLoginFailed": "Autostart could not be registered. It will be retried the next time you save.",
       "launchAtLoginDisableFailed": "Autostart could not be removed, so the app will still launch at login. This will be retried the next time you save."
@@ -690,7 +703,7 @@
       "loadFailed": "Failed to load folders: {{error}}",
       "noAccount": "Connect an account to configure folders",
       "onlyInbox": "Only INBOX is visible on the server. Create the folders you need, then select them here.",
-      "notSet": "— not set —",
+      "notSet": "Not set",
       "auto": "Auto: {{path}}",
       "create": "Create",
       "createNew": "Create new folder...",
@@ -759,9 +772,9 @@
       "conditions": "Conditions",
       "actions": "Actions",
       "field": {
-        "from_address": "From — address",
-        "from_name": "From — display name",
-        "from": "From — name or address (legacy)",
+        "from_address": "From: address",
+        "from_name": "From: display name",
+        "from": "From: name or address (legacy)",
         "to": "To",
         "cc": "CC",
         "subject": "Subject",
@@ -801,20 +814,20 @@
       "addCondition": "Add condition",
       "addAction": "Add action",
       "folderPlaceholder": "Folder name",
-      "moveFolderRequired": "Name the folder to move mail into — the rule cannot be saved without it.",
+      "moveFolderRequired": "Name the folder to move mail into. The rule cannot be saved without it.",
       "saveFailed": "Failed to save or apply the rule. Please try again.",
       "conditionField": "Condition field",
       "conditionOp": "Condition operator",
       "removeCondition": "Remove condition",
       "malformedBadge": "Cannot be applied",
       "refusedBadge": "Not applied",
-      "displayNameCaveat": "The display name is chosen by the sender and can be anyone's — rules that move, archive, delete or mark mail as spam have to match on the address instead.",
+      "displayNameCaveat": "The display name is chosen by the sender and can be anyone's. Rules that move, archive, delete or mark mail as spam have to match on the address instead.",
       "unsupportedFieldCaveat": "MailCopilot does not store “{{field}}”, so this condition can never be checked: the rule matches nothing and no longer runs. Remove the condition or match on another field.",
-      "unverifiableSenderCaveat": "This condition matches the display name, which the sender writes themselves and nobody checks, so it cannot justify “{{action}}”. Match on “{{suggestion}}” instead — otherwise the rule cannot be saved.",
+      "unverifiableSenderCaveat": "This condition matches the display name, which the sender writes themselves and nobody checks, so it cannot justify “{{action}}”. Match on “{{suggestion}}” instead, or the rule cannot be saved.",
       "saveRefused": "The rule was not saved. {{reason}}",
       "applyRefused": "The rule was saved, but not applied to existing mail. {{reason}}",
       "refusal": {
-        "malformedRule": "The rule is not written in a form MailCopilot can apply — some of its conditions or actions are incomplete. If an assistant set it up, ask it to create the rule again, or build the rule here in the editor.",
+        "malformedRule": "MailCopilot cannot apply this rule because some of its conditions or actions are incomplete. If an assistant set it up, ask it to create the rule again, or build the rule here in the editor.",
         "unsupportedField": "MailCopilot does not store the “{{field}}” field, so a condition on it can never be checked. Remove that condition or match on a field the client stores.",
         "unverifiableSender": "The condition “{{field}}” matches the display name, which the sender writes themselves and nobody checks, so it cannot justify “{{action}}”. Match on “{{suggestion}}” instead.",
         "unknown": "This rule cannot be evaluated as written."
@@ -844,7 +857,7 @@
       "website": "Website",
       "docs": "Documentation",
       "sentryEnabled": "Send diagnostics and usage data",
-      "sentryHint": "Includes crash reports, performance measurements, product usage events (which features are used, which AI provider and model, the estimated cost of a request) and a random install identifier that links your sessions. Message content, subjects and folder names are not collected: nothing that is sent is built from them, with one exception — when a quick action turns a draft down as too long, that refusal is counted with one of six declared length bands, never the text and never its exact length. Addresses and file paths are removed automatically from the error text a mail server returns, wherever they can be recognised. The only address that is sent is the one you type into the feedback form below yourself, so that you can get a reply.",
+      "sentryHint": "Includes crash reports, performance measurements, product usage events (which features are used, which AI provider and model, the estimated cost of a request) and a random install identifier that links your sessions. Message content, subjects and folder names are not collected, and nothing that is sent is built from them, with one exception. When a quick action turns a draft down as too long, that refusal is counted with one of six declared length bands, never the text and never its exact length. Addresses and file paths are removed automatically from the error text a mail server returns, wherever they can be recognised. The only address that is sent is the one you type into the feedback form below yourself, so that you can get a reply.",
       "sentryConsentPending": "Diagnostics stay off until the consent question is answered. MailCopilot asks once on the next start; this switch has no effect before then.",
       "debugLogging": "Enable debug logging",
       "debugLoggingHint": "Writes detailed logs to a file for troubleshooting. Logs are stored locally and never sent automatically.",
@@ -868,6 +881,9 @@
         "title": "Updates",
         "autoDownload": "Automatically download updates in the background",
         "autoDownloadHint": "When enabled, new versions download silently and prompt you to restart. When disabled, you choose to download every update.",
+        "checkEnabled": "Check for updates in the background",
+        "checkEnabledHint": "About once an hour, MailCopilot asks our update server whether a new version exists. It is an ordinary HTTPS request: the server sees your IP address and the type of your operating system and processor, and nothing about your mail, accounts or usage. When this is off, MailCopilot starts no new checks on its own (one already under way may still finish). Use “Check for updates” when you want to.",
+        "autoDownloadNeedsCheck": "Background checks are off, so no new automatic download starts (one already under way may still finish). Updates are found only when you click “Check for updates”, and you choose whether to download them. This setting applies again when background checks are turned on.",
         "cannotSelfUpdateHint": "The folder that holds the app is not writable, so updates can't be installed in place. Download the new version manually, or move the app to a folder you own.",
         "cannotSelfUpdateNoTarget": "This build can't replace itself in place (it isn't running as an AppImage or a system package). Download the new version manually from the website.",
         "cannotSelfUpdateUnknown": "This installation can't update itself automatically. Download the new version manually from the website.",
@@ -877,36 +893,41 @@
         "downloadVersion": "Download {{version}}",
         "downloadingPercent": "Downloading… {{percent}}%",
         "restartToInstall": "Restart to install",
-        "errorNetwork": "Network error — try again when you're online",
-        "errorPermission": "Permission denied — administrator required",
-        "errorUnknown": "Update failed — see logs for details",
+        "errorNetwork": "Network error. Try again when you're online",
+        "errorPermission": "Permission denied, administrator required",
+        "errorUnknown": "Update failed. See logs for details",
         "unsupportedDev": "Updates are disabled in this build"
       }
     }
   },
   "telemetryConsent": {
     "title": "Send diagnostic data?",
-    "intro": "MailCopilot can send diagnostic and usage data so that crashes and slowdowns can be found and fixed. It never contains the content of your mail, but it does include a random identifier for this installation, so it is not fully anonymous. Nothing is sent unless you choose to allow it. Your mail and the AI assistant work the same either way — if you decline, the feedback form in Settings becomes a link to our website.",
+    "intro": "MailCopilot can send diagnostic and usage data so that crashes and slowdowns can be found and fixed. It never contains the content of your mail, but it does include a random identifier for this installation, so it is not fully anonymous. Nothing is sent unless you choose to allow it. Your mail and the AI assistant work the same either way. If you decline, the feedback form in Settings becomes a link to our website.",
     "sentTitle": "If you allow it, MailCopilot sends:",
     "sent": {
       "errors": "Errors and crashes: the type of error and the stack trace showing where in the code it happened",
       "versions": "The MailCopilot version, your operating system and its version",
-      "performance": "How long operations took — mail synchronisation, search, sending, AI requests",
-      "usage": "Which features you used and how often — search, writing mail, AI, rules, templates, snoozing — plus the AI provider and model used and the estimated cost of a request",
-      "aiKeyStore": "Actions on the store where your AI keys are kept: which provider, whether the key was being read, saved or removed, and how it went — including whether a key was found there. The key itself is never sent.",
+      "performance": "How long operations took: mail synchronisation, search, sending, AI requests",
+      "usage": "Which features you used and how often (search, writing mail, AI, rules, templates, snoozing), plus the AI provider and model used and the estimated cost of a request",
+      "aiKeyStore": "Actions on the store where your AI keys are kept: which provider, whether the key was being read, saved or removed, and how it went, including whether a key was found there. The key itself is never sent.",
       "setup": "Basic setup facts: how many accounts you have, the kind of mail service (for example Gmail or Outlook), the sign-in method, the interface language and the theme",
       "installId": "A random identifier for this installation, created on first run. It is not tied to your email address, but it does link the data from your different sessions to the same installation."
     },
     "neverTitle": "MailCopilot never sends:",
     "never": {
-      "bodies": "Message bodies, subjects and your folder names are not collected: only the general kind of folder, such as Inbox or Trash, appears in the data, and nothing we send is built from your text — with one narrow exception. When a quick action in the compose window turns a draft down for being longer than it accepts, that refusal is counted together with one of six declared size bands, such as 8k–12k characters: not the length itself, not a single word of the draft, and only at the moment of that refusal. The one text we do not write ourselves is a mail server's error message; addresses and file paths are removed from it automatically before it is sent, wherever they can be recognised",
+      "bodies": "Message bodies, subjects and your folder names are not collected. Only the general kind of folder, such as Inbox or Trash, appears in the data, and nothing we send is built from your text, with one narrow exception. When a quick action in the compose window turns a draft down for being longer than it accepts, that refusal is counted together with one of six declared size bands, such as 8k–12k characters: not the length itself, not a single word of the draft, and only at the moment of that refusal. The one text we do not write ourselves is a mail server's error message. Addresses and file paths are removed from it automatically before it is sent, wherever they can be recognised",
       "addresses": "Email addresses, yours or anyone else's. The only exception is the feedback form in Settings → About: an address you type there yourself is sent along with your message, so that you can get a reply",
       "attachments": "Attachments and their file names",
-      "searchQueries": "What you type into search — only the length of the query and the number of results are counted",
+      "searchQueries": "What you type into search: only the length of the query and the number of results are counted",
       "aiPrompts": "The text of AI requests and answers"
     },
     "changeLater": "You can change this decision at any time: Settings → About.",
-    "learnMore": "What is collected — privacy page",
+    "learnMore": "What is collected: privacy page",
+    "updates": {
+      "title": "Updates",
+      "body": "MailCopilot checks for new versions in the background, about once an hour. Each check is an ordinary request to our update server. It sees your IP address and the type of your operating system and processor, and nothing about your mail, accounts or usage. This is separate from the diagnostics question: the buttons below answer only that one. You can change this at any time: Settings → About.",
+      "checkbox": "Check for updates in the background"
+    },
     "allow": "Allow",
     "deny": "Don't allow"
   },
@@ -929,12 +950,12 @@
       "anchorStored": "Anchor stored",
       "anchorStoredHint": "The certificate itself is stored, so this server is trusted even when its certificate is self-signed.",
       "fingerprintOnly": "Fingerprint only",
-      "fingerprintOnlyHint": "Pins marked “Fingerprint only” store the fingerprint but not the certificate itself. That is not enough for a self-signed server: it only becomes trusted through the certificate warning that appears when connecting.",
+      "fingerprintOnlyHint": "Pins marked “Fingerprint only” store the fingerprint but not the certificate itself. That is not enough for a self-signed server, which only becomes trusted through the certificate warning that appears when connecting.",
       "created": "Added",
       "addPin": "Add pin",
       "addPinTitle": "Pin Server Certificate",
       "addPinHint": "Enter server hostname and port to fetch and pin its certificate.",
-      "addPinAnchorWarning": "A pin added here stores the fingerprint only. A self-signed server will still not connect — confirm it in the certificate warning that appears when connecting instead.",
+      "addPinAnchorWarning": "A pin added here stores the fingerprint only. A self-signed server will still not connect. Confirm it in the certificate warning that appears when connecting.",
       "fetchAndPin": "Fetch & Pin",
       "fetchError": "Failed to fetch certificate: {{error}}"
     },
@@ -995,6 +1016,10 @@
       "autoconfigNotFound": "Could not detect server settings automatically",
       "autoconfigFailed": "Autoconfig error: {{error}}",
       "googleOAuthFailed": "Google OAuth failed",
+      "googleNewMailboxClosed": "This build does not connect new mailboxes with Google sign-in. Add this Gmail address with an app password instead: choose Gmail again to see the steps.",
+      "googleAccountMismatch": "That Google account is not {{email}}, so the mailbox was left unchanged. Sign in with the same address you are reconnecting.",
+      "googleNotConfigured": "Google sign-in is unavailable: this build has no Google OAuth client.",
+      "googleMailboxUnavailable": "This mailbox signs in with Google, but this build has no Google OAuth client, so it cannot be reconnected here.",
       "microsoftOAuthFailed": "Microsoft OAuth failed"
     },
     "wizard": {
@@ -1004,6 +1029,16 @@
       "stepProvider": {
         "title": "Add mail account",
         "hint": "Choose your email provider"
+      },
+      "stepGmailPassword": {
+        "title": "Connect Gmail with an app password",
+        "intro": "New Gmail mailboxes connect over IMAP/SMTP with an app password rather than Google sign-in. Mailboxes that already sign in with Google keep working.",
+        "step1": "Turn on 2-Step Verification for your Google Account. App passwords need it.",
+        "step2": "Create an app password for MailCopilot in your Google Account.",
+        "step3": "On the next screen, enter your Gmail address and the 16-character app password (not your usual Google password).",
+        "orgNote": "If the app passwords option is missing, your account may be managed by an organization, use Advanced Protection, or use security keys only for 2-Step Verification. App passwords are not available then.",
+        "openHelp": "Open Google's instructions",
+        "openFaq": "If the option is missing"
       },
       "stepType": {
         "title": "Add mail account",
@@ -1018,7 +1053,8 @@
       "provider": {
         "gmail": {
           "label": "Gmail",
-          "desc": "Sign in with Google OAuth"
+          "desc": "Sign in with Google OAuth",
+          "descAppPassword": "Connect with an app password"
         },
         "outlook": {
           "label": "Outlook / Microsoft 365",
@@ -1164,6 +1200,13 @@
     "clearSelection": "Clear selection",
     "commandPalette": "Open command palette",
     "showHelp": "Show keyboard shortcuts",
+    "threadTitle": "Inside a conversation",
+    "threadNextPrev": "Next / previous message in the conversation",
+    "threadToggle": "Expand / collapse the focused message",
+    "threadReply": "Reply to the focused message",
+    "threadReplyAll": "Reply all to the focused message",
+    "threadForward": "Forward the focused message",
+    "threadExit": "Leave conversation navigation",
     "contextMenuTitle": "Context menu",
     "contextMenuHint": "Quick actions on message (reply, archive, move…)"
   },
@@ -1206,6 +1249,13 @@
       "placeholder": "Ask about your mail...",
       "send": "Send",
       "sources": "Sources",
+      "sourcesShowAll": "All sources ({{count}})",
+      "sourcesCollapse": "Collapse",
+      "sourceUnconfirmed": "unconfirmed",
+      "sourceUnconfirmedTooltip": "Unconfirmed: the app did not issue this link in this conversation, so it cannot be opened.",
+      "sourceNoSubject": "Message details are not available",
+      "sourceNotFound": "Message not found",
+      "indexIncomplete": "Results may be incomplete: mail is still being indexed.",
       "costTooltip": "Request cost: {{cost}}",
       "sessionCostTooltip": "Session cost: {{cost}}"
     },
@@ -1226,7 +1276,7 @@
     "privacy": {
       "audit": {
         "title": "Privacy & Audit",
-        "hint": "Per-request log of AI activity: provider, tokens, untrusted-content wrapping, and egress blocks. Soft-deleted entries are hidden from this view but stay physically in the database until the rotation cap (10,000 rows) removes the oldest.",
+        "hint": "Per-request log of AI activity: provider, tokens, untrusted-content wrapping, and egress blocks. Deleted entries are hidden from this view but stay in the database until the rotation cap (10,000 rows) removes the oldest.",
         "period": "Period",
         "periodToday": "Today",
         "periodWeek": "Last 7 days",
@@ -1277,7 +1327,7 @@
       "applied": "Applied",
       "cancel": "Cancel",
       "account": "{{email}}",
-      "accountFallback": "Account #{{accountId}}",
+      "accountFallback": "A mailbox that is no longer available",
       "crossAccount_one": "{{count}} account",
       "crossAccount_other": "{{count}} accounts",
       "folder": "Folder: {{folder}}",
@@ -1296,7 +1346,7 @@
         "unsubscribe": "Unsubscribe from mailing lists",
         "send_email": "Send email",
         "move_email": "Move emails",
-        "snooze_email": "Snooze emails",
+        "snooze_email": "Snooze emails until {{when}}",
         "unsnooze_email": "Remove snooze",
         "flag_email": {
           "star": "Star emails",
@@ -1306,7 +1356,7 @@
           "add": "Add to Read Later",
           "remove": "Remove from Read Later"
         },
-        "add_followup": "Add follow-up reminder",
+        "add_followup": "Add follow-up reminder for {{when}}",
         "dismiss_followup": "Dismiss follow-up reminder",
         "create_mail_rule": "Create mail rule",
         "update_mail_rule": "Update mail rule",
@@ -1326,7 +1376,6 @@
       "policy_allow": "Always allow",
       "policy_allow_hint": "AI may freely call web tools even with email content in scope.",
       "policy_allow_warning": "Warning: AI may send email content to external services.",
-      "shieldTooltip": "AI web access is intercepted — you will be asked to approve each outbound call",
       "confirmTitle": "AI wants to access the internet",
       "confirmAllow": "Allow",
       "confirmDeny": "Deny",
@@ -1335,7 +1384,7 @@
         "webFetch": "Fetch URL:",
         "externalTool": "External tool call"
       },
-      "timeout": "Request timed out — access denied"
+      "timeout": "Request timed out, access denied"
     },
     "chips": {
       "summarize": "Summarize",
@@ -1371,7 +1420,9 @@
       "actionNotPrepared": "No action was prepared, so there is no confirmation button and nothing has been changed. Ask again, naming the emails to act on.",
       "offline": "AI assistant is not available offline.",
       "timeout": "Request timed out. Try again.",
-      "changeProvider": "Change provider"
+      "changeProvider": "Change provider",
+      "modelUnavailable": "Model {{model}} is not available at the provider. Pick another one in Settings → AI.",
+      "endpointNotFound": "The server answered \"not found\" to this request. Check the OpenAI-compatible server address in Settings → AI."
     },
     "prompts": {
       "summarize": "Summarize this email",
@@ -1445,7 +1496,7 @@
       },
       "consentMatrix": {
         "title": "AI features per mailbox",
-        "help": "Each AI feature is asked for separately and is off until you turn it on. A tick only allows the feature to be offered in that mailbox — nothing is summarised, drafted, checked or translated until you ask for it.",
+        "help": "Each AI feature is turned on separately and is off by default. A tick only allows the feature to be offered in that mailbox. Nothing runs until you ask for it.",
         "accountColumn": "Mailbox",
         "noAccounts": "Add a mailbox to choose which AI features it may use.",
         "cellLabel": "{{feature}} in {{account}}",
@@ -1467,12 +1518,24 @@
       "proofread": {
         "title": "AI Proofread",
         "label": "Check drafts for mistakes with AI",
-        "help": "Add a Check writing button in the compose window that lists suggested corrections to the text you wrote. You accept each one separately, and nothing is ever changed or sent on its own. Sending is never blocked or delayed by the check. Off by default; enabled per account."
+        "help": "Adds a Check writing button in the compose window that lists suggested corrections to the text you wrote. You accept each one separately, and the check never changes, sends or delays anything on its own. Off by default; enabled per account."
       },
       "translate": {
         "title": "AI Translate",
         "label": "Allow translating received messages and your own drafts with AI",
-        "help": "Adds a Translate control above the message you are reading. Nothing is translated automatically — a provider is only called when you press it, and the original is always one click away. The translation is shown as plain text and never replaces the stored message. The same control appears in the compose window for a draft you are writing: MailCopilot sends only the text you wrote yourself — a quote, a forward header or a signature it recognises stays out of the request and comes back unchanged. That recognition is not complete: some quoting styles used by other mail apps carry no marker MailCopilot can see, and on such a draft the whole body is sent. Nothing is translated on its own here either: the result appears in a review panel beside your draft and replaces it only if you choose to. Off by default; enabled per account."
+        "help": "Adds a Translate button above the message you are reading and in the compose window. Translation starts only when you press it. Formatting and images are not translated. In a draft, only your own text is sent; quotes, forward headers and signatures stay out when recognized. Some quoting styles from other mail apps are not recognized, and then the whole draft is sent. The result opens in a panel beside the draft and replaces it only if you choose. Off by default, set per account."
+      },
+      "modelCustom": "Other model…",
+      "modelFromList": "Choose from list",
+      "modelRefresh": "Refresh model list",
+      "modelListError": {
+        "no_key": "Enter and check the API key to load the model list.",
+        "invalid_key": "The provider rejected the key, so the model list was not loaded.",
+        "store_unavailable": "The key store did not respond, so the model list was not loaded.",
+        "destination_not_approved": "The endpoint address was not confirmed, so the model list was not loaded.",
+        "network": "No connection to the provider. You can still type a model id.",
+        "timeout": "The provider did not answer in time. You can still type a model id.",
+        "provider": "The provider did not return a model list. You can still type a model id."
       }
     },
     "threadSummary": {
@@ -1482,7 +1545,7 @@
       "collapse": "Hide key points",
       "retry": "Retry",
       "refusal": {
-        "budget": "Daily AI budget reached — summary paused until it resets.",
+        "budget": "Daily AI budget reached. Summary paused until it resets.",
         "noProvider": "Configure an AI provider in Settings to summarize threads.",
         "providerError": "Couldn't summarize this thread right now."
       }
@@ -1494,14 +1557,14 @@
         "formal": "Formal",
         "grammar": "Fix grammar"
       },
-      "presetTitle": "{{label}} — rewrites the text you wrote as a whole; you accept or discard the result in one piece.",
+      "presetTitle": "{{label}}: rewrites all of the text you wrote; you accept or discard the result in one piece.",
       "diff": {
         "title": "Review AI rewrite",
         "before": "Before",
         "after": "After",
         "changeCount_one": "{{count}} change",
         "changeCount_other": "{{count}} changes",
-        "noChanges": "The rewrite matches your text — nothing to change.",
+        "noChanges": "The rewrite matches your text, so there is nothing to change.",
         "editsHeading": "Edits",
         "unchangedLines_one": "{{count}} unchanged line",
         "unchangedLines_other": "{{count}} unchanged lines",
@@ -1513,23 +1576,23 @@
         "staleReplaceHint": "Replace is unavailable because the draft changed after this rewrite was requested."
       },
       "refusal": {
-        "budget": "Daily AI budget reached — rewrite paused until it resets.",
+        "budget": "Daily AI budget reached. Rewrite paused until it resets.",
         "noProvider": "Configure an AI provider in Settings to rewrite drafts.",
         "providerError": "Couldn't rewrite this draft right now.",
         "emptyInput": "Write some text first, then pick a quick action.",
-        "tooLong": "This draft is too long to rewrite in one pass, and there is no way to rewrite only a selection — MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, rewrite what is left and paste the cut part back. If your own text looks short, MailCopilot may have failed to spot where a quoted message begins, and measured it together with your text.",
-        "noOwnText": "Quick actions only rewrite your own text — the quoted message and your signature stay untouched. Write something above the quote first."
+        "tooLong": "This draft is too long to rewrite in one pass, and a selection cannot be rewritten on its own: MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, rewrite what is left and paste the cut part back. If your own text looks short, the quoted message may not have been recognised and was counted with it.",
+        "noOwnText": "Quick actions only rewrite your own text. The quoted message and your signature stay untouched. Write something above the quote first."
       },
       "proofread": {
         "button": "Check writing",
-        "buttonTitle": "Check writing — lists suggested corrections one by one, and you accept each one separately.",
+        "buttonTitle": "Check writing: lists suggested corrections one by one, and you accept each one separately.",
         "disabledHint": "Checking drafts with AI is off for this mailbox. Turn it on in Settings → AI.",
         "checking": "Checking…",
         "title": "Suggested corrections",
         "editCount_one": "{{count}} suggestion",
         "editCount_other": "{{count}} suggestions",
-        "noEdits": "No mistakes found — your text reads fine.",
-        "dropped_one": "1 suggestion could not be placed in your text and was discarded.",
+        "noEdits": "No mistakes found.",
+        "dropped_one": "{{count}} suggestion could not be placed in your text and was discarded.",
         "dropped_other": "{{count}} suggestions could not be placed in your text and were discarded.",
         "accept": "Accept",
         "accepted": "Accepted",
@@ -1546,10 +1609,10 @@
         },
         "refusal": {
           "notEnabled": "Turn on AI proofreading for this account in Settings to check your writing.",
-          "noOwnText": "Proofreading only checks your own text — the quoted message and your signature stay untouched. Write something above the quote first.",
+          "noOwnText": "Proofreading only checks your own text. The quoted message and your signature stay untouched. Write something above the quote first.",
           "emptyInput": "Write some text first, then run the check.",
-          "tooLong": "This draft is too long to check in one pass, and there is no way to check only a selection — MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, check what is left and paste the cut part back. If your own text looks short, MailCopilot may have failed to spot where a quoted message begins, and measured it together with your text.",
-          "budget": "Daily AI budget reached — proofreading paused until it resets.",
+          "tooLong": "This draft is too long to check in one pass, and a selection cannot be checked on its own: MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, check what is left and paste the cut part back. If your own text looks short, the quoted message may not have been recognised and was counted with it.",
+          "budget": "Daily AI budget reached. Proofreading paused until it resets.",
           "noProvider": "Configure an AI provider in Settings to proofread drafts.",
           "providerError": "Couldn't check this draft right now."
         },
@@ -1566,11 +1629,11 @@
           "budget": "The AI budget for this period is used up. Raise it in Settings → AI, or wait for the next period.",
           "noProvider": "No AI provider is set up yet. Add one in Settings → AI.",
           "providerError": "The AI provider did not return a translation. Please try again.",
-          "answerTooLong": "The translation does not fit within the AI provider's answer limit, so it came back cut off and is not shown. Another attempt would end the same way: neither this draft nor the limit has changed. Shorten your own text, or cut part of it out, translate what is left and paste the cut part back.",
-          "emptyInput": "There is nothing to translate yet — write something first.",
-          "tooLong": "This draft is too long to translate in one go, and there is no way to translate only a selection — MailCopilot always takes all of your own text. Shorten the draft, or cut part of it out, translate what is left and paste the cut part back. If your own text looks short, MailCopilot may have failed to spot where a quoted message begins, and measured it together with your text.",
+          "answerTooLong": "The translation did not fit in the provider's answer limit and is not shown. Shorten your text and try again.",
+          "emptyInput": "Write some text first.",
+          "tooLong": "This draft is too long to translate. Shorten it and try again.",
           "optOut": "Translation is turned off for this account. Turn it on in Settings → AI → Translate messages.",
-          "noOwnText": "Your draft contains only quoted text and a signature. Write your own text above the quote — quoted text and signatures are never translated."
+          "noOwnText": "The draft contains only quoted text and a signature. Write your own text above the quote."
         }
       }
     },
@@ -1578,7 +1641,7 @@
       "trigger": "Instant Reply",
       "useThisDraft": "Use this draft",
       "refusal": {
-        "budget": "Daily AI budget reached — instant replies paused until it resets.",
+        "budget": "Daily AI budget reached. Instant replies paused until it resets.",
         "noProvider": "Configure an AI provider in Settings to draft replies.",
         "providerError": "Couldn't draft replies right now."
       }
@@ -1655,7 +1718,7 @@
   "spellcheck": {
     "consentTitle": "Download a spelling dictionary?",
     "consentMessage": "A dictionary file is needed to check spelling in this language.",
-    "consentDetail": "The file is downloaded from {{origin}}, which is not part of MailCopilot. That request tells them which language you picked and the network address you are using. Nothing you type is sent anywhere — the checking itself happens on this computer. Choose Cancel and the language stays off.",
+    "consentDetail": "The file is downloaded from {{origin}}, which is not part of MailCopilot. That request tells them which language you picked and the network address you are using. Nothing you type is sent anywhere, because the checking happens on this computer. Choose Cancel and the language stays off.",
     "consentLanguages": "Languages",
     "consentButton": "Download",
     "cancelButton": "Cancel",
@@ -1668,11 +1731,11 @@
     "endpointLabel": "AI endpoint address",
     "proxyLabel": "Proxy for AI requests",
     "endpointRisk": "Every AI request to this address carries your API key, so whoever runs it receives that key and everything the assistant sends.",
-    "endpointRiskCleartext": "Every AI request to this address carries your API key, so whoever runs it receives that key and everything the assistant sends. The address starts with http:// rather than https://, so those requests are not encrypted: anyone on the network path — including any proxy — can read them as well.",
-    "endpointRiskInactive": "This address is used only when the AI provider is set to an OpenAI-compatible service, which is not the provider in use right now. If that provider is selected later, every AI request to this address will carry your API key, so whoever runs it would receive that key and everything the assistant sends.",
-    "endpointRiskInactiveCleartext": "This address is used only when the AI provider is set to an OpenAI-compatible service, which is not the provider in use right now. If that provider is selected later, every AI request to this address will carry your API key, so whoever runs it would receive that key and everything the assistant sends. The address also starts with http:// rather than https://, so those requests would not be encrypted: anyone on the network path — including any proxy — could read them as well.",
+    "endpointRiskCleartext": "Every AI request to this address carries your API key, so whoever runs it receives that key and everything the assistant sends. The address starts with http:// (not https://), so those requests are not encrypted and anyone on the network path, including any proxy, can read them.",
+    "endpointRiskInactive": "This address is used only when the AI provider is set to an OpenAI-compatible service, and a different provider is in use right now. If that provider is selected later, every AI request to this address will carry your API key, so whoever runs it would receive that key and everything the assistant sends.",
+    "endpointRiskInactiveCleartext": "This address is used only when the AI provider is set to an OpenAI-compatible service, and a different provider is in use right now. If that provider is selected later, every AI request to this address will carry your API key, so whoever runs it would receive that key and everything the assistant sends. The address also starts with http:// (not https://), so those requests would not be encrypted and anyone on the network path, including any proxy, could read them.",
     "proxyRisk": "Every AI request is routed through this proxy, so whoever runs it sees which addresses you contact, and how much and how often. They can read your API key and the messages themselves only if the proxy intercepts encrypted connections with a certificate this computer trusts.",
-    "proxyRiskCleartext": "Every AI request is routed through this proxy, and the AI endpoint address starts with http:// rather than https://, so those requests are not encrypted. Whoever runs the proxy can therefore read your API key and the messages themselves, not merely see which addresses you contact.",
+    "proxyRiskCleartext": "Every AI request is routed through this proxy, and the AI endpoint address starts with http:// (not https://), so those requests are not encrypted. Whoever runs the proxy can see which addresses you contact and read your API key and the messages themselves.",
     "currentValue": "Now",
     "newValue": "New",
     "directValue": "no proxy (direct connection)",

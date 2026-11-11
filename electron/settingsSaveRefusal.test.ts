@@ -442,6 +442,24 @@ describe('dropErasingUndefined', () => {
     }
   })
 
+  it('keeps a stored updateCheckEnabled: false when the payload carries an explicit undefined', () => {
+    // Absent reads as "check in the background", so an erased `false` would
+    // silently resume the network requests the user turned off.
+    const current = persistedSettings({ updateCheckEnabled: false })
+    expect(current.updateCheckEnabled).toBe(false)
+    const { accepted } = classify({ updateCheckEnabled: undefined, sortMode: 'from' })
+    expect('updateCheckEnabled' in (accepted as object)).toBe(false)
+    const next = mergeAndPersist({ updateCheckEnabled: undefined, sortMode: 'from' }, current)
+    expect(next.updateCheckEnabled).toBe(false)
+    expect(next.sortMode).toBe('from')
+  })
+
+  it('still applies an explicit updateCheckEnabled value over the stored one', () => {
+    const current = persistedSettings({ updateCheckEnabled: false })
+    expect(mergeAndPersist({ updateCheckEnabled: true }, current).updateCheckEnabled).toBe(true)
+    expect(mergeAndPersist({ updateCheckEnabled: false }, persistedSettings()).updateCheckEnabled).toBe(false)
+  })
+
   it('does not mutate the payload it was given', () => {
     const payload = { mcpExportWhitelist: undefined, sortMode: 'from' }
     dropErasingUndefined(payload)
@@ -502,6 +520,25 @@ describe('telemetry domain parity', () => {
     // such a key is `unrecognized_keys`, i.e. the §3.10 P0 path, not this one.
     const writable = Object.keys(rendererWritableSettingsSchema.shape)
     for (const field of SETTINGS_REFUSABLE_FIELDS) expect(writable).toContain(field)
+  })
+})
+
+describe('updateCheckEnabled in the settings schemas', () => {
+  it('the renderer-writable schema accepts a payload carrying only { updateCheckEnabled: false }', () => {
+    const result = classify({ updateCheckEnabled: false })
+    expect(result.forbidden).toEqual([])
+    expect(result.refusedFields).toEqual([])
+    expect(result.wholeSaveRefused).toBe(false)
+    expect(rendererWritableSettingsSchema.safeParse({ updateCheckEnabled: false }).success).toBe(true)
+  })
+
+  it('the renderer-writable schema rejects a non-boolean value', () => {
+    expect(rendererWritableSettingsSchema.safeParse({ updateCheckEnabled: 'off' }).success).toBe(false)
+  })
+
+  it('the persisted schema defaults a missing key to true and keeps a stored false', () => {
+    expect(persistedSettings().updateCheckEnabled).toBe(true)
+    expect(persistedSettings({ updateCheckEnabled: false }).updateCheckEnabled).toBe(false)
   })
 })
 

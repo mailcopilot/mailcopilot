@@ -98,6 +98,8 @@ export interface MailBodyContentProps {
   iframeKey: string
   /** Ref forwarded to the iframe element so the caller can interact with it. */
   mailIframeRef: React.Ref<HTMLIFrameElement>
+  /** iframe `onLoad`: lets the caller re-apply images that arrived after the body was shown. */
+  onMailIframeLoad?: () => void
   /** Active mail key string used for disabling individual attachment buttons. */
   activeMailKey: string
   /** Saving-in-progress attachment key (accountId:folder:uid:part). */
@@ -152,6 +154,7 @@ export default function MailBodyContent({
   hiddenAttachments,
   iframeKey,
   mailIframeRef,
+  onMailIframeLoad,
   activeMailKey,
   savingAttachment,
   onShowExternalImages,
@@ -213,7 +216,7 @@ export default function MailBodyContent({
             scrolls into text they cannot read. Renders nothing when the
             per-account opt-in is off. */}
         {active && translation && (
-          <MailTranslateBar state={translation} originalIsHtml={!!details?.html} />
+          <MailTranslateBar state={translation} />
         )}
       </div>
 
@@ -317,6 +320,7 @@ export default function MailBodyContent({
                 referrerPolicy="no-referrer"
                 className="mail-iframe"
                 srcDoc={mailIframeDoc}
+                onLoad={onMailIframeLoad}
               />
             ) : (
               <div className="empty-state">

@@ -6,6 +6,16 @@ import dns from 'node:dns'
 import net from 'node:net'
 import type { ComposeAttachment, SmtpConfig } from './types'
 import { buildTlsOptions } from './tls'
+import { markStarttlsRefusal, smtpStarttlsPolicy } from './starttlsPolicy'
+import {
+  isDeliveryUndetermined,
+  isPreGreetingFailure,
+  isSmtpSessionError,
+  isStarttlsRefusal,
+  isTlsUpgradeTimeout,
+} from '@mailcopilot/core/transportFailure'
+import { encodeErrorPresentation } from '@mailcopilot/core/errorPresentation'
+import { walkErrorTree } from '@mailcopilot/core/transientErrors'
 import { withNetSpan } from './telemetry'
 import { bucketBodySize, providerFromHost } from '../../electron/metricsBuckets'
 
@@ -19,6 +29,14 @@ export type SendMailOptions = {
   html?: string
   attachments?: ComposeAttachment[]
   headers?: Record<string, string>
+  /**
+   * RFC 5322 §3.6.4 threading headers of a reply, resolved by main from the
+   * parent message (`buildReplyThreadHeaders`). nodemailer and MailComposer
+   * read both fields natively, so the SMTP send, the Graph MIME and the
+   * Sent-folder copy all carry them.
+   */
+  inReplyTo?: string
+  references?: string
   /**
    * §2.22 fix iter2A — `multipart/alternative` legs that nodemailer / MailComposer
    * surface alongside the plain `text` and `html` body. Used for `text/calendar;
@@ -47,6 +65,9 @@ const PROBE_TIMEOUT_MS = 5_000
 
 /** Check if the error is a TCP connection timeout */
 function isTimeoutError(e: unknown): boolean {
+  // A greeting timeout reads "Greeting never received" (code ETIMEDOUT), which the
+  // text match below misses, so the code is checked too.
+  if ((e as { code?: unknown })?.code === 'ETIMEDOUT') return true
   const msg = e instanceof Error ? e.message : String(e)
   return /timeout|ETIMEDOUT/i.test(msg)
 }
@@ -105,6 +126,7 @@ function createSmtpTransport(
     host: cfg.host,
     port: cfg.port,
     secure: cfg.secure,
+    ...smtpStarttlsPolicy(cfg),
     auth: cfg.accessToken
       ? { type: 'OAuth2' as const, user: cfg.user, accessToken: cfg.accessToken }
       : { user: cfg.user, pass: cfg.pass || '' },
@@ -116,24 +138,40 @@ function createSmtpTransport(
 }
 
 const TEST_TIMEOUTS: Timeouts = { connection: 15_000, greeting: 15_000, socket: 15_000 }
-const SEND_TIMEOUTS: Timeouts = { connection: 30_000, greeting: 15_000, socket: 60_000 }
+// socket: how long a silent connection is tolerated, including the wait for the
+// 250 after DATA. 100 s is what Thunderbird uses; RFC 5321 §4.5.3.2.6 suggests
+// 10 min, which would hold the single send-queue pass (all mailboxes) that long.
+const SEND_TIMEOUTS: Timeouts = { connection: 30_000, greeting: 15_000, socket: 100_000 }
 
-export async function testSmtpConnection(cfg: SmtpConfig): Promise<{ ok: boolean; error?: string }> {
+/** Test seam (explicit export, not an argument): lets a real-library test shorten
+ *  the send timers instead of waiting a minute for a stalled server. The object
+ *  is read on every send, so assigning to its fields takes effect. */
+export const __testOnly = { sendTimeouts: SEND_TIMEOUTS, testTimeouts: TEST_TIMEOUTS }
+
+type SmtpTestResult = { ok: boolean; error?: string }
+
+function smtpTestFailure(e: unknown): SmtpTestResult {
+  const tag = isStarttlsRefusal(e)
+    ? `${encodeErrorPresentation('starttls_required')} `
+    : isPreGreetingFailure(e) ? `${encodeErrorPresentation('pre_greeting')} ` : ''
+  const shown = markStarttlsRefusal(e)
+  return { ok: false, error: tag + (shown instanceof Error ? shown.message : String(shown)) }
+}
+
+export async function testSmtpConnection(cfg: SmtpConfig): Promise<SmtpTestResult> {
   try {
     await createSmtpTransport(cfg, TEST_TIMEOUTS).verify()
     return { ok: true }
   } catch (e: unknown) {
-    if (!isTimeoutError(e)) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) }
-    }
+    if (!isTimeoutError(e)) return smtpTestFailure(e)
     // Retry on timeout: resolve system A-records and probe each IPv4 directly.
     const ip = await findReachableIp(cfg.host, cfg.port)
-    if (!ip) return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    if (!ip) return smtpTestFailure(e)
     try {
       await createSmtpTransport({ ...cfg, host: ip }, TEST_TIMEOUTS, cfg.host).verify()
       return { ok: true }
     } catch (retryErr: unknown) {
-      return { ok: false, error: retryErr instanceof Error ? retryErr.message : String(retryErr) }
+      return smtpTestFailure(retryErr)
     }
   }
 }
@@ -160,12 +198,20 @@ export async function sendMail(cfg: SmtpConfig, options: SendMailOptions) {
       const info = await createSmtpTransport(cfg, SEND_TIMEOUTS).sendMail(mailOpts)
       return { messageId: info.messageId }
     } catch (err) {
-      if (!isTimeoutError(err)) throw err
+      // Only a failure BEFORE the greeting may be retried on another address:
+      // nodemailer also reports a mid-session socket timeout as a timeout, and
+      // by then the message may already have been accepted — resending it
+      // here would risk a duplicate.
+      if (!isTimeoutError(err) || !isPreGreetingFailure(err)) throw markStarttlsRefusal(err)
       // Retry on timeout: resolve system A-records and probe each IPv4 directly.
       const ip = await findReachableIp(cfg.host, cfg.port)
       if (!ip) throw err
-      const info = await createSmtpTransport({ ...cfg, host: ip }, SEND_TIMEOUTS, cfg.host).sendMail(mailOpts)
-      return { messageId: info.messageId }
+      try {
+        const info = await createSmtpTransport({ ...cfg, host: ip }, SEND_TIMEOUTS, cfg.host).sendMail(mailOpts)
+        return { messageId: info.messageId }
+      } catch (retryErr) {
+        throw markStarttlsRefusal(retryErr)
+      }
     }
   })
 }
@@ -195,7 +241,28 @@ export function classifySmtpError(err: unknown): { code: number | null; isTransi
   if (code != null) {
     return { code, isTransient: code >= 400 && code < 500 }
   }
-  // No SMTP code — likely network error (transient)
+  // Failed before the server greeted us: nothing was transmitted, so a retry is
+  // safe. Decided by stage, so it does not depend on which address was tried
+  // last or on how the OS names the errno (ENETUNREACH, EHOSTUNREACH, ...).
+  if (isPreGreetingFailure(err)) return { code: null, isTransient: true }
+  // The TLS handshake after an accepted STARTTLS timed out: the upgrade precedes
+  // AUTH, MAIL and DATA, so nothing of the message was sent either. Only this
+  // timer; a socket timeout (SOCKET_TIMEOUT) stays final below.
+  if (isTlsUpgradeTimeout(err)) return { code: null, isTransient: true }
+  // Anything else that happened INSIDE the SMTP session and carries no server
+  // reply code is not retried automatically. After the server was reached the
+  // message may have been accepted (a socket timeout or reset while waiting for
+  // the 250 after DATA, a silent close), and a failure in EHLO or AUTH cannot be
+  // told from one after DATA by the error alone. A second automatic attempt
+  // would deliver the message twice; the user can resend by hand.
+  // Looked for in the whole cause chain: a wrapper that hides the stage on the
+  // outside must not turn a post-DATA failure back into a retry.
+  let fromSession = false
+  walkErrorTree(err, (node) => { if (isSmtpSessionError(node)) fromSession = true })
+  if (fromSession) return { code: null, isTransient: false }
+  // Not raised by the session at all (an OAuth token refresh, a missing
+  // configuration): the server was never contacted, so a network-looking
+  // failure is safe to retry. Text match, because there is no structure to read.
   const msg = err instanceof Error ? err.message : String(err)
   if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|timeout|ECONNREFUSED|socket/i.test(msg)) {
     return { code: null, isTransient: true }
@@ -203,6 +270,23 @@ export function classifySmtpError(err: unknown): { code: number | null; isTransi
   // Unknown error without SMTP code or recognizable network error — treat as permanent.
   // Retrying unknown errors wastes queue cycles and delays failure notification to the user.
   return { code: null, isTransient: false }
+}
+
+/**
+ * The text stored and shown for a send that has finally failed. A refused
+ * STARTTLS upgrade carries the `starttls_required` tag, a failure before the
+ * server took the message (normally before its greeting) the `pre_greeting` tag
+ * and a session that broke after the server was reached, with no reply code to
+ * judge by, the `delivery_unknown` tag, so the UI shows a translated
+ * sentence instead of the raw error of whichever address was tried last;
+ * everything else keeps its own text (a server's refusal reason is what the
+ * user needs). The raw text stays after the tag for the log.
+ */
+export function finalSendFailureText(err: unknown): string {
+  if (isStarttlsRefusal(err)) return `${encodeErrorPresentation('starttls_required')} ${String(err)}`
+  if (isPreGreetingFailure(err)) return `${encodeErrorPresentation('pre_greeting')} ${String(err)}`
+  if (isDeliveryUndetermined(err)) return `${encodeErrorPresentation('delivery_unknown')} ${String(err)}`
+  return String(err)
 }
 
 /** Exponential backoff delays for SMTP transient errors (4xx / network) */

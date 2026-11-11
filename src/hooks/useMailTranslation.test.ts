@@ -628,7 +628,7 @@ describe('useMailTranslation — a WRONG caption is correctable too (§3.3.B6.f2
     expect(translate).toHaveBeenCalledTimes(1)
   })
 
-  it('never offers both doors at once', async () => {
+  it('offers the link without a caption too, and keeps the picker closed until asked', async () => {
     const translate = vi.fn<TranslateFn>(async () => ({
       ok: true,
       translation: makeTranslation({ sourceLang: null }),
@@ -638,9 +638,9 @@ describe('useMailTranslation — a WRONG caption is correctable too (§3.3.B6.f2
     act(() => view.result.current.request())
     await waitFor(() => expect(view.result.current.needsLanguageChoice).toBe(true))
 
-    // Caption missing: the unprompted offer is up, the correction door is not —
-    // there is no caption to disagree with.
-    expect(view.result.current.canRestateSourceLang).toBe(false)
+    expect(view.result.current.canRestateSourceLang).toBe(true)
+    expect(view.result.current.sourceChoiceVisible).toBe(false)
+    act(() => view.result.current.toggleSourceChoice())
     expect(view.result.current.sourceChoiceVisible).toBe(true)
   })
 

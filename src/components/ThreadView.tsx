@@ -13,6 +13,11 @@
  * - Clicking an expanded+active card toggles it closed (collapses it without
  *   switching the active mail).
  * - Clicking a collapsed+active card re-expands it.
+ * - Keyboard navigation inside the open thread (§3.3.C-thread.4) lives in
+ *   `useThreadKeyboard`; the grammar itself is pure
+ *   (`packages/core/threadKeyboard.ts`). This component only supplies the card
+ *   order, registers the header elements so the cursor can move real DOM focus,
+ *   and performs the two commands that need card context (activate / reply).
  * - Thread-level actions live in the single top viewer toolbar (App.tsx) and
  *   apply to the whole thread when activeThread.count > 1, matching Gmail /
  *   Spark / Shortwave / Apple Mail / Outlook behavior. ThreadView itself does
@@ -20,13 +25,16 @@
  *   to confusion about which scope a button targets.
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import CopyableAddress from './CopyableAddress'
 import type { MailSummary } from '../../packages/net/types'
+import type { ThreadReplyMode } from '../../packages/core/threadKeyboard'
 import type { ThreadRow } from '../utils/threading'
 import { useThreadCards } from '../hooks/useThreadCards'
 import type { ConversationOrder } from '../hooks/useThreadCards'
+import { useThreadKeyboard } from '../hooks/useThreadKeyboard'
 import { useThreadSummary } from '../hooks/useThreadSummary'
 import { useInstantReply } from '../hooks/useInstantReply'
 import type { InstantReplyDraft } from '../utils/quickActions'
@@ -77,6 +85,13 @@ interface ThreadViewProps {
     ref: { accountId: number; folder: string; uid: number },
     draft: InstantReplyDraft,
   ) => void
+  /**
+   * §3.3.C-thread.4 — reply / reply all / forward on the card under the
+   * keyboard cursor (`r` / `a` / `f`). Scoped to THAT message, not to the
+   * thread and not to the open message: the cursor may sit on a collapsed card.
+   * When omitted the three keys do nothing inside the thread.
+   */
+  onCardAction?: (item: MailSummary, mode: ThreadReplyMode) => void
 }
 
 /**
@@ -139,10 +154,38 @@ export default function ThreadView({
   summaryEnabled = false,
   instantReplyEnabled = false,
   onInstantReplyPick,
+  onCardAction,
 }: ThreadViewProps) {
   const { t } = useTranslation()
   const order = useConversationOrder(orderProp)
   const { cards, expandedKeys, toggleCard } = useThreadCards(thread, activeKey, order)
+
+  const cardKeys = useMemo(() => cards.map(c => c.key), [cards])
+
+  /**
+   * The one rule for "the user chose this card", shared by the header click and
+   * by Enter / Space on the keyboard cursor. Collapsed and not open — open it
+   * (App marks THAT message read, never the whole thread, CLAUDE.md §5).
+   * Otherwise just fold or unfold the open card.
+   */
+  const activateCard = (key: string) => {
+    const card = cards.find(c => c.key === key)
+    if (!card) return
+    const isActive = card.key === activeKey
+    if (isActive) toggleCard(card.key)
+    else if (!expandedKeys.has(card.key)) onCardOpen(card.item)
+  }
+
+  const keyboard = useThreadKeyboard({
+    cardKeys,
+    activeKey,
+    threadKey: thread?.key ?? null,
+    onActivate: activateCard,
+    onReply: (key, mode) => {
+      const card = cards.find(c => c.key === key)
+      if (card) onCardAction?.(card.item, mode)
+    },
+  })
 
   // §3.3 B2: the summary is scoped to the actively-open thread only — no
   // list-level or ambient processing. The hook holds the debounce/IPC/refusal
@@ -180,6 +223,7 @@ export default function ThreadView({
         {cards.map(card => {
           const isActive = card.key === activeKey
           const isExpanded = expandedKeys.has(card.key)
+          const isFocused = card.key === keyboard.focusedKey
           const showBody = isActive && isExpanded
 
           const fromLabel = (card.item.fromName || card.item.from || card.item.fromAddr || '').trim()
@@ -193,23 +237,19 @@ export default function ThreadView({
                 isActive ? 'thread-card-active' : '',
                 isExpanded ? 'thread-card-expanded' : 'thread-card-collapsed',
                 card.item.unread ? 'thread-card-unread' : '',
+                isFocused ? 'thread-card-focused' : '',
               ].filter(Boolean).join(' ')}
               data-testid="thread-card"
+              data-focused={isFocused ? 'true' : undefined}
             >
               <button
                 type="button"
+                ref={keyboard.registerCard(card.key)}
                 className="thread-card-header"
                 aria-expanded={isExpanded}
                 title={isExpanded ? t('mail.thread.collapseCard') : t('mail.thread.expandCard')}
-                onClick={() => {
-                  if (isExpanded && isActive) {
-                    toggleCard(card.key)
-                  } else if (!isExpanded && isActive) {
-                    toggleCard(card.key)
-                  } else if (!isExpanded && !isActive) {
-                    onCardOpen(card.item)
-                  }
-                }}
+                onFocus={() => keyboard.setFocusedKey(card.key)}
+                onClick={() => activateCard(card.key)}
               >
                 <MailAvatar
                   from={card.item.from}
@@ -218,7 +258,7 @@ export default function ThreadView({
                 />
                 <div className="thread-card-header-meta">
                   <div className="thread-card-header-row">
-                    <span className="thread-card-from">{fromLabel}</span>
+                    <CopyableAddress address={card.item.fromAddr} className="thread-card-from">{fromLabel}</CopyableAddress>
                     <span className="thread-card-date">{dateLabel}</span>
                   </div>
                   {!isExpanded && (

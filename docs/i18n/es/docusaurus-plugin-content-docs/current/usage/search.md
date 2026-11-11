@@ -57,3 +57,11 @@ Al buscar en una carpeta específica, MailCopilot puede consultar el servidor IM
 ## Clasificación por relevancia
 
 Los resultados se clasifican por relevancia. Las coincidencias en el asunto se clasifican más alto que las del cuerpo del mensaje.
+
+## Preguntar al asistente de IA sobre tu correo
+
+La búsqueda encuentra mensajes. Si prefieres hacer una pregunta con tus propias palabras, usa el asistente de IA: abre el panel del chat de IA desde la barra lateral.
+
+- **Misma caché e índice.** Cuando el asistente busca en tu correo, usa la caché local y el índice de búsqueda descritos en esta página, así que todo lo de [Completitud de la búsqueda](#completitud-de-la-búsqueda) se aplica también a sus respuestas: un mensaje que todavía no está indexado puede pasarse por alto. Si el índice de un buzón consultado aún está incompleto, una línea bajo la respuesta lo indica.
+
+Cómo funciona el asistente, qué envía a tu proveedor de IA y cómo marca los enlaces a mensajes que no recibió se describe en [Asistente de IA](../ai-assistant#abrir-el-panel-ia).

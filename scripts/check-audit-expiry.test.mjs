@@ -90,7 +90,8 @@ test('parseAllowlist: real .audit-ci.json parses with zero invalid entries', () 
   const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
   const { entries, invalid } = parseAllowlist(config)
   assert.deepEqual(invalid, [], `unexpected invalid entries: ${JSON.stringify(invalid)}`)
-  assert.ok(entries.length > 0, 'real allowlist should not be empty')
+  // An empty allowlist is a valid, desirable state (no accepted advisories); the per-entry
+  // checks below simply have nothing to iterate.
   for (const e of entries) {
     assert.match(e.id, /^GHSA-/, `advisory id should be a GHSA id, got ${e.id}`)
     assert.notEqual(parseDateUTC(e.expiry), null, `entry ${e.id} must have a valid expiry`)
@@ -294,15 +295,20 @@ test('CLI: real .audit-ci.json passes when --now is one day after the latest exp
   // This keeps the test green when the team re-extends expiries later.
   const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
   const { entries } = parseAllowlist(config)
-  const earliest = Math.min(...entries.map((e) => parseDateUTC(e.expiry)))
+  // Empty allowlist: nothing can expire, so any date must pass.
+  const earliest = entries.length > 0 ? Math.min(...entries.map((e) => parseDateUTC(e.expiry))) : Date.UTC(2030, 0, 1)
   const now = new Date(earliest - 8 * 86_400_000).toISOString().slice(0, 10)
   const res = spawnSync(process.execPath, [SCRIPT_PATH, `--now=${now}`], { encoding: 'utf8' })
   assert.equal(res.status, 0, `stderr: ${res.stderr}`)
 })
 
-test('CLI: real .audit-ci.json fails when --now is inside the warn window of the earliest expiry', () => {
+test('CLI: real .audit-ci.json fails when --now is inside the warn window of the earliest expiry', (t) => {
   const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
   const { entries } = parseAllowlist(config)
+  if (entries.length === 0) {
+    t.skip('allowlist is empty: no expiry to approach (the synthetic-config tests cover the window logic)')
+    return
+  }
   const earliest = Math.min(...entries.map((e) => parseDateUTC(e.expiry)))
   const now = new Date(earliest - 3 * 86_400_000).toISOString().slice(0, 10)
   const res = spawnSync(process.execPath, [SCRIPT_PATH, `--now=${now}`], { encoding: 'utf8' })

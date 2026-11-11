@@ -75,7 +75,7 @@ La barre d'etat reste visible tant que des taches de synchronisation ou d'indexa
 Une icone de cloche dans l'en-tete de la liste des messages ouvre le centre de notifications. Il regroupe deux types de notifications :
 
 - **Rappels de relance** -- lorsqu'une relance que vous avez programmee sur un message envoye arrive a echeance (voir [Rediger des e-mails](./composing-emails) pour les details).
-- **Echecs d'envoi** -- lorsqu'un message dans la file d'envoi abandonne apres des erreurs de livraison permanentes (SMTP ou, pour les comptes Outlook, Microsoft Graph).
+- **Echecs d'envoi** -- lorsqu'un message dans la file d'envoi abandonne apres des erreurs de livraison permanentes (SMTP ou, pour les comptes Outlook, Microsoft Graph), ou lorsque le résultat de la livraison n'a pas pu être confirmé.
 
 La cloche affiche un petit badge avec le nombre de notifications nouvelles. Cliquez sur la cloche pour ouvrir le panneau deroulant : vous pouvez y lire chaque notification, la marquer comme lue, marquer toutes les notifications comme lues d'un coup, ou supprimer des entrees individuellement. Les notifications sont stockees localement dans le cache SQLite, elles survivent donc aux redemarrages de l'application ; les entrees vieilles de plus de 30 jours sont purgees automatiquement.
 

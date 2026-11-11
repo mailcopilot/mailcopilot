@@ -5,7 +5,7 @@
  * state, performs no IPC and makes no decision about when to call a provider.
  * Everything it shows is a projection of the hook (CLAUDE.md §5 hotspot policy).
  *
- * Five things this component is responsible for getting right:
+ * Four things this component is responsible for getting right:
  *
  *   1. **Nothing happens without a click.** The only provider-reaching control
  *      is the translate button. There is no auto-banner and no effect here.
@@ -13,12 +13,11 @@
  *   2. **The original is always one click away.** Once a translation exists the
  *      button becomes a two-way switch, and switching back never re-requests.
  *
- *   3. **Every caption is correctable.** The source-language picker has two
- *      doors and one shape: it is offered unprompted when the result came back
- *      with no caption, and it is one disclosure click away from a caption that
- *      IS there but that the reader disagrees with (§3.3.B6.f2). Both are
- *      offers over a translation already on screen; neither blocks anything and
- *      neither costs a provider call.
+ *   3. **The source language can be stated.** A short link next to the notice
+ *      opens the source-language picker, whether the result came back with a
+ *      caption (local detection fails confidently on close relatives) or
+ *      without one. It is an offer over a translation already on screen: it
+ *      blocks nothing and costs no provider call (§3.3.B6.f2).
  *
  *   4. **A refusal is honest about what a retry would do.** The button is drawn
  *      only when the hook says another attempt could end differently; when it
@@ -27,12 +26,6 @@
  *      second attempt on, the refusal carries the count, so a repeat that
  *      refuses identically is still visibly a repeat (2026-08-31 incident).
  *
- *   5. **It says what was actually translated.** For an HTML mail, main
- *      translates the cached plain-text projection of the body, not the rendered
- *      markup — so the reader is looking at a translation of something slightly
- *      different from what the pane normally shows them. `sourceIsTextProjection`
- *      comes back on the wire and drives that one line of disclosure; the
- *      component does not infer it.
  *
  * It deliberately renders `.meta-row`s inside the existing `.mail-viewer-meta`
  * block instead of introducing a styled strip of its own: the bar is a small
@@ -48,15 +41,9 @@ import LanguageSelect from './TranslateLanguageSelect'
 export type MailTranslateBarProps = {
   /** The hook that owns every piece of state this component draws. */
   state: UseMailTranslationResult
-  /**
-   * Whether the ORIGINAL body is HTML. Only used to decide whether the
-   * plain-text-projection disclosure is worth showing: for a text-only mail the
-   * projection IS the message, and the line would be noise.
-   */
-  originalIsHtml: boolean
 }
 
-export default function MailTranslateBar({ state, originalIsHtml }: MailTranslateBarProps) {
+export default function MailTranslateBar({ state }: MailTranslateBarProps) {
   const { t } = useTranslation()
 
   if (!state.active) return null
@@ -133,16 +120,9 @@ export default function MailTranslateBar({ state, originalIsHtml }: MailTranslat
               : t('mail.translate.produced', {
                   target: t(`mail.translate.languages.${translation.targetLang}`),
                 })}
-            {originalIsHtml && translation.sourceIsTextProjection
-              ? ` ${t('mail.translate.textProjection')}`
-              : ''}
-            {/* The second door into the picker (§3.3.B6.f2): a caption that IS
-                there can still be wrong — local detection fails confidently on
-                close relatives — and this sits directly on the sentence it
-                would correct, inside the same `<span>` so it flows with the
-                prose instead of being pushed to the end of the flex row. It is
-                a disclosure, not an action: nothing is requested until the
-                reader states a language and presses the button below. */}
+            {/* Opens the source-language picker (§3.3.B6.f2). A disclosure, not an
+                action: nothing is requested until the reader states a language
+                and presses the button below. */}
             {state.canRestateSourceLang && (
               <>
                 {' '}
@@ -196,39 +176,12 @@ export default function MailTranslateBar({ state, originalIsHtml }: MailTranslat
         </div>
       )}
 
-      {/* An OFFER to caption a translation that already exists, not a demand
-          (§3.3.B6.f1). Local detection confuses close relatives
-          (Russian/Bulgarian) confidently enough that we will not guess a label —
-          but the label never reached the model, so it never had any business
-          blocking the translation either.
-
-          Everything here is worded and shaped so that nothing reads as a
-          condition the user has to satisfy: the translation is already on
-          screen and already readable above this block, the explanatory line
-          says out loud that naming the language is optional, and the button
-          promises a LABEL, not a translation. Answering re-requests, and because
-          the cache is keyed on the hash of the source text (the language is not
-          part of that key) the same text comes straight back with the user's own
-          label — no provider call and nothing to pay for, which is why no
-          "this will cost another request" warning belongs here.
-
-          ONE picker, two doors (§3.3.B6.f2): it is shown unprompted when the
-          result came back with no caption, and on request when the reader
-          disagrees with a caption that is there. The explanatory line differs
-          because the situations differ — "we could not name it" versus "name it
-          yourself" — but the control, the button and the cost are identical. */}
+      {/* The picker behind the "set the original language" link. Answering
+          re-requests, and because the cache is keyed on the hash of the source
+          text (the language is not part of that key) the same text comes
+          straight back with the reader's own label: no provider call. */}
       {state.sourceChoiceVisible && (
         <>
-          <div
-            className="meta-row mail-translate-notice"
-            data-testid="mail-translate-source-offer"
-          >
-            <span>
-              {state.needsLanguageChoice
-                ? t('mail.translate.sourceOffer')
-                : t('mail.translate.sourceRestateHint')}
-            </span>
-          </div>
           <div
             className="meta-row mail-translate-row"
             id="mail-translate-source-choice"

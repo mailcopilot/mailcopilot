@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { useMailIframeDoc } from './useMailIframeDoc'
 import type { AttachmentMeta, MailSummary, MessageDetails } from '../../packages/net/types'
 
@@ -45,6 +45,29 @@ function makeDetails(html: string | undefined, overrides: Partial<MessageDetails
 // passing it as `initialProps`, or by threading stable references through
 // a closure. Creating a fresh `defaultParams()` inside the render callback
 // would trigger an infinite effect loop.
+// The mounted iframe the hook writes late images into (§2.308). One shared ref,
+// reset per test; `mountFrame` plays the part of React mounting the iframe.
+const frameRef: { current: HTMLIFrameElement | null } = { current: null }
+
+/** Mount the hook's current srcdoc into a real jsdom iframe and fire its `onLoad`. */
+function mountFrame(result: { current: { doc: string | null; onIframeLoad: () => void } }): HTMLIFrameElement {
+  frameRef.current?.remove()
+  const frame = document.createElement('iframe')
+  document.body.appendChild(frame)
+  const d = frame.contentDocument!
+  d.open()
+  d.write(result.current.doc ?? '')
+  d.close()
+  frameRef.current = frame
+  act(() => { result.current.onIframeLoad() })
+  return frame
+}
+
+/** The live document of the mounted iframe, serialized. */
+function liveHtml(): string {
+  return frameRef.current?.contentDocument?.documentElement.outerHTML ?? ''
+}
+
 function makeParams(overrides: Partial<{
   active: MailSummary | null
   details: MessageDetails | null
@@ -55,6 +78,7 @@ function makeParams(overrides: Partial<{
   quotedTextLabel: string
 }> = {}) {
   return {
+    iframeRef: frameRef,
     active: makeActive(),
     details: makeDetails('<p>hello</p>'),
     alwaysLoadImages: false,
@@ -72,8 +96,10 @@ describe('useMailIframeDoc', () => {
     // Default — any IPC returns !ok so nothing inlines; pipeline goes down
     // the placeholder path, which still produces a valid srcdoc.
     mockInvoke.mockResolvedValue({ ok: false })
+    frameRef.current = null
   })
   afterEach(() => {
+    frameRef.current?.remove()
     // Explicit React Testing Library cleanup — otherwise the previous test's
     // hook instance stays mounted across tests and its in-flight effect
     // keeps scheduling state updates into the next test's assertions.
@@ -129,11 +155,14 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => {
-      expect(result.current.doc).not.toBeNull()
-      expect(result.current.doc).toContain('data:image/png;base64,AAAA')
-    })
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    // The body is shown at once with the inert placeholder, never the raw URL...
     expect(result.current.doc).not.toContain('https://a.test/img.png')
+    expect(result.current.doc).not.toContain('base64,AAAA')
+    mountFrame(result)
+    // ...and the image arrives in the LIVE document (no reload).
+    await waitFor(() => { expect(liveHtml()).toContain('data:image/png;base64,AAAA') })
+    expect(liveHtml()).not.toContain('https://a.test/img.png')
     expect(result.current.hasExternalImages).toBe(true)
     expect(mockInvoke).toHaveBeenCalledWith('net:fetchExternalImage', 'https://a.test/img.png')
   })
@@ -192,11 +221,10 @@ describe('useMailIframeDoc', () => {
     })
     rerender(next)
 
-    // Wait for the fresh srcdoc to land.
-    await waitFor(() => {
-      expect(result.current.doc).not.toBeNull()
-      expect(result.current.doc).toContain('data:image/png;base64,FRESH')
-    })
+    // Wait for the fresh srcdoc to land, mount it, and let its image arrive.
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    mountFrame(result)
+    await waitFor(() => { expect(liveHtml()).toContain('data:image/png;base64,FRESH') })
 
     // Now unblock the stale fetch. Its completion path must check `cancelled`
     // and NOT clobber the fresh srcdoc.
@@ -206,7 +234,8 @@ describe('useMailIframeDoc', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
 
     expect(result.current.doc).not.toContain('STALE')
-    expect(result.current.doc).toContain('FRESH')
+    expect(liveHtml()).not.toContain('STALE')
+    expect(liveHtml()).toContain('FRESH')
   })
 
   it('applies dark-mode filter CSS only when theme=dark AND darkModeEmails=true', async () => {
@@ -535,7 +564,10 @@ describe('useMailIframeDoc', () => {
     })
     const doc = result.current.doc!
     // Real URL observed by the pipeline and inlined as data URI.
-    expect(doc).toContain('data:image/jpeg;base64,REAL')
+    // The image arrives in the live document after the body is shown.
+    mountFrame(result)
+    await waitFor(() => { expect(liveHtml()).toContain('data:image/jpeg;base64,REAL') })
+    expect(liveHtml()).not.toContain('https://real.test/photo.jpg')
     // Raw http(s) URL must NOT survive.
     expect(doc).not.toContain('https://real.test/photo.jpg')
     // Banner true — the real URL was observed.
@@ -573,7 +605,10 @@ describe('useMailIframeDoc', () => {
       expect(result.current.doc).not.toBeNull()
     })
     const doc = result.current.doc!
-    expect(doc).toContain('data:image/jpeg;base64,REAL')
+    // The image arrives in the live document after the body is shown.
+    mountFrame(result)
+    await waitFor(() => { expect(liveHtml()).toContain('data:image/jpeg;base64,REAL') })
+    expect(liveHtml()).not.toContain('https://real.test/photo.jpg')
     expect(doc).not.toContain('https://real.test/photo.jpg')
     expect(doc).not.toContain('https://placeholder.test/1x1.gif')
     expect(result.current.hasExternalImages).toBe(true)
@@ -619,7 +654,10 @@ describe('useMailIframeDoc', () => {
     })
     const doc = result.current.doc!
     // Real URL won the promotion and flowed through the external-image pipeline.
-    expect(doc).toContain('data:image/jpeg;base64,REAL')
+    // The image arrives in the live document after the body is shown.
+    mountFrame(result)
+    await waitFor(() => { expect(liveHtml()).toContain('data:image/jpeg;base64,REAL') })
+    expect(liveHtml()).not.toContain('https://real.test/photo.jpg')
     expect(doc).not.toContain('https://real.test/photo.jpg')
     // cid reference was overwritten before cid inlining — no cid: token in DOM.
     expect(doc).not.toContain('cid:img1')
@@ -780,6 +818,13 @@ describe('useMailIframeDoc', () => {
     return result.current.hiddenAttachments.map(a => a.part)
   }
 
+  /** Wait for the body, mount it in an iframe, and let every mocked fetch land. */
+  async function mountAndSettle(result: { current: { doc: string | null; onIframeLoad: () => void } }) {
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    mountFrame(result)
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+  }
+
   function inlineAttachment(overrides: Partial<AttachmentMeta> = {}): AttachmentMeta {
     return {
       part: '1.1',
@@ -809,10 +854,10 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual(['1.1'])
-    expect(result.current.doc).toContain('data:image/png;base64,LOGO')
-    expect(result.current.doc).not.toContain('cid:logo@x')
+    expect(liveHtml()).toContain('data:image/png;base64,LOGO')
+    expect(liveHtml()).not.toContain('cid:logo@x')
   })
 
   // A `Content-ID` is text the sender chooses, so it must be treated as data
@@ -832,10 +877,10 @@ describe('useMailIframeDoc', () => {
       })
       const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-      await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+      await mountAndSettle(result)
       // The image is drawn...
-      expect(result.current.doc).toContain('data:image/png;base64,LOGO')
-      expect(result.current.doc).not.toContain(`cid:${cid}`)
+      expect(liveHtml()).toContain('data:image/png;base64,LOGO')
+      expect(liveHtml()).not.toContain(`cid:${cid}`)
       // ...which is the only thing that permits dropping the chip.
       expect(hiddenParts(result)).toEqual(['1.1'])
     },
@@ -850,9 +895,12 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
-    expect(result.current.doc).toContain('cid:logo@x')
+    // The image stays the inert placeholder: no bytes, and no leftover cid: token.
+    expect(liveHtml()).not.toContain('base64,')
+    expect(liveHtml()).not.toContain('cid:logo@x')
+    expect(liveHtml()).toContain('data:image/svg+xml')
   })
 
   it('keeps the chip when the fetch throws', async () => {
@@ -865,7 +913,7 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
   })
 
@@ -879,9 +927,9 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
-    expect(result.current.doc).toContain('data:image/png;base64,LOGO')
+    expect(liveHtml()).toContain('data:image/png;base64,LOGO')
   })
 
   // Condition 3 — the iteration-4 narrowing. These positions all survive
@@ -898,9 +946,9 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     // Rendering is untouched by the narrowing: the bytes are still inlined.
-    expect(result.current.doc).toContain('data:image/png;base64,LOGO')
+    expect(liveHtml()).toContain('data:image/png;base64,LOGO')
     expect(hiddenParts(result)).toEqual([])
   })
 
@@ -922,7 +970,7 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
   })
 
@@ -938,7 +986,7 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     // All three are inlined — the browser may pick any candidate.
     expect(mockInvoke).toHaveBeenCalledTimes(3)
     expect(hiddenParts(result)).toEqual(['1.3'])
@@ -953,7 +1001,7 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
     expect(mockInvoke).not.toHaveBeenCalledWith('net:attachmentBase64', expect.anything(), expect.anything(), expect.anything(), expect.anything())
   })
@@ -967,7 +1015,7 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
   })
 
@@ -982,7 +1030,7 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toEqual([])
     expect(mockInvoke).not.toHaveBeenCalledWith('net:attachmentBase64', expect.anything(), expect.anything(), expect.anything(), expect.anything())
   })
@@ -996,12 +1044,14 @@ describe('useMailIframeDoc', () => {
     const params = makeParams({ details: makeDetails(html, { attachments }) })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    await mountAndSettle(result)
     expect(hiddenParts(result)).toHaveLength(25)
     expect(hiddenParts(result)).not.toContain('1.25')
-    // ...and the overflow references really are still un-substituted.
-    expect(result.current.doc).toContain('cid:img25@x')
-    expect(result.current.doc).not.toContain('cid:img24@x')
+    // ...the overflow images were never fetched, so they are the placeholder (not a
+    // `cid:` URL the browser would draw as a broken image) and their chips stay.
+    expect(liveHtml()).not.toContain('cid:img25@x')
+    expect(liveHtml()).not.toContain('cid:img24@x')
+    expect(liveHtml()).toContain('data:image/svg+xml')
     expect(mockInvoke).toHaveBeenCalledTimes(25)
   })
 
@@ -1013,7 +1063,7 @@ describe('useMailIframeDoc', () => {
     expect(result.current.hiddenAttachments).toEqual([])
   })
 
-  it('reports nothing hidden until the substitution has finished', async () => {
+  it('reports nothing hidden until the image has been written into the body', async () => {
     // Direction of the only transition: chips start visible and may disappear
     // once the bytes are in. Never the other way round.
     let release: (() => void) | undefined
@@ -1029,13 +1079,15 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
+    // The body is already there, before any byte has arrived.
+    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
+    mountFrame(result)
     expect(result.current.hiddenAttachments).toEqual([])
-    expect(result.current.doc).toBeNull()
 
     release!()
-    await waitFor(() => { expect(result.current.doc).not.toBeNull() })
-    // The chip row and the body land in the same commit.
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
     expect(hiddenParts(result)).toEqual(['1.1'])
+    expect(liveHtml()).toContain('data:image/png;base64,LOGO')
   })
 
   it('does not crash when details.attachments is undefined (optional field)', async () => {
@@ -1052,12 +1104,10 @@ describe('useMailIframeDoc', () => {
     })
     const { result } = renderHook((p) => useMailIframeDoc(p), { initialProps: params })
 
-    await waitFor(() => {
-      expect(result.current.doc).not.toBeNull()
-    })
+    await mountAndSettle(result)
     // cid: reference with no inline attachments — not rewritten, but must
     // not crash. CSP + srcdoc remain intact.
-    expect(result.current.doc).toContain("img-src 'self' data: cid:")
+    expect(liveHtml()).toContain("img-src 'self' data: cid:")
     // No external URL → banner hidden.
     expect(result.current.hasExternalImages).toBe(false)
     // No fetch fired (no external URLs, no inline attachments).

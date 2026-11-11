@@ -90,8 +90,26 @@ afterEach(() => {
 
 describe('parseConsentReply', () => {
   it('reads a well-formed reply as an answer, either way round', () => {
-    expect(parseConsentReply({ needed: true, version: 1 })).toEqual({ kind: 'answer', needed: true })
-    expect(parseConsentReply({ needed: false, version: 1 })).toEqual({ kind: 'answer', needed: false })
+    expect(parseConsentReply({ needed: true, version: 1 }))
+      .toEqual({ kind: 'answer', needed: true, updateCheckEnabled: undefined })
+    expect(parseConsentReply({ needed: false, version: 1 }))
+      .toEqual({ kind: 'answer', needed: false, updateCheckEnabled: undefined })
+  })
+
+  it('reads a boolean updateCheckEnabled from main, and anything else as not reported', () => {
+    expect(parseConsentReply({ needed: true, updateCheckEnabled: false }))
+      .toEqual({ kind: 'answer', needed: true, updateCheckEnabled: false })
+    expect(parseConsentReply({ needed: true, updateCheckEnabled: true }))
+      .toEqual({ kind: 'answer', needed: true, updateCheckEnabled: true })
+    // No value from main (older main, or settings it could not read): nothing is
+    // reported, so the screen shows its default but never writes it back.
+    expect(parseConsentReply({ needed: true }))
+      .toEqual({ kind: 'answer', needed: true, updateCheckEnabled: undefined })
+  })
+
+  it('a malformed updateCheckEnabled never demotes a well-formed needed', () => {
+    expect(parseConsentReply({ needed: true, updateCheckEnabled: 'no' }))
+      .toEqual({ kind: 'answer', needed: true, updateCheckEnabled: undefined })
   })
 
   // §2.236 — an unrecognized shape is a protocol violation, not a permission to
@@ -116,11 +134,11 @@ describe('parseConsentReply', () => {
   // demote a well-formed `needed: true` into "could not determine" and, after
   // the retry budget, into a launch where the question is silently not asked.
   it('accepts a reply without version — the renderer reads only needed', () => {
-    expect(parseConsentReply({ needed: true })).toEqual({ kind: 'answer', needed: true })
-    expect(parseConsentReply({ needed: false })).toEqual({ kind: 'answer', needed: false })
+    expect(parseConsentReply({ needed: true })).toEqual({ kind: 'answer', needed: true, updateCheckEnabled: undefined })
+    expect(parseConsentReply({ needed: false })).toEqual({ kind: 'answer', needed: false, updateCheckEnabled: undefined })
     // Extra fields are main's business too, and are equally not a violation.
     expect(parseConsentReply({ needed: true, version: 2, extra: 'x' }))
-      .toEqual({ kind: 'answer', needed: true })
+      .toEqual({ kind: 'answer', needed: true, updateCheckEnabled: undefined })
   })
 })
 
@@ -373,8 +391,11 @@ describe('useTelemetryConsent — diagnostics', () => {
 })
 
 describe('useTelemetryConsent — decide', () => {
-  it('sends exactly { granted } — main stamps the version and timestamp', async () => {
-    mockInvoke.mockImplementation(stateReply(true))
+  it('sends { granted, updateCheckEnabled } when main reported the option — main stamps the version and timestamp', async () => {
+    mockInvoke.mockImplementation((channel: string) =>
+      channel === 'telemetry:consentState'
+        ? Promise.resolve({ needed: true, version: 2, updateCheckEnabled: true })
+        : Promise.resolve({ ok: true, granted: true }))
     const { result } = renderHook(() => useTelemetryConsent())
     await waitFor(() => expect(result.current.phase).toBe('required'))
 
@@ -382,8 +403,86 @@ describe('useTelemetryConsent — decide', () => {
     await waitFor(() => expect(result.current.phase).toBe('resolved'))
 
     const call = mockInvoke.mock.calls.find(([c]) => c === 'telemetry:setConsent')
+    expect(call?.[1]).toEqual({ granted: true, updateCheckEnabled: true })
+    expect(Object.keys(call?.[1] as object).sort()).toEqual(['granted', 'updateCheckEnabled'])
+  })
+
+  it('leaves the option OUT of the payload when main reported nothing and the user did not touch it', async () => {
+    // Main could not read the settings: the screen shows its default (on), and
+    // that default must not overwrite a stored refusal it never saw.
+    mockInvoke.mockImplementation(stateReply(true))
+    const { result } = renderHook(() => useTelemetryConsent())
+    await waitFor(() => expect(result.current.phase).toBe('required'))
+    expect(result.current.updateCheckEnabled).toBe(true)
+
+    act(() => { result.current.decide(true) })
+    await waitFor(() => expect(result.current.phase).toBe('resolved'))
+
+    const call = mockInvoke.mock.calls.find(([c]) => c === 'telemetry:setConsent')
     expect(call?.[1]).toEqual({ granted: true })
     expect(Object.keys(call?.[1] as object)).toEqual(['granted'])
+  })
+
+  it('sends the option once the user has toggled it, even if main reported nothing', async () => {
+    mockInvoke.mockImplementation(stateReply(true))
+    const { result } = renderHook(() => useTelemetryConsent())
+    await waitFor(() => expect(result.current.phase).toBe('required'))
+    act(() => { result.current.setUpdateCheckEnabled(true) })
+    act(() => { result.current.decide(false) })
+    await waitFor(() => expect(result.current.phase).toBe('resolved'))
+    const call = mockInvoke.mock.calls.find(([c]) => c === 'telemetry:setConsent')
+    expect(call?.[1]).toEqual({ granted: false, updateCheckEnabled: true })
+  })
+
+  it('sends the option as the user left it, independent of the diagnostics answer', async () => {
+    mockInvoke.mockImplementation(stateReply(true))
+    const { result } = renderHook(() => useTelemetryConsent())
+    await waitFor(() => expect(result.current.phase).toBe('required'))
+
+    act(() => { result.current.setUpdateCheckEnabled(false) })
+    expect(result.current.updateCheckEnabled).toBe(false)
+    act(() => { result.current.decide(true) })
+    await waitFor(() => expect(result.current.phase).toBe('resolved'))
+
+    const call = mockInvoke.mock.calls.find(([c]) => c === 'telemetry:setConsent')
+    expect(call?.[1]).toEqual({ granted: true, updateCheckEnabled: false })
+  })
+
+  it('Escape sends the option as it currently shows, not as it was when the screen opened', async () => {
+    mockInvoke.mockImplementation(stateReply(true))
+    const { result } = renderHook(() => useTelemetryConsent())
+    await waitFor(() => expect(result.current.phase).toBe('required'))
+
+    act(() => { result.current.setUpdateCheckEnabled(false) })
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    })
+    await waitFor(() => expect(result.current.phase).toBe('resolved'))
+
+    const call = mockInvoke.mock.calls.find(([c]) => c === 'telemetry:setConsent')
+    expect(call?.[1]).toEqual({ granted: false, updateCheckEnabled: false })
+  })
+
+  it('initialises the option off when main reports updateCheckEnabled: false on a first run', async () => {
+    mockInvoke.mockImplementation((channel: string) =>
+      channel === 'telemetry:consentState'
+        ? Promise.resolve({ needed: true, version: 2, updateCheckEnabled: false })
+        : Promise.resolve({ ok: true, granted: true }))
+    const { result } = renderHook(() => useTelemetryConsent())
+    await waitFor(() => expect(result.current.phase).toBe('required'))
+    expect(result.current.updateCheckEnabled).toBe(false)
+
+    act(() => { result.current.decide(true) })
+    await waitFor(() => expect(result.current.phase).toBe('resolved'))
+    const call = mockInvoke.mock.calls.find(([c]) => c === 'telemetry:setConsent')
+    expect(call?.[1]).toEqual({ granted: true, updateCheckEnabled: false })
+  })
+
+  it('the option defaults to on when main does not mention it', async () => {
+    mockInvoke.mockImplementation(stateReply(true))
+    const { result } = renderHook(() => useTelemetryConsent())
+    await waitFor(() => expect(result.current.phase).toBe('required'))
+    expect(result.current.updateCheckEnabled).toBe(true)
   })
 
   // AC5 — refusing by keyboard and refusing by button must be one code path.

@@ -502,12 +502,26 @@ export type PendingActionSummary = {
   /** Folder context, when applicable. `null` for cross-account batches
    *  (folder may differ per account/batch). */
   folder: string | null
+  /**
+   * The instant a scheduling action is set for, in canonical UTC — `wakeAt`
+   * for `snooze_email`, `remindAt` for `add_followup`. `undefined` for every
+   * other kind.
+   *
+   * Carried as a STRUCTURED field rather than left inside `description`
+   * because the renderer resolves a localized verb from `i18nKey` and only
+   * falls back to `description` when that key is missing. With the key
+   * present the user was confirming "Snooze emails" with no WHEN in sight,
+   * while the apply wrote a specific instant. This is the same string the
+   * apply callback receives, so the card and the write cannot disagree.
+   */
+  scheduledAt?: string
   /** §2.20 PR1 — for cross-account batches (currently only `mail_action`),
    *  per-account slots `{ accountId, email }` preserving the producer-
-   *  supplied (or refs[]-derived) ordering. `email: null` at a slot means
-   *  the account was deleted between preview registration and summary, OR
-   *  has no `email` field set; the renderer should show
-   *  `t('ai.confirmation.accountFallback', { id })` for that slot.
+   *  supplied (or refs[]-derived) ordering. `email` is the display label of a
+   *  LIVE mailbox (address, default identity, login or name); `null` means
+   *  nothing names it: the account was deleted between preview registration
+   *  and summary, or the store could not be read. The renderer then shows
+   *  `t('ai.confirmation.accountFallback')`, which names no number.
    *  `undefined` for single-account or global actions. */
   accountSlots?: { accountId: number; email: string | null }[]
   /** §2.20 PR1 — number of distinct accounts spanned by a cross-account
@@ -539,18 +553,26 @@ export type PendingActionSummary = {
 }
 
 /**
- * Resolve an account email for a single accountId. Returns `null` when the
- * account is not present in `listAccounts()` (deleted between preview
- * registration and summary), and also when `listAccounts()` itself throws —
- * the summary path must never crash the renderer surface because of an
- * accounts-store hiccup.
+ * How a LIVE mailbox is named to the user: its address, else the default identity's address, else its login,
+ * else its name. `email` alone is not enough: the Outlook and Google sign-in flows save no `email`, so
+ * "no email" must never be read as "no such mailbox". `null` only when nothing names it.
+ */
+function accountDisplayLabel(account: ReturnType<typeof listAccounts>[number]): string | null {
+  const defaultIdentity = account.identities?.find(i => i.isDefault)?.email
+  return account.email || defaultIdentity || account.smtp?.user || account.imap?.user || account.name || null
+}
+
+/**
+ * The display label for a single accountId. `null` when the account is not present in `listAccounts()`
+ * (deleted between preview registration and summary), and also when `listAccounts()` itself throws:
+ * the summary path must never crash the renderer surface because of an accounts-store hiccup.
  */
 function resolveAccountEmail(accountId: number | null): string | null {
   if (accountId === null || !Number.isFinite(accountId)) return null
   try {
     const account = listAccounts().find(a => a.id === accountId)
     if (!account) return null
-    return account.email ?? null
+    return accountDisplayLabel(account)
   } catch (err) {
     log.warn(`resolveAccountEmail failed for accountId=${accountId}: ${err instanceof Error ? err.message : String(err)}`)
     return null
@@ -608,7 +630,8 @@ function resolveAccountSlots(accountIds: number[]): { accountId: number; email: 
   }
   const byId = new Map<number, string>()
   for (const a of accounts) {
-    if (a.email) byId.set(a.id, a.email)
+    const label = accountDisplayLabel(a)
+    if (label) byId.set(a.id, label)
   }
   return accountIds.map(id => ({ accountId: id, email: byId.get(id) ?? null }))
 }
@@ -761,6 +784,7 @@ export function summarizePending(entry: PendingActionEntry): PendingActionSummar
         accountEmail: resolveAccountEmail(d.accountId),
         emailCount: d.uids.length,
         folder: d.folder,
+        scheduledAt: d.wakeAt,
       }
     }
     case 'unsnooze_email': {
@@ -809,6 +833,7 @@ export function summarizePending(entry: PendingActionEntry): PendingActionSummar
         accountEmail: resolveAccountEmail(d.accountId),
         emailCount: 1,
         folder: d.folder,
+        scheduledAt: d.remindAt,
       }
     }
     case 'dismiss_followup': {

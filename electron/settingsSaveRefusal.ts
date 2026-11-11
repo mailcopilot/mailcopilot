@@ -323,7 +323,9 @@ export function stripRefusedFields(
  *
  * THE PROPERTY THAT PUTS A FIELD HERE — and the only one: its ABSENCE from the
  * persisted store is read downstream as a WIDER permission than any value it
- * can hold. `mcpExportWhitelist` is such a field. `resolveExportWhitelist` in
+ * can hold. `updateCheckEnabled` is such a field (absent reads as the default,
+ * "check in the background", so an erased `false` would silently resume the
+ * network requests the user turned off). `mcpExportWhitelist` is another. `resolveExportWhitelist` in
  * electron/services/mcpExport.ts treats a nullish value as "the caller
  * expressed no preference" and serves `DEFAULT_EXPORT_WHITELIST`, so a stored
  * list that narrows the exported tool surface disappears into a wider default
@@ -361,7 +363,7 @@ export function stripRefusedFields(
  * (`applyAiDestinationOverrides`), so listing one here would delete the clear
  * in the one place §2.119 performs it, not just in the merge.
  */
-export const UNERASABLE_SETTINGS_FIELDS = ['mcpExportWhitelist'] as const
+export const UNERASABLE_SETTINGS_FIELDS = ['mcpExportWhitelist', 'updateCheckEnabled'] as const
 
 export type UnerasableSettingsField = (typeof UNERASABLE_SETTINGS_FIELDS)[number]
 

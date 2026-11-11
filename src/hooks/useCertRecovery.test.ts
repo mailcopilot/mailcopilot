@@ -95,6 +95,7 @@ const REQ: CertRecoveryRequest = {
   fingerprintSha256: 'AA:BB:CC',
   systemOnly: true,
   rawMessage: 'self-signed certificate in certificate chain',
+  reason: 'selfSigned',
 }
 
 beforeEach(() => {
@@ -160,6 +161,19 @@ describe('useCertRecovery — recovery dialog queue', () => {
     expect(d?.request.fingerprintSha256).toBe('')
     expect(d?.request.systemOnly).toBe(false)
     expect(d?.request.rawMessage).toBe('')
+    expect(d?.request.reason).toBe('unknown')
+  })
+
+  it('maps a reason outside the closed set to unknown', () => {
+    const { result } = renderHook(() => useCertRecovery())
+    act(() => fire('cert:recoveryRequired', { ...REQ, reason: 'expired" onload="x' }))
+    expect(result.current.dialog?.request.reason).toBe('unknown')
+  })
+
+  it('keeps a known reason from main', () => {
+    const { result } = renderHook(() => useCertRecovery())
+    act(() => fire('cert:recoveryRequired', { ...REQ, reason: 'expired' }))
+    expect(result.current.dialog?.request.reason).toBe('expired')
   })
 
   it('queues a second host FIFO and promotes it after the first resolves', async () => {

@@ -76,7 +76,7 @@ La barra di stato resta visibile finche e in corso del lavoro di sincronizzazion
 Un'icona a forma di campanella nell'intestazione della lista dei messaggi apre il centro notifiche. Raccoglie due tipi di notifiche:
 
 - **Promemoria di follow-up**: quando scade un follow-up impostato su un messaggio inviato (vedi [Comporre email](./composing-emails) per i dettagli).
-- **Errori di invio**: quando un messaggio nella coda di invio si arrende dopo errori di consegna permanenti (SMTP o, per gli account Outlook, Microsoft Graph).
+- **Errori di invio**: quando un messaggio nella coda di invio si arrende dopo errori di consegna permanenti (SMTP o, per gli account Outlook, Microsoft Graph) o quando non è stato possibile confermare l'esito della consegna.
 
 La campanella mostra un piccolo badge con il numero di nuove notifiche. Clicca sulla campanella per aprire il pannello a discesa: li puoi leggere ciascuna notifica, contrassegnarla come letta, contrassegnarle tutte come lette in un colpo solo, oppure eliminare singoli elementi. Le notifiche sono memorizzate localmente nella cache SQLite e quindi sopravvivono al riavvio dell'app; le voci piu vecchie di 30 giorni vengono rimosse automaticamente.
 

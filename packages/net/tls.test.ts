@@ -13,7 +13,9 @@ import {
   verifyCertTrust,
   CA_CACHE_TTL_MS,
   __resetCombinedCaCacheForTest,
+  __testOnly,
 } from './tls'
+import { isDistrustedRootPem } from './distrustedRoots'
 
 // ---------------------------------------------------------------------------
 // Long-lived self-signed fixture (CN=localhost, SAN DNS:localhost + IP
@@ -141,6 +143,171 @@ const DNS_ONLY_FP = normalizeFingerprintSha256(
   new crypto.X509Certificate(DNS_ONLY_CERT).fingerprint256,
 )
 
+// ---------------------------------------------------------------------------
+// PRIVATE-CA CHAIN FIXTURE — TEST ONLY.
+//
+// Reproduces the shape of the incident: a mail host whose leaf is issued by a
+// PRIVATE CA with an intermediate, where the server sends leaf + intermediate
+// + the self-signed private root in its chain. A pinned LEAF cannot terminate
+// such a chain without partial chain building, so before the fix the pinned
+// path failed with SELF_SIGNED_CERT_IN_CHAIN and `checkServerIdentity` — i.e.
+// the pin comparison — never ran at all.
+//
+// Static PEMs rather than per-run generation: keygen costs seconds and this
+// suite must need neither the openssl binary nor a new dependency. Generated
+// with `openssl` (EC P-256, valid until 2126); the private keys exist nowhere
+// else and are worthless outside this file. TEST ONLY — never trust anything
+// here at runtime.
+//
+//   PRIVATE_ROOT  CN=MailCopilot Test Private Root CA   (self-signed, CA:TRUE)
+//   PRIVATE_SUB   CN=MailCopilot Test Private Sub CA    (signed by root)
+//   PRIVATE_LEAF  CN=mail.private.test, SAN DNS + IP:127.0.0.1 (signed by sub)
+//   PRIVATE_LEAF2 same issuer and names, different key → different fingerprint
+//                 (server-side rotation, or an attacker holding a certificate
+//                 from the same private CA)
+// ---------------------------------------------------------------------------
+const PRIVATE_ROOT_CERT = `-----BEGIN CERTIFICATE-----
+MIIBvTCCAWOgAwIBAgIUJ//JutjcCOMIQV3/q1e0PY+O7uUwCgYIKoZIzj0EAwIw
+KzEpMCcGA1UEAwwgTWFpbENvcGlsb3QgVGVzdCBQcml2YXRlIFJvb3QgQ0EwIBcN
+MjYwOTA5MTEyMTM3WhgPMjEyNjA4MTYxMTIxMzdaMCsxKTAnBgNVBAMMIE1haWxD
+b3BpbG90IFRlc3QgUHJpdmF0ZSBSb290IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAElrLugrKCLHNpVbCKZKE1HtX0yGdw2ry/lxgkgQpHDv+gMzsHDGU0mD2u
+NLsdipGrEm8wOrGerNuc5nENrXUqmqNjMGEwHQYDVR0OBBYEFGRCkS5AeoI6VlTw
+P+Es7I+qUX69MB8GA1UdIwQYMBaAFGRCkS5AeoI6VlTwP+Es7I+qUX69MA8GA1Ud
+EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAoGCCqGSM49BAMCA0gAMEUCIQDq
+NEDuDzuNwUVw0JrjPgunbZohHgLYS85Q0EWA+CnjsQIgYulgGzN+BkTXczFZrrw7
+pjhzr4nH5jTMF6hobRGX/Zc=
+-----END CERTIFICATE-----
+`
+
+const PRIVATE_SUB_CERT = `-----BEGIN CERTIFICATE-----
+MIIBvzCCAWWgAwIBAgIUGUJEvgHweP8EfCM4ROauh/1nf20wCgYIKoZIzj0EAwIw
+KzEpMCcGA1UEAwwgTWFpbENvcGlsb3QgVGVzdCBQcml2YXRlIFJvb3QgQ0EwIBcN
+MjYwOTA5MTEyMTM3WhgPMjEyNjA4MTYxMTIxMzdaMCoxKDAmBgNVBAMMH01haWxD
+b3BpbG90IFRlc3QgUHJpdmF0ZSBTdWIgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAARYiamEU2uABxoNSRpBQwYKbuPkja1vxt3gDwk92BWz77EjkkdswhiP7hMg
+MI5TJ5qT28Eg9AGElAfg5U0ougdRo2YwZDASBgNVHRMBAf8ECDAGAQH/AgEAMA4G
+A1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUos+vkNJnuVd7ntjRAqMDUHGfVcEwHwYD
+VR0jBBgwFoAUZEKRLkB6gjpWVPA/4Szsj6pRfr0wCgYIKoZIzj0EAwIDSAAwRQIg
+fpscEQhqgTLpDkV1+4dEHS3caIaRrQFjAfpolVZd4/ACIQDG90N8Vn6vmRlRFZI7
+Rj0/J9oEgHLZ6OREbUASA8clAg==
+-----END CERTIFICATE-----
+`
+
+const PRIVATE_LEAF_CERT = `-----BEGIN CERTIFICATE-----
+MIIB5TCCAYugAwIBAgIUExOXnh1RBY5OZSeenigMIGyLL6QwCgYIKoZIzj0EAwIw
+KjEoMCYGA1UEAwwfTWFpbENvcGlsb3QgVGVzdCBQcml2YXRlIFN1YiBDQTAgFw0y
+NjA5MDkxMTIxMzdaGA8yMTI2MDgxNjExMjEzN1owHDEaMBgGA1UEAwwRbWFpbC5w
+cml2YXRlLnRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATgiyNku4T3Zym3
+aqOBd/vtFxTwmI9YGgbWkPTIayE5jqe7y82PxUZylG7uWNdR9YqltpIOKvUdXBVR
+8ZTGD9UMo4GaMIGXMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgWgMBMGA1Ud
+JQQMMAoGCCsGAQUFBwMBMCIGA1UdEQQbMBmCEW1haWwucHJpdmF0ZS50ZXN0hwR/
+AAABMB0GA1UdDgQWBBT5CXYbtw/+zoHheQAIhHHY1fr3ITAfBgNVHSMEGDAWgBSi
+z6+Q0me5V3ue2NECowNQcZ9VwTAKBggqhkjOPQQDAgNIADBFAiBX/+jKWQ0Mtuer
+UjS46Dcgu/oHSEVKmXuEaqJQ0OLHhgIhAJGAWl1MR3Up6hfz5elxNoCI4ChuYJbN
+xkfSO0ZOU8MN
+-----END CERTIFICATE-----
+`
+
+const PRIVATE_LEAF_KEY = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgeeMrc3wmgs4dX/+8
+UMjQtQSIwzpjg/PVCjrktyLQqSehRANCAATgiyNku4T3Zym3aqOBd/vtFxTwmI9Y
+GgbWkPTIayE5jqe7y82PxUZylG7uWNdR9YqltpIOKvUdXBVR8ZTGD9UM
+-----END PRIVATE KEY-----
+`
+
+const PRIVATE_LEAF2_CERT = `-----BEGIN CERTIFICATE-----
+MIIB5TCCAYugAwIBAgIUExOXnh1RBY5OZSeenigMIGyLL6UwCgYIKoZIzj0EAwIw
+KjEoMCYGA1UEAwwfTWFpbENvcGlsb3QgVGVzdCBQcml2YXRlIFN1YiBDQTAgFw0y
+NjA5MDkxMTIxMzdaGA8yMTI2MDgxNjExMjEzN1owHDEaMBgGA1UEAwwRbWFpbC5w
+cml2YXRlLnRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASiu2JFNdt0kX+u
+bewBMicTEm1kPZ8cUTMzBBiARGUEfdK40yYZ6/i81IeMNc86UL22RqaoBhPwpbUP
+7o3BixZQo4GaMIGXMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgWgMBMGA1Ud
+JQQMMAoGCCsGAQUFBwMBMCIGA1UdEQQbMBmCEW1haWwucHJpdmF0ZS50ZXN0hwR/
+AAABMB0GA1UdDgQWBBTlYiefB8BsxRVCKES/jWXtjDWHoDAfBgNVHSMEGDAWgBSi
+z6+Q0me5V3ue2NECowNQcZ9VwTAKBggqhkjOPQQDAgNIADBFAiEAsClsSPtqV7vF
+D6Nbg3ELH1E1YcY+zORximhocjqSaAACIEna8VqBZrzGT0IF8nZqvWks+yfxQgW7
+s0A7FTh8/jlN
+-----END CERTIFICATE-----
+`
+
+const PRIVATE_LEAF2_KEY = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgygibbUl0CnD94Oi9
+a+TR11UiIa/Y8DU4Cf7OuSM7WzqhRANCAASiu2JFNdt0kX+ubewBMicTEm1kPZ8c
+UTMzBBiARGUEfdK40yYZ6/i81IeMNc86UL22RqaoBhPwpbUP7o3BixZQ
+-----END PRIVATE KEY-----
+`
+
+/** The Sub CA's own fingerprint — used where the CONFIRMED anchor is itself a
+ *  CA (`basicConstraints: CA:TRUE`), the shape that retired the trust-list
+ *  containment: such an anchor terminates the chain of every certificate it
+ *  ever issued, and no filtering of the store can reach it. */
+const PRIVATE_SUB_FP = normalizeFingerprintSha256(
+  new crypto.X509Certificate(PRIVATE_SUB_CERT).fingerprint256,
+)
+
+const PRIVATE_LEAF_FP = normalizeFingerprintSha256(
+  new crypto.X509Certificate(PRIVATE_LEAF_CERT).fingerprint256,
+)
+const PRIVATE_LEAF2_FP = normalizeFingerprintSha256(
+  new crypto.X509Certificate(PRIVATE_LEAF2_CERT).fingerprint256,
+)
+
+// ---------------------------------------------------------------------------
+// Local-server lifecycle helpers.
+//
+// Teardown here has to hold on the FAILURE paths, not only the happy one: a
+// suite that hangs in `afterEach` reports a timeout on an unrelated test and
+// leaves a listening socket behind for the rest of the run.
+//
+// Two hazards, both closed below:
+//  - `server.close()` waits for every open connection to end. A peer socket
+//    that outlives its test — a rejected handshake, an assertion that threw
+//    before the client helper returned — keeps the callback pending forever.
+//    So connections are TRACKED and destroyed before closing.
+//  - `listen` resolves only when the bind succeeds. With the customary
+//    `server.on('error', () => {})` swallowing the failure, a bind error left
+//    the promise pending until the test timeout, with no message. So binding
+//    gets its own error listener that REJECTS.
+// ---------------------------------------------------------------------------
+
+type TrackedServer = { destroyConnections: () => void }
+const trackedServers = new WeakMap<net.Server, TrackedServer>()
+
+/** Bind on an ephemeral loopback port; rejects (rather than hanging) on error.
+ *  Also starts tracking peer sockets for `closeServer`. */
+function listenLocal(server: net.Server): Promise<number> {
+  const sockets = new Set<net.Socket>()
+  server.on('connection', (socket: net.Socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
+  trackedServers.set(server, {
+    destroyConnections: () => {
+      for (const socket of sockets) {
+        try { socket.destroy() } catch { /* already gone */ }
+      }
+      sockets.clear()
+    },
+  })
+  return new Promise<number>((resolve, reject) => {
+    const onError = (e: Error) => reject(e)
+    server.once('error', onError)
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', onError)
+      resolve((server.address() as net.AddressInfo).port)
+    })
+  })
+}
+
+/** Destroy any lingering peer sockets, then close. Safe on an unbound or
+ *  already-closed server. */
+async function closeServer(server: net.Server | undefined): Promise<void> {
+  if (!server) return
+  trackedServers.get(server)?.destroyConnections()
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+}
+
 describe('packages/net/tls', () => {
   describe('normalizeFingerprintSha256', () => {
     it('uppercase and colons', () => {
@@ -184,6 +351,21 @@ describe('packages/net/tls', () => {
       expect(isTlsTrustError(new Error("Hostname/IP does not match certificate's altnames: Host: a.b"))).toBe(true)
       expect(isTlsTrustError(new Error('TLS pin mismatch: AA:BB'))).toBe(true)
       expect(isTlsTrustError(new Error('TLS pin error: server certificate fingerprint is empty'))).toBe(true)
+    })
+
+    it('classifies the anchored-endpoint hold as a trust error, so the IMAP recovery dialog opens', () => {
+      // Load-bearing, not cosmetic: the hold is the named PRICE of design B —
+      // on an endpoint holding a confirmed certificate body, a pin that has
+      // only a fingerprint stops working. Its only remedy is confirming that
+      // certificate too, and the recovery dialog is raised by the 'cert'
+      // classification (classifyImapError → isTlsTrustError). Misclassify this
+      // message as a network error and the price becomes a dead end.
+      const hold = new Error(
+        'TLS pin not confirmed: AA:BB — this endpoint accepts only certificates confirmed in the recovery dialog',
+      )
+      expect(isTlsTrustError(hold)).toBe(true)
+      // Also when a transport library prefixes its own text, as ImapFlow does.
+      expect(isTlsTrustError(new Error('LOGIN aborted: TLS pin not confirmed: AA:BB'))).toBe(true)
     })
 
     it('does NOT match responses that merely mention a certificate', () => {
@@ -257,7 +439,7 @@ describe('packages/net/tls', () => {
       expect(second).not.toBe(first)
     })
 
-    it('caches within the TTL and re-reads the store after it expires', () => {
+    it('caches within the TTL and recomputes OUR snapshot after it expires', () => {
       vi.useFakeTimers()
       const spy = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
         return type === 'default' ? ['D'] : ['S']
@@ -267,9 +449,14 @@ describe('packages/net/tls', () => {
       expect(getCombinedCaCertificates()).toEqual(['D', 'S'])
       expect(spy).toHaveBeenCalledTimes(2) // default + system, once each
 
-      // Admin removes a root mid-session: after the TTL the change must be
-      // picked up without an app restart (a removed interception root must
-      // not stay trusted for the whole process lifetime).
+      // What is pinned here is OUR cache: after the TTL the snapshot is
+      // RECOMPUTED from the source rather than reused.
+      //
+      // It is NOT a claim that an OS-store change is picked up. On the real
+      // runtime `tls.getCACertificates` hands back a frozen per-process
+      // snapshot (see the CA_CACHE_TTL_MS docblock), so a root the
+      // administrator removes mid-session keeps its effect until the
+      // application restarts. Only the stub below can change its answer.
       spy.mockImplementation(((type?: string) => {
         return type === 'default' ? ['D'] : []
       }) as typeof tls.getCACertificates)
@@ -305,7 +492,7 @@ describe('packages/net/tls', () => {
       }
     })
 
-    it('real Node runtime: combined set is a superset of the default set', () => {
+    it('real Node runtime: combined set is a superset of the default set minus the distrusted roots', () => {
       // No mocks — sanity-check the actual runtime (Node >= 22.15 in dev/CI).
       // Skip silently on runtimes without the API (fallback covered above).
       const getCa = (tls as { getCACertificates?: (t?: string) => string[] }).getCACertificates
@@ -313,7 +500,22 @@ describe('packages/net/tls', () => {
       const combined = getCombinedCaCertificates()
       expect(combined).not.toBeNull()
       const have = new Set(combined!.map((p) => p.trim()))
-      for (const pem of getCa('default')) expect(have.has(pem.trim())).toBe(true)
+      // Node security releases dropped the eMudhra roots from the bundled
+      // store, but a runtime one step older still ships "emSign ECC Root
+      // CA - G3" (measured: Node v22.22.1 carries it). On such a Node the
+      // combined list is NOT a plain superset of the default set — the
+      // distrusted-roots filter removes that root BY DESIGN. So the superset
+      // is asserted only over the default roots that survive the filter,
+      // and for the rest the removal itself is pinned: whichever side of the
+      // bundle bump the runtime is on, a distrusted root must never be in
+      // the list we hand to OpenSSL.
+      for (const pem of getCa('default')) {
+        if (isDistrustedRootPem(pem)) {
+          expect(have.has(pem.trim())).toBe(false)
+        } else {
+          expect(have.has(pem.trim())).toBe(true)
+        }
+      }
     })
   })
 
@@ -368,20 +570,26 @@ describe('packages/net/tls', () => {
      * certificates are trusted read the array handed to `tls.createSecureContext`.
      *
      * Stubbing it is required, not merely convenient: these tests use sentinel
-     * strings ('D', 'S', 'PINNED-PEM') that real OpenSSL would reject as PEM.
+     * strings ('D', 'S') for the snapshot that real OpenSSL would reject as
+     * PEM. Anchors, by contrast, must be real certificate bodies here — only
+     * parsed bodies reach the trust list at all (see `buildTlsOptions`).
      */
+    type ContextOpts = { ca?: string | string[]; allowPartialTrustChain?: boolean }
     let caPassedToContext: () => string[] | undefined
+    let optsPassedToContext: () => ContextOpts | undefined
     let contextCalls: () => number
 
     beforeEach(() => {
       __resetCombinedCaCacheForTest()
-      const seen: Array<string[] | undefined> = []
-      vi.spyOn(tls, 'createSecureContext').mockImplementation(((opts?: { ca?: string | string[] }) => {
-        const ca = opts?.ca
-        seen.push(typeof ca === 'string' ? [ca] : ca)
+      const seen: ContextOpts[] = []
+      vi.spyOn(tls, 'createSecureContext').mockImplementation(((opts?: ContextOpts) => {
+        seen.push(opts ?? {})
         return { __stub: true } as unknown as tls.SecureContext
       }) as typeof tls.createSecureContext)
-      caPassedToContext = () => seen[seen.length - 1]
+      const caOf = (opts?: ContextOpts) =>
+        typeof opts?.ca === 'string' ? [opts.ca] : (opts?.ca as string[] | undefined)
+      caPassedToContext = () => caOf(seen[seen.length - 1])
+      optsPassedToContext = () => seen[seen.length - 1]
       contextCalls = () => seen.length
     })
 
@@ -447,10 +655,15 @@ describe('packages/net/tls', () => {
         return type === 'default' ? ['D'] : ['S']
       }) as typeof tls.getCACertificates)
 
-      const opts = buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['PINNED-PEM'] })
-      // Additive: the anchor only widens chain building, and the fingerprint
-      // check still narrows acceptance to the pinned leaf.
-      expect(caPassedToContext()).toEqual(['D', 'S', 'PINNED-PEM'])
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+      })
+      // The anchor is APPENDED to the snapshot; the snapshot itself is handed
+      // over untouched. (An earlier revision reduced it to its self-signed
+      // subset under the partial-chain flag; that filter is gone — containment
+      // moved into `checkServerIdentity`, see the hold tests below.)
+      expect(caPassedToContext()).toEqual(['D', 'S', SELF_SIGNED_CERT])
       expect(opts!.rejectUnauthorized).toBe(true)
     })
 
@@ -460,9 +673,48 @@ describe('packages/net/tls', () => {
         throw new Error('unavailable')
       }) as typeof tls.getCACertificates)
 
-      const opts = buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['PINNED-PEM'] })
-      expect(caPassedToContext()).toEqual(['PINNED-PEM'])
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+      })
+      expect(caPassedToContext()).toEqual([SELF_SIGNED_CERT])
       expect(opts!.rejectUnauthorized).toBe(true)
+    })
+
+    it('with pins, anchor PEM, and NO CA API — partial chain still turns on, the pin is the only guard left', () => {
+      // A parsed anchor is the sole switch for the flag — it does not
+      // check whether `combined` exists. Uncovered gap: `combined === null`
+      // was only asserted for the resulting `ca` array (see the test above),
+      // never for `allowPartialTrustChain` or for what still enforces
+      // identity once the system trust store is gone entirely.
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(tls, 'getCACertificates').mockImplementation((() => {
+        throw new Error('unavailable')
+      }) as typeof tls.getCACertificates)
+
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+        servername: 'localhost',
+      })!
+      expect(caPassedToContext()).toEqual([SELF_SIGNED_CERT])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBe(true)
+      expect(opts.rejectUnauthorized).toBe(true)
+
+      // Wrong fingerprint — refused. Nothing else in the trust set could
+      // have stopped this connection; the pin comparison is doing all the
+      // work that the (absent) system store normally shares with it.
+      const wrong = { fingerprint256: '00:11', subjectaltname: 'DNS:localhost' } as unknown as tls.PeerCertificate
+      const err = opts.checkServerIdentity!('localhost', wrong)
+      expect(err).toBeInstanceOf(Error)
+      expect(err!.message).toContain('TLS pin mismatch')
+
+      // Matching, anchored fingerprint — accepted, hostname not consulted.
+      const right = {
+        fingerprint256: SELF_SIGNED_FP,
+        subjectaltname: 'DNS:something-else.test',
+      } as unknown as tls.PeerCertificate
+      expect(opts.checkServerIdentity!('localhost', right)).toBeUndefined()
     })
 
     it('with empty certificate fingerprint — pin error', () => {
@@ -497,6 +749,169 @@ describe('packages/net/tls', () => {
       expect(opts).toEqual({ rejectUnauthorized: true, servername: 'smtp.gmail.com' })
     })
 
+    // ─── partial chain building (private-CA pinned servers) ────────────────
+    //
+    // A pinned LEAF can only terminate a chain under OpenSSL's
+    // X509_V_FLAG_PARTIAL_CHAIN (Node: `allowPartialTrustChain`). The real
+    // handshakes that prove what that means are further down; these assert
+    // WHICH context each path asks for.
+
+    it('pinned path WITH anchors asks for partial chain building', () => {
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      buildTlsOptions({ tlsPinsSha256: [SELF_SIGNED_FP], tlsPinnedCertsPem: [SELF_SIGNED_CERT] })
+      expect(caPassedToContext()).toEqual(['D', 'S', SELF_SIGNED_CERT])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBe(true)
+    })
+
+    it('unpinned path asks for EXACTLY `{ ca }` — nothing about chain building changes there', () => {
+      // The widening the flag performs is list-wide: every intermediate in the
+      // trust store becomes a standalone end of trust. On the pinned path the
+      // fingerprint check contains that; here there is nothing to contain it,
+      // so the option object must stay byte-for-byte what it always was.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      buildTlsOptions({})
+      expect(Object.keys(optsPassedToContext() ?? {})).toEqual(['ca'])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBeUndefined()
+    })
+
+    it('pinned path WITHOUT anchors asks for full chain building', () => {
+      // Nothing of ours could terminate a chain here, so the flag would only
+      // promote the general trust store's intermediates for no benefit at all.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      buildTlsOptions({ tlsPinsSha256: ['AA:BB'] })
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBeUndefined()
+    })
+
+    it('whitespace-only and empty pinned cert PEM entries never turn partial chain building on', () => {
+      // Two garbage rows ('   ', '') must not be mistaken for anchors. They
+      // are dropped by the `Boolean(pem && pem.trim())` filter, and — since
+      // the flag is derived from the PARSED anchor set — they could not have
+      // turned it on even if they had survived.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const opts = buildTlsOptions({
+        tlsPinsSha256: ['AA:BB'],
+        tlsPinnedCertsPem: ['   ', ''],
+      })!
+      expect(caPassedToContext()).toEqual(['D', 'S'])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBeUndefined()
+      expect(opts.rejectUnauthorized).toBe(true)
+    })
+
+    it('a stored anchor that is not a parsable certificate does NOT turn partial chain building on', () => {
+      // The flag is derived from `anchorFingerprints`, not from the raw stored
+      // list, so the set that decides "is the presented leaf an anchor?" IS the
+      // set that switched the flag on. A corrupt row (non-empty, but not a
+      // certificate) therefore relaxes nothing — and it does not reach `ca`
+      // either: only parsed bodies travel on, so the endpoint keeps ordinary
+      // chain building and the ordinary hostname check over a trust list that
+      // is exactly the snapshot.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const corrupt = '-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n'
+      buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: [corrupt] })
+      expect(caPassedToContext()).toEqual(['D', 'S'])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBeUndefined()
+    })
+
+    it('a real anchor survives filtering alongside whitespace/empty noise — flag turns on, the noise never reaches `ca`', () => {
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT, '   ', ''],
+      })
+      expect(caPassedToContext()).toEqual(['D', 'S', SELF_SIGNED_CERT])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBe(true)
+    })
+
+    it('a corrupt anchor entry BEFORE a real one does not stop the loop from finding the real one', () => {
+      // Every earlier test with a corrupt entry used it ALONE or alongside
+      // whitespace/empty noise (which never reaches the try/catch at all — it
+      // is filtered out before the loop runs). None of them exercises what
+      // happens when `new X509Certificate(pem)` actually THROWS for an entry
+      // that precedes a real one: a `for...of` that breaks or returns on the
+      // first caught exception (a plausible "simplify the loop" mutation)
+      // would silently disable partial-chain building for every endpoint
+      // whose corrupt row happens to sort before its real one.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const corrupt = '-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n'
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [corrupt, SELF_SIGNED_CERT],
+      })!
+      // The corrupt entry is dropped from the trust list, the real one is not.
+      expect(caPassedToContext()).toEqual(['D', 'S', SELF_SIGNED_CERT])
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBe(true)
+
+      // Behavioural proof, not just the flag: the real anchor still grants
+      // identity despite sorting after the corrupt one.
+      const right = {
+        fingerprint256: SELF_SIGNED_FP,
+        subjectaltname: 'DNS:something-else.test',
+      } as unknown as tls.PeerCertificate
+      expect(opts.checkServerIdentity!('localhost', right)).toBeUndefined()
+    })
+
+    it('a partial-chain context is never handed to an unpinned connection', () => {
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const pinned = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+      })!
+      const plain = buildTlsOptions({})!
+      expect(contextCalls()).toBe(2)
+      expect(plain.secureContext).not.toBe(pinned.secureContext)
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBeUndefined()
+    })
+
+    it('the SecureContext cache key names the partial-chain flag', () => {
+      // SECURITY-LOAD-BEARING, and deliberately tested on the key function
+      // itself rather than through buildTlsOptions: today the flag is only
+      // ever requested together with a non-empty anchor set, whose key
+      // part already separates the entries, so no call site can currently produce
+      // the collision. That is a coincidence of the call sites, not a property
+      // of the cache. If the flag is left out of the key, a later change that
+      // asks for it on an anchor set some other endpoint uses WITHOUT it would
+      // silently hand that endpoint a relaxed context. The old key —
+      // `${revision}|${anchorsKey(anchors)}` — fails this test.
+      const { secureContextCacheKey } = __testOnly
+      expect(secureContextCacheKey(1, [], true)).not.toBe(secureContextCacheKey(1, [], false))
+      expect(secureContextCacheKey(1, ['ANCHOR-A'], true)).not.toBe(
+        secureContextCacheKey(1, ['ANCHOR-A'], false),
+      )
+      // The two inputs the key already named must keep separating entries.
+      expect(secureContextCacheKey(1, [], false)).not.toBe(secureContextCacheKey(2, [], false))
+      expect(secureContextCacheKey(1, ['ANCHOR-A'], true)).not.toBe(
+        secureContextCacheKey(1, ['ANCHOR-B'], true),
+      )
+      // Same inputs → same key, or the cache would never hit.
+      expect(secureContextCacheKey(1, ['ANCHOR-A'], true)).toBe(
+        secureContextCacheKey(1, ['ANCHOR-A'], true),
+      )
+    })
+
     // ─── §2.156 shared SecureContext ───────────────────────────────────────
 
     it('reuses ONE SecureContext across connections to the same trust set', () => {
@@ -514,7 +929,7 @@ describe('packages/net/tls', () => {
       expect(buildTlsOptions({})!.secureContext).toBe(first.secureContext)
     })
 
-    it('a CA snapshot refresh rebuilds the context — staleness stays bounded by the TTL', () => {
+    it('a CA snapshot refresh rebuilds the context — our two caches change over together', () => {
       vi.useFakeTimers()
       try {
         const spy = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
@@ -524,10 +939,15 @@ describe('packages/net/tls', () => {
         const before = buildTlsOptions({})!
         expect(contextCalls()).toBe(1)
 
-        // Admin removes the interception root. The whole point of CA_CACHE_TTL_MS
-        // is that this takes effect without a restart; a context cached for the
-        // process lifetime would have kept the removed root trusted, which is
-        // exactly the hole this test exists to keep closed.
+        // The snapshot's CONTENTS change (here by stubbing the source). What
+        // is pinned is OUR plumbing: a recomputed snapshot must orphan every
+        // context built from the previous contents, so the `ca` arrays and the
+        // OpenSSL contexts never disagree about what is trusted.
+        //
+        // Note what this does NOT claim. On the real runtime the source is a
+        // frozen per-process snapshot (see the CA_CACHE_TTL_MS docblock), so a
+        // root the admin removes mid-session stays trusted until restart. That
+        // is Node's behaviour, not ours, and the test stays off it deliberately.
         spy.mockImplementation(((type?: string) => (type === 'default' ? ['D'] : [])) as typeof tls.getCACertificates)
         vi.advanceTimersByTime(CA_CACHE_TTL_MS + 1)
 
@@ -545,10 +965,13 @@ describe('packages/net/tls', () => {
         return type === 'default' ? ['D'] : ['S']
       }) as typeof tls.getCACertificates)
 
-      const a = buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['ANCHOR-A'] })!
-      expect(caPassedToContext()).toEqual(['D', 'S', 'ANCHOR-A'])
-      const b = buildTlsOptions({ tlsPinsSha256: ['CC:DD'], tlsPinnedCertsPem: ['ANCHOR-B'] })!
-      expect(caPassedToContext()).toEqual(['D', 'S', 'ANCHOR-B'])
+      // Real certificate bodies, not sentinels: only PARSED bodies reach the
+      // trust list, so a sentinel string would be filtered out and both
+      // endpoints would collapse onto the shared no-anchor context.
+      const a = buildTlsOptions({ tlsPinsSha256: [SELF_SIGNED_FP], tlsPinnedCertsPem: [SELF_SIGNED_CERT] })!
+      expect(caPassedToContext()).toEqual(['D', 'S', SELF_SIGNED_CERT])
+      const b = buildTlsOptions({ tlsPinsSha256: [DNS_ONLY_FP], tlsPinnedCertsPem: [DNS_ONLY_CERT] })!
+      expect(caPassedToContext()).toEqual(['D', 'S', DNS_ONLY_CERT])
       expect(a.secureContext).not.toBe(b.secureContext)
       // An unpinned endpoint must not receive either anchored context.
       const plain = buildTlsOptions({})!
@@ -556,9 +979,50 @@ describe('packages/net/tls', () => {
       expect(plain.secureContext).not.toBe(b.secureContext)
       // Same anchors again → the cached context, not a fourth build.
       const callsBefore = contextCalls()
-      expect(buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['ANCHOR-A'] })!.secureContext)
-        .toBe(a.secureContext)
+      expect(
+        buildTlsOptions({ tlsPinsSha256: [SELF_SIGNED_FP], tlsPinnedCertsPem: [SELF_SIGNED_CERT] })!.secureContext,
+      ).toBe(a.secureContext)
       expect(contextCalls()).toBe(callsBefore)
+    })
+
+    it('a FINGERPRINT-ONLY pinned endpoint shares ONE context with the plain unpinned endpoint — sharing is safe because identity narrows per-connection, not per-context', () => {
+      // With no anchor PEM, the pinned path's `ca` and `partialChain` inputs
+      // are byte-for-byte what the unpinned path already builds
+      // (`anchors: []`, flag off) — the three-part key collapses to the same
+      // value. That is not a leak: `checkServerIdentity` and
+      // `rejectUnauthorized` stay per-connection, so sharing the underlying
+      // OpenSSL trust store buys nothing to an attacker and one fewer
+      // `createSecureContext` call to the hot path.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const unpinned = buildTlsOptions({})!
+      const fingerprintOnly = buildTlsOptions({ tlsPinsSha256: ['AA:BB'] })!
+      expect(contextCalls()).toBe(1)
+      expect(fingerprintOnly.secureContext).toBe(unpinned.secureContext)
+      expect(unpinned.checkServerIdentity).toBeUndefined()
+      expect(fingerprintOnly.checkServerIdentity).toBeInstanceOf(Function)
+    })
+
+    it('adding a stored certificate PEM to a previously fingerprint-only pin crosses the anchors boundary into a FRESH, partial-chain context', () => {
+      // The account's pin did not change, only whether its body is known —
+      // but that alone must move it off the shared no-anchor context above
+      // and onto a distinct, partial-chain one (anchorsKey changes AND the
+      // flag flips).
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const fingerprintOnly = buildTlsOptions({ tlsPinsSha256: [SELF_SIGNED_FP] })!
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBeUndefined()
+
+      const anchored = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [SELF_SIGNED_CERT],
+      })!
+      expect(optsPassedToContext()?.allowPartialTrustChain).toBe(true)
+      expect(anchored.secureContext).not.toBe(fingerprintOnly.secureContext)
     })
 
     it('a cache hit within the TTL does not bump the revision — repeated calls stay on ONE context', () => {
@@ -583,26 +1047,28 @@ describe('packages/net/tls', () => {
     })
 
     it('anchor sets that would collide under naive concatenation still get different context keys', () => {
-      // anchorsKey() hashes with a NUL separator between PEM bodies precisely
-      // so that ['AB', 'C'] and ['A', 'BC'] cannot hash to the same digest.
-      // Without the separator the second call below would hit the cache
-      // entry built for the FIRST (different) anchor set and silently reuse
-      // the wrong trust store.
-      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
-        return type === 'default' ? ['D'] : ['S']
-      }) as typeof tls.getCACertificates)
-
-      buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['AB', 'C'] })
-      expect(contextCalls()).toBe(1)
-      buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['A', 'BC'] })
-      expect(contextCalls()).toBe(2)
+      // anchorsKey() joins with a NUL separator between PEM bodies precisely
+      // so that ['AB', 'C'] and ['A', 'BC'] cannot produce the same key.
+      // Without it, an endpoint would hit the cache entry built for a
+      // DIFFERENT anchor set and silently reuse the wrong trust store.
+      //
+      // Asserted on the key function rather than through `buildTlsOptions`,
+      // for the same reason as the partial-chain key test above: only PARSED
+      // certificate bodies reach the key now, and no pair of real
+      // certificates can express this split — the property belongs to the
+      // key construction, not to any call site.
+      const { secureContextCacheKey } = __testOnly
+      expect(secureContextCacheKey(1, ['AB', 'C'], true)).not.toBe(
+        secureContextCacheKey(1, ['A', 'BC'], true),
+      )
     })
 
     it('a revision bump sweeps ALL stale-revision entries out of the cache, not just the one being looked up', () => {
       // §2.156: without this sweep the cache would grow by (accounts ×
-      // revisions) for the whole process lifetime — a new root-store snapshot
-      // every CA_CACHE_TTL_MS orphans every context built from the previous
-      // one, and nothing else ever removes them.
+      // revisions) for the whole process lifetime — a RECOMPUTED snapshot
+      // orphans every context built from the previous contents, and nothing
+      // else ever removes them. (Recomputed, not refreshed: the source is
+      // frozen per process — see the CA_CACHE_TTL_MS docblock.)
       vi.useFakeTimers()
       try {
         const spyCa = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
@@ -611,12 +1077,14 @@ describe('packages/net/tls', () => {
 
         // Three distinct trust sets built in revision 1: two pinned accounts
         // plus the plain unpinned one.
-        buildTlsOptions({ tlsPinsSha256: ['AA:BB'], tlsPinnedCertsPem: ['ANCHOR-A'] })
-        buildTlsOptions({ tlsPinsSha256: ['CC:DD'], tlsPinnedCertsPem: ['ANCHOR-B'] })
+        buildTlsOptions({ tlsPinsSha256: [SELF_SIGNED_FP], tlsPinnedCertsPem: [SELF_SIGNED_CERT] })
+        buildTlsOptions({ tlsPinsSha256: [DNS_ONLY_FP], tlsPinnedCertsPem: [DNS_ONLY_CERT] })
         buildTlsOptions({})
         expect(contextCalls()).toBe(3)
 
-        // Admin removes a root; TTL expires — revision bumps.
+        // The stub changes its answer and the TTL expires, so the snapshot is
+        // recomputed and the revision bumps. Modelling only our own plumbing —
+        // the real store cannot change mid-process.
         spyCa.mockImplementation(((type?: string) => {
           return type === 'default' ? ['D2'] : ['S']
         }) as typeof tls.getCACertificates)
@@ -636,6 +1104,66 @@ describe('packages/net/tls', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    it('a revision bump orphans BOTH the full (unpinned) and the partial-chain (anchored) context', () => {
+      // The sweep test above proves stale entries get DELETED; it never
+      // rebuilds the partial-chain variant afterwards, so it cannot show
+      // whether that variant's NEXT lookup actually gets a fresh context
+      // rather than an accidental hit against a leftover key. The three-part
+      // key names the revision for both variants alike — verify both really
+      // rebuild, not just that the map shrank.
+      vi.useFakeTimers()
+      try {
+        const spy = vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+          return type === 'default' ? ['D'] : ['S']
+        }) as typeof tls.getCACertificates)
+
+        const anchored = { tlsPinsSha256: [SELF_SIGNED_FP], tlsPinnedCertsPem: [SELF_SIGNED_CERT] }
+        const fullBefore = buildTlsOptions({})!
+        const partialBefore = buildTlsOptions(anchored)!
+        expect(contextCalls()).toBe(2)
+
+        spy.mockImplementation(((type?: string) =>
+          (type === 'default' ? ['D2'] : ['S'])) as typeof tls.getCACertificates)
+        vi.advanceTimersByTime(CA_CACHE_TTL_MS + 1)
+
+        const fullAfter = buildTlsOptions({})!
+        const partialAfter = buildTlsOptions(anchored)!
+
+        expect(fullAfter.secureContext).not.toBe(fullBefore.secureContext)
+        expect(partialAfter.secureContext).not.toBe(partialBefore.secureContext)
+        // The last build was the partial-chain one — it still asks for partial
+        // chain building, and its list is the REFRESHED snapshot plus the
+        // anchor.
+        expect(caPassedToContext()).toEqual(['D2', 'S', SELF_SIGNED_CERT])
+        expect(optsPassedToContext()?.allowPartialTrustChain).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a same-revision cache miss for one flag variant does not evict a live entry of the OTHER variant', () => {
+      // The sweep loop in `secureContextFor` deletes purely on
+      // `v.revision !== revision`. Building a NEW key (different anchors, or
+      // a different partial-chain flag) at the SAME revision must not sweep
+      // away an entry that already belongs to that same revision, no matter
+      // which flag variant it is.
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) => {
+        return type === 'default' ? ['D'] : ['S']
+      }) as typeof tls.getCACertificates)
+
+      const full = buildTlsOptions({})!
+      expect(contextCalls()).toBe(1)
+
+      // Cache miss on a DIFFERENT key (partial-chain, different anchors),
+      // same revision — this is exactly the branch that runs the sweep loop.
+      buildTlsOptions({ tlsPinsSha256: [SELF_SIGNED_FP], tlsPinnedCertsPem: [SELF_SIGNED_CERT] })
+      expect(contextCalls()).toBe(2)
+
+      const fullAgain = buildTlsOptions({})!
+      expect(contextCalls()).toBe(2) // no third build — the full entry survived
+      expect(fullAgain.secureContext).toBe(full.secureContext)
     })
 
     it('__resetCombinedCaCacheForTest also clears the SecureContext cache (test isolation)', () => {
@@ -710,15 +1238,20 @@ describe('packages/net/tls', () => {
       expect(b.servername).toBe('account-b.example.com')
       expect(a.checkServerIdentity).not.toBe(b.checkServerIdentity)
 
-      // Behavioural proof, not just reference inequality: a certificate
-      // matching B's extra renderer pin is accepted by B...
+      // Behavioural proof, not just reference inequality: the two endpoints
+      // refuse B's extra renderer pin for DIFFERENT reasons, and the reason is
+      // exactly what each endpoint knows. B knows the pin, so its refusal is
+      // the anchored-endpoint hold ("the body was never confirmed")...
       const rendererCert = {
         fingerprint256: rendererPinB,
         subjectaltname: 'DNS:account-b.example.com',
       } as unknown as tls.PeerCertificate
-      expect(b.checkServerIdentity!('1.2.3.4', rendererCert)).toBeUndefined()
-      // ...but REJECTED by A as a pin mismatch — A never learned that pin;
-      // sharing the SecureContext did not smuggle it across.
+      const errB = b.checkServerIdentity!('1.2.3.4', rendererCert)
+      expect(errB).toBeInstanceOf(Error)
+      expect(errB!.message).toContain('TLS pin not confirmed')
+      // ...while A never learned that pin at all, so it stops one step earlier
+      // with a mismatch. Sharing the SecureContext did not smuggle the pin
+      // across.
       const err = a.checkServerIdentity!('1.2.3.4', rendererCert)
       expect(err).toBeInstanceOf(Error)
       expect(err!.message).toContain('TLS pin mismatch')
@@ -812,6 +1345,11 @@ describe('packages/net/tls', () => {
       // (Settings) on the same endpoint. A per-endpoint "has anchors" flag
       // would hand the anchored certificate's privilege to the renderer-chosen
       // one; the discriminator is therefore per presented certificate.
+      //
+      // Such an endpoint runs a PARTIAL-CHAIN context (it has a parsed
+      // anchor), and there the hostname check is no longer enough to keep a
+      // renderer-written pin a narrowing of trust — so the fingerprint-only
+      // leaf is refused outright, one step BEFORE the name is looked at.
       const rendererPin = 'AA:BB:CC:DD'
       const opts = buildTlsOptions({
         tlsPinsSha256: [DNS_ONLY_FP, rendererPin],
@@ -826,14 +1364,32 @@ describe('packages/net/tls', () => {
       } as unknown as tls.PeerCertificate
       expect(opts!.checkServerIdentity!('1.2.3.4', anchored)).toBeUndefined()
 
-      // Fingerprint-only leaf on the SAME endpoint → still name-checked.
+      // Fingerprint-only leaf on the SAME endpoint → refused as unconfirmed.
       const fingerprintOnly = {
         fingerprint256: rendererPin,
         subjectaltname: 'DNS:attacker.example.com',
       } as unknown as tls.PeerCertificate
       const err = opts!.checkServerIdentity!('1.2.3.4', fingerprintOnly)
       expect(err).toBeInstanceOf(Error)
-      expect(err!.message).toMatch(/altnames|subject/i)
+      expect(err!.message).toContain('TLS pin not confirmed')
+      expect(err!.message).toContain(rendererPin)
+      // WHO refused: the hold, not the name check. A message mentioning
+      // altnames/subject would mean the leaf reached `tls.checkServerIdentity`
+      // — i.e. it was being judged by its name on a partial-chain context.
+      expect(err!.message).not.toMatch(/altnames|subject/i)
+      // And it is a TRUST error, so the recovery dialog opens and the user can
+      // confirm this certificate too (the named remedy for the named price).
+      expect(isTlsTrustError(err)).toBe(true)
+
+      // A fingerprint-only leaf that names the DIALLED host is refused just the
+      // same: on this endpoint the name buys nothing.
+      const matching = {
+        fingerprint256: rendererPin,
+        subjectaltname: 'DNS:smtp.gmail.com',
+      } as unknown as tls.PeerCertificate
+      expect(opts!.checkServerIdentity!('1.2.3.4', matching)!.message).toContain(
+        'TLS pin not confirmed',
+      )
     })
 
     it('unparsable stored anchor grants no identity — falls back to the name check', () => {
@@ -893,14 +1449,14 @@ describe('packages/net/tls', () => {
         socket.end('OK\r\n')
       })
       // Rejected handshakes surface here; swallow so they don't crash the run.
+      // Rejected handshakes surface here; swallow so they don't crash the run.
+      // Bind failures do NOT go through here — `listenLocal` rejects on those.
       server.on('tlsClientError', () => {})
-      server.on('error', () => {})
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-      port = (server.address() as net.AddressInfo).port
+      port = await listenLocal(server)
     })
 
     afterEach(async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await closeServer(server)
       __resetCombinedCaCacheForTest()
     })
 
@@ -911,8 +1467,10 @@ describe('packages/net/tls', () => {
         const done = (r: { ok: boolean; error?: Error }) => {
           if (settled) return
           settled = true
-          try { socket.destroy() } catch { /* ignore */ }
-          resolve(r)
+          // Closing the client in `finally`: teardown must not depend on the
+          // destroy call succeeding, and `server.close()` in afterEach cannot
+          // complete while this peer is still open.
+          try { socket.destroy() } catch { /* already gone */ } finally { resolve(r) }
         }
         const socket = tls.connect({ host: '127.0.0.1', port, ...opts }, () => done({ ok: true }))
         socket.once('error', (e: Error) => done({ ok: false, error: e }))
@@ -976,6 +1534,45 @@ describe('packages/net/tls', () => {
       expect(isTlsTrustError(r.error)).toBe(true)
     })
 
+    it('a corrupt stored body next to a real anchor → options still build on the REAL context, and the real anchor still grants identity', async () => {
+      // Every other corrupt-anchor test stubs `tls.createSecureContext`, so
+      // none of them can say what OpenSSL does with such a row. That mattered:
+      // the production comment used to ASSUME a garbage entry in `ca` is
+      // ignored, and if `createSecureContext` rejected it instead,
+      // `buildTlsOptions` would throw before any socket — every connection for
+      // the account failing with an error that does not classify as a trust
+      // error, so network-class backoff and no recovery dialog. This describe
+      // block uses the real constructor, and the code now hands it only parsed
+      // bodies, which makes the question moot rather than answered by luck.
+      const corrupt = '-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n'
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [corrupt, SELF_SIGNED_CERT],
+        // A name the certificate does not carry: only the ANCHORED identity
+        // mode can accept this, so the handshake succeeding proves the real
+        // anchor survived alongside the corrupt row — flag, trust list and all.
+        servername: 'not-the-pinned-host.example',
+      })!
+      expect(opts.rejectUnauthorized).toBe(true)
+      const r = await handshake(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+    })
+
+    it('a corrupt stored body ALONE → no anchor, so the self-signed server still fails CLOSED', async () => {
+      // The other half of the narrowing: dropping the row must not accidentally
+      // leave the endpoint anchored by something unparsable.
+      const corrupt = '-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n'
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [SELF_SIGNED_FP],
+        tlsPinnedCertsPem: [corrupt],
+        servername: 'localhost',
+      })!
+      const r = await handshake(opts)
+      expect(r.ok).toBe(false)
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
     it('no pins → untrusted certificate is rejected by the combined CA set', async () => {
       const opts = buildTlsOptions({ servername: 'localhost' })!
       const r = await handshake(opts)
@@ -1006,13 +1603,11 @@ describe('packages/net/tls', () => {
         socket.end('OK\r\n')
       })
       server.on('tlsClientError', () => {})
-      server.on('error', () => {})
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-      port = (server.address() as net.AddressInfo).port
+      port = await listenLocal(server)
     })
 
     afterEach(async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await closeServer(server)
       __resetCombinedCaCacheForTest()
     })
 
@@ -1037,13 +1632,41 @@ describe('packages/net/tls', () => {
         const done = (r: { ok: boolean; error?: Error }) => {
           if (settled) return
           settled = true
-          try { socket.destroy() } catch { /* ignore */ }
-          resolve(r)
+          // Closing the client in `finally`: teardown must not depend on the
+          // destroy call succeeding, and `server.close()` in afterEach cannot
+          // complete while this peer is still open.
+          try { socket.destroy() } catch { /* already gone */ } finally { resolve(r) }
         }
         const socket = tls.connect({ host: '127.0.0.1', port, ...opts }, () => done({ ok: true }))
         socket.once('error', (e: Error) => done({ ok: false, error: e }))
         socket.setTimeout(5_000, () => done({ ok: false, error: new Error('handshake timeout') }))
       })
+    }
+
+    /**
+     * Same dial, while recording whether Node reached the PINNED
+     * `checkServerIdentity`.
+     *
+     * That observable is what names the layer that refused: Node invokes the
+     * callback only after OpenSSL verified the chain, so `identityChecked ===
+     * false` means the chain was refused and no pin could have mattered, while
+     * `true` means the chain verified and OUR identity layer is what stopped
+     * the connection. Asserting an error code alone cannot tell the two apart.
+     */
+    async function handshakeByIpTracked(
+      opts: tls.ConnectionOptions,
+    ): Promise<{ ok: boolean; error?: Error; identityChecked: boolean }> {
+      const inner = opts.checkServerIdentity
+      if (!inner) throw new Error('handshakeByIpTracked needs the pinned identity callback')
+      let identityChecked = false
+      const r = await handshakeByIp({
+        ...opts,
+        checkServerIdentity: (host, cert) => {
+          identityChecked = true
+          return inner(host, cert)
+        },
+      })
+      return { ...r, identityChecked }
     }
 
     it('NOT pinned → still rejected for the name mismatch (unpinned path unchanged)', async () => {
@@ -1090,16 +1713,28 @@ describe('packages/net/tls', () => {
 
     it('MIXED endpoint over a real handshake — a fingerprint-only leaf borrows nothing from the anchored one', async () => {
       // Anchored pin for one certificate + fingerprint-only pin for another,
-      // on the same endpoint. The server presents the fingerprint-only one.
+      // on the same endpoint. The server presents the fingerprint-only one,
+      // handed to OpenSSL as a root so the CHAIN cannot be what refuses it —
+      // that is what makes the refusal attributable to the identity layer.
       const opts = buildTlsOptions({
         tlsPinsSha256: [SELF_SIGNED_FP, DNS_ONLY_FP],
         tlsPinnedCertsPem: [SELF_SIGNED_CERT],
       })!
-      const r = await handshakeByIp(
+      const r = await handshakeByIpTracked(
         withTrust(opts, [...(getCombinedCaCertificates() ?? []), SELF_SIGNED_CERT, DNS_ONLY_CERT]),
       )
       expect(r.ok).toBe(false)
-      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID')
+      // The chain verified, so the pin callback ran — and it refused, because
+      // this endpoint holds a confirmed BODY and this leaf is not one.
+      expect(r.identityChecked).toBe(true)
+      expect(r.error?.message).toContain('TLS pin not confirmed')
+      expect(r.error?.message).toContain(DNS_ONLY_FP)
+      // Not the name check (the leaf names domains, the dial is a bare IP, so
+      // that check would also have failed — it simply never runs here) and not
+      // an OpenSSL chain verdict: our refusals carry no `code`.
+      expect(r.error?.message).not.toMatch(/altnames|subject/i)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBeUndefined()
+      expect(isTlsTrustError(r.error)).toBe(true)
     })
 
     it('pinned to a DIFFERENT certificate → rejected as a pin mismatch, not as a name mismatch', async () => {
@@ -1116,6 +1751,539 @@ describe('packages/net/tls', () => {
       expect(r.error?.message).toContain('TLS pin mismatch')
       expect(r.error?.message).toContain(DNS_ONLY_FP)
       expect(isTlsTrustError(r.error)).toBe(true)
+    })
+  })
+
+  // ─── PRIVATE-CA SERVER — partial chain building ────────────────────────────
+  //
+  // The incident this exists for: a mail host moved from a public CA to a
+  // PRIVATE one and now serves leaf → Sub CA → self-signed private root,
+  // sending all three. "Trust this certificate" stored a correct pin and the
+  // very next connection failed identically — forever — because a pinned LEAF
+  // cannot be a trust anchor unless partial chain building is on, so the chain
+  // never verified, so Node never called `checkServerIdentity`, so the pin was
+  // never even compared.
+  //
+  // Fully hermetic: a local server with a generated private chain, no network.
+
+  describe('private-CA server (leaf → Sub CA → self-signed private root)', () => {
+    let server: tls.Server | undefined
+    let port = 0
+
+    /** Serve `leafCert` and send the WHOLE chain, private root included —
+     *  the shape the affected server actually presents. */
+    async function serve(leafCert: string, leafKey: string): Promise<void> {
+      server = tls.createServer(
+        { key: leafKey, cert: leafCert + PRIVATE_SUB_CERT + PRIVATE_ROOT_CERT },
+        (socket) => socket.end('OK\r\n'),
+      )
+      server.on('tlsClientError', () => {})
+      port = await listenLocal(server)
+    }
+
+    beforeEach(() => {
+      __resetCombinedCaCacheForTest()
+    })
+
+    afterEach(async () => {
+      vi.restoreAllMocks()
+      await closeServer(server)
+      server = undefined
+      __resetCombinedCaCacheForTest()
+    })
+
+    /** Pretend the OS store contains `certs` (and nothing else public), so a
+     *  test can model a machine that has the private CA installed. */
+    function osStoreContains(certs: string[]): void {
+      vi.spyOn(tls, 'getCACertificates').mockImplementation(((type?: string) =>
+        type === 'default' ? certs : []) as typeof tls.getCACertificates)
+    }
+
+    type Attempt = { ok: boolean; error?: Error; identityChecked: boolean }
+
+    /** Handshake with an explicitly built context. Reports whether Node
+     *  reached `checkServerIdentity` — the observable that distinguishes
+     *  "chain verified, pin compared" from "chain failed, pin ignored". */
+    function rawHandshake(ctxOpts: tls.SecureContextOptions): Promise<Attempt> {
+      return new Promise((resolve) => {
+        let settled = false
+        let identityChecked = false
+        const done = (r: Omit<Attempt, 'identityChecked'>) => {
+          if (settled) return
+          settled = true
+          try { socket.destroy() } catch { /* already gone */ } finally { resolve({ ...r, identityChecked }) }
+        }
+        const socket = tls.connect(
+          {
+            host: '127.0.0.1',
+            port,
+            servername: 'mail.private.test',
+            rejectUnauthorized: true,
+            secureContext: tls.createSecureContext(ctxOpts),
+            checkServerIdentity: () => {
+              identityChecked = true
+              return undefined
+            },
+          },
+          () => done({ ok: true }),
+        )
+        socket.once('error', (e: Error) => done({ ok: false, error: e }))
+        socket.setTimeout(5_000, () => done({ ok: false, error: new Error('handshake timeout') }))
+      })
+    }
+
+    /** Handshake with options exactly as `buildTlsOptions` produced them. */
+    function handshake(opts: tls.ConnectionOptions): Promise<{ ok: boolean; error?: Error }> {
+      return new Promise((resolve) => {
+        let settled = false
+        const done = (r: { ok: boolean; error?: Error }) => {
+          if (settled) return
+          settled = true
+          // Closing the client in `finally`: teardown must not depend on the
+          // destroy call succeeding, and `server.close()` in afterEach cannot
+          // complete while this peer is still open.
+          try { socket.destroy() } catch { /* already gone */ } finally { resolve(r) }
+        }
+        const socket = tls.connect({ host: '127.0.0.1', port, ...opts }, () => done({ ok: true }))
+        socket.once('error', (e: Error) => done({ ok: false, error: e }))
+        socket.setTimeout(5_000, () => done({ ok: false, error: new Error('handshake timeout') }))
+      })
+    }
+
+    /**
+     * Same, while recording whether Node reached the PINNED
+     * `checkServerIdentity` — the observable that names WHO refused.
+     *
+     * Node invokes the callback only on the branch where chain verification
+     * already succeeded, so `identityChecked === false` means OpenSSL refused
+     * the chain and no pin could have changed the outcome, while `true` means
+     * the chain verified and our per-certificate hold is what stopped the
+     * connection. Design B places containment in the second layer, so every
+     * assertion about it has to say which layer spoke — an error code alone
+     * cannot (our refusals carry no `code` at all).
+     */
+    async function trackedHandshake(opts: tls.ConnectionOptions): Promise<Attempt> {
+      const inner = opts.checkServerIdentity
+      if (!inner) throw new Error('trackedHandshake needs the pinned identity callback')
+      let identityChecked = false
+      const r = await handshake({
+        ...opts,
+        checkServerIdentity: (host, cert) => {
+          identityChecked = true
+          return inner(host, cert)
+        },
+      })
+      return { ...r, identityChecked }
+    }
+
+    // ── the three states, measured directly against OpenSSL ────────────────
+    // Same three the fix was derived from on the live server, reproduced here
+    // without a network. They are asserted on raw contexts rather than through
+    // buildTlsOptions on purpose: state (1) is no longer reachable from
+    // production code, and it is the state that explains the bug.
+
+    it('(1) an anchored LEAF cannot end the chain without the flag — and the pin is never compared', async () => {
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const r = await rawHandshake({ ca: [PRIVATE_LEAF_CERT] })
+      expect(r.ok).toBe(false)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('SELF_SIGNED_CERT_IN_CHAIN')
+      // The whole user-visible defect in one assertion: the pin callback never
+      // ran, so no pin — correct or not — could have changed the outcome.
+      expect(r.identityChecked).toBe(false)
+    })
+
+    it('(2) with the flag the anchored LEAF ends the chain and the pin callback DOES run', async () => {
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const r = await rawHandshake({ ca: [PRIVATE_LEAF_CERT], allowPartialTrustChain: true })
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+      expect(r.identityChecked).toBe(true)
+    })
+
+    it('(3) the flag alone trusts nothing — without the anchor the chain still fails', async () => {
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      // An unrelated anchor, so the list is non-empty and the only difference
+      // from (2) is WHICH certificate is in it.
+      const r = await rawHandshake({ ca: [SELF_SIGNED_CERT], allowPartialTrustChain: true })
+      expect(r.ok).toBe(false)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBe('SELF_SIGNED_CERT_IN_CHAIN')
+      expect(r.identityChecked).toBe(false)
+    })
+
+    // ── the same through the production path ───────────────────────────────
+
+    it('pinned + anchored PEM → handshake SUCCEEDS (this is the defect being fixed)', async () => {
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      expect(opts.rejectUnauthorized).toBe(true)
+      const r = await handshake(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+    })
+
+    it('pinned WITHOUT the certificate PEM → still fails closed', async () => {
+      // Unchanged: the flag rides on the anchors, so a fingerprint-only pin
+      // gets no help from it. Until the recovery dialog persists the body, a
+      // private-CA server errors like any untrusted chain.
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        servername: 'mail.private.test',
+      })!
+      const r = await handshake(opts)
+      expect(r.ok).toBe(false)
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    it('anchored leaf keeps skipping the hostname check — identity mode is unchanged', async () => {
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'not-the-pinned-host.example',
+      })!
+      const r = await handshake(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+    })
+
+    // ── the flag did NOT buy the private CA any standing ───────────────────
+
+    it('a DIFFERENT certificate from the same private CA is refused as a pin mismatch (root in the OS store)', async () => {
+      // The machine in the incident has the private root installed, so the
+      // chain verifies on its own and `checkServerIdentity` is reached. What
+      // must stop the connection is the pin, and nothing else.
+      osStoreContains([PRIVATE_ROOT_CERT])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await handshake(opts)
+      expect(r.ok).toBe(false)
+      expect(r.error?.message).toContain('TLS pin mismatch')
+      expect(r.error?.message).toContain(PRIVATE_LEAF2_FP)
+    })
+
+    it('an ORPHANED intermediate in the OS store lets the chain verify — the per-certificate hold is what refuses', async () => {
+      // Now only the INTERMEDIATE sits in the OS store, with no root above it
+      // — the real shape on the affected machine (`Russian_Trusted_Sub_CA*` in
+      // /usr/local/share/ca-certificates/). The flag promotes every
+      // non-self-signed member of the trust list to a standalone end of trust,
+      // so this rotated certificate DOES verify: the trust list is not reduced,
+      // and OpenSSL therefore has no objection to raise.
+      //
+      // That is design B's premise, not a gap in it. `allowPartialTrustChain`
+      // is a property of the CONTEXT while the decision it could corrupt is
+      // taken per PRESENTED certificate, so containment lives in the layer that
+      // can see the certificate. Here the presented leaf is not pinned at all,
+      // so the connection fails closed one layer down, as a pin mismatch — and
+      // that verdict is what re-raises the recovery dialog for it.
+      osStoreContains([PRIVATE_SUB_CERT])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.ok).toBe(false)
+      expect(isTlsTrustError(r.error)).toBe(true)
+      // WHO refused: the chain verified (so the promotion really did happen —
+      // this is the measurement, not an assumption) and the pin comparison ran.
+      expect(r.identityChecked).toBe(true)
+      expect(r.error?.message).toContain('TLS pin mismatch')
+      expect(r.error?.message).toContain(PRIVATE_LEAF2_FP)
+      // Our refusals carry no OpenSSL code; a chain verdict here would mean the
+      // hold was never reached and the test proved nothing about it.
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBeUndefined()
+    })
+
+    it('the ANCHORED leaf still connects with nothing usable in the store', async () => {
+      // The control for the test above, and the regression guard for the
+      // incident fix: with the store's only entry an orphaned intermediate
+      // that cannot anchor this chain, the leaf the user confirmed must still
+      // terminate its own chain.
+      osStoreContains([PRIVATE_SUB_CERT])
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await handshake(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+    })
+
+    it('MIXED endpoint with an ORPHANED intermediate — the fingerprint-only leaf gains NOTHING from the flag', async () => {
+      // The invariant this pins, and the reason it is expressed per presented
+      // certificate: `partialChain` is a property of the CONTEXT (the whole
+      // trust list) while the anchored/fingerprint-only discrimination is a
+      // property of the PRESENTED certificate, so on an endpoint holding both
+      // kinds of pin the relaxed chain building reaches the fingerprint-only
+      // leaf too — here it verifies against a bare intermediate, a chain that
+      // before the flag could not terminate at all.
+      //
+      // The hostname MATCHES here, so neither the chain nor the name check can
+      // be what refuses this connection. What refuses it is the hold: this
+      // endpoint holds a human-confirmed BODY, and only confirmed bodies are
+      // accepted on it. Design A tried to hold the same line by composing the
+      // trust list and could not — an anchor that is itself a CA (see the
+      // regression test below) is appended after any filter by construction.
+      osStoreContains([PRIVATE_SUB_CERT])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP, PRIVATE_LEAF2_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.ok).toBe(false)
+      // WHO refused: the chain verified, the pin was found, the BODY was not.
+      expect(r.identityChecked).toBe(true)
+      expect(r.error?.message).toContain('TLS pin not confirmed')
+      expect(r.error?.message).toContain(PRIVATE_LEAF2_FP)
+      expect(r.error?.message).not.toContain('TLS pin mismatch')
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBeUndefined()
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    it('the partial-chain trust list is the whole snapshot plus the anchors — nothing is reduced', async () => {
+      // The composition design B hands to OpenSSL, asserted on the list itself
+      // because the handshake tests can only show consequences. Both store
+      // entries survive — the self-signed private ROOT and the bare Sub CA
+      // alike — and the anchor is appended to them. Containment is NOT here;
+      // it is in `checkServerIdentity` (the tests above), which is why this
+      // list may stay complete.
+      osStoreContains([PRIVATE_ROOT_CERT, PRIVATE_SUB_CERT])
+      const seen: Array<{ ca?: string[]; partialChain?: boolean }> = []
+      vi.spyOn(tls, 'createSecureContext').mockImplementation(((
+        opts?: tls.SecureContextOptions & { allowPartialTrustChain?: boolean },
+      ) => {
+        seen.push({ ca: opts?.ca as string[] | undefined, partialChain: opts?.allowPartialTrustChain })
+        return { __stub: true } as unknown as tls.SecureContext
+      }) as typeof tls.createSecureContext)
+
+      buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })
+      expect(seen[seen.length - 1]).toEqual({
+        ca: [PRIVATE_ROOT_CERT, PRIVATE_SUB_CERT, PRIVATE_LEAF_CERT],
+        partialChain: true,
+      })
+
+      // Control: with no anchor there is no flag at all, and the list is the
+      // snapshot untouched — the unpinned path is bit-for-bit what it was.
+      __resetCombinedCaCacheForTest()
+      buildTlsOptions({ tlsPinsSha256: [PRIVATE_LEAF_FP], servername: 'mail.private.test' })
+      expect(seen[seen.length - 1]).toEqual({
+        ca: [PRIVATE_ROOT_CERT, PRIVATE_SUB_CERT],
+        partialChain: undefined,
+      })
+    })
+
+    it('a store intermediate keeps its chain-LINK role on the pinned context', async () => {
+      // The coverage design A gave up and design B keeps, so it gets a test:
+      // reducing the list to its self-signed subset also removed the ORDINARY
+      // role of a store intermediate — supplying a link the server omitted.
+      //
+      // Server sends the leaf ALONE (a common misconfiguration); the user's
+      // store carries Sub CA + private root. The chain can only verify by
+      // using the store's intermediate as a LINK, and it must, even though
+      // this endpoint is pinned and runs the partial-chain context. Proof that
+      // it did: the pin callback was reached at all.
+      osStoreContains([PRIVATE_ROOT_CERT, PRIVATE_SUB_CERT])
+      server = tls.createServer(
+        { key: PRIVATE_LEAF2_KEY, cert: PRIVATE_LEAF2_CERT },
+        (socket) => socket.end('OK\r\n'),
+      )
+      server.on('tlsClientError', () => {})
+      port = await listenLocal(server)
+
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.identityChecked).toBe(true)
+      // Refused by the pin, not by the chain: the link worked, the certificate
+      // is simply not the confirmed one.
+      expect(r.ok).toBe(false)
+      expect(r.error?.message).toContain('TLS pin mismatch')
+    })
+
+    it('an intermediate in the OS store does NOT become an end of trust on the unpinned path', async () => {
+      // The control for the test above, and the reason the flag is scoped to
+      // the pinned context: the identical trust store, with no pin to contain
+      // the widening, must still refuse this chain.
+      osStoreContains([PRIVATE_SUB_CERT])
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({ servername: 'mail.private.test' })!
+      expect(opts.checkServerIdentity).toBeUndefined()
+      const r = await handshake(opts)
+      expect(r.ok).toBe(false)
+      // WHICH chain-building code comes back is OpenSSL's business and differs
+      // with the trust set (measured: UNABLE_TO_GET_ISSUER_CERT here, where the
+      // untrusted intermediate is present but cannot anchor; SELF_SIGNED_CERT_IN_CHAIN
+      // when it is absent). The assertion is that the chain is REFUSED and that
+      // the failure classifies as a trust error, not a particular code.
+      expect(isTlsTrustError(r.error)).toBe(true)
+      expect(['UNABLE_TO_GET_ISSUER_CERT', 'SELF_SIGNED_CERT_IN_CHAIN']).toContain(
+        (r.error as NodeJS.ErrnoException | undefined)?.code,
+      )
+    })
+
+    it('MIXED endpoint — the fingerprint-only leaf is refused before the hostname check can matter', async () => {
+      // An anchored pin (from the recovery dialog) and a fingerprint-only pin
+      // (renderer-writable `tls:addPin`) on one endpoint; the server presents
+      // the fingerprint-only one, and its name does NOT match the dialled
+      // host. Both layers would refuse it, so the assertion is about WHICH:
+      // on a partial-chain context the hold speaks first and the name check
+      // never runs, because the name is not what the guarantee rests on here.
+      osStoreContains([PRIVATE_ROOT_CERT])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP, PRIVATE_LEAF2_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'not-the-pinned-host.example',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.ok).toBe(false)
+      expect(r.identityChecked).toBe(true)
+      expect(r.error?.message).toContain('TLS pin not confirmed')
+      expect(r.error?.message).not.toMatch(/altnames|subject/i)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBeUndefined()
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    // ── the case design B exists for: an anchor that is itself a CA ─────────
+    //
+    // The finding that retired design A. A confirmed anchor need not be a
+    // leaf: `net:trustCert` stores the certificate the endpoint PRESENTED, and
+    // a server can present a CA certificate (`basicConstraints: CA:TRUE`).
+    // With the partial-chain flag such an anchor terminates the chain of every
+    // certificate it ever issued — and no filtering of the OS store can help,
+    // because anchors are appended AFTER any filter, by construction.
+    //
+    // So the guarantee is held per presented certificate instead: on an
+    // endpoint that holds a confirmed body, only confirmed bodies are
+    // accepted. These two tests are that guarantee, over real handshakes.
+
+    it('a CA anchor does not launder its own descendants — a fingerprint-only descendant is refused', async () => {
+      // The user confirmed the Sub CA (it is what this endpoint presented at
+      // the time); a compromised renderer then pins a leaf ISSUED by that Sub
+      // CA through `tls:addPin`, with no body. The hostname MATCHES, and the
+      // chain verifies through the anchor — so without the hold this
+      // certificate would be accepted as the mail host although the human
+      // confirmed a different one. That is the MITM design A could not close.
+      osStoreContains([])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_SUB_FP, PRIVATE_LEAF2_FP],
+        tlsPinnedCertsPem: [PRIVATE_SUB_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.ok).toBe(false)
+      // The chain DID verify through the CA anchor — measured, not assumed.
+      // That is precisely why containment cannot live in the trust list.
+      expect(r.identityChecked).toBe(true)
+      expect(r.error?.message).toContain('TLS pin not confirmed')
+      expect(r.error?.message).toContain(PRIVATE_LEAF2_FP)
+      expect((r.error as NodeJS.ErrnoException | undefined)?.code).toBeUndefined()
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    it('a descendant of a CA anchor that is not pinned at all is refused as a mismatch', async () => {
+      // Same endpoint, same verifying chain, but nothing pinned the presented
+      // leaf: the refusal comes one step earlier and names the other verdict.
+      // Both messages must stay distinguishable — a log has to say whether the
+      // pin was unknown or merely unconfirmed.
+      osStoreContains([])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_SUB_FP],
+        tlsPinnedCertsPem: [PRIVATE_SUB_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.ok).toBe(false)
+      expect(r.identityChecked).toBe(true)
+      expect(r.error?.message).toContain('TLS pin mismatch')
+      expect(r.error?.message).toContain(PRIVATE_LEAF2_FP)
+      expect(r.error?.message).not.toContain('TLS pin not confirmed')
+      expect(isTlsTrustError(r.error)).toBe(true)
+    })
+
+    it('a CONFIRMED descendant of the same CA anchor still connects — the hold narrows, it does not break the dialog', async () => {
+      // Control for the pair above: the hold refuses UNCONFIRMED bodies, not
+      // "everything the CA anchor issued". Once the same descendant is
+      // confirmed in the recovery dialog — i.e. its body is stored alongside
+      // its pin — the very same endpoint accepts it. That is the remedy the
+      // price is paid against, so it gets a test of its own.
+      osStoreContains([])
+      await serve(PRIVATE_LEAF2_CERT, PRIVATE_LEAF2_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_SUB_FP, PRIVATE_LEAF2_FP],
+        tlsPinnedCertsPem: [PRIVATE_SUB_CERT, PRIVATE_LEAF2_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await trackedHandshake(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+      expect(r.identityChecked).toBe(true)
+    })
+
+    // ── combined CA store entirely unavailable (not merely lacking the ──────
+    // private root) — `combined === null`, `ca` is built from the anchor
+    // alone. Unit tests above prove the FLAG turns on in this branch; only a
+    // real handshake proves the chain actually terminates on the anchor and
+    // that the pin, not the (absent) system store, is what still guards it.
+
+    it('combined CA store entirely unavailable + anchored pin → handshake still succeeds via the anchor alone', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(tls, 'getCACertificates').mockImplementation((() => {
+        throw new Error('unavailable')
+      }) as typeof tls.getCACertificates)
+
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: [PRIVATE_LEAF_FP],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await handshake(opts)
+      expect(r.error).toBeUndefined()
+      expect(r.ok).toBe(true)
+    })
+
+    it('combined CA store entirely unavailable + anchored pin → a WRONG recorded fingerprint is still refused', async () => {
+      // The anchor makes the chain verify (so `checkServerIdentity` runs at
+      // all); with no system store to fall back on, fingerprint equality is
+      // the ONLY thing left that can still refuse a certificate here.
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(tls, 'getCACertificates').mockImplementation((() => {
+        throw new Error('unavailable')
+      }) as typeof tls.getCACertificates)
+
+      await serve(PRIVATE_LEAF_CERT, PRIVATE_LEAF_KEY)
+      const opts = buildTlsOptions({
+        tlsPinsSha256: ['00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF'],
+        tlsPinnedCertsPem: [PRIVATE_LEAF_CERT],
+        servername: 'mail.private.test',
+      })!
+      const r = await handshake(opts)
+      expect(r.ok).toBe(false)
+      expect(r.error?.message).toContain('TLS pin mismatch')
     })
   })
 
@@ -1661,13 +2829,11 @@ describe('packages/net/tls', () => {
     beforeEach(async () => {
       __resetCombinedCaCacheForTest()
       server = createImapStartTlsServer()
-      server.on('error', () => {})
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-      port = (server.address() as net.AddressInfo).port
+      port = await listenLocal(server)
     })
 
     afterEach(async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await closeServer(server)
       __resetCombinedCaCacheForTest()
     })
 

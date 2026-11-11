@@ -1,0 +1,13 @@
+﻿MailCopilot - aviso de privacidad
+
+Lea este aviso antes de instalar. La política de privacidad completa: https://docs.mailcopilot.io/legal/privacy-policy
+
+Además de comunicarse con los servidores de correo que usted configure, MailCopilot contacta por sí mismo con lo siguiente:
+
+1. Búsqueda de actualizaciones. Aproximadamente una vez por hora, MailCopilot pregunta a nuestro servidor de actualizaciones si hay una versión nueva. El servidor ve su dirección IP y el tipo de sistema operativo y de procesador. No se envía nada sobre su correo, sus cuentas o su uso. En una instalación nueva se muestra una opción en el primer inicio, antes de la primera búsqueda; puede cambiarla en cualquier momento en Ajustes > Acerca de. Si está desactivada, MailCopilot no inicia nuevas búsquedas por su cuenta; una búsqueda o descarga ya en curso puede terminar.
+
+2. Datos de diagnóstico y de uso. Desactivados hasta que los permita; se le pregunta en el primer inicio. Nunca contienen el contenido de su correo.
+
+3. Asistente de IA. Opcional. Las solicitudes van solo al proveedor que usted configure, con su propia clave.
+
+4. Fotos de remitentes. De forma predeterminada, las fotos de los remitentes se cargan desde Gravatar: un hash de la dirección del remitente y su dirección IP llegan a Gravatar. Puede desactivarlo en Ajustes.

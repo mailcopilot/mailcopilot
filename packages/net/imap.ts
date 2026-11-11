@@ -25,6 +25,13 @@ import {
   recordRefreshSuccess,
 } from './authRefreshCooldown'
 import {
+  admitLoginAttempt,
+  imapAuthBackoffError,
+  noteLatchAuthFailure,
+  noteLatchSuccess,
+  remainingLoginLatchMs,
+} from './authLoginLatch'
+import {
   bucketIdleDuration,
   bucketFetchedHeaders,
   bucketDuration,
@@ -39,6 +46,13 @@ import {
   IMAP_PRIORITY_RANK,
 } from './imapScheduler'
 import type { ImapPoolRequester } from './imapScheduler'
+import { imapStarttlsPolicy, markStarttlsRefusal } from './starttlsPolicy'
+import { isStarttlsRefusal, isImapPreGreetingTimeout, isImapConnectionFailure, hasImapConnectionFailureCode, isImapOutcomeUndetermined, markImapOutcomeUndetermined } from '@mailcopilot/core/transportFailure'
+import { walkErrorTree } from '@mailcopilot/core/transientErrors'
+import { classifyCertFailureReason, type CertFailureReason } from '@mailcopilot/core/certFailureReason'
+import { storeFlag, deleteUids, moveUids } from './imapMutations'
+import { runImapAttempt, newImapAttempt, assertAttemptLive, operationDeadlineError, type ImapAttempt } from './imapAttempt'
+import { encodeErrorPresentation } from '@mailcopilot/core/errorPresentation'
 
 export {
   withImapPriority,
@@ -46,6 +60,25 @@ export {
   IMAP_PRIORITY_RANK,
   MAX_OVERTAKES_BEFORE_PROMOTION,
 } from './imapScheduler'
+
+export {
+  IMAP_AUTH_BACKOFF_CODE,
+  isImapAuthBackoffError,
+  LOGIN_LATCH_WINDOWS_MS,
+} from './authLoginLatch'
+
+/**
+ * Drop the login latch for an account: the INPUT changed (new credentials
+ * saved, interactive re-authentication finished) and the next attempt is owed a
+ * real trip to the server rather than the remainder of a backoff earned by the
+ * credentials that were replaced.
+ *
+ * Re-exported from ./authLoginLatch so the main process has one import surface
+ * for the connection boundary. Deleting an account needs no call: the identity
+ * of a latch is the pair (accountId, generation), so the `forget()` bump makes
+ * the stale entry unreadable on its own.
+ */
+export { clearLoginLatch as clearImapAuthLatch } from './authLoginLatch'
 
 /**
  * §2.17 — requester tier for the IMAP locks.
@@ -62,6 +95,23 @@ export type { ImapPoolRequester }
  *  over the ambient tier set by `withImapPriority`. */
 export type WithImapRetryOpts = {
   priority?: ImapPoolRequester
+}
+
+/** `withImapRetry` (the singleton connection) only: the pool and dedicated
+ *  variants cannot cancel an attempt that is still connecting, so they do not
+ *  take a deadline. */
+export type WithImapSingletonRetryOpts = WithImapRetryOpts & {
+  /** Bound the WHOLE operation (every attempt, pause and reconnect) by
+   *  `IMAP_OPERATION_DEADLINE_MS`. For short, interactive operations only:
+   *  LIST and the mutating commands. Never for a header crawl, which is long
+   *  by design and bounded by its own progress watchdog.
+   *
+   *  Two limits, stated: the bound is not strict to the millisecond (time spent
+   *  in the retry loop's own cleanup, a token refresh included, is only checked
+   *  when the next attempt starts), and it does not scale with the size of the
+   *  batch: a very large STORE or MOVE on a slow server can be cut off, and is
+   *  then reported as an outcome unknown. */
+  overallDeadline?: boolean
 }
 
 /** @deprecated Use `WithImapRetryOpts` — kept so existing call sites compile. */
@@ -268,8 +318,14 @@ export const IDLE_REFRESH_MS = 24 * 60 * 1000
  */
 export function classifyImapError(err: unknown): 'network' | 'auth' | 'cert' | 'permanent' {
   const msg = err instanceof Error ? err.message : String(err)
-  if (isTlsTrustError(err)) {
+  if (findTlsTrustError(err) !== undefined) {
     return 'cert'
+  }
+  // The structure already says what happened: a connection-level code, or a
+  // failure of our own (`ERR_IMAP_*`), is not an authentication failure because
+  // its prose mentions LOGIN (a folder of that name, say).
+  if (hasImapConnectionFailureCode(err) || String((err as { code?: unknown } | null)?.code ?? '').startsWith('ERR_IMAP_')) {
+    return 'network'
   }
   if (/AUTHENTICATIONFAILED|LOGIN|CREDENTIALS|NO LOGIN|Invalid credentials|AUTHENTICATE|XOAUTH2|token expired|WEBALERT|Web login required/i.test(msg)) {
     return 'auth'
@@ -336,6 +392,8 @@ export type CertErrorPayload = {
   host: string
   port: number
   rawMessage: string
+  /** Readable failure class built from the error code (display only). */
+  reason?: CertFailureReason
   /** `true` = implicit TLS (993), `false` = STARTTLS upgrade (143). */
   secure?: boolean
   /** Application protocol of the endpoint; always `'imap'` from this registry. */
@@ -383,6 +441,8 @@ function notifyCertError(accountId: number, cfg: ImapConfig, err: unknown): void
       host: cfg.host,
       port: cfg.port,
       rawMessage: err instanceof Error ? err.message : String(err),
+      // The trust error may be nested (IDLE paths hand over the outer error).
+      reason: classifyCertFailureReason(findTlsTrustError(err) ?? err),
       secure: cfg.secure !== false,
       protocol: 'imap',
     })
@@ -539,8 +599,44 @@ export function unregisterConnectionOutcomeHandler(): void {
 }
 
 /** Fire-and-forget outcome notification. Never throws: a broken subscriber
- *  must not change the result of an IMAP operation nor its retry semantics. */
+ *  must not change the result of an IMAP operation nor its retry semantics.
+ *
+ *  This is also where the login latch is armed and cleared, and it is the right
+ *  place for exactly the reason the outcome registry itself is: the set of
+ *  verdicts is, by construction, the set of operations that actually talk to
+ *  the server. Arming from hand-picked call sites would drift the same way the
+ *  three `noteSuccess` call sites did before §2.165 — and it would miss the
+ *  IDLE prologue and the IDLE cycle, which report from here without going
+ *  through `withOutcomeReporting` at all.
+ *
+ *  The latch moves BEFORE the subscriber runs so a subscriber that throws (it
+ *  cannot affect us — see the catch) still leaves the throttle armed.
+ *
+ *  A verdict moves the latch only while its stamp still equals the generation
+ *  the id holds NOW — the contract §2.165 states for the badge subscriber, and
+ *  the latch is bound by it for the same reason plus one of its own. A verdict
+ *  that outlived its mailbox is not merely uninformative here, it is harmful in
+ *  BOTH directions: a stale auth failure would overwrite the entry of the
+ *  incarnation that currently holds the id, and the next attempt of that
+ *  incarnation would then read a generation mismatch, drop the entry and
+ *  connect immediately — a stale verdict silently RELEASING a live throttle.
+ *  A stale success would release it outright.
+ *
+ *  `null` is a mismatch, not a wildcard (same rule, same reason): an
+ *  unattributable verdict moves nothing. It matches only when the stamp taken
+ *  at the start of the operation was also `null`, which is the case when no
+ *  generation provider is registered at all — then every stamp is `null`, the
+ *  comparison is consistent, and the latch keeps working. */
 function notifyConnectionOutcome(outcome: ImapConnectionOutcome): void {
+  try {
+    if (captureAccountGeneration(outcome.accountId) === outcome.accountGeneration) {
+      if (outcome.ok) {
+        noteLatchSuccess(outcome.accountId, outcome.accountGeneration)
+      } else if (classifyImapError(outcome.error) === 'auth') {
+        noteLatchAuthFailure(outcome.accountId, outcome.accountGeneration)
+      }
+    }
+  } catch { /* the throttle must never change an IMAP outcome */ }
   const handler = connectionOutcomeHandler
   if (!handler) return
   try {
@@ -592,10 +688,61 @@ const outcomeReportingScope = new AsyncLocalStorage<{
  *
  * Nested calls do not re-read: the outermost scope's stamp is the operation's
  * stamp, matching the rule that the outermost boundary owns the report.
+ *
+ * The LOGIN LATCH is enforced here, for the same structural reason the verdict
+ * is produced here: this is the one place every outward operation passes
+ * through, so "stop hammering a rejected account" holds by construction instead
+ * of by each caller remembering it. Three properties are load-bearing:
+ *
+ *  1. **The refusal happens BEFORE the reporting scope is entered, so it
+ *     produces no verdict at all.** This mirrors `assertImapAuth`, which
+ *     refuses before any connection is attempted and is therefore outside the
+ *     boundary (§2.165). It also has to be this way: the badge threshold is
+ *     two, and a refusal counted as a verdict would raise "sign in again" off
+ *     our own throttle after a single real failed login — the exact defect the
+ *     threshold exists to prevent. The evidence for the badge must keep coming
+ *     from the server, which is what the one probe per window is for.
+ *
+ *  2. **Nested operations are never gated.** They are part of an attempt that
+ *     was already admitted; re-checking them would refuse work mid-flight and
+ *     would consume a second reservation for one login.
+ *
+ *  3. **The `interactive` TIER is exempt — which is narrower than "anything a
+ *     person started", and the difference is worth stating.** Exempt is what
+ *     main.ts wraps in `imapInteractive`: opening a message, downloading a
+ *     part or an attachment, STORE of \Seen / \Flagged, move, delete, remote
+ *     search, one page of summaries, the AI mail actions. NOT exempt: manual
+ *     folder sync — `net:syncFolderHeaders` carries no tier and resolves to
+ *     `other` — and neither does the periodic pass, the body indexer or
+ *     offline replay. So a user who presses "sync" on a latched mailbox gets
+ *     the cache and no connection, while opening a message from it does go to
+ *     the server.
+ *
+ *     Recovery therefore does not depend on which button was pressed. The
+ *     latch is released by: the success of any admitted attempt (probe,
+ *     interactive call, or IDLE, whose verdicts arm and clear it like every
+ *     other); `clearImapAuthLatch`, which main.ts calls when new credentials
+ *     are saved or an interactive re-authentication completes; and a
+ *     generation bump when the account is deleted. The exemption exists so
+ *     that a person working in the mailbox is not a timer — the rate is
+ *     bounded by the human — not as the only way back. This is the line K-9
+ *     and Thunderbird draw: stop the scheduled retries, keep the
+ *     user-initiated one.
  */
-function withOutcomeReporting<T>(accountId: number, op: () => Promise<T>): Promise<T> {
+function withOutcomeReporting<T>(
+  accountId: number,
+  op: () => Promise<T>,
+  opts?: { priority?: ImapPoolRequester },
+): Promise<T> {
   if (outcomeReportingScope.getStore() !== undefined) return op()
   const accountGeneration = captureAccountGeneration(accountId)
+  if (resolveImapPriority(opts?.priority) !== 'interactive'
+      && !admitLoginAttempt(accountId, accountGeneration)) {
+    // Rejected as a promise rather than thrown: every caller is an async
+    // function today, but a synchronous throw out of a Promise-returning
+    // function is a trap for the next one.
+    return Promise.reject(imapAuthBackoffError(accountId, remainingLoginLatchMs(accountId, accountGeneration)))
+  }
   return outcomeReportingScope.run({ accountId, accountGeneration }, async () => {
     try {
       const value = await op()
@@ -1027,6 +1174,149 @@ export function extractReferencesHeader(buf: Buffer | undefined): string | undef
   return result.trim() || undefined
 }
 
+/** Overall time limit for one short interactive IMAP operation (LIST, STORE,
+ *  MOVE, EXPUNGE), covering every attempt, pause and reconnect.
+ *
+ *  Why a new number, and why this one: the per-socket budgets bound SILENCE, not
+ *  duration — the 30 s socket-idle timer restarts on every byte, so a server
+ *  that keeps sending untagged `* OK` lines while never completing the command
+ *  holds the operation (and the connection lock) for ever. 100 s is Thunderbird's
+ *  `mailnews.tcptimeout` (the single network timeout of the client this one
+ *  models its stability on), and it is not shorter than ImapFlow's own 90 s
+ *  connection budget, so it never cuts a connect the library would still have
+ *  waited for. A mutation cut off by it is reported as an undetermined outcome. */
+export const IMAP_OPERATION_DEADLINE_MS = 100_000
+
+let deadlineOverrideMs: number | null = null
+/** Test seam: shrink (or, with null, restore) the overall operation limit. */
+export function __setOperationDeadlineForTest(ms: number | null): void {
+  deadlineOverrideMs = ms
+}
+
+/** Absolute deadline for an operation that asked for one, else null. */
+function startOperationDeadline(opts: WithImapSingletonRetryOpts | undefined): number | null {
+  if (!opts?.overallDeadline) return null
+  return Date.now() + (deadlineOverrideMs ?? IMAP_OPERATION_DEADLINE_MS)
+}
+
+/** Run one attempt, giving up at `deadlineAt`: `abort` closes the connection the
+ *  attempt was using (so the lock and the socket are released and the pending
+ *  command settles), and the caller gets a terminal, non-retryable error. */
+function runWithinDeadline<T>(
+  work: () => Promise<T>,
+  deadlineAt: number | null,
+  attempt: ImapAttempt,
+  abort: () => void,
+): Promise<T> {
+  if (deadlineAt === null) return work()
+  const fail = (): Error => {
+    const err = operationDeadlineError()
+    if (attempt.mutationIssued) markImapOutcomeUndetermined(err)
+    return err
+  }
+  const remaining = deadlineAt - Date.now()
+  if (remaining <= 0) return Promise.reject(fail())
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      // Verdict first, then the abandonment: the error reflects what had been
+      // sent up to now, and nothing after this point may add to it.
+      const err = fail()
+      attempt.aborted = true
+      try { abort() } catch { /* closing a dead connection */ }
+      reject(err)
+    }, remaining)
+    work().then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error: unknown) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
+/** The singleton ImapFlow that is connecting right now (not yet published as
+ *  `client`). The deadline closes it too: an attempt abandoned mid-connect must
+ *  not complete the connection and publish it behind a newer operation's back. */
+let connectingClient: ImapFlow | null = null
+
+/** Wait for `pending` no longer than the operation's deadline. The stages of the
+ *  retry loop that sit OUTSIDE an attempt (the OAuth token refresh, the logout of
+ *  a dead connection) would otherwise hold the connection lock past the deadline;
+ *  on expiry the caller gets the terminal deadline error, and a LATE result of
+ *  `pending` is never read, so a refreshed token cannot be applied to an
+ *  operation that already finished. */
+function withinDeadline<T>(start: () => Promise<T>, deadlineAt: number | null): Promise<T> {
+  if (deadlineAt === null) return start()
+  const remaining = deadlineAt - Date.now()
+  // Already expired: do not even start the stage (a /token request for an
+  // operation that is over).
+  if (remaining <= 0) return Promise.reject(operationDeadlineError())
+  const pending = start()
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(operationDeadlineError()), remaining)
+    pending.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error: unknown) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
+/** Log the singleton client out within the deadline; if that does not finish,
+ *  close the socket instead of leaving it open until the library gives up. */
+async function logoutWithinDeadline(old: ImapFlow, deadlineAt: number | null): Promise<void> {
+  try {
+    await withinDeadline(() => old.logout(), deadlineAt)
+  } catch {
+    try { old.close() } catch { /* already closed */ }
+  }
+}
+
+/** Close and forget the singleton connection (the deadline's `abort`), whether
+ *  it is established or still connecting. */
+function abortSingletonConnection(): void {
+  stopNoopHeartbeat()
+  const old = client
+  const pending = connectingClient
+  client = null
+  currentUserKey = null
+  connecting = null
+  connectingClient = null
+  if (old) old.close()
+  if (pending && pending !== old) pending.close()
+}
+
+/** The first node of the error tree that is a TLS trust failure, if any. A trust
+ *  failure nested under another error (an aggregate of a refused address AND a
+ *  rejected certificate) is still a trust failure: retrying cannot help and the
+ *  recovery dialog has to be offered. */
+function findTlsTrustError(err: unknown): unknown {
+  if (isTlsTrustError(err)) return err // also a thrown string, which has no tree
+  let found: unknown
+  walkErrorTree(err, (node) => {
+    if (found === undefined && typeof node !== 'string' && isTlsTrustError(node)) found = node
+  })
+  return found
+}
+
+/** The connection-loss branch shared by the three retry loops.
+ *
+ *  Structural (`isImapConnectionFailure` walks the error tree), not a text
+ *  match: an empty-message `AggregateError` and `ECONNREFUSED` / `ENETUNREACH`
+ *  used to bypass the retry entirely. Once the attempt has sent a mutating
+ *  command (MOVE, STORE, EXPUNGE) the failure is an undetermined outcome and
+ *  is never retried: the verdict is recorded beside the ORIGINAL error, which
+ *  is still the thing rethrown. */
+function connectionLossRetryable(e: unknown, attempt: ImapAttempt, remaining: number): boolean {
+  if (!isImapConnectionFailure(e)) return false
+  // An inner boundary already decided this outcome is unknown (a mutator awaited
+  // inside an outer boundary's callback): the outer attempt never saw the
+  // mutation itself, so its own flag cannot be trusted to say so.
+  if (isImapOutcomeUndetermined(e)) return false
+  if (attempt.mutationIssued) {
+    markImapOutcomeUndetermined(e)
+    return false
+  }
+  return remaining > 0
+}
+
 /** Wrapper with retry on IMAP connection loss (NoConnection / not usable).
  *  2 retries with 1s delay between attempts (handles transient Wi-Fi drops).
  *
@@ -1042,7 +1332,7 @@ export async function withImapRetry<T>(
   cfg: ImapConfig,
   fn: () => Promise<T>,
   retries = 2,
-  opts?: WithImapRetryOpts,
+  opts?: WithImapSingletonRetryOpts,
 ): Promise<T> {
   // §2.17 Phase 1 — resolve the tier synchronously, before anything is awaited:
   // the ambient store belongs to the caller's context, and the lock is entered
@@ -1052,18 +1342,29 @@ export async function withImapRetry<T>(
   return withOutcomeReporting(accountId, () => withImapOpLock(async () => {
     let remaining = retries
     let authRetryUsed = false
+    // Reconnect happens INSIDE the guarded attempt: a connect failure on the
+    // way back in is classified and charged to the same budget instead of
+    // escaping it as a fresh, unclassified throw.
+    let reconnect = false
+    const deadlineAt = startOperationDeadline(opts)
     for (;;) {
+      const attempt: ImapAttempt = newImapAttempt()
       try {
         waitReporter.reportOnce()
-        return await fn()
+        return await runWithinDeadline(() => runImapAttempt(attempt, async () => {
+          if (reconnect) { reconnect = false; await connectImap(cfg) }
+          return fn()
+        }), deadlineAt, attempt, abortSingletonConnection)
       } catch (e: unknown) {
         const errClass = classifyImapError(e)
 
         // Cert error path: retrying cannot succeed until the trust anchors
         // change. Notify the main-process subscriber (fire-and-forget) and
         // rethrow immediately — no connection-loss retry, no token refresh.
+        // The notification carries the trust failure itself, wherever in the
+        // error tree it sits.
         if (errClass === 'cert') {
-          notifyCertError(accountId, cfg, e)
+          notifyCertError(accountId, cfg, findTlsTrustError(e) ?? e)
           throw e
         }
 
@@ -1071,19 +1372,21 @@ export async function withImapRetry<T>(
         // The cooldown gate inside invokeAuthHandlerWithCooldown prevents
         // request storms against Azure/Google `/token` when the refresh
         // token itself is revoked.
-        if (errClass === 'auth' && !authRetryUsed) {
+        // A mutation already sent is never re-run by a token refresh: the check
+        // comes before any retry branch, not only the connection-loss one.
+        if (errClass === 'auth' && !authRetryUsed && !attempt.mutationIssued) {
           authRetryUsed = true
-          const freshToken = await invokeAuthHandlerWithCooldown(accountId, e)
+          const freshToken = await withinDeadline(() => invokeAuthHandlerWithCooldown(accountId, e), deadlineAt)
           if (freshToken !== null) {
             // Patch config with refreshed token for reconnection.
             cfg.accessToken = freshToken
             // Reset singleton so connectImap picks up the new token.
             stopNoopHeartbeat()
-            if (client) { try { await client.logout() } catch { /* ignore */ } }
+            if (client) await logoutWithinDeadline(client, deadlineAt)
             client = null
             currentUserKey = null
             connecting = null
-            await connectImap(cfg)
+            reconnect = true
             continue
           }
           // No handler, cooldown active, or refresh rejected — fall through
@@ -1091,26 +1394,25 @@ export async function withImapRetry<T>(
           throw e
         }
 
-        const msg = e instanceof Error ? e.message : String(e)
-        // 'Unexpected close' is thrown by ImapFlow on abrupt socket closure
-        // (§2.20-E regression). It is intentionally added as a separate
-        // alternative — broadening to /close/i would also match benign
-        // messages like "connection closed gracefully".
-        const isConnectionLost = /NoConnection|not usable|Unexpected close|closed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|ECONNABORTED/i.test(msg)
-        if (!isConnectionLost || remaining <= 0) throw e
+        // §2.20-E / §2.309: structural classification of the whole error tree
+        // (see connectionLossRetryable); 'Unexpected close' (ImapFlow, abrupt
+        // socket closure) is now covered by its code, and the text match that
+        // remains is only for code-less errors.
+        if (!connectionLossRetryable(e, attempt, remaining)) throw e
         remaining -= 1
 
-        // Reset singleton — the next connectImap() will create a new connection.
+        // Reset singleton — the reconnect at the top of the next attempt will
+        // create a new connection.
         stopNoopHeartbeat()
-        if (client) { try { await client.logout() } catch { /* ignore */ } }
+        if (client) await logoutWithinDeadline(client, deadlineAt)
         client = null
         currentUserKey = null
         connecting = null
         await sleep(1000)
-        await connectImap(cfg)
+        reconnect = true
       }
     }
-  }, priority))
+  }, priority), { priority })
 }
 
 function userKey(cfg: ImapConfig) {
@@ -1129,6 +1431,9 @@ function formatImapError(e: unknown): string {
 }
 
 export async function connectImap(cfg: ImapConfig) {
+  // A connection is never started on behalf of an attempt the overall deadline
+  // already abandoned.
+  assertAttemptLive()
   const ukey = userKey(cfg)
   if (client && currentUserKey === ukey && client.usable) return client
   // If a parallel connect() is already in progress for this account — just wait for it.
@@ -1136,11 +1441,16 @@ export async function connectImap(cfg: ImapConfig) {
   // If connect() is in progress for a different account, wait for completion to avoid breaking the shared singleton client.
   if (connecting) {
     try { await connecting } catch { /* ignore: will try to reconnect below */ }
+    // Each await above can outlive the attempt's deadline: re-check before
+    // acting on what it returned.
+    assertAttemptLive()
     if (client && currentUserKey === ukey && client.usable) return client
     if (connecting && currentUserKey === ukey) return connecting
   }
 
   if (client) { try { await client.logout() } catch { /* connection already closed */ } client = null }
+  // The logout above may have stalled until the deadline abandoned this attempt.
+  assertAttemptLive()
   const c = new ImapFlow({
     host: cfg.host,
     port: cfg.port,
@@ -1149,6 +1459,7 @@ export async function connectImap(cfg: ImapConfig) {
       ? { user: cfg.user, accessToken: cfg.accessToken }
       : { user: cfg.user, pass: cfg.pass || '' },
     tls: buildTlsOptions(cfg),
+    ...imapStarttlsPolicy(cfg),
     logger: silentLogger,
     socketTimeout: 30_000,
   })
@@ -1156,10 +1467,14 @@ export async function connectImap(cfg: ImapConfig) {
   // Suppress uncaught 'error' event (e.g. Socket timeout) — reconnection happens on next request.
   c.on('error', (err: Error) => { console.warn('[IMAP] Connection error:', err.message) })
   currentUserKey = ukey
+  connectingClient = c
 
   const p = (async () => {
     try {
       await c.connect()
+      // An attempt abandoned by the deadline publishes nothing, whatever the
+      // library's own closed-state checks do: close and fail.
+      try { assertAttemptLive() } catch (abandoned) { c.close(); throw abandoned }
       // Assign client only after successful connect, so intermediate calls don't get an unconnected instance.
       client = c
       startNoopHeartbeat()
@@ -1178,6 +1493,7 @@ export async function connectImap(cfg: ImapConfig) {
     return await p
   } finally {
     if (connecting === p) connecting = null
+    if (connectingClient === c) connectingClient = null
   }
 }
 
@@ -1216,6 +1532,7 @@ async function connectIdle(cfg: ImapConfig) {
       ? { user: cfg.user, accessToken: cfg.accessToken }
       : { user: cfg.user, pass: cfg.pass || '' },
     tls: buildTlsOptions(cfg),
+    ...imapStarttlsPolicy(cfg),
     logger: silentLogger,
     // IDLE is managed manually in a loop, so we disable auto-idle to avoid unexpected states.
     disableAutoIdle: true,
@@ -1274,12 +1591,20 @@ export async function startIdle(
       idleMailbox = mailbox
     }
   } catch (e) {
-    if (classifyImapError(e) === 'cert') notifyCertError(accountId, cfg, e)
+    if (classifyImapError(e) === 'cert') notifyCertError(accountId, cfg, findTlsTrustError(e) ?? e)
     // §2.165: the connect/select prologue IS a full login, so it is a verdict
     // on the credentials in its own right. Reported directly rather than
     // through `withOutcomeReporting`: startIdle is invoked from the main
     // process outside any retry wrapper, and the loop below outlives the call
     // that started it, so there is no enclosing scope to nest into.
+    //
+    // The consequence for the login latch is deliberate and asymmetric: this
+    // verdict ARMS the latch (every verdict does — see notifyConnectionOutcome)
+    // but IDLE itself is not held back by it. IDLE is started by the renderer
+    // once per account per session, not by a timer, and a rejected cycle
+    // already sleeps the 60-minute auth backoff inside the loop, so it is not
+    // a storm source; gating it would instead cost the one long-lived
+    // connection that keeps proving the credentials still work.
     notifyConnectionOutcome({ accountId, accountGeneration: idleGeneration, ok: false, error: e })
     throw e
   }
@@ -1691,14 +2016,22 @@ export async function testImapConnection(cfg: ImapConfig): Promise<{ ok: boolean
         ? { user: cfg.user, accessToken: cfg.accessToken }
         : { user: cfg.user, pass: cfg.pass || '' },
       tls: buildTlsOptions(cfg),
+      ...imapStarttlsPolicy(cfg),
       logger: silentLogger,
     })
     await c.connect()
     await c.logout()
     return { ok: true }
   } catch (e: unknown) {
-    const message = formatImapError(e)
-    return { ok: false, error: message }
+    // A refused upgrade carries the vocabulary tag; the renderer shows the
+    // translated sentence for it (see presentedTaggedText).
+    // A server that never greeted gets the translated sentence; the raw
+    // library text ("Failed to receive greeting from server in required time")
+    // stays after the tag for the log.
+    const tag = isStarttlsRefusal(e)
+      ? `${encodeErrorPresentation('starttls_required')} `
+      : isImapPreGreetingTimeout(e) ? `${encodeErrorPresentation('pre_greeting')} ` : ''
+    return { ok: false, error: tag + formatImapError(markStarttlsRefusal(e)) }
   }
 }
 
@@ -1724,7 +2057,7 @@ export async function listMailboxes(accountId: number, cfg: ImapConfig): Promise
         specialUse: (box.specialUse as string) || null,
         unread: (box.status as { unseen?: number } | undefined)?.unseen ?? undefined,
       }))
-  })
+  }, 2, { overallDeadline: true })
 }
 
 /** Load latest messages from a folder (delegates to fetchFolderSummariesPage). */
@@ -1759,6 +2092,7 @@ async function createDedicatedConnection(cfg: ImapConfig): Promise<ImapFlow> {
       ? { user: cfg.user, accessToken: cfg.accessToken }
       : { user: cfg.user, pass: cfg.pass! },
     tls: buildTlsOptions(cfg),
+    ...imapStarttlsPolicy(cfg),
     socketTimeout: 30_000,
     logger: false,
     disableAutoIdle: true,
@@ -1771,7 +2105,15 @@ async function createDedicatedConnection(cfg: ImapConfig): Promise<ImapFlow> {
 }
 
 /** Execute a short-lived IMAP operation on its own connection with retry on transient disconnects.
- *  Supports auth-error recovery via the registered onAuthError handler (same as withImapRetry). */
+ *  Supports auth-error recovery via the registered onAuthError handler (same as withImapRetry).
+ *
+ *  No explicit tier: a dedicated connection takes neither op lock nor pool
+ *  slot, so there is nothing for a tier to ORDER (see ./imapScheduler). The
+ *  ambient tier is still read at the boundary, for the login latch — an
+ *  `imapInteractive` scope around one of these calls now exempts it from the
+ *  auth throttle even though it never affected its scheduling. That is the
+ *  intended reading: the tier says who is waiting, and the throttle is about
+ *  timers, not people. */
 async function withDedicatedImapRetry<T>(
   accountId: number,
   cfg: ImapConfig,
@@ -1793,22 +2135,26 @@ async function runDedicatedImapRetry<T>(
   let authRetryUsed = false
   for (;;) {
     let c: ImapFlow | null = null
+    const attempt: ImapAttempt = newImapAttempt()
     try {
       c = await createDedicatedConnection(cfg)
-      return await fn(c)
+      const conn = c
+      return await runImapAttempt(attempt, () => fn(conn))
     } catch (e: unknown) {
       const errClass = classifyImapError(e)
 
       // Cert error path: notify the main-process subscriber and rethrow —
       // retrying a trust failure is pointless (see withImapRetry).
       if (errClass === 'cert') {
-        notifyCertError(accountId, cfg, e)
+        notifyCertError(accountId, cfg, findTlsTrustError(e) ?? e)
         throw e
       }
 
       // Auth error path: attempt token refresh exactly once, gated by
       // per-account cooldown to avoid hammering Azure/Google `/token`.
-      if (errClass === 'auth' && !authRetryUsed) {
+      // A mutation already sent is never re-run by a token refresh: the check
+        // comes before any retry branch, not only the connection-loss one.
+        if (errClass === 'auth' && !authRetryUsed && !attempt.mutationIssued) {
         authRetryUsed = true
         const freshToken = await invokeAuthHandlerWithCooldown(accountId, e)
         if (freshToken !== null) {
@@ -1818,10 +2164,8 @@ async function runDedicatedImapRetry<T>(
         throw e
       }
 
-      const msg = e instanceof Error ? e.message : String(e)
-      // §2.20-E: keep classifier in sync with withImapRetry (imap.ts:~534).
-      const isConnectionLost = /NoConnection|not usable|Unexpected close|closed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|ECONNABORTED/i.test(msg)
-      if (!isConnectionLost || remaining <= 0) throw e
+      // Same classification as withImapRetry (connectionLossRetryable).
+      if (!connectionLossRetryable(e, attempt, remaining)) throw e
       remaining -= 1
       await sleep(1000)
     } finally {
@@ -2802,10 +3146,9 @@ export async function setSeen(cfg: ImapConfig, mailbox: string, uids: number[], 
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(mailbox)
-    if (seen) await c.messageFlagsAdd(uids, ['\\Seen'], { uid: true })
-    else await c.messageFlagsRemove(uids, ['\\Seen'], { uid: true })
-  })
-  // Update cache
+    await storeFlag(c, uids, '\\Seen', seen)
+  }, 2, { overallDeadline: true })
+  // Update cache (only reached when the server confirmed the STORE)
   setUnread(accountId, mailbox, uids, !seen)
 }
 
@@ -2813,9 +3156,8 @@ export async function setFlagged(cfg: ImapConfig, mailbox: string, uids: number[
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(mailbox)
-    if (flagged) await c.messageFlagsAdd(uids, ['\\Flagged'], { uid: true })
-    else await c.messageFlagsRemove(uids, ['\\Flagged'], { uid: true })
-  })
+    await storeFlag(c, uids, '\\Flagged', flagged)
+  }, 2, { overallDeadline: true })
   setFlaggedDb(accountId, mailbox, uids, flagged)
 }
 
@@ -2849,14 +3191,12 @@ export async function moveMessages(cfg: ImapConfig, fromMailbox: string, toMailb
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(fromMailbox)
-    const result = await c.messageMove(uids, toMailbox, { uid: true })
-    // ImapFlow returns false on server NO/BAD — don't touch local cache on failure
-    if (result === false) throw new Error(`IMAP MOVE failed for ${uids.length} messages from ${fromMailbox} to ${toMailbox}`)
+    // The result is CHECKED (./imapMutations): ImapFlow returns false, it does
+    // not throw, for a server NO and for a dropped connection alike, and on a
+    // server without MOVE it would flag and expunge after a refused COPY.
     // Capture uidMap (COPYUID) for destination cache update (K-9: RealImapFolder.kt:342)
-    if (result && typeof result === 'object' && 'uidMap' in result) {
-      uidMap = (result as { uidMap?: Map<number, number> }).uidMap
-    }
-  })
+    uidMap = await moveUids(c, uids, toMailbox)
+  }, 2, { overallDeadline: true })
   // Update local cache: copy messages to destination with new UIDs, then delete from source.
   // When uidMap is available (UIDPLUS/COPYUID), use server-provided mapping.
   // When not available, create placeholder entries with temporary negative UIDs
@@ -2881,36 +3221,26 @@ export async function moveMessages(cfg: ImapConfig, fromMailbox: string, toMailb
 }
 
 /**
- * UIDPLUS-aware delete: safe UID EXPUNGE when available, guarded broad EXPUNGE otherwise.
- * Without UIDPLUS, checks for pre-existing \Deleted messages to avoid collateral expunge.
- * If other \Deleted messages exist, only flags ours (no EXPUNGE) — they'll be cleaned on next sync.
- * This matches K-9 Mail's conservative approach (RealImapFolder.kt:1165). */
+ * Draft-cleanup deletion: best effort, never throws. The checked, strict delete
+ * is `deleteUids` (./imapMutations); the draft paths only tidy up after a save
+ * and have always ignored a failure here, so the failure stays ignored.
+ * (UIDPLUS-aware: UID EXPUNGE when available, a guarded broad EXPUNGE otherwise,
+ * matching K-9 Mail's conservative approach, RealImapFolder.kt:1165.) */
 async function safeMessageDelete(c: ImapFlow, uids: number[]): Promise<boolean> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const hasUidPlus = (c as any).capabilities?.has?.('UIDPLUS') ?? false
-  if (hasUidPlus) {
-    return await c.messageDelete(uids, { uid: true })
-  }
-  // Without UIDPLUS: check for pre-existing \Deleted before issuing broad EXPUNGE.
-  const uidSet = new Set(uids)
-  const deletedUids = await c.search({ deleted: true }, { uid: true })
-  const foreignDeleted = (Array.isArray(deletedUids) ? deletedUids : []).filter(u => !uidSet.has(u))
-  if (foreignDeleted.length > 0) {
-    // Other messages have \Deleted — only flag ours, skip EXPUNGE to avoid collateral damage.
-    await c.messageFlagsAdd(uids, ['\\Deleted'], { uid: true })
+  try {
+    await deleteUids(c, uids)
     return true
+  } catch {
+    return false
   }
-  // No foreign \Deleted — safe to EXPUNGE (only our UIDs will be affected).
-  return await c.messageDelete(uids, { uid: true })
 }
 
 export async function deleteMessagesRemote(cfg: ImapConfig, mailbox: string, uids: number[], accountId: number) {
   await withImapRetry(accountId, cfg, async () => {
     const c = await connectImap(cfg)
     await c.mailboxOpen(mailbox)
-    const result = await safeMessageDelete(c, uids)
-    if (result === false) throw new Error(`IMAP DELETE failed for ${uids.length} messages in ${mailbox}`)
-  })
+    await deleteUids(c, uids)
+  }, 2, { overallDeadline: true })
   deleteMessages(accountId, mailbox, uids)
 }
 
@@ -3054,7 +3384,11 @@ export async function saveDraft(
   cfg: ImapConfig,
   draftsMailbox: string,
   draftId: string,
-  data: { to?: string; cc?: string; bcc?: string; subject?: string; text?: string; html?: string },
+  data: {
+    to?: string; cc?: string; bcc?: string; subject?: string; text?: string; html?: string
+    /** RFC 5322 §3.6.4 headers of a reply draft, resolved by main from the parent. */
+    inReplyTo?: string; references?: string
+  },
 ): Promise<{ uid?: number }> {
   // §2.16 iter2 — Message-Id is derived deterministically from draftId so that
   // every save of the SAME draft emits the SAME Message-ID header. This makes
@@ -3077,6 +3411,8 @@ export async function saveDraft(
     subject: data.subject || '',
     text: data.text || undefined,
     html: data.html || undefined,
+    inReplyTo: data.inReplyTo || undefined,
+    references: data.references || undefined,
     messageId: stableMessageId,
     headers: {
       [MAILCOPILOT_DRAFT_HEADER]: draftId,
@@ -3506,6 +3842,7 @@ export async function connectImapPerAccount(cfg: ImapConfig, priority?: ImapPool
       ? { user: cfg.user, accessToken: cfg.accessToken }
       : { user: cfg.user, pass: cfg.pass || '' },
     tls: buildTlsOptions(cfg),
+    ...imapStarttlsPolicy(cfg),
     logger: silentLogger,
     socketTimeout: 30_000,
   })
@@ -3560,23 +3897,29 @@ export async function withImapRetryPerAccount<T>(
   return withOutcomeReporting(accountId, () => withPerAccountOpLock(ukey, priority, async () => {
     let remaining = retries
     let authRetryUsed = false
+    // Reconnect inside the guarded attempt (see withImapRetry).
+    let reconnect = false
     for (;;) {
+      const attempt: ImapAttempt = newImapAttempt()
       try {
         waitReporter.reportOnce()
-        return await fn()
+        if (reconnect) { reconnect = false; await connectImapPerAccount(cfg, priority) }
+        return await runImapAttempt(attempt, fn)
       } catch (e: unknown) {
         const errClass = classifyImapError(e)
 
         // Cert error path: notify the main-process subscriber and rethrow —
         // retrying a trust failure is pointless (see withImapRetry).
         if (errClass === 'cert') {
-          notifyCertError(accountId, cfg, e)
+          notifyCertError(accountId, cfg, findTlsTrustError(e) ?? e)
           throw e
         }
 
         // Auth error path: attempt token refresh exactly once, gated by
         // per-account cooldown to avoid hammering Azure/Google `/token`.
-        if (errClass === 'auth' && !authRetryUsed) {
+        // A mutation already sent is never re-run by a token refresh: the check
+        // comes before any retry branch, not only the connection-loss one.
+        if (errClass === 'auth' && !authRetryUsed && !attempt.mutationIssued) {
           authRetryUsed = true
           const freshToken = await invokeAuthHandlerWithCooldown(accountId, e)
           if (freshToken !== null) {
@@ -3586,16 +3929,14 @@ export async function withImapRetryPerAccount<T>(
             perAccountClients.delete(ukey)
             perAccountConnecting.delete(ukey)
             releasePerAccountSlot(ukey)
-            await connectImapPerAccount(cfg, priority)
+            reconnect = true
             continue
           }
           throw e
         }
 
-        const msg = e instanceof Error ? e.message : String(e)
-        // §2.20-E: keep classifier in sync with withImapRetry (imap.ts:~534).
-        const isConnectionLost = /NoConnection|not usable|Unexpected close|closed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|ECONNABORTED/i.test(msg)
-        if (!isConnectionLost || remaining <= 0) throw e
+        // Same classification as withImapRetry (connectionLossRetryable).
+        if (!connectionLossRetryable(e, attempt, remaining)) throw e
         remaining -= 1
 
         const old = perAccountClients.get(ukey)
@@ -3604,10 +3945,10 @@ export async function withImapRetryPerAccount<T>(
         perAccountConnecting.delete(ukey)
         releasePerAccountSlot(ukey)
         await sleep(1000)
-        await connectImapPerAccount(cfg, priority)
+        reconnect = true
       }
     }
-  }))
+  }), { priority })
 }
 
 /** Close per-account connection for a specific account */

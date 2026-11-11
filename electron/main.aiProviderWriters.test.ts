@@ -16,9 +16,12 @@ import { z } from 'zod'
  *   1. WRITERS reject it. Every renderer-reachable IPC entry point that accepts
  *      a provider parses against the single `aiProviderSchema`, so no NEW row
  *      or request can carry the removed id.
- *   2. The RESUME path cannot be steered by a legacy row. Both branches are
- *      positive equality checks against live providers, so an unknown or
- *      dropped provider falls out of all of them rather than into one.
+ *   2. The CONTINUATION path cannot be steered by a legacy row. The branch that
+ *      loads conversation history is a positive equality list against live
+ *      providers, so an unknown or dropped provider falls out of it rather than
+ *      into it. (§2.283 removed the second branch, which used to substitute a
+ *      stored Claude CLI session id for `resume`; see the dedicated suites at
+ *      the bottom of this file.)
  *
  * Reads stay deliberately opaque — the append-only audit log, the cost ledger
  * and persisted session rows keep rendering ids that are no longer selectable.
@@ -114,7 +117,7 @@ describe('§2.218 main.ts — every provider-accepting WRITER uses the shared sc
   })
 })
 
-describe('§2.218 main.ts — a legacy session cannot steer the resume path', () => {
+describe('§2.218 main.ts — a legacy session cannot steer the continuation path', () => {
   /** The `if (sid) { ... }` block inside the `ai:chat` handler. */
   const resumeBlock = (() => {
     const chatStart = MAIN_TS.indexOf("handleIpc('ai:chat'")
@@ -129,33 +132,30 @@ describe('§2.218 main.ts — a legacy session cannot steer the resume path', ()
     // per-request override) alone. If it ever starts reading `session.provider`,
     // a row written under a removed provider would drive the branch again.
     //
-    // The row's provider IS read further down — but as a GUARD (§2.218.f2 M-2:
-    // resume material may only be consumed when the row's own provider matches),
-    // never as the input that selects the branch. Opposite directions: one would
-    // let history choose behaviour, the other lets history only veto it.
+    // §2.283 — the session row is no longer read on this path at all: the guard
+    // that compared its provider before consuming resume material went with the
+    // resume mechanism itself.
     const assignment = resumeBlock.slice(0, resumeBlock.indexOf('\n'))
     expect(assignment).toContain('provider || getSettings().aiProvider')
     expect(assignment).not.toMatch(/session\??\.provider/)
   })
 
-  // THE LOAD-BEARING ASSERTION. A dropped/unknown provider must fall out of
-  // every branch. Written as `=== 'anthropic-api'`, an undefined provider skips
-  // the claudeSessionId substitution; rewritten as `!== 'openai-api'`, it would
-  // fall in and hand a legacy session's stored Claude id to a provider that was
-  // never configured.
-  it('gates the claudeSessionId substitution on positive equality with anthropic-api', () => {
-    expect(resumeBlock).toContain("if (effectiveProvider === 'anthropic-api')")
-    expect(resumeBlock).toContain('session?.claudeSessionId')
+  // THE LOAD-BEARING ASSERTION. A dropped/unknown provider must fall out of the
+  // branch. Written as positive equalities, an undefined provider loads no
+  // history and the turn fails cleanly with "AI provider not configured";
+  // rewritten as `!== 'openai-api'`, it would fall IN.
+  it('gates history loading on positive equality, never on a negative', () => {
     expect(resumeBlock).not.toMatch(/effectiveProvider\s*!==/)
   })
 
-  it('gates history loading on positive equality with the multi-turn providers', () => {
+  it('gates history loading on positive equality with every live provider', () => {
+    expect(resumeBlock).toContain("effectiveProvider === 'anthropic-api'")
     expect(resumeBlock).toContain("effectiveProvider === 'openai-api'")
     expect(resumeBlock).toContain("effectiveProvider === 'gemini-api'")
   })
 
   // The E2E short-circuit returns before this block (mock stream), so no e2e
-  // spec can observe the resume decision — which is exactly why it is pinned
+  // spec can observe the history decision — which is exactly why it is pinned
   // here rather than left to the e2e suite.
   it('sits after the E2E short-circuit, so only this suite covers it', () => {
     const chatStart = MAIN_TS.indexOf("handleIpc('ai:chat'")
@@ -260,48 +260,176 @@ describe('§2.218.f2 main.ts — settings:save refuses unhandled schema failures
 })
 
 /**
- * §2.218.f2 (codex-security-review, M-2) — resume material is provider-scoped.
+ * §2.283 — Anthropic lost its own continuation mechanism, so it MUST take the
+ * shared one.
  *
- * `claude_session_id` is minted by whichever provider created the row. The
- * removed `subscription` provider minted it against the user's CONSUMER Claude
- * session, so consuming it under `anthropic-api` would carry consumer-auth
- * material into an API-key request — reachable by an honest user reopening an
- * old chat, or by a compromised renderer passing an explicit provider override
- * for a session it did not create.
+ * The Claude provider used to run through the proprietary Agent SDK, which kept
+ * the conversation inside the Claude Code CLI and rejoined it via the stored
+ * `claude_session_id` (`resume`). That is why `anthropic-api` was absent from
+ * the history-loading list. Moving the provider onto the shared `streamText`
+ * path removed `resume` — and left the absence behind, which silently collapsed
+ * every multi-turn Claude conversation into a single-turn one: the model saw
+ * only the latest prompt.
+ *
+ * The condition is EVALUATED here, not merely pattern-matched, so the test
+ * states the behaviour ("Claude loads history, a removed provider does not")
+ * rather than the spelling of the branch.
  */
-describe('§2.218.f2 main.ts — resume material requires a provider match', () => {
-  const resumeBlock = (() => {
+describe('§2.283 main.ts — history loads for every live provider, Claude included', () => {
+  /** The `if (...)` condition that guards the `getLastAiMessages` call. */
+  const historyCondition = (() => {
     const chatStart = MAIN_TS.indexOf("handleIpc('ai:chat'")
-    const anchor = MAIN_TS.indexOf("if (effectiveProvider === 'anthropic-api')", chatStart)
-    return anchor > -1 ? MAIN_TS.slice(anchor, MAIN_TS.indexOf('\n  }', anchor)) : ''
+    const anchor = MAIN_TS.indexOf('const effectiveProvider = provider || getSettings().aiProvider', chatStart)
+    if (anchor < 0) return null
+    const loadIdx = MAIN_TS.indexOf('getLastAiMessages(sid, 40)', anchor)
+    if (loadIdx < 0) return null
+    const ifIdx = MAIN_TS.lastIndexOf('if (', loadIdx)
+    const openIdx = MAIN_TS.indexOf('(', ifIdx)
+    const closeIdx = MAIN_TS.indexOf(') {', openIdx)
+    return ifIdx > anchor && closeIdx > openIdx ? MAIN_TS.slice(openIdx + 1, closeIdx) : null
   })()
 
-  it('consumes claudeSessionId only when the row was created by the same provider', () => {
-    expect(resumeBlock).not.toBe('')
-    expect(resumeBlock).toMatch(
-      /session\?\.claudeSessionId && session\.provider === effectiveProvider/,
-    )
+  /** Evaluate the extracted condition for one value of `effectiveProvider`. */
+  function loadsHistoryFor(effectiveProvider: string | undefined): boolean {
+    expect(historyCondition).not.toBeNull()
+    const evaluate = new Function('effectiveProvider', `return Boolean(${historyCondition})`) as (
+      p: string | undefined,
+    ) => boolean
+    return evaluate(effectiveProvider)
+  }
+
+  // THE REGRESSION. Fails against the pre-fix source, where the list was
+  // `openai-api || gemini-api` and Claude fell out of it.
+  it('loads history for anthropic-api', () => {
+    expect(loadsHistoryFor('anthropic-api')).toBe(true)
   })
 
-  // The regression shape: a bare `if (session?.claudeSessionId)` guarding the
-  // assignment, i.e. the pre-fix code.
-  it('has no unguarded assignment of the stored resume id', () => {
-    const assignIdx = resumeBlock.indexOf('effectiveSid = session.claudeSessionId')
-    expect(assignIdx).toBeGreaterThan(-1)
-    const guard = resumeBlock.slice(0, assignIdx)
-    expect(guard).toContain('session.provider === effectiveProvider')
+  it.each(['openai-api', 'gemini-api'])('still loads history for %s', (p) => {
+    expect(loadsHistoryFor(p)).toBe(true)
   })
 
-  // A mismatch must fall through to a FRESH session, not to some other id.
-  it('leaves effectiveSid alone on a mismatch', () => {
-    const elseBranch = resumeBlock.slice(resumeBlock.indexOf('} else if'))
-    expect(elseBranch).not.toContain('effectiveSid =')
+  // The §2.218 property, restated as behaviour: an unknown or removed provider
+  // falls OUT of the list. `subscription` is the concrete case — such a session
+  // must not be continued under a provider that no longer exists.
+  it.each(['subscription', 'not-a-provider', ''])('does not load history for %s', (p) => {
+    expect(loadsHistoryFor(p)).toBe(false)
   })
 
-  it('compares the stored provider as an opaque string, not against the live enum', () => {
-    // The row is HISTORY and may name a provider that no longer exists — that is
-    // precisely the case being defended against, so it must not be validated
-    // against `aiProviderSchema` (which would throw on it).
-    expect(resumeBlock).not.toContain('aiProviderSchema')
+  it('does not load history when no provider is configured', () => {
+    expect(loadsHistoryFor(undefined)).toBe(false)
+  })
+})
+
+/**
+ * §2.283 — the resume path is GONE, not merely unused.
+ *
+ * With the Agent SDK removed there is no `resume`, and `event.sessionId` is an
+ * echo of the id main just passed in. The provider-scoped gate of §2.218.f2
+ * (a legacy `subscription` row must not hand its CONSUMER-minted Claude id to
+ * an `anthropic-api` request) is satisfied structurally instead: no stored id
+ * is substituted into the request at all, and main writes nothing back. The
+ * `claude_session_id` COLUMN stays — it is history, and dropping it is a schema
+ * migration, not part of this fix.
+ */
+describe('§2.283 main.ts — nothing substitutes or mints resume material', () => {
+  const chatBody = (() => {
+    const start = MAIN_TS.indexOf("handleIpc('ai:chat'")
+    return MAIN_TS.slice(start, MAIN_TS.indexOf('\n})', start))
+  })()
+
+  it('passes the app-level session id straight to aiChat', () => {
+    expect(chatBody).toContain('sessionId: sid,')
+    expect(chatBody).not.toContain('effectiveSid')
+  })
+
+  it('never reads the stored resume id on the chat path', () => {
+    expect(chatBody).not.toContain('claudeSessionId')
+  })
+
+  // Writing `event.sessionId` back stored OUR OWN id under a column that means
+  // "the CLI's session". The writer is gone from main entirely — asserted on the
+  // whole file, because an import kept alive is how such a call comes back.
+  it('does not write claude_session_id from anywhere in main', () => {
+    expect(MAIN_TS).not.toContain('updateAiSessionClaudeId')
+  })
+})
+
+/**
+ * §2.283.f1 (codex, Low) — ONE settings read, two uses.
+ *
+ * The history decision above resolves `provider || getSettings().aiProvider`.
+ * `aiChat` performs the SAME fallback internally when the request carries no
+ * explicit provider, so handing it the raw `provider` (usually `undefined`)
+ * made this a two-read decision with a window between the reads. The renderer
+ * may save settings while a chat request is in flight, and a provider switch
+ * landing in that window would load one provider's history and run the turn on
+ * another — or, for a switch INTO `anthropic-api`, load no history at all
+ * before a turn that needs it (the §2.283 regression, re-opened by a race).
+ *
+ * The fix is to resolve once and pass that value on. What is asserted here is
+ * exactly that link: the identifier the positive history gate tests is the same
+ * identifier `aiChat` receives, and settings are read once on this path. Both
+ * are DERIVED from the source (identifier names are parsed out, not spelled in
+ * the test), so the suite states the property rather than the wording.
+ */
+describe('§2.283.f1 main.ts — the provider is resolved once and reused', () => {
+  const chatBody = (() => {
+    const start = MAIN_TS.indexOf("handleIpc('ai:chat'")
+    return MAIN_TS.slice(start, MAIN_TS.indexOf('\n})', start))
+  })()
+
+  /** The `if (...)` condition guarding the `getLastAiMessages` call. */
+  const historyCondition = (() => {
+    const loadIdx = chatBody.indexOf('getLastAiMessages(sid, 40)')
+    if (loadIdx < 0) return null
+    const ifIdx = chatBody.lastIndexOf('if (', loadIdx)
+    const openIdx = chatBody.indexOf('(', ifIdx)
+    const closeIdx = chatBody.indexOf(') {', openIdx)
+    return ifIdx > -1 && closeIdx > openIdx ? chatBody.slice(openIdx + 1, closeIdx) : null
+  })()
+
+  /** Identifiers compared with `===` inside the history gate. */
+  const gatedIdentifiers = (() => {
+    const names = new Set<string>()
+    for (const m of (historyCondition ?? '').matchAll(/([A-Za-z_$][\w$]*)\s*===/g)) names.add(m[1])
+    return [...names]
+  })()
+
+  /** The expression passed as `aiProvider:` in the `aiChat({ ... })` call. */
+  const aiChatProviderArg = (() => {
+    const callIdx = chatBody.indexOf('aiChat({')
+    if (callIdx < 0) return null
+    const m = chatBody.slice(callIdx).match(/aiProvider:\s*([^,}]+)/)
+    return m ? m[1].trim() : null
+  })()
+
+  it('gates history on exactly one resolved provider value', () => {
+    expect(historyCondition).not.toBeNull()
+    expect(gatedIdentifiers).toHaveLength(1)
+  })
+
+  // THE FIX, stated as a link rather than as text: whatever the gate tests is
+  // what the turn runs on. Fails against the pre-fix source, which passed the
+  // raw per-request `provider` and let `aiChat` re-read settings.
+  it('hands that same value to aiChat explicitly', () => {
+    expect(aiChatProviderArg).not.toBeNull()
+    expect(aiChatProviderArg).toBe(gatedIdentifiers[0])
+  })
+
+  // The resolution must sit ABOVE the history block, so a single evaluation
+  // serves both uses; declaring it inside `if (sid)` is how the second read
+  // (inside aiChat) became necessary in the first place.
+  it('resolves the provider before the history block, not inside it', () => {
+    const declIdx = chatBody.indexOf(`const ${gatedIdentifiers[0]} =`)
+    const sidIdx = chatBody.indexOf('if (sid) {')
+    expect(declIdx).toBeGreaterThan(-1)
+    expect(sidIdx).toBeGreaterThan(declIdx)
+  })
+
+  // Comments are stripped first: the block above deliberately NAMES the
+  // fallback it is removing, and a prose mention is not a read.
+  it('reads the settings provider exactly once on the chat path', () => {
+    const code = chatBody.replace(/^\s*\/\/.*$/gm, '')
+    expect(code.match(/getSettings\(\)\.aiProvider/g) ?? []).toHaveLength(1)
   })
 })

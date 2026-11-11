@@ -154,7 +154,7 @@ describe('main.ts §2.99 — window-all-closed keeps running only behind a tray 
  * these handlers. `main.ts` is not importable (module-level window creation, IPC
  * registration and a DB open at import time), and e2e cannot reach them either —
  * the single-instance lock is bypassed under `MAILCOPILOT_E2E`
- * (`const gotSingleInstanceLock = process.env.MAILCOPILOT_E2E === '1' || ...`),
+ * in an unpackaged build (`mayRunAlongsideOtherInstances`, electron/e2eFlag.ts),
  * so `second-instance` never fires in a spec run, and `activate` is a macOS
  * event our Linux CI cannot raise. What follows is therefore a SOURCE-MIRROR
  * assertion, in the pattern of main.standaloneWindows.test.ts: it fails the
@@ -245,7 +245,9 @@ describe('main.ts §2.99 — second-instance brings the app back, window or not'
     // that (an unconditional bypass, a lock taken after the listener) would
     // make every relaunch a second copy against the same database instead of a
     // way back to the first one.
-    expect(MAIN_TS).toContain("const gotSingleInstanceLock = process.env.MAILCOPILOT_E2E === '1' || app.requestSingleInstanceLock()")
+    // The decision itself (packaged build ⇒ the lock is always requested) is executed in
+    // e2eFlag.test.ts; this only pins that the lock is taken through it.
+    expect(MAIN_TS).toContain('const gotSingleInstanceLock = mayRunAlongsideOtherInstances(process.env, app.isPackaged, () => app.requestSingleInstanceLock())')
     const lockIdx = MAIN_TS.indexOf('const gotSingleInstanceLock =')
     expect(lockIdx).toBeLessThan(start)
     expect(MAIN_TS.slice(lockIdx, start)).toContain('app.quit()')
@@ -697,7 +699,7 @@ describe('main.ts §2.99 review H3 — invalidateUnreadBadge runs at every local
     })
 
     it('recounts on the transient-failure-queued exit (catch branch)', () => {
-      const catchIdx = body.indexOf('if (isTransientNetworkError(err)) {')
+      const catchIdx = body.indexOf('if (isTransientNetworkError(err) && !isImapOutcomeUndetermined(err)) {')
       const blockEnd = body.indexOf('\n    }', catchIdx)
       expect(catchIdx).toBeGreaterThan(-1)
       expect(body.slice(catchIdx, blockEnd)).toContain('invalidateUnreadBadge()')

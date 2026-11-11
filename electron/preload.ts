@@ -16,6 +16,7 @@ const ALLOWED_INVOKE_CHANNELS = [
   // that open after the flag was raised.
   'accounts:authState',
   'oauth:google:connect',
+  'oauth:google:availability',
   'oauth:microsoft:connect',
   'net:testImap',
   'net:testSmtp',
@@ -129,9 +130,14 @@ const ALLOWED_INVOKE_CHANNELS = [
   'ai:chat',
   'ai:stop',
   'ai:newSession',
+  // §3.3 B3 — citation tickets: which links of an answer are sources of a session (read-only), and the
+  // current place of the message a ticket names. Neither channel can add a ticket or choose a place.
+  'ai:resolveCitations',
+  'ai:openCitation',
   'ai:quickAction',
   'ai:setContext',
   'ai:checkAuth',
+  'ai:listModels',
   'ai:openProviderSetup',
   'ai:saveApiKey',
   'ai:deleteApiKey',

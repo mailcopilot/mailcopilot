@@ -550,8 +550,16 @@ export function dedupeAiRuleActions(
 // ── Token → cost estimation ───────────────────────────────────────────────
 
 export interface AiRuleUsage {
+  /**
+   * Total prompt tokens the provider reports, INCLUDING the two cache counts
+   * below (the AI SDK's `inputTokens.total` shape). Not "the uncached part".
+   */
   inputTokens: number;
   outputTokens: number;
+  /** Prompt tokens served from the provider's prompt cache (a subset of `inputTokens`). Priced only with `cacheTerms`. */
+  cacheReadTokens?: number;
+  /** Prompt tokens written to the provider's prompt cache (a subset of `inputTokens`). Priced only with `cacheTerms`. */
+  cacheWriteTokens?: number;
 }
 
 /** Per-1K-token input/output rate for a model id (case-insensitive match). */
@@ -561,17 +569,113 @@ interface ModelRate {
 }
 
 /**
- * The SINGLE pricing table. Resolve per-1K input/output rates for a model id.
- * Intentionally conservative for unknown models (falls through to a default
- * that is pricier than the cheap tiers, so an unknown model is never
- * under-priced).
+ * Claude list prices, USD per MILLION tokens, keyed `family-major[-minor]`.
+ *
+ * Source: https://platform.claude.com/docs/en/about-claude/pricing ("Model
+ * pricing"), read 2026-11-10. One entry per model row of that page. `cacheRead`
+ * is the cache-hit multiplier where the page states one other than the standard
+ * 0.1x (its footnotes: 0.025x on Fable/Mythos 5.2 and 5.1, 0.05x on Opus 5.5 and
+ * Sonnet 5.5). Cache writes are 1.25x for the 5-minute TTL on every row.
+ *
+ * Claude Haiku 5.5 has two tiers on the page: prompts up to 100,000 tokens at
+ * $0.10 / $0.50 and prompts over 100,000 tokens at $0.50 / $2.50 (`over100k`).
+ * The tier is chosen by the size of ONE call's prompt, so callers must price one
+ * provider call at a time (the spend ledger and the ceiling guard sum per-step
+ * costs for exactly this reason); a summed token count would tip an ordinary
+ * multi-step request into the dear tier.
+ *
+ * An id that names a known family but a version missing from this table (a model
+ * released after the date above) is priced at that family's most expensive row,
+ * never at a cheaper sibling. Ids that do not name `claude-<family>-<version>`
+ * (the old `claude-3-5-haiku` style) are NOT in the page and keep their previous
+ * rates below.
  */
-function modelRates(model: string): ModelRate {
+const CLAUDE_PRICES: Record<
+  string,
+  { in: number; out: number; cacheRead?: number; over100k?: { in: number; out: number } }
+> = {
+  'fable-5-2': { in: 8, out: 40, cacheRead: 0.025 },
+  'mythos-5-2': { in: 8, out: 40, cacheRead: 0.025 },
+  'fable-5-1': { in: 10, out: 50, cacheRead: 0.025 },
+  'mythos-5-1': { in: 10, out: 50, cacheRead: 0.025 },
+  'fable-5': { in: 10, out: 50 },
+  'mythos-5': { in: 10, out: 50 },
+  'opus-5-5': { in: 4, out: 20, cacheRead: 0.05 },
+  'opus-5': { in: 5, out: 25 },
+  'opus-4-8': { in: 5, out: 25 },
+  'opus-4-7': { in: 5, out: 25 },
+  'opus-4-6': { in: 5, out: 25 },
+  'opus-4-5': { in: 5, out: 25 },
+  'opus-4-1': { in: 15, out: 75 },
+  'opus-4': { in: 15, out: 75 },
+  'sonnet-5-5': { in: 2, out: 10, cacheRead: 0.05 },
+  'sonnet-5': { in: 2, out: 10 },
+  'sonnet-4-6': { in: 3, out: 15 },
+  'sonnet-4-5': { in: 3, out: 15 },
+  'sonnet-4': { in: 3, out: 15 },
+  'haiku-5-5': { in: 0.1, out: 0.5, over100k: { in: 0.5, out: 2.5 } },
+  'haiku-4-5': { in: 1, out: 5 },
+};
+
+/** Prompt size above which a tiered Claude row bills its `over100k` rate (the page: "over 100,000 tokens"). */
+const CLAUDE_LONG_PROMPT_TOKENS = 100_000;
+
+/** `claude-sonnet-4-5-20250929`, `anthropic/claude-sonnet-5.5`: family and 1-2 digit versions. */
+const CLAUDE_ID = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/;
+
+type ClaudePrice = { in: number; out: number; cacheRead?: number; over100k?: { in: number; out: number } };
+
+function claudePrice(model: string): { price: ClaudePrice; exact: boolean } | undefined {
+  const m = CLAUDE_ID.exec(model.toLowerCase().replace(/\./g, '-'));
+  if (!m) return undefined;
+  const family = m[1]!;
+  const exact = CLAUDE_PRICES[m[3] ? `${family}-${m[2]}-${m[3]}` : `${family}-${m[2]}`];
+  if (exact) return { price: exact, exact: true };
+  let worst: { in: number; out: number } | undefined;
+  for (const [key, price] of Object.entries(CLAUDE_PRICES)) {
+    if (key.startsWith(`${family}-`) && (!worst || price.in > worst.in)) worst = price;
+  }
+  return worst ? { price: { in: worst.in, out: worst.out }, exact: false } : undefined;
+}
+
+/** `gpt-6-luna`, optionally behind an `openai/` gateway prefix and with a `YYYY-MM-DD` snapshot suffix. */
+function isGpt6Luna(lowerId: string): boolean {
+  return /^(?:openai\/)?gpt-6-luna(?:-\d{4}-\d{2}-\d{2})?$/.test(lowerId.trim());
+}
+
+/**
+ * The SINGLE pricing table. Resolve per-1K input/output rates for a model id.
+ *
+ * OpenAI rows: https://developers.openai.com/api/docs/pricing, read 2026-11-10
+ * (standard tier): gpt-4o $2.50 / $10.00, gpt-4o-mini $0.15 / $0.60 per MTok;
+ * read 2026-11-11: gpt-6-luna $0.10 / $0.50 per MTok (the default OpenAI model).
+ *
+ * NOT in a first-party source we checked, and therefore left as they were:
+ * the `gpt-4o-2024-05-13` and `chatgpt-4o-latest` rows ($5 / $15), the original
+ * `gpt-4` row (the OpenAI page does not list it; note it also
+ * catches `gpt-4.1` and `gpt-4-turbo` ids), the legacy `haiku` row for
+ * `claude-3-x-haiku` ids, the `gemini` + `flash` row, and the fall-through below.
+ * The fall-through is $1 / $3 per MTok and is NOT pricier than every known
+ * model any more: an id this function cannot place, from a vendor it does not
+ * know, can be under-priced. Whoever adds a vendor adds its row.
+ */
+function modelRates(model: string, promptTokens = 0): ModelRate {
+  const claude = claudePrice(model);
+  if (claude) {
+    const tier = promptTokens > CLAUDE_LONG_PROMPT_TOKENS && claude.price.over100k ? claude.price.over100k : claude.price;
+    return { inputCostPer1k: tier.in / 1000, outputCostPer1k: tier.out / 1000 };
+  }
   const m = model.toLowerCase();
-  if (m.includes('gpt-4o-mini')) {
+  if (isGpt6Luna(m)) {
+    return { inputCostPer1k: 0.0001, outputCostPer1k: 0.0005 };
+  } else if (m.includes('gpt-4o-mini')) {
     return { inputCostPer1k: 0.00015, outputCostPer1k: 0.0006 };
-  } else if (m.includes('gpt-4o')) {
+  } else if (m.includes('gpt-4o-2024-05-13') || m.includes('chatgpt-4o-latest')) {
+    // Not on the OpenAI page any more, so no first-party price to refresh them
+    // from: kept at the rate they had before, and matched BEFORE the generic row.
     return { inputCostPer1k: 0.005, outputCostPer1k: 0.015 };
+  } else if (m.includes('gpt-4o')) {
+    return { inputCostPer1k: 0.0025, outputCostPer1k: 0.01 };
   } else if (m.includes('gpt-4')) {
     return { inputCostPer1k: 0.01, outputCostPer1k: 0.03 };
   } else if (m.includes('haiku')) {
@@ -580,6 +684,63 @@ function modelRates(model: string): ModelRate {
     return { inputCostPer1k: 0.000075, outputCostPer1k: 0.0003 };
   }
   return { inputCostPer1k: 0.001, outputCostPer1k: 0.003 };
+}
+
+/**
+ * Does this model id have a price row backed by the provider's own price page?
+ *
+ * The rate table is OUR estimate and the provider owns the bill, so a number
+ * that reaches the user's screen has to come from a row we can cite: the Claude
+ * rows of `CLAUDE_PRICES` (an exact `family-version` row, never the "dearest
+ * sibling" stand-in for a version the table lacks) and the OpenAI rows read
+ * from the OpenAI pricing page, `gpt-4o`, `gpt-4o-mini` and `gpt-6-luna` with an optional
+ * `YYYY-MM-DD` snapshot suffix. Everything else is NOT listed: the fall-through
+ * rate, the rows `modelRates` documents as having no first-party source, and ids
+ * that merely CONTAIN a listed name (`gpt-4.1-mini` contains `gpt-4`, and was
+ * shown at roughly eighty times what the gateway billed).
+ *
+ * Used only to decide whether an ESTIMATE may be displayed. The ledger, the
+ * per-request ceiling and the daily/monthly caps keep pricing every model with
+ * `modelRates` exactly as before: for those, an over-estimate is the safe side.
+ */
+export function hasListedPrice(model: string): boolean {
+  const claude = claudePrice(model);
+  if (claude) return claude.exact;
+  // `openai/gpt-4o-mini`-style gateway prefixes are tolerated; the dated
+  // snapshot the page does not list ($5 / $15) is not.
+  const m = model.trim().toLowerCase().replace(/^openai\//, '');
+  return (/^gpt-4o(?:-mini)?(?:-\d{4}-\d{2}-\d{2})?$/.test(m) && m !== 'gpt-4o-2024-05-13') || isGpt6Luna(m);
+}
+
+/**
+ * Whose prompt-cache price list the reported cache counts are priced by. Stated
+ * by the CALLER, never guessed from the model id: an OpenAI-compatible gateway
+ * can serve a claude-named model, report cached tokens, and bill them in full.
+ * `anthropic` is passed only for the pinned Anthropic contour, the one that sets
+ * the cache markers and whose host reports the counts.
+ */
+export type CacheTerms = 'anthropic';
+
+/**
+ * Price of cached prompt tokens relative to the plain input rate, and only when
+ * the caller names the terms. Anthropic bills cache reads at the model's
+ * multiplier (0.1x, or the page's 0.05x / 0.025x for the newest rows) and
+ * 5-minute cache writes at 1.25x (a 1-hour marker would bill 2x: add that here
+ * before one is ever set). Without terms the cache does not exist for pricing,
+ * since the size of an OpenAI-style automatic discount differs per model and
+ * gateway. This is an ESTIMATE; the provider owns the bill. The same number feeds
+ * the displayed cost, the per-request ceiling AND the daily/monthly settle, so a
+ * cached request now settles lower than before; enforcement still rests on it.
+ */
+function cacheMultipliers(model: string, terms: CacheTerms | undefined): { read: number; write: number } {
+  if (terms !== 'anthropic') return { read: 1, write: 1 };
+  const claude = claudePrice(model);
+  return { read: (claude?.exact ? claude.price.cacheRead : undefined) ?? 0.1, write: 1.25 };
+}
+
+/** A cache count we may price: finite and non-negative, else 0 (full price). */
+function usableCacheTokens(raw: number | undefined): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 
 /**
@@ -625,7 +786,11 @@ function modelRates(model: string): ModelRate {
  * completion we can make is the wrong direction for a fail-closed floor.
  *
  * The cost of sharing it is measured, not hand-waved: against the rate table
- * above, the 2000 → 2500 raise moves exactly ONE tier — gpt-4, $0.08 → $0.10.
+ * above (as read 2026-08-31, before the Claude rows were refreshed from the
+ * first-party price page), the 2000 → 2500 raise moves exactly ONE tier — gpt-4,
+ * $0.08 → $0.10. After the refresh the Claude rows with the dearest output
+ * (every Opus row, Fable and Mythos) price their worst
+ * case ABOVE the flat floor by their own rates; `aiRules.test.ts` pins both.
  * Every other tier (gpt-4o, gpt-4o-mini, haiku, gemini-flash, unknown) prices a
  * worst case at or under the flat $0.05 floor at BOTH values, so its reservation
  * is unchanged; `aiRules.test.ts` pins that. And the raised amount is held only
@@ -656,7 +821,9 @@ export function nullUsageReservationUsd(model: string): number {
 
 /**
  * Approximate per-request cost from real provider-reported token counts.
- * Pricing is per 1K tokens and intentionally conservative for unknown models.
+ * Pricing is per 1K tokens. Unknown Claude versions are priced at their family's
+ * dearest row; an id from a vendor this table does not know falls through to a
+ * flat rate that can UNDER-price it (see `modelRates`).
  * Returns `undefined` when there is no USABLE usage to price — that includes
  * null/undefined usage, both counts <= 0, AND any non-finite value (NaN /
  * Infinity / non-number). Returning `undefined` on garbage usage is critical:
@@ -673,6 +840,7 @@ export function nullUsageReservationUsd(model: string): number {
 export function estimateAiRuleCostUsd(
   model: string,
   usage: AiRuleUsage | null | undefined,
+  opts?: { cacheTerms?: CacheTerms },
 ): number | undefined {
   if (!usage) return undefined;
   const { inputTokens, outputTokens } = usage;
@@ -684,10 +852,20 @@ export function estimateAiRuleCostUsd(
   }
   if (inputTokens <= 0 && outputTokens <= 0) return undefined;
 
-  const { inputCostPer1k, outputCostPer1k } = modelRates(model);
+  // The tier of a tiered row follows THIS call's prompt size (`inputTokens`).
+  const { inputCostPer1k, outputCostPer1k } = modelRates(model, Math.max(0, inputTokens));
+
+  // Cached tokens are a SUBSET of `inputTokens`; clamp so a provider that
+  // reports more cache tokens than input can never make the estimate negative
+  // or cheaper than the discount allows.
+  const input = Math.max(0, inputTokens);
+  const cacheRead = Math.min(usableCacheTokens(usage.cacheReadTokens), input);
+  const cacheWrite = Math.min(usableCacheTokens(usage.cacheWriteTokens), input - cacheRead);
+  const mult = cacheMultipliers(model, opts?.cacheTerms);
+  const effectiveInput = input - cacheRead - cacheWrite + cacheRead * mult.read + cacheWrite * mult.write;
 
   const cost =
-    (Math.max(0, inputTokens) / 1000) * inputCostPer1k +
+    (effectiveInput / 1000) * inputCostPer1k +
     (Math.max(0, outputTokens) / 1000) * outputCostPer1k;
 
   // Guard the COMPUTED result, not just the inputs. Enormous-but-finite token

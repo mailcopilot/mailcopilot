@@ -36,6 +36,14 @@ const i18nMap: Record<string, string> = {
   'shortcuts.clearSelection': 'Clear selection',
   'shortcuts.commandPalette': 'Open command palette',
   'shortcuts.showHelp': 'Show keyboard shortcuts',
+  // §3.3.C-thread.4 — bindings that exist only inside an open conversation
+  'shortcuts.threadTitle': 'Inside a conversation',
+  'shortcuts.threadNextPrev': 'Next / previous message in the conversation',
+  'shortcuts.threadToggle': 'Expand / collapse the focused message',
+  'shortcuts.threadReply': 'Reply to the focused message',
+  'shortcuts.threadReplyAll': 'Reply all to the focused message',
+  'shortcuts.threadForward': 'Forward the focused message',
+  'shortcuts.threadExit': 'Leave conversation navigation',
   'common.close': 'Close',
 }
 const stableT = (key: string) => i18nMap[key] ?? key
@@ -79,6 +87,19 @@ describe('KeyboardShortcutsModal', () => {
     const kbdElements = Array.from(container.querySelectorAll('kbd'))
     const rightClickKbd = kbdElements.find(el => el.textContent === 'Right-click')
     expect(rightClickKbd).toBeDefined()
+  })
+
+  it('renders the in-conversation section with its six bindings (§3.3.C-thread.4)', () => {
+    const { container } = render(React.createElement(KeyboardShortcutsModal, { onClose }))
+    expect(screen.getByText('Inside a conversation')).toBeInTheDocument()
+    expect(screen.getByText('Next / previous message in the conversation')).toBeInTheDocument()
+    expect(screen.getByText('Expand / collapse the focused message')).toBeInTheDocument()
+    expect(screen.getByText('Reply to the focused message')).toBeInTheDocument()
+    expect(screen.getByText('Reply all to the focused message')).toBeInTheDocument()
+    expect(screen.getByText('Forward the focused message')).toBeInTheDocument()
+    expect(screen.getByText('Leave conversation navigation')).toBeInTheDocument()
+    const kbds = Array.from(container.querySelectorAll('kbd')).map(el => el.textContent)
+    expect(kbds).toContain('Enter / Space')
   })
 
   it('calls onClose when overlay background is clicked', () => {

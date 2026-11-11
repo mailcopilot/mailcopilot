@@ -38,6 +38,20 @@ const GROUPS = [
     ],
   },
   {
+    // §3.3.C-thread.4 — these bindings exist only while a conversation with
+    // more than one message is open; `j` / `k` then walk the cards instead of
+    // the message list, and Esc hands the list its keys back.
+    titleKey: 'shortcuts.threadTitle',
+    items: [
+      { keys: ['j / k'], labelKey: 'shortcuts.threadNextPrev' },
+      { keys: ['Enter / Space'], labelKey: 'shortcuts.threadToggle' },
+      { keys: ['r'], labelKey: 'shortcuts.threadReply' },
+      { keys: ['a'], labelKey: 'shortcuts.threadReplyAll' },
+      { keys: ['f'], labelKey: 'shortcuts.threadForward' },
+      { keys: ['Escape'], labelKey: 'shortcuts.threadExit' },
+    ],
+  },
+  {
     titleKey: 'shortcuts.general',
     items: [
       { keys: ['Ctrl+K'], labelKey: 'shortcuts.commandPalette' },

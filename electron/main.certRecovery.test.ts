@@ -271,7 +271,12 @@ function toPinDto(row: PinRow): Omit<PinRow, 'certPem'> & { hasCertPem: boolean 
 // Mirrors the pin/cert lookup and how both protocol configs are built.
 function buildAccountTlsConfig(
   id: number,
-  base: { imap: { host: string; port: number }; smtp: { host: string; port: number } },
+  // `tlsPinnedCertsPem` is typed in on purpose: the assembly must override any
+  // body a stored record carries, not spread it through (see the test below).
+  base: {
+    imap: { host: string; port: number; tlsPinnedCertsPem?: string[] }
+    smtp: { host: string; port: number; tlsPinnedCertsPem?: string[] }
+  },
   deps: {
     listTlsPinsForEndpoint: (id: number, host: string, port: number) => string[]
     listTlsPinnedCertsPemForEndpoint: (id: number, host: string, port: number) => string[]
@@ -1569,6 +1574,22 @@ describe('main.ts requireAccountConfig — pinned certificate bodies', () => {
 
     expect(cfg.imap.tlsPinsSha256).toEqual(['AA:BB'])
     expect(cfg.smtp.tlsPinsSha256).toEqual(['AA:BB'])
+  })
+
+  it('the pin store wins over any certificate body carried by the stored record', () => {
+    // Second layer behind `accountSaveSchema`, which cannot persist a renderer
+    // body: the pin-store lookup overrides `base`, so even a body that somehow
+    // sits in the record never reaches the transport. Reordering breaks this.
+    const cfg = buildAccountTlsConfig(42, {
+      imap: { ...base.imap, tlsPinnedCertsPem: ['-----BEGIN CERTIFICATE-----forged'] },
+      smtp: { ...base.smtp, tlsPinnedCertsPem: ['-----BEGIN CERTIFICATE-----forged'] },
+    }, {
+      listTlsPinsForEndpoint: vi.fn(() => ['AA:BB']),
+      listTlsPinnedCertsPemForEndpoint: vi.fn(() => [SELF_SIGNED_PEM]),
+    })
+
+    expect(cfg.imap.tlsPinnedCertsPem).toEqual([SELF_SIGNED_PEM])
+    expect(cfg.smtp.tlsPinnedCertsPem).toEqual([SELF_SIGNED_PEM])
   })
 
   it('empty anchor list for pins created before capture landed (fail-closed preserved)', () => {

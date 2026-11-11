@@ -145,8 +145,8 @@ describe('accumulatedStepCostUsd', () => {
       { usage: { inputTokens: 1000, outputTokens: 1000 } },
       { usage: { inputTokens: 1000, outputTokens: 1000 } },
     ]
-    // gpt-4o: $0.005 / 1k in, $0.015 / 1k out → 2k in + 2k out = $0.04.
-    expect(accumulatedStepCostUsd('gpt-4o', steps)).toBeCloseTo(0.04, 10)
+    // gpt-4o: $0.0025 / 1k in, $0.01 / 1k out → 2k in + 2k out = $0.025.
+    expect(accumulatedStepCostUsd('gpt-4o', steps)).toBeCloseTo(0.025, 10)
   })
 
   it('prices a pricier model higher for identical usage (no second rate table)', () => {
@@ -165,8 +165,8 @@ describe('accumulatedStepCostUsd', () => {
       { usage: undefined },
       { usage: { inputTokens: undefined, outputTokens: 1000 } },
     ]
-    // Only the 1000 output tokens are priced: $0.015 on gpt-4o.
-    expect(accumulatedStepCostUsd('gpt-4o', steps)).toBeCloseTo(0.015, 10)
+    // Only the 1000 output tokens are priced: $0.01 on gpt-4o.
+    expect(accumulatedStepCostUsd('gpt-4o', steps)).toBeCloseTo(0.01, 10)
   })
 
   it('ignores non-finite and negative token counts (never NaN, never negative)', () => {
@@ -176,7 +176,7 @@ describe('accumulatedStepCostUsd', () => {
     ]
     const cost = accumulatedStepCostUsd('gpt-4o', steps)
     expect(Number.isFinite(cost)).toBe(true)
-    expect(cost).toBeCloseTo(0.015, 10)
+    expect(cost).toBeCloseTo(0.01, 10)
   })
 
   it('prices an unrecognized model id through the conservative default rate table instead of throwing', () => {
@@ -211,8 +211,8 @@ describe('createRequestBudgetGuard', () => {
   })
 
   it('stops on exact equality with the ceiling (no headroom left for another step)', () => {
-    // gpt-4o: 1000 output tokens = $0.015 exactly.
-    const guard = createRequestBudgetGuard('gpt-4o', 0.015)
+    // gpt-4o: 1000 output tokens = $0.01 exactly.
+    const guard = createRequestBudgetGuard('gpt-4o', 0.01)
     expect(guard.stopWhen({ steps: [{ usage: { inputTokens: 0, outputTokens: 1000 } }] })).toBe(true)
     expect(guard.tripped()).toBe(true)
   })
@@ -249,16 +249,16 @@ describe('createRequestBudgetGuard', () => {
   // the earlier attempts the effective cap would be `limit × attempts`.
   describe('carried spend across retries', () => {
     it('counts the carried baseline toward the ceiling instead of restarting at zero', () => {
-      // gpt-4o: 1000 output tokens = $0.015. One such step alone stays under a
-      // $0.02 ceiling — but not when $0.015 was already spent by attempt 1.
+      // gpt-4o: 1000 output tokens = $0.01. One such step alone stays under a
+      // $0.015 ceiling — but not when $0.01 was already spent by attempt 1.
       const step: RequestStepLike = { usage: { inputTokens: 0, outputTokens: 1000 } }
 
-      const withoutCarry = createRequestBudgetGuard('gpt-4o', 0.02)
+      const withoutCarry = createRequestBudgetGuard('gpt-4o', 0.015)
       expect(withoutCarry.stopWhen({ steps: [step] })).toBe(false)
 
-      const withCarry = createRequestBudgetGuard('gpt-4o', 0.02, 0.015)
+      const withCarry = createRequestBudgetGuard('gpt-4o', 0.015, 0.01)
       expect(withCarry.stopWhen({ steps: [step] })).toBe(true)
-      expect(withCarry.spentUsd()).toBeCloseTo(0.03, 6)
+      expect(withCarry.spentUsd()).toBeCloseTo(0.02, 6)
     })
 
     it('reports request-scoped spend (carry + this attempt) even before any step', () => {
@@ -312,12 +312,12 @@ describe('budgetCeilingReached', () => {
   })
 
   it('is order-independent: the same verdict the guard reaches, without the guard', () => {
-    const guard = createRequestBudgetGuard('gpt-4o', 0.015)
+    const guard = createRequestBudgetGuard('gpt-4o', 0.01)
     const step: RequestStepLike = { usage: { inputTokens: 0, outputTokens: 1000 } }
     // The guard's predicate is what would be short-circuited away by an earlier
     // stop condition; the pure predicate agrees with it on the same numbers.
     expect(guard.stopWhen({ steps: [step] })).toBe(true)
-    expect(budgetCeilingReached(0.015, accumulatedStepCostUsd('gpt-4o', [step]))).toBe(true)
+    expect(budgetCeilingReached(0.01, accumulatedStepCostUsd('gpt-4o', [step]))).toBe(true)
   })
 
   it('treats a non-finite spend as "not reached" rather than stopping on NaN', () => {
@@ -367,6 +367,163 @@ describe('createRequestSpendLedger', () => {
     expect(billed).toBeGreaterThan(0)
     // The floor is a fallback for the unknown, NOT a minimum on a real price.
     expect(billed).toBeLessThan(FLOOR)
+  })
+
+  describe('prompt-cache accounting', () => {
+    // The Anthropic contour names its cache terms (reads 0.1x, writes 1.25x).
+    // Haiku 4.5 is $1 per MTok, i.e. $0.001 per 1k input tokens.
+    const CLAUDE = 'claude-haiku-4-5'
+
+    it('prices cache reads and writes differently from plain input', () => {
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      ledger.noteStep({ inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheWriteTokens: 10_000 } })
+      ledger.noteStep({ inputTokens: 10_500, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 10_000 } })
+      ledger.finalizeAttempt()
+      // step 1: 10k x1.25; step 2: 500 plain + 10k x0.1 -> 12.5k + 1.5k = 14k effective, at $0.001/1k
+      expect(ledger.billedUsd()).toBeCloseTo(14 * 0.001, 8)
+      expect(ledger.measuredUsd()).toBeCloseTo(14 * 0.001, 8)
+    })
+
+    it('is cheaper than the uncached request it replaces', () => {
+      const cached = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      const plain = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      cached.noteStep({ inputTokens: 20_000, outputTokens: 0, inputTokenDetails: { cacheWriteTokens: 20_000 } })
+      for (let i = 0; i < 4; i++) {
+        cached.noteStep({ inputTokens: 20_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 20_000 } })
+      }
+      for (let i = 0; i < 5; i++) plain.noteStep({ inputTokens: 20_000, outputTokens: 0 })
+      cached.finalizeAttempt()
+      plain.finalizeAttempt()
+      expect(cached.billedUsd() as number).toBeLessThan((plain.billedUsd() as number) / 2)
+    })
+
+    it('still reports the total prompt size, cache included, to the context-window guard', () => {
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      expect(ledger.noteStep({ inputTokens: 20_000, outputTokens: 10, inputTokenDetails: { cacheReadTokens: 19_000 } })).toBe(20_000)
+      expect(ledger.measuredTokens()).toEqual({ inputTokens: 20_000, outputTokens: 10 })
+    })
+
+    it('prices a step that reports no inputTokenDetails at the plain rate, next to one that does', () => {
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      ledger.noteStep({ inputTokens: 10_000, outputTokens: 0 })
+      ledger.noteStep({ inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 10_000 } })
+      ledger.finalizeAttempt()
+      // 10k plain + 10k x0.1 = 11k effective; a step without details must not borrow the other's discount.
+      expect(ledger.billedUsd()).toBeCloseTo(11 * 0.001, 8)
+    })
+
+    it('caps reads plus writes at the step input, reads first', () => {
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      ledger.noteStep({
+        inputTokens: 1_000,
+        outputTokens: 0,
+        inputTokenDetails: { cacheReadTokens: 800, cacheWriteTokens: 800 },
+      })
+      ledger.finalizeAttempt()
+      // 800 read x0.1 + the 200 left of the input as write x1.25 = 330 effective.
+      expect(ledger.billedUsd()).toBeCloseTo(0.33 * 0.001, 10)
+    })
+
+    it('keeps cache counts of an unpriceable step in MEASURED but bills only the floor for it', () => {
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      ledger.noteStep({
+        inputTokens: 1_000_000,
+        outputTokens: Number.NaN,
+        inputTokenDetails: { cacheReadTokens: 1_000_000 },
+      })
+      ledger.finalizeAttempt()
+      // Measured: the whole input was a cache read, 0.1 x $1.
+      expect(ledger.measuredUsd()).toBeCloseTo(0.1, 8)
+      // Billed: the floor REPLACES the partial price, so no cache discount leaks into it.
+      expect(ledger.billedUsd()).toBeCloseTo(FLOOR, 10)
+    })
+
+    it('does not let an unpriceable step discount the priced steps next to it', () => {
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      ledger.noteStep({ inputTokens: 1_000_000, outputTokens: 0 }) // priced, plain: $1
+      ledger.noteStep({ inputTokens: 1_000_000, outputTokens: Number.NaN, inputTokenDetails: { cacheReadTokens: 1_000_000 } })
+      ledger.finalizeAttempt()
+      expect(ledger.billedUsd()).toBeCloseTo(1 + FLOOR, 8)
+    })
+
+    it('gives NO cache discount when the caller names no terms, whatever the model id says', () => {
+      // An OpenAI-compatible gateway serving a claude-named model reports cached
+      // tokens it may bill in full; only the pinned Anthropic contour passes terms.
+      const ledger = createRequestSpendLedger('anthropic/claude-sonnet-4.5', FLOOR, CEILING)
+      const plain = createRequestSpendLedger('anthropic/claude-sonnet-4.5', FLOOR, CEILING)
+      ledger.noteStep({ inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 10_000 } })
+      plain.noteStep({ inputTokens: 10_000, outputTokens: 0 })
+      ledger.finalizeAttempt()
+      plain.finalizeAttempt()
+      expect(ledger.billedUsd()).toBeCloseTo(plain.billedUsd() as number, 10)
+      expect(ledger.measuredUsd()).toBeCloseTo(plain.measuredUsd(), 10)
+      const steps = [{ usage: { inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 10_000 } } }]
+      expect(accumulatedStepCostUsd('anthropic/claude-sonnet-4.5', steps)).toBeCloseTo(10 * 0.003, 10)
+      expect(createRequestBudgetGuard('anthropic/claude-sonnet-4.5', 1, 0).stopWhen({ steps })).toBe(false)
+    })
+
+    it('sums cache counts across steps for the per-request ceiling and ignores garbage details', () => {
+      const steps = [
+        { usage: { inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheWriteTokens: 10_000 } } },
+        { usage: { inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 10_000 } } },
+        { usage: { inputTokens: 10_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: Number.NaN } } },
+        { usage: { inputTokens: 10_000, outputTokens: 0 } },
+      ]
+      // 12.5k + 1k + 10k + 10k = 33.5k effective input tokens.
+      expect(accumulatedStepCostUsd(CLAUDE, steps, 'anthropic')).toBeCloseTo(33.5 * 0.001, 8)
+    })
+
+    it('clamps cache counts per step in the ceiling guard, exactly as the ledger does', () => {
+      // One malformed step must not discount the input of the steps next to it.
+      const steps = [
+        { usage: { inputTokens: 20_000, outputTokens: 0 } },
+        { usage: { inputTokens: undefined, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 20_000 } } },
+        { usage: { inputTokens: 20_000, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 40_000 } } },
+      ]
+      const ledger = createRequestSpendLedger(CLAUDE, FLOOR, CEILING, 'anthropic')
+      for (const step of steps) ledger.noteStep(step.usage)
+      ledger.finalizeAttempt()
+      // step 1 full price, step 2 has no input (and so no cache), step 3 fully cached.
+      expect(accumulatedStepCostUsd(CLAUDE, steps, 'anthropic')).toBeCloseTo((20 + 20 * 0.1) * 0.001, 10)
+      expect(accumulatedStepCostUsd(CLAUDE, steps, 'anthropic')).toBeCloseTo(ledger.measuredUsd(), 10)
+    })
+  })
+
+  // A model that tiers its price by prompt size (Claude Haiku 5.5: $0.10 / $0.50 per
+  // MTok up to 100,000 prompt tokens, $0.50 / $2.50 above) must be priced one
+  // provider call at a time. Summed tokens would tip an ordinary multi-step request
+  // into the dear tier; pricing the sum at the cheap tier would under-count a call
+  // that really crossed the line.
+  describe('per-call price tiers', () => {
+    const HAIKU = 'claude-haiku-5-5'
+
+    it('prices many ordinary steps at the base tier even when their tokens add up past 100k', () => {
+      const ledger = createRequestSpendLedger(HAIKU, FLOOR, CEILING)
+      const steps = Array.from({ length: 6 }, () => ({ usage: { inputTokens: 30_000, outputTokens: 0 } }))
+      for (const step of steps) ledger.noteStep(step.usage)
+      ledger.finalizeAttempt()
+      expect(ledger.billedUsd()).toBeCloseTo(6 * 30 * 0.0001, 10) // 180k tokens at $0.10 per MTok
+      expect(ledger.measuredUsd()).toBeCloseTo(6 * 30 * 0.0001, 10)
+      expect(accumulatedStepCostUsd(HAIKU, steps)).toBeCloseTo(6 * 30 * 0.0001, 10)
+    })
+
+    it('prices a step whose own prompt is over 100k at the dear tier, in the ledger and in the ceiling guard', () => {
+      const long = { usage: { inputTokens: 150_000, outputTokens: 1_000 } }
+      const ledger = createRequestSpendLedger(HAIKU, FLOOR, CEILING)
+      ledger.noteStep(long.usage)
+      ledger.noteStep({ inputTokens: 20_000, outputTokens: 0 }) // an ordinary step next to it
+      ledger.finalizeAttempt()
+      const expected = 150 * 0.0005 + 1 * 0.0025 + 20 * 0.0001
+      expect(ledger.billedUsd()).toBeCloseTo(expected, 10)
+      expect(ledger.measuredUsd()).toBeCloseTo(expected, 10)
+      expect(accumulatedStepCostUsd(HAIKU, [long, { usage: { inputTokens: 20_000, outputTokens: 0 } }])).toBeCloseTo(expected, 10)
+    })
+
+    it('stops the ceiling on the dear tier of a long prompt', () => {
+      const guard = createRequestBudgetGuard(HAIKU, 0.07)
+      const step = { usage: { inputTokens: 150_000, outputTokens: 0 } } // $0.075 at the dear tier, $0.015 at the cheap one
+      expect(guard.stopWhen({ steps: [step] })).toBe(true)
+    })
   })
 
   // The billing unit is the PROVIDER CALL. Applying one floor to the whole

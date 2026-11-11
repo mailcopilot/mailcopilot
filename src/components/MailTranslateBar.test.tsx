@@ -34,20 +34,16 @@ const i18nMap: Record<string, string> = {
   'mail.translate.targetLabel': 'Translate into',
   'mail.translate.sourceLabel': 'Language of the original',
   'mail.translate.sourcePlaceholder': 'Choose a language',
-  'mail.translate.sourceOffer': 'The language of the original could not be identified, so the translation above is not labelled with it. Naming it is optional: it updates the label and reuses the translation already produced, without asking the provider for a new one.',
-  'mail.translate.sourceApply': 'Update the label',
-  'mail.translate.sourceRestate': 'Not the right language?',
-  'mail.translate.sourceRestateHint':
-    'State the language of the original yourself. It only changes the label above: the translation you are reading stays as it is and is reused, without asking the provider for a new one.',
-  'mail.translate.produced': 'Machine translation into {{target}}. The original is one click away.',
-  'mail.translate.producedFrom': 'Machine translation from {{source}} into {{target}}. The original is one click away.',
-  'mail.translate.textProjection': 'Translated from the plain-text version of the message, so its formatting and images are not part of the translation.',
+  'mail.translate.sourceApply': 'Apply',
+  'mail.translate.sourceRestate': 'Set the original language',
+  'mail.translate.produced': 'Translated into {{target}}',
+  'mail.translate.producedFrom': 'Translated from {{source}} into {{target}}',
   'mail.translate.refusal.budget': 'The AI budget for this period is used up. Raise it in Settings → AI, or wait for the next period.',
   'mail.translate.refusal.no_provider': 'No AI provider is set up yet. Add one in Settings → AI.',
   'mail.translate.refusal.provider_error':
-    "The AI provider did not return a translation, and did not say why. Another attempt sends the message to the provider again.",
+    'The AI provider did not return a translation. Try again.',
   'mail.translate.refusal.answer_too_long':
-    "The translation does not fit within the AI provider's answer limit, so it came back cut off and is not shown. Another attempt would end the same way: neither this message nor the limit has changed.",
+    "The translation did not fit in the provider's answer limit and is not shown. Trying again gives the same result.",
   'mail.translate.refusal.empty_input': 'There is no downloaded text for this message yet. Try again once the message has loaded.',
   'mail.translate.refusal.too_long':
     'This message is too long to translate in one go, and there is no way to translate only part of it — the whole message counts towards the limit, including any earlier correspondence quoted inside it.',
@@ -120,8 +116,7 @@ function renderBar(overrides: Partial<MailTranslateBarProps> = {}) {
   const state = overrides.state ?? makeState()
   const props: MailTranslateBarProps = {
     state,
-    originalIsHtml: overrides.originalIsHtml ?? false,
-  }
+      }
   return { state, ...render(<MailTranslateBar {...props} />) }
 }
 
@@ -216,7 +211,7 @@ describe('MailTranslateBar — produced-from notice', () => {
       }),
     })
     const notice = screen.getByTestId('mail-translate-notice')
-    expect(notice).toHaveTextContent('Machine translation from German into Russian.')
+    expect(notice).toHaveTextContent('Translated from German into Russian')
   })
 
   it('falls back to a target-only sentence when sourceLang is null', () => {
@@ -228,7 +223,7 @@ describe('MailTranslateBar — produced-from notice', () => {
       }),
     })
     const notice = screen.getByTestId('mail-translate-notice')
-    expect(notice).toHaveTextContent('Machine translation into English.')
+    expect(notice).toHaveTextContent('Translated into English')
     expect(notice).not.toHaveTextContent('from')
   })
 
@@ -239,32 +234,33 @@ describe('MailTranslateBar — produced-from notice', () => {
     expect(screen.queryByTestId('mail-translate-notice')).not.toBeInTheDocument()
   })
 
-  it('appends the plain-text-projection disclosure only for an HTML original', () => {
+  it('says nothing beyond who translated into what, whatever the original was', () => {
     renderBar({
       state: makeState({
         status: 'ready',
         showingTranslation: true,
-        translation: makeTranslation({ sourceIsTextProjection: true }),
+        translation: makeTranslation({ sourceLang: 'de', targetLang: 'ru', sourceIsTextProjection: true }),
       }),
-      originalIsHtml: true,
     })
     expect(screen.getByTestId('mail-translate-notice')).toHaveTextContent(
-      'Translated from the plain-text version of the message',
+      /^Translated from German into Russian$/,
     )
   })
 
-  it('omits the disclosure for a plain-text original — the projection IS the message', () => {
-    renderBar({
-      state: makeState({
-        status: 'ready',
-        showingTranslation: true,
-        translation: makeTranslation({ sourceIsTextProjection: true }),
-      }),
-      originalIsHtml: false,
-    })
-    expect(screen.getByTestId('mail-translate-notice')).not.toHaveTextContent(
-      'Translated from the plain-text version',
-    )
+  it('offers the link to set the original language with or without a caption, no explanation', () => {
+    for (const sourceLang of ['de', null] as const) {
+      const { unmount } = renderBar({
+        state: makeState({
+          status: 'ready',
+          showingTranslation: true,
+          translation: makeTranslation({ sourceLang }),
+          canRestateSourceLang: true,
+        }),
+      })
+      expect(screen.getByTestId('mail-translate-source-restate')).toHaveTextContent('Set the original language')
+      expect(screen.queryByTestId('mail-translate-source-offer')).not.toBeInTheDocument()
+      unmount()
+    }
   })
 })
 
@@ -416,7 +412,7 @@ describe('MailTranslateBar — the source picker offers a caption, it does not g
     expect(screen.getByTestId('mail-translate-source-choice')).toBeInTheDocument()
   })
 
-  it('says in words that naming the language is optional and costs no new request', () => {
+  it('shows the picker without an explanatory paragraph', () => {
     renderBar({
       state: makeState({
         status: 'ready',
@@ -425,9 +421,8 @@ describe('MailTranslateBar — the source picker offers a caption, it does not g
         sourceLang: null,
       }),
     })
-    expect(screen.getByTestId('mail-translate-source-offer')).toHaveTextContent(
-      i18nMap['mail.translate.sourceOffer'],
-    )
+    expect(screen.getByTestId('mail-translate-source-choice')).toBeInTheDocument()
+    expect(screen.queryByTestId('mail-translate-source-offer')).not.toBeInTheDocument()
   })
 
   it('renders no unprompted offer line when the caption is already known', () => {
@@ -458,7 +453,7 @@ describe('MailTranslateBar — the source picker offers a caption, it does not g
       }),
     })
     const apply = screen.getByTestId('mail-translate-source-apply')
-    expect(apply).toHaveTextContent('Update the label')
+    expect(apply).toHaveTextContent('Apply')
     // Reusing the first-attempt copy here is what made the offer read as a
     // gate ("translate again, this time properly"), so guard against it.
     expect(apply).not.toHaveTextContent('Translate')
@@ -573,12 +568,8 @@ describe('MailTranslateBar — a caption that IS there can still be corrected (�
       }),
     })
     expect(screen.getByTestId('mail-translate-source-choice')).toBeInTheDocument()
-    expect(screen.getByTestId('mail-translate-source-apply')).toHaveTextContent('Update the label')
-    // The explanatory line is the "state it yourself" one, NOT the "we could
-    // not identify it" one — that sentence would be false here.
-    const offer = screen.getByTestId('mail-translate-source-offer')
-    expect(offer).toHaveTextContent(i18nMap['mail.translate.sourceRestateHint'])
-    expect(offer).not.toHaveTextContent('could not be identified')
+    expect(screen.getByTestId('mail-translate-source-apply')).toHaveTextContent('Apply')
+    expect(screen.queryByTestId('mail-translate-source-offer')).not.toBeInTheDocument()
     expect(screen.getByTestId('mail-translate-source-restate')).toHaveAttribute(
       'aria-expanded',
       'true',

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Bell, Check, CheckCheck, AlertTriangle, Clock3, Trash2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { presentedTaggedText } from '../utils/errorPresentation'
 
 export type AppNotification = {
   id: number
@@ -29,6 +31,7 @@ const ICON_MAP: Record<string, typeof Bell> = {
 }
 
 export default function NotificationCenter({ labels, onFollowUpClick }: Props) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState<AppNotification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
@@ -164,7 +167,7 @@ export default function NotificationCenter({ labels, onFollowUpClick }: Props) {
                   </div>
                   <div className="notification-item-content">
                     <div className="notification-item-title">{item.title}</div>
-                    {item.body && <div className="notification-item-body">{item.body}</div>}
+                    {item.body && <div className="notification-item-body">{item.type === 'send_failed' ? presentedTaggedText(t, item.body) : item.body}</div>}
                     <div className="notification-item-time">{formatTime(item.createdAt)}</div>
                   </div>
                   <div className="notification-item-actions">

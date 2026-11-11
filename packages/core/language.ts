@@ -198,14 +198,17 @@ export type LanguageDetection =
  * {@link LANGUAGE_DETECTION_MIN_SCRIPT_CHARS} (80) worth of script, so the head
  * of a message carries the answer whenever there is one, and truncating the
  * sample cannot make the label WRONG in the way truncating a translation makes
- * the text wrong (that asymmetry is why `TRANSLATE_INPUT_CHAR_CAP` refuses
- * instead). Refusing here would cost a correct advisory answer to protect a
+ * the text wrong (that asymmetry is why a translation is never shown cut: it is
+ * produced whole, in pieces, or refused). Refusing here would cost a correct advisory answer to protect a
  * budget the slice already protects.
  *
- * The figure deliberately EQUALS `TRANSLATE_INPUT_CHAR_CAP`
- * (`electron/services/aiTranslate.ts`): the reading path refuses anything
- * longer before it ever calls in here, so this cap is inert on that path and
- * cannot change an answer part 1 already gives. Lowering it would.
+ * The figure equals `TRANSLATE_INPUT_CHAR_CAP` (`electron/services/aiTranslate.ts`),
+ * the budget of ONE translation request, which is also the draft limit. It does
+ * not depend on the overall limit for reading (`TRANSLATE_MESSAGE_MAX_CHARS`,
+ * 60 000): a long message is accepted for translation in pieces, and this slice
+ * then means the label answers about its first 3000 characters, not the whole
+ * message. Raising this cap to follow the reading limit would make the
+ * synchronous detector pass quadratic over 60 000 characters on the main process.
  */
 export const LANGUAGE_DETECTION_MAX_INPUT_CHARS = 3000
 
@@ -255,7 +258,9 @@ export const LANGUAGE_DETECTION_MAX_INPUT_CHARS = 3000
  * ceiling on the product. The bound belongs to the DETECTOR, not to one
  * feature: an earlier version of this note credited `TRANSLATE_INPUT_CHAR_CAP`,
  * the reading path's own refusal, and that is precisely the claim §3.3.B6.f2
- * disproved — part 2 added a second caller that never passed through it.
+ * disproved — part 2 added a second caller that never passed through it (and
+ * the reading limit has since grown to 60 000, so that refusal no longer bounds
+ * anything here).
  *
  * Measured on this machine, all at that 3000-character cap:
  *

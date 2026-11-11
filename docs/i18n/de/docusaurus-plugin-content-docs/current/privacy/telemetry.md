@@ -26,12 +26,12 @@ MailCopilot kann eine geringe Menge Diagnose- und Nutzungsdaten senden -- aber e
 
 ## Zustimmung beim ersten Start
 
-Beim ersten Start von MailCopilot sehen Sie, bevor sich der Kontoeinrichtungs-Assistent öffnet, einen Zustimmungsbildschirm mit dem Titel **Diagnosedaten senden?**. Er listet auf, was bei Zustimmung gesendet würde und was niemals gesendet wird, und bietet zwei gleich große Schaltflächen: **Zulassen** und **Nicht zulassen**. Keine der beiden ist vorausgewählt oder hervorgehoben, und es gibt kein vorangehaktes Kontrollkästchen -- Sie müssen eine aktive Wahl treffen.
+Beim ersten Start von MailCopilot sehen Sie, bevor sich der Kontoeinrichtungs-Assistent öffnet, einen Zustimmungsbildschirm mit dem Titel **Diagnosedaten senden?**. Er listet auf, was bei Zustimmung gesendet würde und was niemals gesendet wird, und bietet zwei gleich große Schaltflächen: **Zulassen** und **Nicht zulassen**. Keine der beiden ist vorausgewählt oder hervorgehoben, und es gibt kein vorangehaktes Kontrollkästchen -- Sie müssen eine aktive Wahl treffen. Derselbe Bildschirm enthält auch einen separaten Block **Updates** mit dem Kontrollkästchen **Im Hintergrund nach Updates suchen**, das standardmäßig aktiviert und von Ihrer Diagnose-Antwort unabhängig ist -- siehe [Über](../settings/about).
 
 Daraus folgt Einiges:
 
 - **Vor Ihrer Antwort wird nichts erhoben, nicht nur nichts gesendet.** Die Zähler und Puffer hinter Diagnose- und Nutzungsdaten werden erst gar nicht geöffnet, solange die Zustimmung aussteht -- MailCopilot sammelt keinen stillen Rückstand, um ihn nach Ihrer Zustimmung auf einmal zu übertragen. Was vor Ihrer Antwort geschah, ist einfach weg; sobald Sie zustimmen, beginnt die Zählung erst ab diesem Zeitpunkt neu (eine Messung der Sitzungsdauer etwa zählt ab dem Moment der Zustimmung, nicht ab dem App-Start).
-- **Den Bildschirm zu schließen oder Escape zu drücken zählt als "Nicht zulassen".** Es gibt keine Möglichkeit, den Bildschirm zu verlassen und dabei zugestimmt zu haben.
+- **Escape zu drücken zählt als "Nicht zulassen".** Das Fenster ohne Antwort zu schließen speichert nichts: Der Bildschirm erscheint beim nächsten Start erneut, in der Zwischenzeit wird nichts erfasst, und bei einer völlig neuen Installation läuft keine automatische Update-Suche, bis Sie antworten. Es gibt keine Möglichkeit, den Bildschirm zu verlassen und dabei zugestimmt zu haben.
 - **Ihre Entscheidung wird zusammen mit der Version dieser Offenlegung gespeichert.** MailCopilot zeigt den Bildschirm nur dann erneut, wenn sich die Liste des Erhobenen tatsächlich erweitert -- eine neue Datenkategorie, ein neues Ziel oder ein breiterer Umfang als zuvor. Gewöhnliche App-Updates, Formulierungsänderungen und Fehlerbehebungen lösen niemals eine erneute Nachfrage aus.
 - **Wenn Sie die Diagnose bereits deaktiviert hatten**, bevor es diesen Bildschirm gab, wird diese Ablehnung respektiert und Sie werden nicht erneut gefragt. Bei allen anderen wird die Diagnose automatisch abgeschaltet, und die Frage erscheint einmal beim nächsten Start.
 - **Sie können Ihre Entscheidung jederzeit ändern**, unter **Einstellungen -> Über**. Solange Sie die anfängliche Frage nicht beantwortet haben, wird der Schalter dort ausgeschaltet und deaktiviert angezeigt, mit einem Hinweis, dass er erst wirksam wird, sobald Sie auf dem Zustimmungsbildschirm geantwortet haben.
@@ -241,7 +241,7 @@ Garantiert ist ein `eml.parse_dispatch`-Ereignis pro EML-Datei, die MailCopilot 
 | --- | --- | --- | --- | --- |
 | `imap.cert_error` | event | ja (10-s-Fenster) | `provider` | Eine IMAP-Operation ist mit einem als Zertifikatsfehler klassifizierten TLS-Fehler fehlgeschlagen (selbstsigniert, nicht vertrauenswürdige Kette, Pin-Konflikt, Hostname-Konflikt). |
 | `cert.recovery_dialog_shown` | event | nein | `provider` | Der Zertifikat-Wiederherstellungsdialog wurde für einen Host angezeigt, höchstens einmal pro Storm-Guard-Fenster. |
-| `cert.trust_clicked` | event | nein | `provider`, `pem` | Sie haben ein vorgelegtes Zertifikat akzeptiert, wodurch ein TLS-Pin gespeichert und eine Konto-Neusynchronisation ausgelöst wurde. `pem` hält nur fest, ob der Zertifikatskörper zusammen mit dem Pin erfasst wurde -- das entscheidet, ob einem selbstsignierten Server künftig vertraut werden kann. |
+| `cert.trust_clicked` | event | nein | `provider`, `pem` | Sie haben ein vorgelegtes Zertifikat akzeptiert, wodurch ein TLS-Pin gespeichert und eine Konto-Neusynchronisation ausgelöst wurde. `pem` hält nur fest, ob der Zertifikatskörper zusammen mit dem Pin erfasst wurde -- das entscheidet, ob einem selbstsignierten Server oder einem Server mit privater Zertifizierungsstelle künftig vertraut werden kann. |
 | `cert.trust_rejected` | event | nein | `provider`, `reason` | Ein Vertrauensversuch endete nicht mit einem gespeicherten Pin -- zum Beispiel haben Sie die Bestätigung abgelehnt, oder das vom Server vorgelegte Zertifikat stimmte nicht mit dem im Wiederherstellungsdialog gezeigten überein. |
 | `cert.interception_notice_shown` | event | nein | `provider` | Ein einmaliger Hinweis wurde angezeigt, dass die Zertifikatskette Ihres Mailservers nur gegen den Zertifikatsspeicher Ihres Betriebssystems verifiziert, nicht gegen die mitgelieferte Liste öffentlicher Stammzertifikate -- ein Anzeichen für Antivirensoftware oder einen Unternehmens-Proxy, der die Verbindung inspiziert. |
 
@@ -336,7 +336,7 @@ Keines dieser drei Ereignisse trägt eine Konto-ID, E-Mail-Adresse, einen Mail-P
 
 | Ereignis | Typ | Aggregiert | Tags | Zweck |
 | --- | --- | --- | --- | --- |
-| `update.check_triggered` | event | nein | `source` | Eine Update-Prüfung wurde ausgelöst, entweder durch den stündlichen Hintergrund-Timer oder durch Ihren Klick unter Einstellungen -> Über. |
+| `update.check_triggered` | event | nein | `source` | Eine Update-Prüfung wurde ausgelöst, entweder durch den stündlichen Hintergrund-Timer (der nur läuft, solange die Hintergrundprüfung auf Updates eingeschaltet ist) oder durch Ihren Klick unter Einstellungen -> Über. |
 | `update.check_result` | event | nein | `result`, `error_class` | Eine Update-Prüfung ist abgeschlossen: aktuell, ein Update verfügbar oder fehlgeschlagen. |
 | `update.download_started` | event | nein | `source` | Ein Update-Download hat begonnen, entweder automatisch oder durch Ihren Klick. |
 | `update.download_completed` | event | nein | — | Ein Update-Download ist erfolgreich abgeschlossen und für die Installation beim nächsten Neustart bereitgestellt. |

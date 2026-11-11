@@ -137,9 +137,19 @@ export function selectCidPartsToInline<T extends InlineCidCandidate>(
  * scan so an `<img src="cid:…">` written inside one cannot pass for a rendered
  * image — `<style>` included: its content is CSS, and CSS is not a position
  * this rule accepts at all any more.
+ *
+ * An end tag is read approximately as an HTML parser reads one: the name
+ * followed by HTML whitespace, `/` or `>` (so `</scriptx>` is another element's
+ * end tag) and then ignored attribute noise up to `>` — `</script bar>` and
+ * `</script\t\n bar>` both end a script element. An end tag that never reaches
+ * its `>` ends at the end of the input (a parser swallows to the end too); that
+ * alternative also keeps the scan linear on input with many such openers. This
+ * is a tag SCAN for the cid rule, not a sanitiser, and it models serializer
+ * output only: quoted `>` inside end-tag attributes is not modelled. The html it
+ * reads has already been through DOMPurify.
  */
 const IGNORED_REGIONS_RE =
-  /<!--[\s\S]*?-->|<script\b[\s\S]*?<\/script\s*>|<style\b[\s\S]*?<\/style\s*>|<noscript\b[\s\S]*?<\/noscript\s*>|<textarea\b[\s\S]*?<\/textarea\s*>|<title\b[\s\S]*?<\/title\s*>/gi
+  /<!--[\s\S]*?-->|<script\b[\s\S]*?<\/script(?:[\t\n\f\r /][^>]*)?(?:>|$)|<style\b[\s\S]*?<\/style(?:[\t\n\f\r /][^>]*)?(?:>|$)|<noscript\b[\s\S]*?<\/noscript(?:[\t\n\f\r /][^>]*)?(?:>|$)|<textarea\b[\s\S]*?<\/textarea(?:[\t\n\f\r /][^>]*)?(?:>|$)|<title\b[\s\S]*?<\/title(?:[\t\n\f\r /][^>]*)?(?:>|$)/gi
 
 /**
  * The same regions left UNTERMINATED, which a parser swallows to the end of the

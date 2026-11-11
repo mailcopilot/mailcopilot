@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import electron from 'vite-plugin-electron/simple'
 import react from '@vitejs/plugin-react'
 import { sentryVitePlugin } from '@sentry/vite-plugin'
+import { resolveNewGoogleMailboxes } from './scripts/officialBuildFlag.mjs'
 
 // Source maps: upload to Sentry when SENTRY_AUTH_TOKEN is present.
 // We generate 'hidden' source maps (no sourceMappingURL in code) and delete .map files after upload,
@@ -97,6 +98,14 @@ export default defineConfig(({ mode }) => ({
             // fails with an actionable message, everything else still works.
             __GOOGLE_OAUTH_CLIENT_ID__: JSON.stringify(process.env.MAILCOPILOT_GOOGLE_CLIENT_ID || ''),
             __GOOGLE_OAUTH_CLIENT_SECRET__: JSON.stringify(process.env.MAILCOPILOT_GOOGLE_CLIENT_SECRET || ''),
+            // Google's lifetime cap on new users of an unverified app cannot
+            // be reset, so official builds do not connect NEW mailboxes through
+            // Google sign-in (§2.297). Release pipelines set
+            // MAILCOPILOT_OFFICIAL_BUILD; a self-build leaves it unset and keeps
+            // the sign-in. Explicit flag, not "the key came from the
+            // environment": the official client id is extractable from the
+            // shipped binary. Existing Google mailboxes reconnect either way.
+            __GOOGLE_NEW_MAILBOXES__: JSON.stringify(resolveNewGoogleMailboxes(process.env, { enforceRelease: mode === 'production' })),
           },
           build: {
             sourcemap: sentryUploadEnabled ? 'hidden' : false,
@@ -143,7 +152,14 @@ export default defineConfig(({ mode }) => ({
     // Vitest still imports them while collecting, reports "(0 test)" and tears the worker down
     // without awaiting their bodies — so their side effects (real child processes, temp dirs)
     // keep running unmanaged and leak. Keep them out of vitest entirely.
-    exclude: ['tests/e2e/**', 'tests/integration/**', 'node_modules/**', 'docs/**', 'scripts/**'],
+    //
+    // `tests/e2e` is Playwright's tree. Its spec/test files stay out of vitest; the
+    // `*.unit.ts` files there are vitest unit tests of the harness's own logic (the
+    // orphan-app reaper, launch arguments). Playwright's default testMatch only
+    // takes `*.spec.*` / `*.test.*`, so neither runner collects the other's files.
+    // The first include entry is vitest's default.
+    include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'tests/e2e/**/*.unit.ts'],
+    exclude: ['tests/e2e/**/*.{test,spec}.?(c|m)[jt]s?(x)', 'tests/integration/**', 'node_modules/**', 'docs/**', 'scripts/**'],
     coverage: {
       provider: 'v8',
       include: [

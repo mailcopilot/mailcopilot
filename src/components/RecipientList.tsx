@@ -14,7 +14,8 @@
  *   - Each chip has data-tooltip="Name <email>" for delegation via
  *     useTooltipDelegation (position: fixed, escapes overflow context).
  *
- * Pure presentation — no IPC, no side effects.
+ * Presentation only. Each chip is a CopyableAddress: right-click (or the menu
+ * key on a focused chip) offers "Copy address".
  */
 
 import { useState, useCallback, useRef } from 'react'
@@ -22,6 +23,7 @@ import { useTranslation } from 'react-i18next'
 import type { MailAddress } from '@mailcopilot/types'
 import { addrDisplayName, addrTooltip } from '@mailcopilot/core'
 import { useTooltipDelegation } from '../hooks/useTooltipDelegation'
+import CopyableAddress from './CopyableAddress'
 
 export interface RecipientListProps {
   addresses: MailAddress[]
@@ -91,15 +93,16 @@ export default function RecipientList({ addresses, maxVisible = 3 }: RecipientLi
       onMouseOut={e => { e.stopPropagation() }}
     >
       {visible.map((addr, i) => (
-        <span
+        <CopyableAddress
           key={`${addr.address ?? ''}-${i}`}
+          address={addr.address}
           className="recipient-chip"
           data-testid="recipient-chip"
           tabIndex={0}
           data-tooltip={addrTooltip(addr) || undefined}
         >
           {addrDisplayName(addr)}
-        </span>
+        </CopyableAddress>
       ))}
       {/* Single toggle button node — className and aria-expanded update in
           place so React never unmounts/remounts the DOM element on toggle.

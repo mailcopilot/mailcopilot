@@ -45,6 +45,9 @@ import { useTelemetryConsentNeeded } from '../hooks/useTelemetryConsent'
 import { AVATAR_ICONS, getAvatarIcon } from '../utils/avatarIcons'
 import { parseShellArgs } from '../utils/parseShellArgs'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
+import { DEFAULT_AI_MODELS } from '@mailcopilot/core'
+import { useAiModelList } from '../hooks/useAiModelList'
+import { AiModelPicker } from '../components/Settings/AiModelPicker'
 import {
   deleteAiApiKeyForProvider,
   isAiKeyFieldMasked,
@@ -199,6 +202,7 @@ type SettingsData = {
   sentryEnabled?: boolean
   /** §2.19 — opt-in auto-download for updates. Default false. */
   autoUpdateEnabled?: boolean
+  updateCheckEnabled?: boolean
   mcpExportEnabled?: boolean
   mcpExportPort?: number
   mcpExportWhitelist?: string[]
@@ -393,7 +397,8 @@ export default function Settings() {
   // Provider loaded from DB — for determining locked state
   const [savedAiProvider, setSavedAiProvider] = useState<AiProviderId | ''>('')
   const [aiApiKey, setAiApiKey] = useState('')
-  const [aiModel, setAiModel] = useState('claude-sonnet-4-5-20250929')
+  // Empty = never chosen; the picker shows the provider default and main resolves the same id.
+  const [aiModel, setAiModel] = useState('')
   const [aiSendOnEnter, setAiSendOnEnter] = useState(true)
   const [aiOpenAiBaseUrl, setAiOpenAiBaseUrl] = useState('')
   const [aiProxyUrl, setAiProxyUrl] = useState('')
@@ -435,6 +440,7 @@ export default function Settings() {
   // see every download surface in the UI before installing. Persisted via
   // settings:save alongside the other About checkboxes.
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(false)
+  const [updateCheckEnabled, setUpdateCheckEnabled] = useState(true)
   const [showFeedbackForm, setShowFeedbackForm] = useState(false)
   const [feedbackMessage, setFeedbackMessage] = useState('')
   const [feedbackEmail, setFeedbackEmail] = useState('')
@@ -642,20 +648,12 @@ export default function Settings() {
 
   const isApiProvider = aiProvider === 'anthropic-api' || aiProvider === 'openai-api' || aiProvider === 'gemini-api'
 
-  const aiModelOptions = useMemo(() => {
-    if (aiProvider === 'openai-api') {
-      return [
-        { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-        { value: 'gpt-4o', label: 'GPT-4o' },
-        { value: 'gpt-4.1', label: 'GPT-4.1' },
-      ]
-    }
-    return [
-      { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
-      { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-      { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-    ]
-  }, [aiProvider])
+  // Model list of the saved provider, read from the provider with the stored key. Loads only when a key is
+  // known to be stored; a failed load leaves the field as plain text.
+  const aiModelList = useAiModelList(
+    savedAiProvider,
+    !!savedAiProvider && (aiKeyMasked || aiConnectionStatus === 'ok'),
+  )
 
   /** Shared AI connection check logic — used in both wizard and saved modes */
   const checkAiConnection = useCallback(async () => {
@@ -766,7 +764,7 @@ export default function Settings() {
             setAiProvider('')
             setSavedAiProvider('')
           }
-          if (s.aiModel) setAiModel(s.aiModel)
+          setAiModel(s.aiModel ?? '')
           setAiSendOnEnter(s.aiSendOnEnter ?? true)
           setAiOpenAiBaseUrl(s.aiOpenAiBaseUrl ?? '')
           setAiProxyUrl(s.aiProxyUrl ?? '')
@@ -829,6 +827,7 @@ export default function Settings() {
           setSentryEnabled(s.sentryEnabled ?? true)
           setDebugLogging(s.debugLogging ?? false)
           setAutoUpdateEnabled(s.autoUpdateEnabled === true)
+          setUpdateCheckEnabled(s.updateCheckEnabled !== false)
           setMcpExportEnabled(s.mcpExportEnabled ?? false)
           setMcpExportPort(typeof s.mcpExportPort === 'number' ? s.mcpExportPort : 23847)
           setMcpExportWhitelist(Array.isArray(s.mcpExportWhitelist) ? s.mcpExportWhitelist : [])
@@ -1019,7 +1018,7 @@ export default function Settings() {
     offlineMaxSizeKB,
     aiProvider, aiModel, aiSendOnEnter, aiOpenAiBaseUrl, aiProxyUrl, aiLocale,
     aiShowSources, aiDailyBudgetUsd, aiMonthlyBudgetUsd, aiMaxTurns,
-    aiMaxBudgetPerRequest, aiEgressPolicy, aiThreadSummaryEnabled, aiInstantReplyEnabled, aiProofreadEnabled, aiTranslateEnabled, sentryEnabled, debugLogging, autoUpdateEnabled,
+    aiMaxBudgetPerRequest, aiEgressPolicy, aiThreadSummaryEnabled, aiInstantReplyEnabled, aiProofreadEnabled, aiTranslateEnabled, sentryEnabled, debugLogging, autoUpdateEnabled, updateCheckEnabled,
     mcpExportEnabled, mcpExportPort, mcpExportWhitelist, mcpEnableStdio,
     trustedDomains,
     // §2.103 — the two editable spellcheck fields. `spellcheckAvailable` is
@@ -1210,9 +1209,9 @@ export default function Settings() {
     await window.api.invoke('accounts:remove', id)
     const next = accounts.filter(a => a.id !== id)
     setAccounts(next)
-    // §1.26.f2 — drop the removed mailbox from the four consent maps this
+    // §1.26.f2 — drop the removed mailbox from the consent maps this
     // window holds. Main purged them in `accounts:remove`, but this window
-    // loads them ONCE (the `[]`-dependency effect above) and sends all four
+    // loads them ONCE (the `[]`-dependency effect above) and sends them all
     // back whole on every save, so without this the next unrelated save would
     // merge the purged entry straight back in.
     //
@@ -1424,6 +1423,7 @@ export default function Settings() {
       sentryEnabled,
       debugLogging,
       autoUpdateEnabled,
+      updateCheckEnabled,
       mcpExportEnabled,
       mcpExportPort,
       // Present ONLY as an array — see the comment on `exportWhitelistPayload`.
@@ -1586,7 +1586,7 @@ export default function Settings() {
     // longer emitted through this settings:save path (§3.10 P0). The state
     // still mirrors the main-side flag for UI rendering, but flipping it
     // goes through `mcp:requestStdioEnable` which has its own side-effect path.
-  }, [accountId, aiApiKey, aiConnectionStatus, aiDailyBudgetUsd, aiEgressPolicy, aiKeyMasked, aiLocale, aiMaxBudgetPerRequest, aiMaxTurns, aiModel, aiMonthlyBudgetUsd, aiOpenAiBaseUrl, aiProvider, aiProxyUrl, aiSendOnEnter, aiShowSources, aiThreadSummaryEnabled, aiInstantReplyEnabled, aiProofreadEnabled, aiTranslateEnabled, alwaysLoadImages, autoAdvance, autoUpdateEnabled, bodyRetentionDays, conversationOrder, darkModeEmails, debugLogging, defaultMailApp, draftSyncEnabled, folderRoles, gravatarInMail, groupConversations, hiddenUnreadFolders, hotkeysPreset, identities, identitiesDirty, imapIdleEnabled, language, mcpExportEnabled, mcpExportPort, mcpExportWhitelist, notificationsEnabled, trayEnabled, closeToTray, launchAtLogin, offlineMaxSizeKB, periodicSyncIntervalMin, recordSettingsSaveOutcome, recordSettingsSaveResult, savedAiProvider, sendDelaySeconds, sentryEnabled, signature, sortMode, spellcheckEnabled, spellcheckLanguages, syncIntervalMinutes, t, theme, trustedDomains])
+  }, [accountId, aiApiKey, aiConnectionStatus, aiDailyBudgetUsd, aiEgressPolicy, aiKeyMasked, aiLocale, aiMaxBudgetPerRequest, aiMaxTurns, aiModel, aiMonthlyBudgetUsd, aiOpenAiBaseUrl, aiProvider, aiProxyUrl, aiSendOnEnter, aiShowSources, aiThreadSummaryEnabled, aiInstantReplyEnabled, aiProofreadEnabled, aiTranslateEnabled, alwaysLoadImages, autoAdvance, autoUpdateEnabled, updateCheckEnabled, bodyRetentionDays, conversationOrder, darkModeEmails, debugLogging, defaultMailApp, draftSyncEnabled, folderRoles, gravatarInMail, groupConversations, hiddenUnreadFolders, hotkeysPreset, identities, identitiesDirty, imapIdleEnabled, language, mcpExportEnabled, mcpExportPort, mcpExportWhitelist, notificationsEnabled, trayEnabled, closeToTray, launchAtLogin, offlineMaxSizeKB, periodicSyncIntervalMin, recordSettingsSaveOutcome, recordSettingsSaveResult, savedAiProvider, sendDelaySeconds, sentryEnabled, signature, sortMode, spellcheckEnabled, spellcheckLanguages, syncIntervalMinutes, t, theme, trustedDomains])
 
   // Account selector — shared across Folders and Signature tabs
   const accountSelector = accounts.length > 1 && (
@@ -2105,12 +2105,12 @@ export default function Settings() {
                     absent): an empty picker with no explanation would read as a
                     broken screen rather than as "this build offers none". */}
                 {(spellcheckAvailable?.languages.length ?? 0) === 0 && (
-                  <span className="hint" data-testid="settings-spellcheck-unavailable">
+                  <span className="hint settings-spellcheck-hint" data-testid="settings-spellcheck-unavailable">
                     {t('settings.spellcheck.unavailable')}
                   </span>
                 )}
                 {spellcheckLanguages.length === 0 ? (
-                  <span className="hint" data-testid="settings-spellcheck-none">
+                  <span className="hint settings-spellcheck-hint" data-testid="settings-spellcheck-none">
                     {t('settings.spellcheck.none')}
                   </span>
                 ) : (
@@ -2131,7 +2131,7 @@ export default function Settings() {
                   </ul>
                 )}
                 {(spellcheckAvailable?.max ?? 0) > 0 && (
-                  <span className="hint">
+                  <span className="hint settings-spellcheck-hint" data-testid="settings-spellcheck-limit">
                     {t('settings.spellcheck.limit', { count: spellcheckAvailable?.max })}
                   </span>
                 )}
@@ -2658,7 +2658,7 @@ export default function Settings() {
                     className="btn btn-secondary"
                     onClick={() => {
                       setAiProvider('anthropic-api')
-                      setAiModel('claude-sonnet-4-5-20250929')
+                      setAiModel(DEFAULT_AI_MODELS['anthropic-api'])
                       setAiApiKey('')
                       setAiKeyMasked(false)
                       setAiConnectionStatus('')
@@ -2672,7 +2672,7 @@ export default function Settings() {
                     className="btn btn-secondary"
                     onClick={() => {
                       setAiProvider('openai-api')
-                      setAiModel('gpt-4o-mini')
+                      setAiModel(DEFAULT_AI_MODELS['openai-api'])
                       setAiApiKey('')
                       setAiKeyMasked(false)
                       setAiConnectionStatus('')
@@ -2686,7 +2686,7 @@ export default function Settings() {
                     className="btn btn-secondary"
                     onClick={() => {
                       setAiProvider('gemini-api')
-                      setAiModel('gemini-2.0-flash')
+                      setAiModel(DEFAULT_AI_MODELS['gemini-api'])
                       setAiApiKey('')
                       setAiKeyMasked(false)
                       setAiConnectionStatus('')
@@ -2895,23 +2895,15 @@ export default function Settings() {
 
                 <div className="setting-row">
                   <label>{t('ai.settings.model')}:</label>
-                  {savedAiProvider === 'openai-api' ? (
-                    <input
-                      data-testid="settings-ai-model"
-                      type="text"
+                  {(savedAiProvider === 'anthropic-api' || savedAiProvider === 'openai-api' || savedAiProvider === 'gemini-api') && (
+                    <AiModelPicker
+                      provider={savedAiProvider}
                       value={aiModel}
-                      placeholder={t('ai.settings.customModelPlaceholder')}
-                      onChange={e => setAiModel(e.target.value)}
-                      style={{ width: 220, fontFamily: 'monospace' }}
+                      onChange={setAiModel}
+                      list={aiModelList.state}
+                      onRefresh={aiModelList.reload}
+                      overrides={{ aiProxyUrl: aiProxyUrl || undefined, aiOpenAiBaseUrl: aiOpenAiBaseUrl || undefined }}
                     />
-                  ) : (
-                  <Select
-                    testId="settings-ai-model"
-                    value={aiModel}
-                    onChange={v => setAiModel(v)}
-                    ariaLabel={t('ai.settings.model')}
-                    options={aiModelOptions}
-                  />
                   )}
                 </div>
 
@@ -3086,13 +3078,13 @@ export default function Settings() {
             }}
             onChangeFeature={(feature, update) => {
               // An exhaustive switch rather than a map of setters: with the
-              // `never` guard in `default`, adding a fifth opt-in to
+              // `never` guard in `default`, adding a further opt-in to
               // `AI_CONSENT_FEATURES` is a compile error HERE until it is given
               // somewhere to be stored.
               //
               // The guard is what makes that true, and it was missing: without
               // it a switch is legal with any subset of the union, so the only
-              // error a fifth feature raised was on `value` below (which is
+              // error a further feature raised was on `value` below (which is
               // `Record<AiConsentFeature, AiConsentMap>` and so must be
               // complete). Satisfying that one and forgetting a branch here
               // produced a checkbox that silently stored nothing — the safe
@@ -4155,6 +4147,8 @@ export default function Settings() {
             <SystemInfo
               autoUpdateEnabled={autoUpdateEnabled}
               onAutoUpdateEnabledChange={setAutoUpdateEnabled}
+              updateCheckEnabled={updateCheckEnabled}
+              onUpdateCheckEnabledChange={setUpdateCheckEnabled}
             />
 
             <hr style={{ margin: '16px 0', borderColor: 'var(--border)' }} />

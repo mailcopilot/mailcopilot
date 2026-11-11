@@ -60,18 +60,18 @@ You can move the AppImage to any convenient location, such as `~/Applications/`.
 ## Installing on Windows
 
 1. Download the `.exe` installer from the website.
-2. Run the installer and follow the on-screen instructions. You can choose the installation directory.
+2. Run the installer and follow the on-screen instructions. You can choose the installation directory. Before the installation steps, the installer shows a privacy notice page (a short summary with a link to the full privacy policy) that you must accept to continue. It appears in the installer's language (English, Russian, French, German, Spanish or Italian; other languages show English) and is not shown for silent installs or automatic updates.
 3. Launch MailCopilot from the Start menu or desktop shortcut.
 
 ## First Launch
 
-When you start MailCopilot for the first time, you first see a consent screen titled **Send diagnostic data?**, asking whether MailCopilot may send diagnostic and usage data -- see [Telemetry](../privacy/telemetry) for exactly what that means. Nothing is sent until you answer, and your choice does not affect mail sync or the AI assistant. It does change one thing in Settings → About: with diagnostics off, the built-in feedback form is replaced with a link to the MailCopilot website instead. After you respond, the account setup wizard opens and guides you through connecting your first email account.
+When you start MailCopilot for the first time, you first see a consent screen titled **Send diagnostic data?**, asking whether MailCopilot may send diagnostic and usage data -- see [Telemetry](../privacy/telemetry) for exactly what that means. Nothing is sent until you answer, and your choice does not affect mail sync or the AI assistant. It does change one thing in Settings → About: with diagnostics off, the built-in feedback form is replaced with a link to the MailCopilot website instead. After you respond, the account setup wizard opens and guides you through connecting your first email account. The same screen also has a separate **Updates** block with a **Check for updates in the background** checkbox. It is on by default, independent of your diagnostics answer, and on a brand-new installation no automatic update request is sent until you have answered the screen.
 
 Your passwords are securely stored in the system keychain (via keytar) and are never written to plain-text configuration files.
 
 ## Automatic Updates
 
-MailCopilot checks for updates automatically. When a new version is available, a notification will appear in the application. You can download the update and restart with one click.
+MailCopilot checks for updates automatically. When a new version is available, a notification will appear in the application. You can download the update and restart with one click. Background update checks can be turned off in **Settings → About**; see [About](../settings/about).
 
 :::note
 MailCopilot's built-in update mechanism can attempt to update itself in place for AppImage, `.deb`/`.rpm`/pacman, Windows, and macOS installs. For an AppImage, MailCopilot replaces the `.AppImage` file itself, so it needs to be stored somewhere writable by your user account -- for example, your home directory. For a `.deb`/`.rpm`/pacman package, the update mechanism requests administrator privileges (`pkexec`/`sudo`) before attempting to write the update, the same way `apt`/`dnf`/`pacman` would -- the fact that the install directory is owned by root does not stop it, though the final outcome depends on that privilege prompt and the package manager, not on MailCopilot. Self-update is unavailable ahead of time only when MailCopilot isn't running as one of these packaged forms (for example, an extracted AppImage or a raw unpacked folder), or when the folder MailCopilot would need to write into isn't writable -- an AppImage's own folder, or on Windows and macOS the folder holding the installed executable. In those cases, update through your package manager or administrator privileges, or by downloading and reinstalling the latest package from the website.

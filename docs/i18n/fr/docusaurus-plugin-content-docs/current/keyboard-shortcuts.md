@@ -42,6 +42,21 @@ Appuyez sur **?** dans l'application pour afficher la reference. Preselection **
 | **p** | Épingler / désépingler le message |
 | **Ctrl+P** | Imprimer le message |
 
+## Dans un fil de discussion
+
+Lorsque vous ouvrez un fil de plusieurs messages, ses cartes reçoivent leurs propres raccourcis clavier. Tant que le fil est ouvert ainsi, **j** / **k** cessent de faire défiler la liste des messages et déplacent à la place un curseur entre les cartes, et **r** / **a** / **f** agissent sur la carte où se trouve le curseur plutôt que sur le message ouvert.
+
+| Raccourci | Action |
+|-----------|--------|
+| **j** / **k** | Message suivant / précédent dans le fil |
+| **Enter** / **Espace** | Développer / réduire le message sélectionné |
+| **r** | Répondre au message sélectionné |
+| **a** | Répondre à tous pour le message sélectionné |
+| **f** | Transférer le message sélectionné |
+| **Escape** | Quitter la navigation dans le fil (**j** / **k** refont défiler la liste des messages) |
+
+**↑** / **↓** ne sont pas interceptées ici -- elles continuent de faire défiler la liste des messages même quand un fil est ouvert, pour parcourir d'autres fils sans appuyer d'abord sur **Escape**. Aucun de ces raccourcis n'agit pendant que vous tapez dans un champ de texte ou qu'une boîte de dialogue est ouverte.
+
 ## IA
 
 | Raccourci | Action |

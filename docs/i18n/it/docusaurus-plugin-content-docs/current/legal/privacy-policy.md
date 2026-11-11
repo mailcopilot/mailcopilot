@@ -6,7 +6,7 @@ title: Informativa sulla Privacy
 # Informativa sulla Privacy
 
 **Data di entrata in vigore:** 13 febbraio 2026
-**Ultimo aggiornamento:** 13 febbraio 2026
+**Ultimo aggiornamento:** 4 novembre 2026
 
 ## 1. Introduzione
 
@@ -143,7 +143,7 @@ Nello specifico:
 
 ## 7. Google OAuth 2.0
 
-Quando connette un account Gmail, MailCopilot utilizza Google OAuth 2.0 con PKCE (RFC 7636) per ottenere l'accesso. Richiediamo i seguenti ambiti:
+Quando connette un account Gmail con l'accesso tramite Google, MailCopilot utilizza Google OAuth 2.0 con PKCE (RFC 7636) per ottenere l'accesso. Nella build ufficiale di MailCopilot l'accesso tramite Google non viene più proposto per le nuove caselle Gmail (si collegano con una password per le app tramite IMAP/SMTP); rimane disponibile per le caselle che lo utilizzano già e per le build create dal codice sorgente con un proprio client Google. Quando si utilizza l'accesso tramite Google, richiediamo i seguenti ambiti:
 
 | Ambito | Scopo |
 |---|---|
@@ -196,7 +196,11 @@ Implementiamo le seguenti misure di sicurezza:
 
 ## 12. Aggiornamenti automatici
 
-MailCopilot verifica periodicamente la disponibilità di aggiornamenti. I metadati degli aggiornamenti (numero di versione, hash del file) vengono scaricati dal nostro repository di rilascio. **Nessun dato personale viene inviato** durante la verifica degli aggiornamenti. Può disabilitare la verifica automatica degli aggiornamenti nelle Impostazioni.
+MailCopilot cerca aggiornamenti in background: all'avvio e poi circa una volta all'ora. Una ricerca di aggiornamenti è una normale richiesta HTTPS al nostro server di aggiornamento per ottenere un piccolo file di metadati (numero di versione e hash del file). Come per qualsiasi richiesta web, il server vede il Suo indirizzo IP e, dal nome del file richiesto, il tipo di sistema operativo e l'architettura del processore. La ricerca in sé non invia la versione di MailCopilot in uso (l'applicazione confronta le versioni localmente) e non sono inclusi posta, dati degli account o dati di utilizzo. La richiesta contiene solo normali intestazioni HTTP, ad esempio uno user agent generico. Un'intestazione di compatibilità che la libreria di aggiornamento usa per i rilasci graduali viene inviata con un valore fisso di soli zeri, identico per tutte le installazioni, quindi non identifica nulla. Il download di un aggiornamento è diverso: rivela le versioni, perché i nomi dei file richiesti contengono numeri di versione e, quando si usa un download differenziale, la richiesta del file block map della versione attualmente installata (nome del tipo `mailcopilot-<current-version>-setup.exe.blockmap` su Windows) indica al server quale versione è in esecuzione.
+
+È Lei a decidere se ciò avvenga. **Cerca aggiornamenti in background** è attivata per impostazione predefinita e può essere disattivata in Impostazioni → Informazioni → Aggiornamenti oppure nella schermata del primo avvio. Non serve riavviare: la disattivazione interrompe le nuove ricerche automatiche non appena salva. Una ricerca o un download automatico che la libreria di aggiornamento ha già avviato può comunque completarsi (un download già iniziato non viene annullato; una ricerca può essere a metà della lettura della propria configurazione e ritenta più volte una connessione rifiutata). A parte questo, quando è disattivata, MailCopilot non contatta mai da solo il server di aggiornamento: né una ricerca all'avvio né ricerche ogni ora. Il pulsante **Controlla aggiornamenti** continua a funzionare, perché fare clic su di esso è una Sua richiesta esplicita. Un nuovo download automatico non può partire senza una ricerca, quindi l'opzione «Scarica automaticamente gli aggiornamenti in background» non ha effetto finché la ricerca in background è disattivata. Su un'installazione del tutto nuova (un profilo senza una risposta precedente alla schermata del primo avvio e senza account di posta), MailCopilot non invia alcuna richiesta di aggiornamento automatica finché non ha risposto a quella schermata; chiuderla senza rispondere non registra nulla, quindi l'attesa continua. Tutti i profili esistenti continuano a cercare, compreso uno a cui la schermata del primo avvio viene mostrata di nuovo dopo una modifica dell'informativa.
+
+In Windows, il programma di installazione mostra, prima dei passaggi di installazione, una pagina con un'informativa sulla privacy (un breve riepilogo con un link a questa informativa) nella lingua del programma di installazione (inglese, russo, francese, tedesco, spagnolo o italiano; per le altre lingue viene mostrato l'inglese). Deve accettarla per continuare. Questa pagina non viene mostrata nelle installazioni silenziose né negli aggiornamenti automatici. I pacchetti per Linux e macOS non hanno una pagina del programma di installazione; per essi, la schermata del primo avvio e le Impostazioni sono i luoghi in cui queste informazioni e la scelta vengono presentate.
 
 ## 13. Privacy dei minori
 

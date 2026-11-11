@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { captureException } from '../sentry'
+import { toCertFailureReason, type CertFailureReason } from '@mailcopilot/core'
 
 /**
  * TLS trust rework Phase A3 — renderer hook for the cert-recovery UX.
@@ -81,8 +82,10 @@ export type CertRecoveryRequest = {
   fingerprintSha256: string
   /** True = chain trusted by the OS store only (local AV / proxy interception). */
   systemOnly: boolean
-  /** Raw IMAP/TLS error message — UNTRUSTED, display as text only. */
+  /** Raw IMAP/TLS error message — UNTRUSTED, kept for diagnostics, not shown. */
   rawMessage: string
+  /** Readable failure class built in main from the error code; a closed set. */
+  reason: CertFailureReason
 }
 
 /** Payload of the `cert:interceptionNotice` broadcast. UNTRUSTED fields. */
@@ -304,6 +307,7 @@ function parseRecovery(payload: unknown): CertRecoveryRequest | null {
     fingerprintSha256: typeof d.fingerprintSha256 === 'string' ? d.fingerprintSha256 : '',
     systemOnly: d.systemOnly === true,
     rawMessage: typeof d.rawMessage === 'string' ? d.rawMessage : '',
+    reason: toCertFailureReason(d.reason),
   }
 }
 

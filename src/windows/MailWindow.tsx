@@ -9,9 +9,10 @@ import {
   isErrorPresentationKey,
 } from '@mailcopilot/core'
 import RecipientList from '../components/RecipientList'
+import { CopyableAddressList } from '../components/CopyableAddress'
 import { computeReplyRecipients, prefixSubject, htmlToText, quoteText } from '../utils/mail'
 import WindowTitlebar from '../components/WindowTitlebar'
-import { sanitizeMailHtml } from '../utils/mail'
+import { sanitizeMailHtml, blockUnresolvedCidImages } from '../utils/mail'
 import { rewriteMailHtmlLinks } from '../utils/mailLinks'
 import { useMailLinkClick } from '../hooks/useMailLinkClick'
 import { useShowFullMessage } from '../hooks/useShowFullMessage'
@@ -19,6 +20,17 @@ import MailBodyFallbackNotice from '../components/MailBodyFallbackNotice'
 import MailParseCapNotice from '../components/MailParseCapNotice'
 import LinkWarningDialog from '../components/LinkWarningDialog'
 import MailActionsToolbar from '../components/MailActionsToolbar'
+import { captureException } from '../sentry'
+import type { MailboxesAndRoles } from '../hooks/useUnreadPending'
+
+/**
+ * How long Archive / Delete stay reversible in this window before the deferred
+ * `net:move` is issued. Shorter than the main window's 5s because this window
+ * closes itself when the timer fires — see the lifecycle contract inside the
+ * component, and `tests/e2e/mail-window-close-commits-move.spec.ts`, which must
+ * close the window well inside this budget to prove anything.
+ */
+const UNDO_WINDOW_MS = 3000
 
 /**
  * Standalone window that displays a single mail message with a full action
@@ -44,9 +56,10 @@ import MailActionsToolbar from '../components/MailActionsToolbar'
  *     (IDN/http/mismatch/unsafeBypass checks), link warning UI via
  *     LinkWarningDialog component.
  *   - All IPC channels used here are in the preload whitelist:
- *       accounts:get, cache:folderRoles, net:attachmentBase64,
- *       net:messageDetails, net:move, net:delete, net:setSeen, net:setFlagged,
- *       ui:openCompose, win:minimize, win:maximize, win:isMaximized.
+ *       accounts:get, cache:folderRoles, net:mailboxesAndRoles,
+ *       net:attachmentBase64, net:messageDetails, net:move, net:delete,
+ *       net:setSeen, net:setFlagged, ui:openCompose, win:minimize,
+ *       win:maximize, win:isMaximized.
  */
 export default function MailWindow({ accountId, folder, uid }: { accountId: number; folder: string; uid: number }) {
   const { t } = useTranslation()
@@ -83,27 +96,34 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
   // Visible error banner when Archive/Delete/Reply IPC fails.
   const [actionError, setActionError] = useState<string | null>(null)
 
-  // Deferred undo state for reversible destructive actions (Archive / Move-to-trash).
+  // Deferred undo for reversible destructive actions (Archive / Move-to-trash).
   //
-  // Defer pattern (mirrors useUndoSystem.moveWithUndo in App.tsx):
-  //   1. User clicks Archive/Trash → show banner, start timer. NO net:move yet.
-  //   2. Timer expires → fire net:move server-call, then window.close().
-  //   3. User clicks Undo → clearTimeout, NO net:move server-call. Banner hides.
+  // LIFECYCLE CONTRACT — `net:move` is issued at most once, by whichever of
+  // these happens first, and always through `flushPendingUndo`:
+  //   * the UNDO_WINDOW_MS timer expires (the window then closes);
+  //   * another destructive action starts, or the permanent-delete dialog opens;
+  //   * the titlebar Close button is pressed (commit first, close after);
+  //   * the page is torn down through the DOM unload sequence (`pagehide`);
+  //   * the component unmounts.
+  // Undo cancels it: the timer is cleared and no move is ever issued.
+  // `pendingUndoRef` is the source of truth (React state mirrors it for
+  // rendering only), and the flush nulls it BEFORE any side effect — that is
+  // what makes the list above safe rather than a list of double-moves.
   //
-  // This avoids the broken "reverse-UID" problem: after a real IMAP MOVE the
-  // message gets a new UID in the target folder (UIDPLUS COPYUID). Storing the
-  // source-folder UID and trying to use it for a reverse move in the target
-  // folder fails silently (IMAP NO/BAD — UID not found).
+  // NAMED LIMITS, not to be papered over:
+  //   * a window taken down with `destroy()` commits nothing. Main destroys
+  //     standalone windows when the main window closes, and Electron documents
+  //     `destroy()` as not emitting `unload`/`beforeunload`. Covering that
+  //     needs main to own the pending move; the renderer cannot.
+  //   * once the page is gone, a failure cannot be reported: the request may
+  //     have been written, but `.catch` belongs to a context that no longer
+  //     runs. "Issued" is all this component can promise on a teardown path.
   //
-  // UIDs change on IMAP MOVE — references become dangling (see
-  // electron/main.ts comment near net:move handler). The defer pattern sidesteps
-  // this entirely: we never move the message until the user commits by letting
-  // the timer expire.
-  //
-  // HIGH fix (MEDIUM — ref-idempotent flush): pendingUndoRef is the source of
-  // truth; React state (pendingUndo) is a mirror for rendering only. flushPendingUndo
-  // reads and nulls the ref synchronously before any side effects, making double-call
-  // safe — the second call sees null ref and returns immediately.
+  // WHY DEFER AT ALL: UIDs change on IMAP MOVE (UIDPLUS COPYUID), so the
+  // source-folder UID cannot address the message afterwards and a reverse move
+  // fails silently (IMAP NO/BAD — UID not found; see the comment near the
+  // `net:move` handler in electron/main.ts). Deferring means there is nothing
+  // to reverse: the message does not move until the action stands.
   type PendingUndoState = {
     message: string
     sourceFolder: string       // original folder (where the message currently lives)
@@ -134,45 +154,81 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
     setActionError(msg)
   }
 
-  // flushPendingUndo: if a deferred move is pending, execute it now (server-call)
-  // and clear banner. Used before starting a second destructive action or before
-  // opening the permanent-delete confirm dialog.
-  //
-  // MEDIUM fix (ref-idempotent): reads and nulls pendingUndoRef synchronously
-  // BEFORE issuing the IPC call. A second synchronous call in the same tick sees
-  // null ref and returns immediately — net:move fires exactly once.
-  const flushPendingUndo = useCallback(() => {
+  /**
+   * A deferred move that failed has no UI left to report it to — the banner is
+   * gone and, on the commit paths, the window is closing. Dropping the
+   * rejection made a destructive action the user believes in disappear without
+   * a trace; it is reported instead.
+   *
+   * The console line carries the VERDICT, never the server's prose (§2.127):
+   * console output is a Sentry breadcrumb source, and the text after
+   * `[mcerr:*]` is written by a third-party IMAP server. `captureException`
+   * applies the same boundary on the exception itself (see src/sentry.ts).
+   */
+  const reportDeferredMoveFailure = useCallback((e: unknown) => {
+    console.error('[mail-window] deferred move failed:', decodeErrorPresentation(e))
+    captureException(e, { source: 'MailWindow.deferredMove' })
+  }, [])
+
+  /**
+   * The ONE place that issues the deferred `net:move` — every entry in the
+   * lifecycle contract above goes through it, including the 3s timer.
+   *
+   * Idempotent by construction: it reads and nulls `pendingUndoRef` before
+   * issuing anything, so a second call in the same tick (pagehide + unmount,
+   * timer + close) finds nothing and returns `null`.
+   *
+   * Returns the in-flight request so the timer can close the window once it has
+   * settled; `null` means there was nothing pending. The caller never has to
+   * block on it — the banner is already gone by then, and a failure is reported
+   * rather than surfaced (see reportDeferredMoveFailure).
+   */
+  const flushPendingUndo = useCallback((): Promise<void> | null => {
     const pending = pendingUndoRef.current
-    if (!pending) return
-    // Null the ref synchronously first — makes this function idempotent under
-    // double-call in the same tick (HIGH fix — ref-idempotent).
+    if (!pending) return null
     pendingUndoRef.current = null
     if (undoTimerRef.current !== null) { clearTimeout(undoTimerRef.current); undoTimerRef.current = null }
     setPendingUndo(null)
-    // Fire-and-forget — errors are silently swallowed here because:
-    //   a) The user has already committed to the action (new action started).
-    //   b) The previous banner is already gone from the UI.
-    //   c) A best-effort move is better than blocking the UI on a failed flush.
-    void window.api.invoke('net:move', accountId, pending.sourceFolder, pending.targetFolder, [uid]).catch(() => {})
-  }, [accountId, uid])
+    return window.api.invoke('net:move', accountId, pending.sourceFolder, pending.targetFolder, [uid])
+      .then(() => {}, reportDeferredMoveFailure)
+  }, [accountId, reportDeferredMoveFailure, uid])
 
-  // Unmount cleanup: flush any pending undo (user closed window = action committed).
-  // Uses pendingUndoRef directly to avoid stale-closure over pendingUndo state.
-  // Also nulls the ref synchronously to prevent double-fire if flushPendingUndo
-  // was called just before unmount.
+  // Latest flush, readable from the mount-only effect below without
+  // re-subscribing the listener on every render.
+  const flushPendingUndoRef = useRef(flushPendingUndo)
+  flushPendingUndoRef.current = flushPendingUndo
+
+  /**
+   * BACKSTOP for teardowns this window does not originate: a `win:close`
+   * issued elsewhere and app quit. Electron documents the DOM unload sequence
+   * for those (electron.d.ts — BrowserWindow 'close' "is emitted before the
+   * `beforeunload` and `unload` event of the DOM"; `app.quit()` "guarantees
+   * that all `beforeunload` and `unload` event handlers are correctly
+   * executed"), and React's own cleanup does not run on any of them.
+   *
+   * A backstop, not the mechanism. A renderer-initiated close carries no such
+   * promise (see `handleTitlebarClose`, which is why the button commits before
+   * closing), and this listener can only say the request was ISSUED: whether
+   * main executed it is not observable from a page that is being destroyed,
+   * and the rejection handler may never run.
+   *
+   * `pagehide`, not `visibilitychange`: minimising or hiding an Electron
+   * window flips `document.visibilityState`, and committing there would spend
+   * the undo window the user was promised. No `beforeunload` handler either —
+   * it adds nothing over `pagehide` unless it cancels, which this window must
+   * never do.
+   */
   useEffect(() => {
+    const commit = () => { void flushPendingUndoRef.current() }
+    window.addEventListener('pagehide', commit)
     return () => {
+      window.removeEventListener('pagehide', commit)
+      // Unmount is still a commit point (in-app route change, test teardown).
+      // Idempotent: if `pagehide` already fired, the ref is null and this is a
+      // no-op, so the move is never issued twice.
+      commit()
       if (undoTimerRef.current !== null) { clearTimeout(undoTimerRef.current); undoTimerRef.current = null }
-      const pending = pendingUndoRef.current
-      if (pending) {
-        pendingUndoRef.current = null
-        // Fire-and-forget server move on unmount — window is closing, action is committed.
-        void window.api.invoke('net:move', accountId, pending.sourceFolder, pending.targetFolder, [uid]).catch(() => {})
-      }
     }
-    // accountId and uid are stable for the lifetime of the window; disable-exhaustive
-    // is intentional here — the cleanup must capture initial values only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // MEDIUM fix: refs for confirm dialog focus trap.
@@ -258,26 +314,57 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
    *  state: a fresh token supersedes whatever the previous attempt returns. */
   const retryLoad = useCallback(() => { loadDetails() }, [loadDetails])
 
-  // Load cached folder roles for this account. Errors are non-fatal —
-  // Archive will be disabled if the cache is unavailable.
-  // BLOCKER fix: setFolderRolesLoaded(true) regardless of result so Delete
-  // button can be re-enabled after the attempt (even when trash is absent).
+  /**
+   * Folder roles for this account: the cache first, and — only when the cache
+   * has never heard of this account — the authoritative source.
+   *
+   * Roles decide whether Delete is REVERSIBLE (move to Trash, with the undo
+   * window) or PERMANENT (the confirm dialog). `cache:folderRoles` reads
+   * `cached_roles`, and that table has exactly one writer: main's
+   * `computeMailboxesAndRoles`, which fills it only AFTER a successful IMAP
+   * LIST. So on a profile where that has not happened yet — a freshly added
+   * account, a first run, a LIST that failed — this window used to conclude
+   * "no Trash folder" and offer to delete the message permanently, while the
+   * main window, which also asks `net:mailboxesAndRoles`, moved the same
+   * message to Trash. Asking the same authoritative channel removes that
+   * divergence (requests are coalesced per account in main, so this shares the
+   * main window's in-flight LIST rather than adding a second one).
+   *
+   * The fallback is gated on "the cache has no entry at all", not on "the
+   * entry has no trash role": an account that genuinely has no Trash folder is
+   * a KNOWN answer, and re-asking the server for it on every window open would
+   * buy nothing.
+   *
+   * BLOCKER fix (kept): `folderRolesLoaded` flips once the attempt is over,
+   * whatever it returned, so Delete is disabled only while the answer is still
+   * unknown — never left disabled forever, and never enabled on a guess.
+   */
   useEffect(() => {
     let cancelled = false
     void (async () => {
+      let known = false
       try {
         const allRoles = await window.api.invoke<Record<number, Record<string, string | undefined>>>('cache:folderRoles')
-        if (!cancelled) {
-          if (allRoles) {
-            const raw = allRoles[accountId]
-            if (raw) setFolderRoles(raw as FolderRoles)
-          }
-          setFolderRolesLoaded(true)
+        const raw = allRoles?.[accountId]
+        if (raw) {
+          known = true
+          if (!cancelled) setFolderRoles(raw as FolderRoles)
         }
       } catch {
-        // Non-fatal — Archive button disabled, other actions still work.
-        if (!cancelled) setFolderRolesLoaded(true)
+        // Non-fatal — fall through to the authoritative source.
       }
+      if (cancelled) return
+      if (!known) {
+        try {
+          const res = await window.api.invoke<MailboxesAndRoles>('net:mailboxesAndRoles', accountId)
+          if (!cancelled && res?.roles) setFolderRoles(res.roles)
+        } catch {
+          // Offline / auth failure — Archive stays disabled and Delete falls
+          // back to the explicit permanent-delete confirmation, exactly as
+          // before. Not fatal for the other actions.
+        }
+      }
+      if (!cancelled) setFolderRolesLoaded(true)
     })()
     return () => { cancelled = true }
   }, [accountId])
@@ -353,7 +440,10 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
   const iframeDoc = useMemo(() => {
     if (!details?.html) return null
     const sanitized = sanitizeMailHtml(details.html)
-    const html = rewriteMailHtmlLinks(sanitized)
+    // This window resolves no inline parts, so a `cid:` reference reaching the
+    // iframe can only end as the browser's own broken-image icon: draw the same
+    // placeholder as the reading pane instead.
+    const html = blockUnresolvedCidImages(rewriteMailHtmlLinks(sanitized))
     return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:"><style>html,body{margin:0;padding:12px;font-family:system-ui,sans-serif;color:#222;background:#fff;}body{word-break:break-word;}img{max-width:100%;height:auto;}</style></head><body>${html}</body></html>`
   }, [details?.html])
 
@@ -455,11 +545,11 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
     if (!folderRoles?.archive) return
     // Flush any previous pending undo before starting a new one (acceptance
     // criterion #4: second Archive while previous pending → flush previous).
-    flushPendingUndo()
+    void flushPendingUndo()
     setActionError(null)
     const archiveFolder = folderRoles.archive
-    // Defer pattern: NO net:move yet. Server call fires only when the timer
-    // expires (user did not click Undo). Undo = clearTimeout, no server call.
+    // No net:move yet — see the lifecycle contract above for the full list of
+    // commit points; the timer below is only the last of them.
     setPendingUndoBoth({
       message: tRef.current('mail.actions.archived'),
       sourceFolder: folder,
@@ -467,13 +557,12 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
     })
     undoTimerRef.current = setTimeout(() => {
       undoTimerRef.current = null
-      pendingUndoRef.current = null
-      setPendingUndo(null)
-      void window.api.invoke('net:move', accountId, folder, archiveFolder, [uid])
-        .catch(() => { /* window is closing; error not surfaceable */ })
-        .finally(() => { window.close() })
-    }, 3000)
-  }, [accountId, folder, folderRoles, flushPendingUndo, setPendingUndoBoth, uid])
+      // The same commit point as every other path. The window closes once the
+      // request has settled — or straight away if an earlier path already
+      // committed and left nothing pending.
+      void (flushPendingUndo() ?? Promise.resolve()).finally(() => { window.close() })
+    }, UNDO_WINDOW_MS)
+  }, [folder, folderRoles, flushPendingUndo, setPendingUndoBoth])
 
   // Delete button requires folderRolesLoaded before it can be clicked (disabled
   // while loading). When trash folder is available and we are not already in it,
@@ -486,8 +575,8 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
     if (folderRoles?.trash && folder !== folderRoles.trash) {
       const trashFolder = folderRoles.trash
       // Flush any previous pending undo before starting a new one.
-      flushPendingUndo()
-      // Defer pattern: NO net:move yet.
+      void flushPendingUndo()
+      // No net:move yet — same contract as Archive.
       setPendingUndoBoth({
         message: tRef.current('mail.actions.movedToTrash'),
         sourceFolder: folder,
@@ -495,20 +584,16 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
       })
       undoTimerRef.current = setTimeout(() => {
         undoTimerRef.current = null
-        pendingUndoRef.current = null
-        setPendingUndo(null)
-        void window.api.invoke('net:move', accountId, folder, trashFolder, [uid])
-          .catch(() => { /* window is closing; error not surfaceable */ })
-          .finally(() => { window.close() })
-      }, 3000)
+        void (flushPendingUndo() ?? Promise.resolve()).finally(() => { window.close() })
+      }, UNDO_WINDOW_MS)
     } else {
       // Permanent delete — flush any pending undo first so the previous banner
       // action is committed before opening the new confirm dialog (acceptance
       // criterion #3 / MEDIUM: stale timer when permanent delete starts).
-      flushPendingUndo()
+      void flushPendingUndo()
       setConfirmPermanentDelete(true)
     }
-  }, [accountId, folder, folderRoles, folderRolesLoaded, flushPendingUndo, setPendingUndoBoth, uid])
+  }, [folder, folderRoles, folderRolesLoaded, flushPendingUndo, setPendingUndoBoth])
 
   // Undo handler — cancel the deferred server move. No net:move is ever issued.
   // The message was never moved, so there is no reverse operation needed.
@@ -574,9 +659,38 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
     iframeRef.current?.contentWindow?.print()
   }, [])
 
+  /**
+   * Titlebar Close: commit the deferred move FIRST, then ask the window to go
+   * away.
+   *
+   * `WindowTitlebar` defaults to a bare `window.close()`, and that default is
+   * what made "Delete → close the window" lose the message in a real run
+   * (e2e `mail-window-close-commits-move.spec.ts`, two attempts, Trash empty).
+   * A renderer-initiated close is NOT the same path as
+   * `BrowserWindow.close()`: Electron documents the DOM unload sequence only
+   * for the latter (electron.d.ts, BrowserWindow 'close': "emitted before the
+   * `beforeunload` and `unload` event of the DOM"), while the renderer-side
+   * form is described as "closes the page, as if the web content had called
+   * `window.close()`" with `beforeunload` skipped unless explicitly requested
+   * (`CloseOpts.waitForBeforeUnload`). Nothing there promises that `pagehide`
+   * runs, and the observed behaviour says it does not.
+   *
+   * So this window no longer DEPENDS on the unload sequence for the one close
+   * the user actually performs: the flush runs while the page is fully alive,
+   * the IPC request is written before anything starts tearing down, and only
+   * then does the close begin. `pagehide` stays as the backstop for teardowns
+   * we do not originate (`win:close` from elsewhere, app quit), and the
+   * `destroy()` sweep of standalone windows remains the known gap that only a
+   * main-side registration can close.
+   */
+  const handleTitlebarClose = useCallback(() => {
+    void flushPendingUndo()
+    window.close()
+  }, [flushPendingUndo])
+
   return (
     <>
-      <WindowTitlebar title={subject || t('mail.actions.openInWindow')} />
+      <WindowTitlebar title={subject || t('mail.actions.openInWindow')} onClose={handleTitlebarClose} />
       <div className="mail-window-root">
         <MailActionsToolbar
           flagged={flagged}
@@ -618,7 +732,7 @@ export default function MailWindow({ accountId, folder, uid }: { accountId: numb
           </div>
         )}
         <div className="mail-viewer-header">
-          <div className="mail-viewer-from">{from}</div>
+          <div className="mail-viewer-from">{env?.from ? <CopyableAddressList list={env.from} /> : from}</div>
           <div className="mail-viewer-subject-row">
             <div className="mail-viewer-subject">{subject}</div>
           </div>

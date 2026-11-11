@@ -17,7 +17,10 @@ export {
 
 export { resolveThreadItems, expandBulkToThreads } from './threadActions'
 
-export { normalizeMailrefs } from './normalizeMailrefs'
+export { normalizeSourceMessageId, SOURCE_MESSAGE_ID_MAX } from './sourceMessageId'
+export { CITATION_ALPHABET, CITATION_TOKEN_LENGTH, CITATION_HREF_PREFIX, CITATION_MAX_PER_ANSWER, isCitationToken, citationHref, parseCitationHref } from './aiCitation'
+export { normalizeMailrefs, parseMailrefHref, extractMailrefTargets, mailrefKey, MAILREF_SCAN_MAX_CHARS } from './normalizeMailrefs'
+export type { MailrefTarget } from './normalizeMailrefs'
 
 export {
   sha256hex,
@@ -132,6 +135,7 @@ export {
   validateDecisionFolder,
   dedupeAiRuleActions,
   estimateAiRuleCostUsd,
+  hasListedPrice,
   nullUsageReservationUsd,
   type AiRulePendingItem,
   type AiRuleSpec,
@@ -140,6 +144,7 @@ export {
   type AiRuleParseFailure,
   type ResolvedAiRuleAction,
   type AiRuleUsage,
+  type CacheTerms,
   type AiRuleEnabledScope,
 } from './aiRules'
 
@@ -240,3 +245,31 @@ export {
   type BadgeUnreadRow,
   type BadgeFolderContext,
 } from './unreadBadgePolicy'
+
+// Structural readers for a refused STARTTLS upgrade and for SMTP failures
+// before the server greeting; their verdicts live in errorPresentation.
+export {
+  STARTTLS_REQUIRED_CODE,
+  isStarttlsRefusal,
+  isPreGreetingFailure,
+  isImapPreGreetingTimeout,
+  isTlsUpgradeTimeout,
+  isDeliveryUndetermined,
+  isSmtpSessionError,
+  isImapConnectionFailure,
+  hasImapConnectionFailureCode,
+  markImapOutcomeUndetermined,
+  isImapOutcomeUndetermined,
+} from './transportFailure'
+export { buildReplyThreadHeaders } from './replyThreading'
+export { CERT_FAILURE_REASONS, classifyCertFailureReason, toCertFailureReason, type CertFailureReason } from './certFailureReason'
+export type { ReplyParentHeaders, ReplyThreadHeaders } from './replyThreading'
+
+export {
+  DEFAULT_AI_MODELS,
+  ANTHROPIC_ONE_SHOT_MODEL,
+  type AiModelProvider,
+  type AiModelOption,
+  type AiModelListFailure,
+  type AiModelListResult,
+} from './aiModels'

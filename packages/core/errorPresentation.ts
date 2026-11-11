@@ -34,13 +34,22 @@
  */
 
 import { isTransientNetworkError, walkErrorTree } from './transientErrors'
+import { isDeliveryUndetermined, isImapPreGreetingTimeout, isPreGreetingFailure, isStarttlsRefusal } from './transportFailure'
 
 /**
  * The closed vocabulary. Everything the user can be told about a failed IPC
  * call is one of these; anything unrecognised collapses into 'unknown', which
  * is a neutral generic message — never an empty string.
  */
-export const ERROR_PRESENTATION_KEYS = ['offline', 'timeout', 'auth', 'unknown'] as const
+export const ERROR_PRESENTATION_KEYS = [
+  'offline',
+  'timeout',
+  'auth',
+  'starttls_required',
+  'pre_greeting',
+  'delivery_unknown',
+  'unknown',
+] as const
 
 export type ErrorPresentationKey = (typeof ERROR_PRESENTATION_KEYS)[number]
 
@@ -58,6 +67,9 @@ export const ERROR_PRESENTATION_I18N_KEYS: Readonly<Record<ErrorPresentationKey,
   offline: 'app.errors.presented.offline',
   timeout: 'app.errors.presented.timeout',
   auth: 'app.errors.presented.auth',
+  starttls_required: 'app.errors.presented.starttls_required',
+  pre_greeting: 'app.errors.presented.pre_greeting',
+  delivery_unknown: 'app.errors.presented.delivery_unknown',
   unknown: 'app.errors.presented.unknown',
 }
 
@@ -115,16 +127,28 @@ function readNodeFields(node: unknown): NodeFields {
  * Map a LIVE error object (main process, before the IPC boundary eats it) to
  * a vocabulary entry.
  *
- * Precedence: auth > timeout > offline > unknown. Auth wins because it is the
- * only verdict that tells the user to do something specific; timeout wins over
+ * Precedence: starttls_required > auth > pre_greeting > delivery_unknown >
+ * timeout > offline > unknown. The first two tell the user to do something
+ * specific; pre_greeting (nothing reached the server's greeting — a blocked
+ * port, a VPN) is more precise than the generic timeout it often travels as;
+ * delivery_unknown (the session broke after the server was reached, so the
+ * message may have been accepted) must win over the timeout/offline readings of
+ * the same error, because "try again" is the wrong advice there; timeout wins over
  * offline because "the server did not answer in time" is the more precise of
- * the two transient readings.
+ * the two transient readings. The first and third are read from the error's
+ * STAGE fields (see ./transportFailure), never from prose.
  */
 export function classifyErrorPresentation(input: unknown): ErrorPresentationKey {
   let auth = false
   let timeout = false
+  let starttls = false
+  let preGreeting = false
+  let deliveryUnknown = false
   try {
     walkErrorTree(input, (node) => {
+      if (isStarttlsRefusal(node)) starttls = true
+      if (isPreGreetingFailure(node) || isImapPreGreetingTimeout(node)) preGreeting = true
+      if (isDeliveryUndetermined(node)) deliveryUnknown = true
       const { text, codes, authFlag } = readNodeFields(node)
       if (authFlag) auth = true
       if (text) {
@@ -139,7 +163,10 @@ export function classifyErrorPresentation(input: unknown): ErrorPresentationKey 
   } catch {
     return 'unknown'
   }
+  if (starttls) return 'starttls_required'
   if (auth) return 'auth'
+  if (preGreeting) return 'pre_greeting'
+  if (deliveryUnknown) return 'delivery_unknown'
   if (timeout) return 'timeout'
   try {
     if (isTransientNetworkError(input)) return 'offline'

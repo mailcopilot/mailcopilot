@@ -31,6 +31,7 @@
 
 import { isTransientNetworkError } from '@mailcopilot/core'
 import { isTlsTrustError } from '../../packages/net/tls'
+import { IMAP_AUTH_BACKOFF_CODE } from '../../packages/net/authLoginLatch'
 import { DOMAINS } from '../metricsSchema'
 import { createLogger } from '../logger'
 import { captureException } from '../sentry'
@@ -81,6 +82,12 @@ const CODE_CLASS: Readonly<Record<string, NetErrorClass>> = {
   NOTFOUND: 'mailbox',
   EAUTH: 'auth',
   AUTHENTICATIONFAILED: 'auth',
+  // Our own discriminator, not a server code: the connection boundary refused
+  // to open a connection because this account's credentials were already
+  // rejected (packages/net/authLoginLatch). Classified as 'auth' because that
+  // is what it is about — the alternative, letting it fall to 'unknown', would
+  // invent a new dashboard shape for a condition already named.
+  [IMAP_AUTH_BACKOFF_CODE.toUpperCase()]: 'auth',
 }
 
 /**
@@ -212,11 +219,87 @@ export function sanitizeNetErrorContext(context: ContextInput): {
 export interface NetErrorTelemetryDeps {
   capture: (error: Error, context: Record<string, unknown>) => void
   isTransient: (err: unknown) => boolean
+  /** Injected clock for the repeat gate below. */
+  now: () => number
 }
 
 const defaultDeps: NetErrorTelemetryDeps = {
   capture: (error, context) => captureException(error, context),
   isTransient: isTransientNetworkError,
+  now: () => Date.now(),
+}
+
+// --- repeat gate ---
+//
+// A persistent failure on this seam repeats at the rate of whatever drives it,
+// and the drivers are timers: the periodic pass walks every folder every five
+// minutes, the body indexer ticks every two seconds. One mailbox with a wrong
+// password produced 2060 identical `imap.sync` auth captures over eight days
+// (~50/h) before the login latch was added — and the latch bounds the LOGINS,
+// not the reports, because the refusal is still a failed operation from every
+// caller's point of view.
+//
+// Same shape as the gate in electron/services/bodyIndexer.ts (`captureOnce`):
+// the FIRST occurrence of a signature is always transmitted, repeats inside the
+// window are dropped, and a NEW failure mode is never delayed by an old one.
+//
+// The key is the payload we would transmit — source, class, kind and the
+// allowlisted context — and nothing else. It cannot carry server text, because
+// every component of it is already something this file was about to send.
+// Deliberately NOT the message digest bodyIndexer hashes: there the message is
+// the app's own, here it is server-controlled, and a key derived from it would
+// put that text one careless refactor away from a payload.
+//
+// Suppression is NOT free, and the cost is named rather than waved away: a
+// dropped event does not reach Sentry at all, so its count is not aggregated
+// there — the FREQUENCY of a repeating failure would be invisible, and
+// frequency is the whole difference between "one mailbox hiccuped" and "one
+// mailbox has been rejected 2060 times in eight days". The gate therefore
+// carries the count forward: every transmitted event reports how many
+// identical ones were suppressed since the last transmission (`suppressed`, a
+// number this file computes — see the capture call).
+//
+// What the key does NOT distinguish is the ACCOUNT: there is no account
+// identity in the allowlisted context, deliberately (this seam exists to stop
+// per-mailbox detail from travelling). Two mailboxes failing the same way on
+// the same source therefore share a signature and one window. That is accepted
+// — the alternative is transmitting or keying on something that identifies a
+// mailbox — and it means `suppressed` counts a condition, not a mailbox.
+const REPEAT_WINDOW_MS = 5 * 60 * 1000
+const REPEAT_KEY_LIMIT = 50
+
+type RepeatEntry = {
+  /** When the last event with this signature was transmitted. */
+  lastAt: number
+  /** Identical events dropped since then. */
+  suppressed: number
+}
+
+const repeatState = new Map<string, RepeatEntry>()
+
+/** Test-only: forget every signature so suites do not suppress each other. */
+export function __resetNetErrorTelemetryRepeatGate(): void {
+  repeatState.clear()
+}
+
+/** `null` while the signature is inside its window (and the drop is counted);
+ *  otherwise the number of events suppressed since the last transmission, to be
+ *  attached to the event that is about to go out. Bounded, insertion-ordered
+ *  LRU — at most REPEAT_KEY_LIMIT entries. */
+function claimRepeatSlot(key: string, now: number): number | null {
+  const entry = repeatState.get(key)
+  if (entry !== undefined && now - entry.lastAt < REPEAT_WINDOW_MS && now >= entry.lastAt) {
+    entry.suppressed += 1
+    return null
+  }
+  const suppressed = entry?.suppressed ?? 0
+  repeatState.delete(key)
+  repeatState.set(key, { lastAt: now, suppressed: 0 })
+  if (repeatState.size > REPEAT_KEY_LIMIT) {
+    const oldest = repeatState.keys().next().value
+    if (oldest !== undefined) repeatState.delete(oldest)
+  }
+  return suppressed
 }
 
 /**
@@ -233,6 +316,11 @@ const defaultDeps: NetErrorTelemetryDeps = {
  *      chains, which is how imapflow failures actually arrive.
  *   2. Everything transmitted afterwards is built from literals in this file
  *      plus the allowlisted context.
+ *   3. The repeat gate is applied LAST, to the payload identity: the first
+ *      occurrence of a signature always goes out, repeats within the window do
+ *      not, and the next transmitted event carries how many were dropped. It is
+ *      last because the key may only be made of values that have already passed
+ *      the allowlist.
  */
 export function reportSanitizedNetError(
   source: string,
@@ -258,6 +346,20 @@ export function reportSanitizedNetError(
     if (transient) return
 
     const { safe, dropped } = sanitizeNetErrorContext(context)
+    const errorKind = classifyNetErrorKind(err)
+    // Repeat gate, applied to the payload identity (see REPEAT_WINDOW_MS). It
+    // sits AFTER sanitisation so the key is built from the same allowlisted
+    // values that are about to be transmitted, and after the transient gate so
+    // a flapping network never occupies a slot in the bounded map.
+    const repeatKey = [
+      safeSource,
+      errorClass,
+      errorKind,
+      ...Object.keys(safe).sort().map(k => `${k}=${String(safe[k])}`),
+    ].join('|')
+    const suppressed = claimRepeatSlot(repeatKey, deps.now())
+    if (suppressed === null) return
+
     // Synthetic and attacker-uncontrolled: message, name and every extra below
     // are literals or enum members produced in this file.
     const sanitized = new Error(`net_${safeSource}_${errorClass}`)
@@ -267,8 +369,14 @@ export function reportSanitizedNetError(
       // reads `extra.source` as a provenance marker (the keychain carve-out).
       source: safeSource,
       error_class: errorClass,
-      error_kind: classifyNetErrorKind(err),
+      error_kind: errorKind,
       context_dropped: dropped,
+      // Identical events dropped by the repeat gate since the last one of this
+      // signature went out. Computed here, never taken from a caller (a caller
+      // key named `suppressed` is not in CONTEXT_RULES and is dropped like any
+      // other unknown), and clamped through the same sanitiser the counting
+      // context keys use.
+      suppressed: sanitizeCount(suppressed) ?? 0,
       ...safe,
     })
   } catch { /* telemetry must never throw into the IMAP/SMTP path */ }

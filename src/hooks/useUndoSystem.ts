@@ -7,6 +7,8 @@ import type { MailSummary } from '../../packages/net/types'
 // renderer console: console output is captured as Sentry breadcrumbs (default
 // integrations, src/sentry.ts), so `presentedError` prints the verdict alone.
 import { presentedError, type Translate } from '../utils/errorPresentation'
+import { decodeErrorPresentation } from '@mailcopilot/core'
+import { captureException } from '../sentry'
 
 export type UndoInfo = {
   accountId: number
@@ -153,7 +155,18 @@ export function useUndoSystem({
     // longer "about to disappear" — keeping suppression after `net:move`
     // would just add 10s of latency for no benefit.
     void window.api.invoke('net:move', info.accountId, info.folder, info.targetFolder, uids)
-      .catch(() => {})
+      // The flush paths (folder change, a second move, page teardown) have no
+      // undo bar left to attach a message to — the timer path shows one via
+      // `setError`. That is a reason not to interrupt the user here, not a
+      // reason to lose the fact: a move the user asked for silently failing is
+      // exactly what telemetry exists for. The console line carries the
+      // VERDICT, never the server's prose (§2.127 — console output is a Sentry
+      // breadcrumb source); `captureException` applies the same boundary to the
+      // exception itself (see src/sentry.ts).
+      .catch((e: unknown) => {
+        console.error('[undo-flush] deferred move failed:', decodeErrorPresentation(e))
+        captureException(e, { source: 'useUndoSystem.flushUndo' })
+      })
       .finally(() => {
         void window.api.invoke('net:move:pendingRemove', info.accountId, info.folder, uids).catch(() => {})
       })
@@ -292,6 +305,51 @@ export function useUndoSystem({
   useEffect(() => {
     return () => { flushUndo() }
   }, [currentFolder, flushUndo])
+
+  // Latest flush, readable from the mount-only listener below without
+  // re-subscribing on every render (`flushUndo` changes identity with `t`).
+  const flushUndoRef = useRef(flushUndo)
+  flushUndoRef.current = flushUndo
+
+  /**
+   * Issue the pending move when the PAGE goes away, not only when React
+   * unmounts.
+   *
+   * The 5s undo window is work this page owes the server, and the cleanup
+   * above only runs on unmount — which a closing window never performs, so
+   * quitting inside those 5s used to drop an archive/delete the user had
+   * already committed to. The main window's close paths are the ones Electron
+   * documents as running the DOM unload sequence: `app.quit()` "guarantees
+   * that all `beforeunload` and `unload` event handlers are correctly
+   * executed", and a window's `close` event "is emitted before the
+   * `beforeunload` and `unload` event of the DOM" (electron.d.ts). `pagehide`
+   * belongs to that sequence, and `flushUndo` writes the request before
+   * returning.
+   *
+   * WHAT THIS DOES NOT PROMISE. The documentation covers the dispatch of the
+   * event, not the fate of asynchronous work started from it: this listener
+   * can say the request was ISSUED, never that main executed it, and the
+   * `.catch` attached to it may not run at all once the page is gone. A
+   * renderer-initiated `window.close()` carries no unload promise whatsoever
+   * (see `handleTitlebarClose` in src/windows/MailWindow.tsx, where an e2e run
+   * showed exactly that), so nothing may be added here that a user-visible
+   * guarantee depends on — a close performed by our own code must commit
+   * before closing, not from inside the teardown.
+   *
+   * `pagehide`, not `visibilitychange`: minimising or hiding an Electron window
+   * flips `document.visibilityState`, and committing there would silently spend
+   * the undo window. Close-to-tray does not unload the page at all (main calls
+   * `event.preventDefault()` + `win.hide()`), so the timer simply keeps
+   * running — nothing to commit early.
+   *
+   * `flushUndo` is idempotent (it nulls `undoInfoRef` before issuing any IPC),
+   * so pagehide + the cleanup above + the 5s timer cannot move a message twice.
+   */
+  useEffect(() => {
+    const commit = () => { flushUndoRef.current() }
+    window.addEventListener('pagehide', commit)
+    return () => { window.removeEventListener('pagehide', commit) }
+  }, [])
 
   return {
     undoInfo,

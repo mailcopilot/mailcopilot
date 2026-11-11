@@ -28,6 +28,8 @@ Haz clic en **Adjuntar** o arrastra archivos. Maximo: 25 MB por archivo.
 
 Responder (**r**), Responder a todos (**a**), Reenviar (**f**).
 
+Las respuestas (Responder y Responder a todos) llevan las cabeceras estándar `In-Reply-To` y `References`, que apuntan al mensaje al que respondes; así el cliente de correo del destinatario coloca tu respuesta en la misma conversación en lugar de iniciar una nueva. Los reenvíos no las llevan. Si el mensaje original no tiene cabecera `Message-ID` o ya no está en la caché local, la respuesta se envía igualmente, solo que sin estas cabeceras. Elegir otro remitente en la ventana de redacción no cambia a qué estás respondiendo, así que las cabeceras se mantienen. Una respuesta guardada como borrador también las conserva: el borrador guarda `In-Reply-To` y `References`, y al reabrirlo desde **Borradores** y enviarlo se agrupa igual en la conversación mientras el mensaje original siga en la caché local.
+
 ## Borradores
 
 Guardado automatico local y en la carpeta de Borradores IMAP.

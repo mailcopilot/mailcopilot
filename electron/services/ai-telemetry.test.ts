@@ -180,6 +180,15 @@ function parseToolResult(raw: string): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * A canonical UTC instant a week ahead of the test's own clock. The
+ * scheduling preview tools refuse an instant that is not strictly in the
+ * future, so a hard-coded literal expires as the clock passes it.
+ */
+function futureIso(offsetMs = 7 * 24 * 60 * 60 * 1000): string {
+  return new Date(Date.now() + offsetMs).toISOString()
+}
+
 describe('§2.20 PR1 — telemetry helpers (ai.ts)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -244,7 +253,7 @@ describe('§2.20 PR1 — telemetry helpers (ai.ts)', () => {
 
     it('preview_snooze_email — empty uids array', async () => {
       const handler = getToolHandler('preview_snooze_email')
-      await handler({ accountId: 1, folder: 'INBOX', uids: [], wakeAt: '2026-06-01T09:00:00Z' })
+      await handler({ accountId: 1, folder: 'INBOX', uids: [], wakeAt: futureIso() })
 
       expect(recordEventMock).toHaveBeenCalledWith(
         'ai.action.preview_skipped',
@@ -285,7 +294,7 @@ describe('§2.20 PR1 — telemetry helpers (ai.ts)', () => {
     it('does NOT fire when preview has non-empty results (preview registered)', async () => {
       // Snooze with actual uids should register, not skip.
       const handler = getToolHandler('preview_snooze_email')
-      await handler({ accountId: 1, folder: 'INBOX', uids: [10], wakeAt: '2026-06-01T09:00:00Z' })
+      await handler({ accountId: 1, folder: 'INBOX', uids: [10], wakeAt: futureIso() })
 
       const skippedCalls = recordEventMock.mock.calls.filter(
         (c: unknown[]) => c[0] === 'ai.action.preview_skipped',

@@ -34,7 +34,7 @@ vi.mock('../metrics', () => ({
 // §2.20 PR1-B — summarizePending now resolves account email via listAccounts.
 // We mock the net/config import surface so the accounts store doesn't need
 // to load (which would pull in better-sqlite3 indirectly via packages/db).
-const listAccountsMock = vi.hoisted(() => vi.fn(() => [] as { id: number; email?: string }[]))
+const listAccountsMock = vi.hoisted(() => vi.fn(() => [] as Array<{ id: number; email?: string; name?: string; imap?: { user?: string }; smtp?: { user?: string }; identities?: Array<{ email: string; isDefault: boolean }> }>))
 vi.mock('../../packages/net/config', () => ({
   listAccounts: listAccountsMock,
 }))
@@ -354,6 +354,36 @@ describe('aiPendingActions registry', () => {
         const summary = summarizePending(lookupPendingAction(id)!)
         expect(summary.accountId).toBe(1)
         expect(summary.accountEmail).toBe('sergey@reg.ru')
+      })
+
+      it('a LIVE mailbox without an `email` field (Outlook and Google sign-in records carry none) is named by its login, never reported as missing', () => {
+        listAccountsMock.mockReturnValue([
+          { id: 2, imap: { user: 'user@outlook.com' }, smtp: { user: 'user@outlook.com' } },
+          { id: 3, name: 'Work', imap: { user: '' } },
+          { id: 4, imap: { user: 'imap@x.test' }, identities: [{ email: 'alias@x.test', isDefault: false }, { email: 'main@x.test', isDefault: true }] },
+        ])
+        const summaryFor = (accountId: number) => summarizePending(lookupPendingAction(registerPendingAction({
+          kind: 'send_email', data: { accountId, to: 'x@y.z', subject: 's', body: 'b' },
+        }))!)
+        expect(summaryFor(2).accountEmail).toBe('user@outlook.com')
+        expect(summaryFor(3).accountEmail).toBe('Work')
+        expect(summaryFor(4).accountEmail).toBe('main@x.test')
+      })
+
+      it('names every live mailbox of a cross-account batch, and only a mailbox that is gone has no label', () => {
+        listAccountsMock.mockReturnValue([{ id: 1, imap: { user: 'a@x.test' } }, { id: 2, email: 'b@x.test' }])
+        const id = registerPendingAction({
+          kind: 'mail_action',
+          data: {
+            action: 'archive',
+            accountId: 1,
+            fromFolder: 'INBOX',
+            refs: [{ accountId: 1, folder: 'INBOX', uid: 1 }, { accountId: 2, folder: 'INBOX', uid: 1 }, { accountId: 9, folder: 'INBOX', uid: 1 }],
+            accountIds: [1, 2, 9],
+          },
+        })
+        const slots = summarizePending(lookupPendingAction(id)!).accountSlots ?? []
+        expect(slots.map(sl => sl.email)).toEqual(['a@x.test', 'b@x.test', null])
       })
 
       it('returns accountEmail=null when account is missing from listAccounts (deleted between preview and summary)', () => {

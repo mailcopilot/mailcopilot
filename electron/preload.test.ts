@@ -84,6 +84,42 @@ describe('preload whitelist', () => {
   })
 })
 
+describe.each(['ai:resolveCitations', 'ai:openCitation'])('%s (§3.3 B3)', (channel) => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('is an invoke channel and forwards its payload to main unchanged', async () => {
+    const api = await loadPreload()
+    const req = { sessionId: 's1', tokens: ['k3f2x7ab'], token: 'k3f2x7ab' }
+    await api.invoke(channel, req)
+    expect(h.ipcRenderer.invoke).toHaveBeenCalledWith(channel, req)
+  })
+
+  it('is not a listen channel (request/response only)', async () => {
+    const api = await loadPreload()
+    expect(() => api.on(channel, () => {})).toThrow(/not allowed/)
+  })
+})
+
+it('the earlier resolve-by-place channel is gone', async () => {
+  const api = await loadPreload()
+  expect(() => api.invoke('ai:resolveSource')).toThrow(/not allowed/)
+})
+
+describe('removed Ask AI channels', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it.each(['ai:ask:create', 'ai:ask:question', 'ai:ask:cancel', 'ai:ask:dispose', 'ai:ask:openSource'])('refuses to invoke %s', async channel => {
+    const api = await loadPreload()
+    expect(() => api.invoke(channel, {})).toThrow(/not allowed/)
+    expect(h.ipcRenderer.invoke).not.toHaveBeenCalled()
+  })
+
+  it('refuses to listen on the removed event channel', async () => {
+    const api = await loadPreload()
+    expect(() => api.on('ai:ask:event', () => {})).toThrow(/not allowed/)
+  })
+})
+
 describe('mail:openRef replay-on-subscribe (review M1)', () => {
   beforeEach(() => { vi.clearAllMocks() })
 

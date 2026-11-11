@@ -139,6 +139,15 @@ function parseResult(text: string): Record<string, unknown> {
   return JSON.parse(cleaned)
 }
 
+/**
+ * A canonical UTC instant a week ahead of the test's own clock. The
+ * scheduling preview tools refuse an instant that is not strictly in the
+ * future, so a hard-coded literal expires as the clock passes it.
+ */
+function futureIso(offsetMs = 7 * 24 * 60 * 60 * 1000): string {
+  return new Date(Date.now() + offsetMs).toISOString()
+}
+
 describe('§3.10 P0 — prompt-injection regression', () => {
   beforeEach(() => {
     clearPendingPreviews()
@@ -168,7 +177,7 @@ describe('§3.10 P0 — prompt-injection regression', () => {
     // The AI legitimately calls preview_* (the email content told it to),
     // but then tries to skip the user-confirmation step.
     const previewHandler = getToolHandler('preview_snooze_email')
-    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: '2026-04-30T09:00:00Z' })
+    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: futureIso() })
     const { previewId } = parseResult(previewRes.content[0].text) as { previewId: string }
 
     const apply = getToolHandler('apply_snooze_email')
@@ -195,7 +204,7 @@ describe('§3.10 P0 — prompt-injection regression', () => {
 
     const cases: Array<{ tool: string; previewArgs: Record<string, unknown> }> = [
       { tool: 'flag_email', previewArgs: { accountId: 1, folder: 'INBOX', uids: [1], flagged: true } },
-      { tool: 'add_followup', previewArgs: { accountId: 1, folder: 'INBOX', uid: 1, toAddr: 'a@b.c', remindAt: '2026-04-30T09:00:00Z' } },
+      { tool: 'add_followup', previewArgs: { accountId: 1, folder: 'INBOX', uid: 1, toAddr: 'a@b.c', remindAt: futureIso() } },
       { tool: 'mark_read_later', previewArgs: { accountId: 1, folder: 'INBOX', uids: [1], add: true } },
     ]
 
@@ -240,7 +249,7 @@ describe('§3.10 P0 — prompt-injection regression', () => {
     setSnoozeCallback(cb as never)
 
     const previewHandler = getToolHandler('preview_snooze_email')
-    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: '2026-04-30T09:00:00Z' })
+    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: futureIso() })
     const { previewId } = parseResult(previewRes.content[0].text) as { previewId: string }
 
     // Simulate user click in the renderer: consumePendingAction issues token.
@@ -263,7 +272,7 @@ describe('§3.10 P0 — prompt-injection regression', () => {
   it('preview output before user click contains NO confirmation_token value', async () => {
     setSnoozeCallback(vi.fn() as never)
     const previewHandler = getToolHandler('preview_snooze_email')
-    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: '2026-04-30T09:00:00Z' })
+    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: futureIso() })
 
     // (1) preview tool's own response — must not leak a token *value*.
     // The `note:` text instructs the model to "call apply_X with previewId
@@ -302,7 +311,7 @@ describe('§3.10 P0 — prompt-injection regression', () => {
     setSnoozeCallback(cb as never)
 
     const previewHandler = getToolHandler('preview_snooze_email')
-    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: '2026-04-30T09:00:00Z' })
+    const previewRes = await previewHandler({ accountId: 1, folder: 'INBOX', uids: [42], wakeAt: futureIso() })
     const { previewId } = parseResult(previewRes.content[0].text) as { previewId: string }
     const { consumePendingAction } = await import('./aiPendingActions')
     const consumed = consumePendingAction(previewId)

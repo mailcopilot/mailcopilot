@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // electron-log pulls the Electron runtime; the module only needs a sink.
 vi.mock('../logger', () => ({
@@ -12,7 +12,14 @@ import {
   reportSanitizedNetError,
   classifyNetError,
   sanitizeNetErrorContext,
+  __resetNetErrorTelemetryRepeatGate,
 } from './netErrorTelemetry'
+import { imapAuthBackoffError } from '../../packages/net/authLoginLatch'
+
+// The repeat gate is process-wide by design (it throttles a repeating failure
+// across every caller). Reset it per test so one case cannot suppress another's
+// identical payload.
+beforeEach(() => { __resetNetErrorTelemetryRepeatGate() })
 
 /**
  * §2.82 iter4 (security finding 2) — the packages/net error seam is the PII
@@ -144,6 +151,130 @@ describe('reportSanitizedNetError — noise and robustness', () => {
     expect(() => reportSanitizedNetError('imap.idle', new Error('boom'), undefined, { capture: throwing })).not.toThrow()
     expect(() => reportSanitizedNetError('imap.idle', undefined, undefined, { capture: () => {} })).not.toThrow()
     expect(() => reportSanitizedNetError('imap.idle', 'a string failure', undefined, { capture: () => {} })).not.toThrow()
+  })
+})
+
+describe('reportSanitizedNetError — repeat gate', () => {
+  /** The failure a wrong password produces on the sync path, over and over. */
+  function authErr(): Error {
+    return Object.assign(new Error('Authentication failed'), { serverResponseCode: 'AUTHENTICATIONFAILED' })
+  }
+
+  it('transmits the first occurrence and drops identical repeats', () => {
+    const spy = captureSpy()
+    let now = 1_000_000
+    for (let i = 0; i < 50; i++) {
+      reportSanitizedNetError('imap.sync', authErr(), { provider: 'other' }, { capture: spy.capture, now: () => now })
+      now += 5_000
+    }
+    // 50 failures over ~4 minutes — one event, not fifty. This is the shape of
+    // the incident: 2060 identical captures from one mailbox in eight days.
+    expect(spy.calls).toHaveLength(1)
+    expect(spy.calls[0].context.error_class).toBe('auth')
+    expect(spy.calls[0].context.suppressed).toBe(0)
+  })
+
+  it('carries the number of suppressed repeats on the next transmitted event', () => {
+    // Suppression must not cost the FREQUENCY: a dropped event is not
+    // aggregated by Sentry, it never arrives, so the count travels with the
+    // next one that does.
+    const spy = captureSpy()
+    let now = 1_000_000
+    for (let i = 0; i <= 30; i++) {
+      reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now: () => now })
+      now += 10_000
+    }
+    expect(spy.calls).toHaveLength(2)
+    expect(spy.calls[0].context.suppressed).toBe(0)
+    // 31 reports, 10s apart: the 1st goes out, the 29 inside the 5-minute
+    // window are counted, and the one at t=300s carries their count.
+    expect(spy.calls[1].context.suppressed).toBe(29)
+    // The counter restarts after it has been reported.
+    now += 5 * 60 * 1000
+    reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now: () => now })
+    expect(spy.calls[2].context.suppressed).toBe(0)
+  })
+
+  it('never takes the suppressed count from a caller', () => {
+    const spy = captureSpy()
+    reportSanitizedNetError(
+      'imap.sync',
+      authErr(),
+      { suppressed: 9999 } as unknown as Record<string, string | number | boolean>,
+      { capture: spy.capture },
+    )
+    // `suppressed` is not in the context allowlist, so the caller's value is
+    // dropped like any other unknown key and ours is the one transmitted.
+    expect(spy.calls[0].context.suppressed).toBe(0)
+    expect(spy.calls[0].context.context_dropped).toBe(1)
+  })
+
+  it('never delays a different failure mode behind a repeating one', () => {
+    const spy = captureSpy()
+    const now = () => 1_000_000
+    reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now })
+    reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now })
+    // Different source, different class, different context — each is its own
+    // signature and each goes out immediately.
+    reportSanitizedNetError('imap.idle', authErr(), undefined, { capture: spy.capture, now })
+    reportSanitizedNetError('imap.sync', Object.assign(new Error('x'), { serverResponseCode: 'OVERQUOTA' }), undefined, { capture: spy.capture, now })
+    reportSanitizedNetError('imap.sync', authErr(), { provider: 'gmail' }, { capture: spy.capture, now })
+    expect(spy.calls).toHaveLength(4)
+  })
+
+  it('reopens after the window so a still-broken account stays visible', () => {
+    const spy = captureSpy()
+    let now = 1_000_000
+    reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now: () => now })
+    now += 5 * 60 * 1000 - 1
+    reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now: () => now })
+    expect(spy.calls).toHaveLength(1)
+    now += 1
+    reportSanitizedNetError('imap.sync', authErr(), undefined, { capture: spy.capture, now: () => now })
+    expect(spy.calls).toHaveLength(2)
+  })
+
+  it('classifies the connection boundary\'s own auth backoff refusal as auth', () => {
+    const spy = captureSpy()
+    const err = imapAuthBackoffError(7, 3_540_000)
+    expect(classifyNetError(err)).toBe('auth')
+    reportSanitizedNetError('imap.sync', err, undefined, { capture: spy.capture })
+    expect(spy.calls).toHaveLength(1)
+    // Still synthetic: the account id in the local message does not travel.
+    expect(serialize(spy.calls[0])).not.toContain('#7')
+  })
+
+  it('evicts the oldest signature once the bounded map exceeds its limit', () => {
+    // The gate is a Map with no TTL sweep — only a size cap (REPEAT_KEY_LIMIT
+    // = 50, insertion-ordered eviction of the oldest). Undetected by every
+    // case above, which uses at most a handful of distinct signatures: remove
+    // the `if (lastCaptured.size > REPEAT_KEY_LIMIT)` eviction block and this
+    // is the only assertion here that goes red — everything else keeps
+    // passing because an unbounded map behaves identically to a bounded one
+    // until it is actually filled past the bound.
+    const spy = captureSpy()
+    const now = () => 1_000_000
+    // 50 distinct signatures, `attempt` (an allowlisted numeric context key)
+    // as the discriminator — fills the map to exactly its cap.
+    for (let i = 0; i < 50; i++) {
+      reportSanitizedNetError('imap.sync', authErr(), { attempt: i }, { capture: spy.capture, now })
+    }
+    expect(spy.calls).toHaveLength(50)
+
+    // A 51st distinct signature must evict the OLDEST one (attempt=0) to stay
+    // within the cap.
+    reportSanitizedNetError('imap.sync', authErr(), { attempt: 50 }, { capture: spy.capture, now })
+    expect(spy.calls).toHaveLength(51)
+
+    // The evicted signature is no longer remembered, so — still well inside
+    // the 5-minute window — it transmits again as if it were new.
+    reportSanitizedNetError('imap.sync', authErr(), { attempt: 0 }, { capture: spy.capture, now })
+    expect(spy.calls).toHaveLength(52)
+
+    // A signature that was never evicted (attempt=49, inserted right before
+    // the one that triggered eviction) stays suppressed.
+    reportSanitizedNetError('imap.sync', authErr(), { attempt: 49 }, { capture: spy.capture, now })
+    expect(spy.calls).toHaveLength(52)
   })
 })
 

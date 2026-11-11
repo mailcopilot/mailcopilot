@@ -2,7 +2,7 @@ import Database from 'better-sqlite3'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
-import { createHash, randomUUID, X509Certificate } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, X509Certificate } from 'node:crypto'
 import { isAdvancedSearch, parseSearchQuery } from './searchParser'
 import { withDbSpan, reportDbEvent, reportDbError } from './telemetry'
 import { installSqlTiming } from './sqlTiming'
@@ -20,6 +20,9 @@ import {
   AI_RULE_ENABLED_LIMIT_ERROR,
   findEncodedMailRuleRefusal,
   mailRuleRefusalError,
+  normalizeSourceMessageId,
+  CITATION_ALPHABET,
+  CITATION_TOKEN_LENGTH,
   type AiRuleEnabledScope,
 } from '../core'
 // electron/metricsBuckets.ts is intentionally zero-dep (no Sentry / electron-log /
@@ -412,9 +415,25 @@ CREATE TABLE IF NOT EXISTS ai_messages(
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   cost_usd REAL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  cite_v INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_ai_messages_session ON ai_messages(session_id, id);
+
+-- Citation tickets (§3.3 B3): main issues one per message row a mail tool hands the model, and the model only
+-- repeats it as mailref://c/<token>. A link is a source only if its ticket is registered for THIS session.
+CREATE TABLE IF NOT EXISTS ai_citations(
+  session_id TEXT NOT NULL REFERENCES ai_sessions(id) ON DELETE CASCADE,
+  token TEXT NOT NULL,
+  account_id INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  folder TEXT NOT NULL,
+  uid INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(session_id, token)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_citations_row ON ai_citations(session_id, account_id, folder, uid, message_id);
+CREATE INDEX IF NOT EXISTS idx_ai_citations_account ON ai_citations(account_id);
 `)
 
 // --- AI / MCP audit log (§3.10 P0) ---
@@ -1207,6 +1226,11 @@ function markSchemaMigrationApplied(name: string): void {
 }
 
 // --- Migrations (must be idempotent) ---
+// Which answers carry citation tickets. Main writes 1 on every new assistant answer; NULL = an answer saved before
+// tickets existed (and user messages): its links work by place, as before.
+if (!hasColumn('ai_messages', 'cite_v')) {
+  db.exec(`ALTER TABLE ai_messages ADD COLUMN cite_v INTEGER`)
+}
 if (!hasColumn('messages', 'from_name')) {
   db.exec(`ALTER TABLE messages ADD COLUMN from_name TEXT`)
 }
@@ -1276,6 +1300,8 @@ if (!hasColumn('messages', 'message_size')) {
 if (!hasColumn('messages', 'message_id')) {
   db.exec(`ALTER TABLE messages ADD COLUMN message_id TEXT`)
 }
+// Finding a message by its Message-ID inside one account (a confirmed chat source whose message was moved).
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_account_message_id ON messages(account_id, message_id)`)
 if (!hasColumn('messages', 'in_reply_to')) {
   db.exec(`ALTER TABLE messages ADD COLUMN in_reply_to TEXT`)
 }
@@ -4053,6 +4079,8 @@ export function deleteAccountData(accountId: number) {
     // summaries above, and the same privacy reason: a stored translation is
     // derived email content and must not outlive the account it came from.
     db.prepare(`DELETE FROM ai_translations WHERE account_id=?`).run(String(id))
+    // Citation tickets that point into the account: a ticket is a pointer to a message of this mailbox.
+    db.prepare(`DELETE FROM ai_citations WHERE account_id=?`).run(id)
   })()
 }
 
@@ -5581,7 +5609,13 @@ export type AiMessageRow = {
   content: string
   costUsd: number | null
   createdAt: string
+  /** 1 = an answer written with citation tickets (main marks every new answer); `null` = older answer or user message. */
+  citationVersion: number | null
 }
+
+/** Most tickets one `listAiCitations` call reads. */
+const AI_CITATIONS_READ_MAX = 100
+const CITATION_VERSION = 1
 
 function rowToAiSession(r: Record<string, unknown>): AiSessionRow {
   return {
@@ -5602,6 +5636,7 @@ function rowToAiMessage(r: Record<string, unknown>): AiMessageRow {
     content: (r.content as string) ?? '',
     costUsd: typeof r.cost_usd === 'number' ? r.cost_usd : null,
     createdAt: r.created_at as string,
+    citationVersion: typeof r.cite_v === 'number' ? r.cite_v : null,
   }
 }
 
@@ -5653,7 +5688,12 @@ export function deleteAllAiSessions(): number {
   return db.prepare(`DELETE FROM ai_sessions WHERE id != ?`).run(AI_COST_LEDGER_SESSION_ID).changes
 }
 
-export function insertAiMessage(sessionId: string, role: 'user' | 'assistant', content: string, costUsd?: number | null): AiMessageRow {
+export function insertAiMessage(
+  sessionId: string,
+  role: 'user' | 'assistant',
+  content: string,
+  costUsd?: number | null,
+): AiMessageRow {
   const now = new Date().toISOString()
   // cost_usd feeds sumAiCostSince/checkBudgetLimits (the budget cap). The
   // aiSession:addMessage IPC lets a renderer supply an arbitrary costUsd, and a
@@ -5664,9 +5704,124 @@ export function insertAiMessage(sessionId: string, role: 'user' | 'assistant', c
   // so a plain chat message with no metering stays cost-less as before; the
   // security-relevant case (finite non-positive) collapses to no budget effect.
   const safeCost = typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd > 0 ? costUsd : null
-  const res = db.prepare(`INSERT INTO ai_messages(session_id, role, content, cost_usd, created_at) VALUES(?, ?, ?, ?, ?)`).run(sessionId, role, content, safeCost, now)
+  // Main marks every new assistant answer as written with tickets; the renderer has no say in it.
+  const citeV = role === 'assistant' ? CITATION_VERSION : null
+  const res = db.prepare(`INSERT INTO ai_messages(session_id, role, content, cost_usd, created_at, cite_v) VALUES(?, ?, ?, ?, ?, ?)`).run(sessionId, role, content, safeCost, now, citeV)
   db.prepare(`UPDATE ai_sessions SET updated_at=? WHERE id=?`).run(now, sessionId)
-  return { id: Number(res.lastInsertRowid), sessionId, role, content, costUsd: safeCost, createdAt: now }
+  return { id: Number(res.lastInsertRowid), sessionId, role, content, costUsd: safeCost, createdAt: now, citationVersion: citeV }
+}
+
+// --- Citation tickets ---
+
+/** 8 random characters (40 bits) from the 32-symbol alphabet; each byte contributes 5 bits (256 is divisible by 32: no bias). */
+function newCitationToken(): string {
+  const bytes = randomBytes(CITATION_TOKEN_LENGTH)
+  let out = ''
+  for (let i = 0; i < CITATION_TOKEN_LENGTH; i++) out += CITATION_ALPHABET[bytes[i]! & 31]
+  return out
+}
+
+export type AiCitationInput = {
+  accountId: number
+  folder: string
+  uid: number
+  messageId: string | null | undefined
+}
+
+export type AiCitationRow = {
+  token: string
+  accountId: number
+  folder: string
+  uid: number
+  messageId: string
+}
+
+function rowToCitation(r: Record<string, unknown>): AiCitationRow {
+  return {
+    token: r.token as string,
+    accountId: r.account_id as number,
+    folder: r.folder as string,
+    uid: r.uid as number,
+    messageId: r.message_id as string,
+  }
+}
+
+/**
+ * Issue (or return the existing) citation ticket of a message row a tool is handing to the model in this session.
+ * `null` = no ticket: the message has no usable Message-ID (opening is by Message-ID, so there would be nothing to
+ * open), the session does not exist, or the row is malformed. The same row in the same session always gets the same
+ * ticket, so a re-read or a cached tool result cannot fork it.
+ */
+export function mintAiCitation(sessionId: string, input: AiCitationInput): string | null {
+  const messageId = normalizeSourceMessageId(input.messageId)
+  if (!messageId) return null
+  if (!Number.isSafeInteger(input.accountId) || input.accountId <= 0) return null
+  if (!Number.isSafeInteger(input.uid) || input.uid <= 0) return null
+  if (typeof input.folder !== 'string' || !input.folder.trim()) return null
+  if (typeof sessionId !== 'string' || !sessionId) return null
+  // The hidden cost-ledger session is bookkeeping that "delete all chats" keeps: nothing else may live in it.
+  if (sessionId === AI_COST_LEDGER_SESSION_ID) return null
+  try {
+    const existing = db.prepare(
+      `SELECT token FROM ai_citations WHERE session_id=? AND account_id=? AND folder=? AND uid=? AND message_id=?`,
+    ).get(sessionId, input.accountId, input.folder, input.uid, messageId) as { token: string } | undefined
+    if (existing) return existing.token
+    if (!db.prepare(`SELECT 1 FROM ai_sessions WHERE id=?`).get(sessionId)) return null
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const token = newCitationToken()
+      const res = db.prepare(
+        `INSERT OR IGNORE INTO ai_citations(session_id, token, account_id, message_id, folder, uid, created_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      ).run(sessionId, token, input.accountId, messageId, input.folder, input.uid, new Date().toISOString())
+      if (res.changes > 0) return token
+    }
+    return null
+  } catch (err) {
+    // Counters only: no ticket, Message-ID or folder name goes into a report.
+    reportDbError('db.mint_ai_citation', err, {})
+    return null
+  }
+}
+
+export function getAiCitation(sessionId: string, token: string): AiCitationRow | undefined {
+  const row = db.prepare(`SELECT * FROM ai_citations WHERE session_id=? AND token=?`).get(sessionId, token) as Record<string, unknown> | undefined
+  return row ? rowToCitation(row) : undefined
+}
+
+/** The registered tickets of `tokens` in this session (unknown ones are simply absent); at most 100 per call. */
+export function listAiCitations(sessionId: string, tokens: readonly string[]): AiCitationRow[] {
+  const wanted = tokens.slice(0, AI_CITATIONS_READ_MAX)
+  if (wanted.length === 0) return []
+  const marks = wanted.map(() => '?').join(',')
+  const rows = db.prepare(`SELECT * FROM ai_citations WHERE session_id=? AND token IN (${marks})`).all(sessionId, ...wanted) as Record<string, unknown>[]
+  return rows.map(rowToCitation)
+}
+
+/** Where a confirmed source's message lives now, and what to call it. */
+export type ResolvedSourceMessage = { folder: string; uid: number; subject: string; from: string; date: string }
+
+/**
+ * The message a confirmed source MEANT (§3.3 B3). A confirmed source is a place `(account, folder, uid)` plus the
+ * `Message-ID` it had when it was confirmed. The place can come to hold another message (the server renumbered
+ * the folder, the mailbox was re-pointed and re-synced), so the Message-ID decides, in this order:
+ *  1. the message at that very place, when it still has that Message-ID;
+ *  2. else a message of the SAME account with that Message-ID (it was moved to another folder), the same folder
+ *     preferred;
+ *  3. else `undefined`: the message is not here, and nothing else may be opened in its stead.
+ * An account number is never reused, so "the same account" is the same mailbox for the life of the profile.
+ */
+export function findMessageForSource(accountId: number, folder: string, uid: number, messageId: string): ResolvedSourceMessage | undefined {
+  const wanted = messageId.trim()
+  if (!wanted) return undefined
+  const row = db.prepare(
+    `SELECT folder_path AS folder, uid, subject, COALESCE(NULLIF(TRIM(from_name), ''), from_addr) AS "from", date
+       FROM messages
+      WHERE account_id = ? AND message_id = ?
+      ORDER BY (folder_path = ? AND uid = ?) DESC, (folder_path = ?) DESC, uid ASC
+      LIMIT 1`,
+  ).get(accountId, wanted, folder, uid, folder) as { folder: string; uid: number; subject: string | null; from: string | null; date: string | null } | undefined
+  if (!row) return undefined
+  return { folder: row.folder, uid: row.uid, subject: row.subject ?? '', from: row.from ?? '', date: row.date ?? '' }
 }
 
 export function listAiMessages(sessionId: string): AiMessageRow[] {
@@ -5799,6 +5954,7 @@ export function recordAiCost(
     content,
     costUsd: safeCost,
     createdAt: now,
+    citationVersion: null,
   }
 }
 
@@ -6432,13 +6588,16 @@ export function getThreadSummary(accountId: string, threadHash: string): ThreadS
  * retired by a contract bump age out through this ceiling rather than through a
  * sweep.
  *
- * Sized for the working set a person actually revisits — a few hundred messages
- * — not for "keep everything ever translated". Each row is one translated
- * message body, so the cost of the ceiling is roughly a few megabytes per
- * account in the worst case, and the cost of exceeding it would be a table that
- * only ever grows (§2.68).
+ * Sized for the working set a person actually revisits — a couple of hundred
+ * messages — not for "keep everything ever translated". It was 500 when a row
+ * held at most one request's output (3000 characters of source, about 1.5 MB per
+ * account in the worst case). A long message is now translated in pieces up to
+ * 60 000 characters and stored whole, so one row can be twenty times larger:
+ * 500 rows would reach tens of megabytes per account, and 200 keeps the worst
+ * case near the old order of magnitude. The cost of exceeding the ceiling would
+ * be a table that only ever grows (§2.68).
  */
-export const AI_TRANSLATIONS_MAX_ROWS_PER_ACCOUNT = 500
+export const AI_TRANSLATIONS_MAX_ROWS_PER_ACCOUNT = 200
 
 /** Decoded cache row for one translated message body. */
 export type AiTranslationRow = {

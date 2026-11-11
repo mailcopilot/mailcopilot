@@ -11,6 +11,7 @@ import { ERROR_PRESENTATION_KEYS } from '@mailcopilot/core'
 import {
   TranslatedError,
   presentedError,
+  presentedTaggedText,
   readIpcFailureTag,
   isIpcFailureNoise,
   ipcFailureLabel,
@@ -140,7 +141,7 @@ describe('readIpcFailureTag', () => {
   it.each([
     ['offline', "Error invoking remote method 'net:inboxSummaries': Error: [mcerr:offline] AggregateError"],
     ['timeout', "Error invoking remote method 'sync:run': Error: [mcerr:timeout] ETIMEDOUT"],
-    ['unknown', "Error invoking remote method 'ai:ask': Error: [mcerr:unknown] weird"],
+    ['unknown', "Error invoking remote method 'ai:chat': Error: [mcerr:unknown] weird"],
   ])('recognises the %s verdict', (key, message) => {
     expect(readIpcFailureTag(new Error(message))?.key).toBe(key)
   })
@@ -214,6 +215,10 @@ describe('isIpcFailureNoise / ipcFailureLabel', () => {
   it('classifies network state as noise and app failures as reportable', () => {
     expect(isIpcFailureNoise({ key: 'offline', channel: null })).toBe(true)
     expect(isIpcFailureNoise({ key: 'timeout', channel: null })).toBe(true)
+    expect(isIpcFailureNoise({ key: 'pre_greeting', channel: null })).toBe(true)
+    expect(isIpcFailureNoise({ key: 'delivery_unknown', channel: null })).toBe(true)
+    // A refused STARTTLS is a server/config property the user must fix, not network weather.
+    expect(isIpcFailureNoise({ key: 'starttls_required', channel: null })).toBe(false)
     expect(isIpcFailureNoise({ key: 'auth', channel: null })).toBe(false)
     expect(isIpcFailureNoise({ key: 'unknown', channel: null })).toBe(false)
   })
@@ -221,5 +226,38 @@ describe('isIpcFailureNoise / ipcFailureLabel', () => {
   it('builds the label from the closed set only', () => {
     expect(ipcFailureLabel({ key: 'auth', channel: 'net:trustCert' })).toBe('ipc_net:trustCert_auth')
     expect(ipcFailureLabel({ key: 'unknown', channel: null })).toBe('ipc_unknown_unknown')
+  })
+})
+
+describe('presentedTaggedText', () => {
+  it.each([
+    ['pre_greeting', '[mcerr:pre_greeting] Error: connect ENETUNREACH 2001:db8::1:587'],
+    ['delivery_unknown', '[mcerr:delivery_unknown] Error: Connection closed unexpectedly'],
+    ['starttls_required', '[mcerr:starttls_required] ERR_STARTTLS_REQUIRED: the server does not offer an encrypted connection'],
+    ['offline', '[mcerr:offline] AggregateError'],
+    ['auth', '[mcerr:auth] 535 Bad credentials'],
+  ])('shows the translated sentence for a leading %s tag, not the raw text after it', (bucket, text) => {
+    const shown = presentedTaggedText(t, text)
+    expect(shown).toBe(`<app.errors.presented.${bucket}>`)
+    expect(shown).not.toContain('mcerr')
+  })
+
+  it('returns untagged server text unchanged (a 5xx refusal reason is what the user needs)', () => {
+    expect(presentedTaggedText(t, '550 no such user')).toBe('550 no such user')
+  })
+
+  it('does not honour a tag that is not in the leading position', () => {
+    const text = '550 rejected: see [mcerr:pre_greeting] in the manual'
+    expect(presentedTaggedText(t, text)).toBe(text)
+  })
+
+  it('returns an empty string unchanged', () => {
+    expect(presentedTaggedText(t, '')).toBe('')
+  })
+
+  it('collapses an unknown tag key to the generic sentence instead of echoing the text', () => {
+    expect(presentedTaggedText(t, '[mcerr:bogus] 535 authentication failed')).toBe(
+      '<app.errors.presented.unknown>',
+    )
   })
 })

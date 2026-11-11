@@ -246,6 +246,14 @@ function presetForDomain(domain: string): AutoconfigResult | null {
   return { ...cfg, source: 'preset' }
 }
 
+/** The `gmail.com` preset on its own, for a user who chose the Gmail card: the
+ *  choice names the servers, whatever domain their address is on (Workspace). */
+export function gmailPresetAutoconfig(): AutoconfigResult {
+  const preset = presetForDomain('gmail.com')
+  if (!preset) throw new Error('gmail.com preset is missing')
+  return preset
+}
+
 export async function autoconfig(email: string): Promise<AutoconfigResult | null> {
   return autoconfigWithDeps(email, {
     fetch: globalThis.fetch.bind(globalThis),

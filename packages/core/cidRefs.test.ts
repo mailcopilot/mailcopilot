@@ -155,6 +155,33 @@ describe('extractImageSrcCids', () => {
       .toEqual(['real@x'])
   })
 
+  it('ends an ignored region at an end tag that carries junk, as a parser does', () => {
+    // `</script bar>` and `</script\t\n bar>` close a script element in an HTML
+    // parser (the end tag name is followed by whitespace and ignored attributes),
+    // so the image after it is a real image. Not closing here would swallow the
+    // image into the "unterminated region" and drop its cid.
+    expect(extractImageSrcCids('<script>x</script bar><img src="cid:real@x">')).toEqual(['real@x'])
+    expect(extractImageSrcCids('<script>x</script\t\n bar><img src="cid:real@x">')).toEqual(['real@x'])
+    expect(extractImageSrcCids('<style>p{}</style x><img src="cid:real@x">')).toEqual(['real@x'])
+    expect(extractImageSrcCids('<script>x</script/><img src="cid:real@x">')).toEqual(['real@x'])
+    // A longer name is a different element's end tag and does not close it.
+    expect(extractImageSrcCids('<script>x</scriptx><img src="cid:victim@x">')).toEqual([])
+    // The end tag runs to the first `>`, so here it swallows the opening of the
+    // image and the image is not read either.
+    expect(extractImageSrcCids('<script>x</script bar <img src="cid:victim@x">')).toEqual([])
+  })
+
+  it('stays fast on many openers whose end tags never reach a closing bracket', () => {
+    // Without an end-of-input alternative each opener rescans every later
+    // `</script ` to the end of the input: cubic. The cid mention comes FIRST
+    // (the scan returns early without one) so that no `>` follows the junk end
+    // tags and lets them finish.
+    const hostile = '<img src="cid:real@x">' + '<script </script '.repeat(1000)
+    const started = Date.now()
+    expect(extractImageSrcCids(hostile)).toEqual(['real@x'])
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
   it('does not read an <img> written inside another element attribute', () => {
     // A parser sees one <p> with a title, not an image.
     expect(extractImageSrcCids(`<p title="<img src=cid:victim@x>">text</p>`)).toEqual([])

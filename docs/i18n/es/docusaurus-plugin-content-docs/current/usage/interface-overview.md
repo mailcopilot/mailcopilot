@@ -76,7 +76,7 @@ La barra de estado permanece visible siempre que haya trabajo de sincronizacion 
 Un icono de campana en el encabezado de la lista de mensajes abre el centro de notificaciones. Agrupa dos tipos de notificaciones:
 
 - **Recordatorios de seguimiento**: cuando un seguimiento que estableciste sobre un mensaje enviado vence (consulta [Redactar correos](./composing-emails) para mas detalles).
-- **Fallos de envio**: cuando un mensaje en la cola de envio se rinde tras errores de entrega permanentes (SMTP o, en cuentas Outlook, Microsoft Graph).
+- **Fallos de envio**: cuando un mensaje en la cola de envio se rinde tras errores de entrega permanentes (SMTP o, en cuentas Outlook, Microsoft Graph) o cuando no se pudo confirmar el resultado de la entrega.
 
 La campana muestra un pequeno distintivo con el numero de notificaciones nuevas. Pulsa la campana para abrir el panel desplegable: alli puedes leer cada notificacion, marcarla como leida, marcarlas todas como leidas a la vez, o eliminar entradas individuales. Las notificaciones se almacenan localmente en el cache SQLite, por lo que sobreviven al reinicio de la aplicacion; las entradas de mas de 30 dias se purgan automaticamente.
 

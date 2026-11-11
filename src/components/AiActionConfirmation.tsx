@@ -39,8 +39,45 @@ export type PendingActionSummary = {
   folderBreakdown?: { accountId: number; folder: string; count: number }[]
   emailCount: number | null
   folder: string | null
+  /**
+   * Canonical UTC instant a scheduling action is set for (`snooze_email`,
+   * `add_followup`); absent for every other kind. It is the exact string the
+   * apply will write, so what the user confirms and what is stored cannot
+   * drift apart.
+   */
+  scheduledAt?: string
   createdAt: number
   confirmed?: boolean
+}
+
+/** Kinds whose localized verb interpolates `{{when}}` and is therefore only
+ *  usable once `scheduledAt` has resolved to a displayable instant. */
+const KINDS_REQUIRING_WHEN = new Set(['snooze_email', 'add_followup'])
+
+/**
+ * Render a scheduled instant in the viewer's own zone.
+ *
+ * Same call as the two places that already print an instant in this app
+ * (`AiPanel` session timestamps, `NotificationCenter` follow-up times), so a
+ * follow-up reads the same here and in the notification it later produces.
+ *
+ * No `timeZone` option is passed: the value is always canonical UTC minted by
+ * `normalizeScheduleInstant`, and the viewer's zone is what the user cares
+ * about. That also keeps the §2.27 hazard out of reach — the RangeError there
+ * comes from feeding Intl a non-IANA zone label, and we never name a zone.
+ * An unparseable value degrades to the raw string rather than to nothing:
+ * showing the ISO text is worse than a formatted date and far better than
+ * confirming an action with no time at all.
+ */
+function formatScheduledAt(iso: string | undefined): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  try {
+    return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return iso
+  }
 }
 
 export type AiActionConfirmationProps = {
@@ -63,9 +100,16 @@ export type AiActionConfirmationProps = {
  */
 function useKindLabel(summary: PendingActionSummary): string {
   const { t, i18n } = useTranslation()
+  const when = formatScheduledAt(summary.scheduledAt)
   const tryKey = (key: string): string | null => {
-    if (i18n.exists(key)) return t(key)
-    return null
+    if (!i18n.exists(key)) return null
+    // A scheduling verb carries `{{when}}`. Without an instant to put there
+    // the key would render its own placeholder, so we decline it and let the
+    // chain fall through to `description`, which spells the instant out in
+    // full. Either way the user never confirms a scheduling action without
+    // seeing the time it is set for.
+    if (KINDS_REQUIRING_WHEN.has(summary.kind) && when === null) return null
+    return when !== null ? t(key, { when }) : t(key)
   }
   return tryKey(summary.i18nKey)
     ?? tryKey(`ai.confirmation.kinds.${summary.kind}`)
@@ -114,7 +158,7 @@ function FolderBreakdownMeta({
               : undefined
           const accountLabel = accountSlot
             ? (accountSlot.email ??
-                t('ai.confirmation.accountFallback', { accountId: accountSlot.accountId }))
+                t('ai.confirmation.accountFallback'))
             : null
           const folderLabel = accountLabel
             ? `${accountLabel}: ${br.folder} (${br.count})`
@@ -180,7 +224,7 @@ export default function AiActionConfirmation({ summary, onApply, onCancel }: AiA
                 {' '}({summary.accountSlots.map((slot) =>
                   slot.email !== null
                     ? slot.email
-                    : t('ai.confirmation.accountFallback', { accountId: slot.accountId })
+                    : t('ai.confirmation.accountFallback')
                 ).join(', ')})
               </span>
             )}
@@ -191,7 +235,7 @@ export default function AiActionConfirmation({ summary, onApply, onCancel }: AiA
           </span>
         ) : summary.accountId !== null ? (
           <span className="ai-action-confirmation-meta-item">
-            {t('ai.confirmation.accountFallback', { accountId: summary.accountId })}
+            {t('ai.confirmation.accountFallback')}
           </span>
         ) : null}
         {summary.folder && (

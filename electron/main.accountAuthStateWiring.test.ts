@@ -3,9 +3,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import * as ts from 'typescript'
 
-// The behavioural mirror at the bottom of this file instantiates the REAL
+// The behavioural section at the bottom of this file instantiates the REAL
 // account-auth-state service, which pulls the main-process logger, Sentry and
-// metrics into the graph. Stubbed so the mirror exercises state transitions
+// metrics into the graph. Stubbed so it exercises state transitions
 // only. The source-text assertions above are unaffected — they read main.ts
 // from disk.
 vi.mock('./logger', () => ({
@@ -15,6 +15,7 @@ vi.mock('./sentry', () => ({ captureException: vi.fn() }))
 vi.mock('./metrics', () => ({ recordEvent: vi.fn() }))
 
 import { initAccountAuthState, type AccountAuthStatePayload } from './services/accountAuthState'
+import { removeAccount, type AccountRemovalDeps } from './services/accountRemoval'
 
 /**
  * electron/main.accountAuthStateWiring.test.ts — structural wiring guard for
@@ -767,14 +768,18 @@ describe('main.ts §2.165 — the two verdicts the boundary can never see', () =
 
   it('the Google reconnect clears the flag only when the IMAP test actually passed', () => {
     const body = slices.googleConnect()
-    expect(body).toContain('if (!tlsCertImap) accountAuthState.noteSignedIn(id)')
-    // Gate and clear must reference the same variable the TLS branch sets: a
-    // `tlsCertImap` endpoint means the login was never reached (handshake
-    // failed) and the account is saved only so the user can accept the cert.
-    expect(body).toContain('tlsCertImap = { host: imapMeta.host, port: imapMeta.port }')
-    // …and it happens after the account has an id to report against.
-    expect(body.indexOf('if (!tlsCertImap) accountAuthState.noteSignedIn(id)')).toBeGreaterThan(
-      body.indexOf('const { id } = await saveAccount({'),
+    // The handler reads the service result: `tlsCertRequired.imap` set means the
+    // login was never reached (handshake failed) and the account is saved only
+    // so the user can accept the cert. The service side of that contract (the
+    // field is set exactly on a TLS-cert IMAP error) is exercised as real code
+    // in electron/services/googleConnectService.test.ts.
+    expect(body).toContain('if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)')
+    // The handler must await the service call to have a result to inspect.
+    expect(body).toContain('const res = await connectGoogleAccount(')
+    // A refusal returns before any of the success-path reporting.
+    expect(body.indexOf('if (!res.ok) return res')).toBeGreaterThan(body.indexOf('const res = await connectGoogleAccount('))
+    expect(body.indexOf('if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)')).toBeGreaterThan(
+      body.indexOf('if (!res.ok) return res'),
     )
   })
 
@@ -815,45 +820,34 @@ describe('main.ts §2.165 — accounts:remove tears down only after the deletion
     expect(body).toContain("broadcast('accounts:changed', { kind: 'removed', id })")
   })
 
-  it('every teardown call follows deleteAccount, on both exits', () => {
-    // `deleteAccount` can reject and the handler propagates that rejection.
-    // Tearing down first left a SURVIVING account without a token-refresh
-    // handler (condemned to auth failures nothing can repair), without a cert
-    // subscription (a TLS interception on it would pass in silence) and without
-    // its badge (the only warning the user had).
+  // WIRING PIN (source text of main.ts, not behaviour). The ORDER of the
+  // sequence is proved against the real function in
+  // `services/accountRemoval.test.ts` and in the behavioural section at the
+  // bottom of this file; what only the source can show is that the handler hands
+  // the real collaborators to it.
+  it('WIRING PIN: the handler passes removeAccount the shared teardown, the real deleteAccount', () => {
     const body = slices.accountsRemove()
-    const deleteIdx = body.indexOf('await deleteAccount(id)')
-    expect(deleteIdx).toBeGreaterThan(-1)
+    expect(body).toContain('await removeAccount(id, {')
+    expect(body).toContain('teardown: completeAccountRemoval,')
+    expect(body).toContain('deleteAccount,')
+    expect(body).toContain('recordIsGone: accountRecordIsGone,')
+    // None of the per-account teardown calls lives in the handler any more: they
+    // are inside `completeAccountRemoval`, which only `removeAccount` calls.
     for (const call of ['accountAuthState.forget(id)', 'unregisterAuthErrorHandler(id)', 'certRecovery.unregisterAccount(id)']) {
-      // …and none of them appears in the handler at all any more: the handler
-      // calls the shared teardown, which is defined ABOVE it.
       expect(body, call).not.toContain(call)
     }
-    for (const idx of [...body.matchAll(/completeAccountRemoval\(id\)/g)].map(m => m.index ?? -1)) {
-      expect(idx).toBeGreaterThan(deleteIdx)
-    }
-    expect(countOccurrences(body, 'completeAccountRemoval(id)')).toBe(2)
+    expect(countOccurrences(body, 'completeAccountRemoval(')).toBe(0)
+    // The e2e short-circuit precedes the sequence and does not tear down for real.
+    expect(body.indexOf('if (IS_E2E)')).toBeLessThan(body.indexOf('await removeAccount('))
   })
 
-  it('a rejecting deleteAccount still reaches the caller', () => {
-    // The rejection is caught now (fix wave 5), but only to finish the cleanup
-    // a partial deletion left behind — it is re-thrown unconditionally, so
-    // "teardown runs after delete" never becomes "the failure is swallowed".
+  it('WIRING PIN: the handler does not catch the rejection itself', () => {
+    // The rejection reaching the caller is behaviour of `removeAccount` (proved
+    // in accountRemoval.test.ts); this only pins that the handler adds no
+    // try/catch around it that could swallow it.
     const body = slices.accountsRemove()
-    expect(body).toContain(
-      '  try {\n' +
-      '    await deleteAccount(id)\n' +
-      '  } catch (err) {\n' +
-      '    if (accountRecordIsGone(id)) {\n',
-    )
-    // The re-throw is the LAST statement of the catch, outside the `if`: it runs
-    // whether or not the record turned out to be gone.
-    expect(body).toContain(
-      '      completeAccountRemoval(id)\n' +
-      '    }\n' +
-      '    throw err\n' +
-      '  }\n',
-    )
+    expect(body).not.toMatch(/\bcatch\b/)
+    expect(body).not.toContain('try {')
   })
 
   it('the failure path decides by looking at the store, never at the error', () => {
@@ -1013,11 +1007,11 @@ describe('main.ts §2.165 — mutation control (proves the checks above can actu
   it('the OAuth gate checks fail once the clear becomes unconditional', () => {
     const google = slices.googleConnect()
     const mutatedGoogle = google.replace(
-      'if (!tlsCertImap) accountAuthState.noteSignedIn(id)',
-      'accountAuthState.noteSignedIn(id)',
+      'if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)',
+      'accountAuthState.noteSignedIn(res.id)',
     )
     expect(mutatedGoogle).not.toBe(google)
-    expect(mutatedGoogle).not.toContain('if (!tlsCertImap) accountAuthState.noteSignedIn(id)')
+    expect(mutatedGoogle).not.toContain('if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)')
 
     const ms = slices.microsoftConnect()
     const mutatedMs = ms.replace(
@@ -1028,38 +1022,10 @@ describe('main.ts §2.165 — mutation control (proves the checks above can actu
     expect(mutatedMs).not.toContain('if (!res.tlsCertRequired?.imap) accountAuthState.noteSignedIn(res.id)')
   })
 
-  it('the accounts:remove ordering check fails once the teardown moves ahead of the deletion', () => {
-    // The regression this pins is exactly the pre-§2.165 code: the auth handler
-    // and the cert subscription were dropped BEFORE the deletion that can fail.
-    const body = slices.accountsRemove()
-    const mutated = body.replace('  try {\n    await deleteAccount(id)', '  completeAccountRemoval(id)\n  try {\n    await deleteAccount(id)')
-    expect(mutated).not.toBe(body)
-    expect(mutated.indexOf('completeAccountRemoval(id)')).toBeLessThan(mutated.indexOf('await deleteAccount(id)'))
-  })
-
-  it('the partial-deletion check fails once the rejecting path stops finishing the teardown', () => {
-    // Fix wave 5. The mutant is the pre-wave-5 handler: a rejection propagates
-    // untouched, so a record that is gone keeps its generation and the next
-    // account to be issued that id inherits every stale verdict.
-    const body = slices.accountsRemove()
-    const rescue =
-      '    if (accountRecordIsGone(id)) {\n'
-    expect(body).toContain(rescue)
-    const mutated = body.replace(rescue, '    if (false) {\n')
-    expect(mutated).not.toBe(body)
-    expect(mutated).not.toContain(rescue)
-  })
-
-  it('the partial-deletion check fails once the rejection is swallowed instead of re-thrown', () => {
-    // The other direction: finishing the teardown must not turn a failed
-    // deletion into a reported success.
-    const body = slices.accountsRemove()
-    const rethrow = '    }\n    throw err\n  }\n'
-    expect(body).toContain(rethrow)
-    const mutated = body.replace(rethrow, '    }\n  }\n')
-    expect(mutated).not.toBe(body)
-    expect(mutated).not.toContain(rethrow)
-  })
+  // The three controls that used to live here sliced the `accounts:remove` body
+  // out of main.ts and rewrote its text. The sequence now lives in
+  // `services/accountRemoval.ts`; its controls are behavioural and sit in the
+  // "removal path, in real time" section at the bottom of this file.
 
   it('the store-lookup check fails once the decision is made from the error text', () => {
     const body = slices.accountRecordIsGone()
@@ -1135,60 +1101,63 @@ describe('main.ts §2.165 — mutation control (proves the checks above can actu
 /**
  * §2.165 fix wave 5 — the removal path, in real time.
  *
- * The assertions above pin the SHAPE of `accounts:remove` in the source. They
- * cannot show what the shape is for, and the defect this closes is a sequence,
- * not a token: `deleteAccount` removes the account record BEFORE work that can
- * fail (secret cleanup, the settings write that moves `currentAccountId`), so a
+ * The assertions above pin the SHAPE of the wiring in `main.ts`. They cannot
+ * show what the shape is for, and the defect this closes is a sequence, not a
+ * token: `deleteAccount` removes the account RECORD BEFORE work that can fail
+ * (secret cleanup, the settings write that moves `currentAccountId`), so a
  * rejection can leave the record gone with none of the teardown done. The
  * generation is then never bumped, and because ids are handed out as "max + 1"
  * they are reused — the next account created inherits both the id AND every
  * verdict still in flight for the mailbox that is gone.
  *
- * `electron/main.ts` cannot be imported in unit tests (module-level side
- * effects: BrowserWindow, IPC registration, DB open — the constraint documented
- * in `main.certRecovery.test.ts` / `main.pendingMoves.test.ts`), so the handler
- * is mirrored here with injected dependencies and the REAL state service. The
- * mirror is kept honest by the source-text assertions above, which fail if the
- * production handler drifts from this shape; when changing one, change both.
+ * The sequence is the REAL `removeAccount` (`services/accountRemoval.ts`, the
+ * function `accounts:remove` calls), with the REAL account-state service behind
+ * the teardown. `electron/main.ts` itself cannot be imported in unit tests
+ * (module-level side effects), which is why the sequence was extracted instead
+ * of mirrored: a hand-copied handler here would keep passing after the
+ * production one drifted. What stays a stand-in is `makeTeardown`, which lists
+ * the calls `completeAccountRemoval` makes; its membership and order are pinned
+ * against main.ts by the "shared teardown" test above.
  */
 describe('main.ts §2.165 (fix wave 5) — a deletion that rejects after removing the record', () => {
-  /** Mirror: `completeAccountRemoval` (electron/main.ts). Only the calls whose
+  /** Stand-in for `completeAccountRemoval` (electron/main.ts). Only the calls whose
    *  ORDER and presence the tests are about; the token-cache deletes and the
    *  EML cleanup have no observable state here. */
-  function makeTeardown(svc: ReturnType<typeof initAccountAuthState>) {
+  function makeTeardown(svc: ReturnType<typeof initAccountAuthState>, trace?: string[]) {
     const calls: string[] = []
-    const unregisterAuthErrorHandler = vi.fn<(id: number) => void>(() => { calls.push('unregisterAuthErrorHandler') })
-    const unregisterCertAccount = vi.fn<(id: number) => void>(() => { calls.push('certRecovery.unregisterAccount') })
-    const broadcastRemoved = vi.fn<(id: number) => void>(() => { calls.push('broadcast:removed') })
+    const note = (name: string) => { calls.push(name); trace?.push(name) }
+    const unregisterAuthErrorHandler = vi.fn<(id: number) => void>(() => { note('unregisterAuthErrorHandler') })
+    const unregisterCertAccount = vi.fn<(id: number) => void>(() => { note('certRecovery.unregisterAccount') })
+    const broadcastRemoved = vi.fn<(id: number) => void>(() => { note('broadcast:removed') })
     const completeAccountRemoval = (id: number) => {
       unregisterAuthErrorHandler(id)
       unregisterCertAccount(id)
-      calls.push('forget')
+      note('forget')
       svc.forget(id)
       broadcastRemoved(id)
     }
     return { calls, completeAccountRemoval, unregisterAuthErrorHandler, unregisterCertAccount, broadcastRemoved }
   }
 
-  /** Mirror: the `accounts:remove` handler body after the e2e branch and the
-   *  IDLE stop (electron/main.ts). */
+  /** The real `removeAccount`, with the collaborators this section varies. */
   async function accountsRemove(
     id: number,
     deps: {
       deleteAccount: (id: number) => Promise<void>
       accountRecordIsGone: (id: number) => boolean
       completeAccountRemoval: (id: number) => void
+      stopIdle?: () => Promise<void>
+      fence?: AccountRemovalDeps['fence']
     },
   ): Promise<{ ok: true }> {
-    try {
-      await deps.deleteAccount(id)
-    } catch (err) {
-      if (deps.accountRecordIsGone(id)) {
-        deps.completeAccountRemoval(id)
-      }
-      throw err
-    }
-    deps.completeAccountRemoval(id)
+    await removeAccount(id, {
+      stopIdle: deps.stopIdle ?? (async () => {}),
+      deleteAccount: deps.deleteAccount,
+      recordIsGone: deps.accountRecordIsGone,
+      teardown: deps.completeAccountRemoval,
+      onPartialDelete: () => {},
+      fence: deps.fence ?? { begin: () => {}, end: () => {} },
+    })
     return { ok: true as const }
   }
 
@@ -1199,9 +1168,9 @@ describe('main.ts §2.165 (fix wave 5) — a deletion that rejects after removin
   }
 
   it('finishes the teardown and bumps the generation when the record is gone', async () => {
-    // Mutation that fails this: dropping the `accountRecordIsGone` branch from
-    // the catch (the pre-wave-5 handler), or moving `forget` out of the shared
-    // teardown.
+    // Mutation that fails this: dropping the `recordIsGone` branch from the catch
+    // in `removeAccount` (the pre-wave-5 handler), or moving `forget` out of the
+    // shared teardown.
     const { svc } = makeService()
     const teardown = makeTeardown(svc)
     // An operation of the doomed mailbox is already in flight; it stamped
@@ -1287,5 +1256,80 @@ describe('main.ts §2.165 (fix wave 5) — a deletion that rejects after removin
     ])
     svc.noteMissingCredentials(7, inFlight)
     expect(svc.snapshot().needsReauth).toEqual([])
+  })
+
+  /** Every teardown call (including `forget`) and the deletion, in the order they ran. */
+  async function runTraced(opts: { rejects: boolean; recordIsGone: boolean }): Promise<string[]> {
+    const { svc } = makeService()
+    const trace: string[] = []
+    const teardown = makeTeardown(svc, trace)
+    const run = accountsRemove(7, {
+      stopIdle: async () => { trace.push('stopIdle') },
+      deleteAccount: async () => {
+        trace.push('deleteAccount')
+        if (opts.rejects) throw new Error('boom')
+      },
+      accountRecordIsGone: () => opts.recordIsGone,
+      completeAccountRemoval: teardown.completeAccountRemoval,
+    })
+    await run.catch(() => {})
+    return trace
+  }
+
+  /** The invariant the former source-text test stood for, as a predicate over a trace. */
+  const teardownFollowsDeletion = (trace: string[]): boolean => {
+    const del = trace.indexOf('deleteAccount')
+    const teardownCalls = ['unregisterAuthErrorHandler', 'certRecovery.unregisterAccount', 'forget']
+    return del > -1 && teardownCalls.every(call => trace.indexOf(call) > del)
+  }
+
+  it('every teardown call follows deleteAccount, on both exits', async () => {
+    // Replaces the source-text slice of the former handler. The regression this
+    // pins is the pre-§2.165 code: the auth handler and the cert subscription
+    // were dropped BEFORE the deletion that can fail.
+    const resolved = await runTraced({ rejects: false, recordIsGone: true })
+    const rejected = await runTraced({ rejects: true, recordIsGone: true })
+
+    expect(teardownFollowsDeletion(resolved)).toBe(true)
+    expect(teardownFollowsDeletion(rejected)).toBe(true)
+    expect(resolved.filter(c => c === 'forget')).toHaveLength(1)
+    expect(rejected.filter(c => c === 'forget')).toHaveLength(1)
+  })
+
+  it('a rejecting deleteAccount still reaches the caller, whether or not the record is gone', async () => {
+    // The rejection is caught to finish the cleanup a partial deletion left
+    // behind, and re-thrown unconditionally, so "teardown runs after delete"
+    // never becomes "the failure is swallowed".
+    const { svc } = makeService()
+    for (const recordIsGone of [true, false]) {
+      const failure = new Error(`failure gone=${recordIsGone}`)
+      await expect(accountsRemove(7, {
+        deleteAccount: async () => { throw failure },
+        accountRecordIsGone: () => recordIsGone,
+        completeAccountRemoval: makeTeardown(svc).completeAccountRemoval,
+      })).rejects.toBe(failure)
+    }
+  })
+
+  // --- Controls: the checks above must be able to fail ----------------------
+  // Mutates the INJECTED collaborators (never the source text) and shows that the
+  // predicate used above turns red. The other two directions (a record that is
+  // gone but never torn down, a swallowed rejection) are covered by the
+  // assertions of the tests above directly: they fail when `removeAccount` stops
+  // consulting `recordIsGone` or stops re-throwing.
+
+  it('control: the ordering predicate turns red when the teardown is run ahead of the deletion', async () => {
+    // Mutant of the pre-§2.165 handler: the teardown is triggered from the idle
+    // stop that precedes the deletion.
+    const { svc } = makeService()
+    const trace: string[] = []
+    const teardown = makeTeardown(svc, trace)
+    await accountsRemove(7, {
+      stopIdle: async () => { teardown.completeAccountRemoval(7) },
+      deleteAccount: async () => { trace.push('deleteAccount') },
+      accountRecordIsGone: () => true,
+      completeAccountRemoval: () => {},
+    })
+    expect(teardownFollowsDeletion(trace)).toBe(false)
   })
 })

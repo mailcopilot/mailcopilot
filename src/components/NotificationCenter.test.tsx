@@ -1,8 +1,23 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import en from '../i18n/locales/en.json'
 import NotificationCenter from './NotificationCenter'
 import type { AppNotification } from './NotificationCenter'
+
+// The component now translates tagged bodies; resolve against the real English
+// catalogue so a renamed/missing key fails here instead of rendering a raw key.
+function lookup(key: string): string | undefined {
+  return key.split('.').reduce<unknown>(
+    (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+    en,
+  ) as string | undefined
+}
+const stableT = (key: string): string => lookup(key) ?? key
+const stableUseTranslation = { t: stableT }
+vi.mock('react-i18next', () => ({
+  useTranslation: () => stableUseTranslation,
+}))
 
 afterEach(cleanup)
 
@@ -128,6 +143,51 @@ describe('NotificationCenter', () => {
     render(<NotificationCenter labels={labels} />)
     await waitFor(() => {
       expect(screen.getByTestId('notification-badge').textContent).toBe('99+')
+    })
+  })
+
+  describe('send_failed body presentation', () => {
+    async function openWithBody(body: string) {
+      setupMockApi([
+        { id: 9, type: 'send_failed', title: 'Quarterly report', body, refId: 'q-9', read: false, createdAt: '2026-04-05T08:00:00Z' },
+      ], 1)
+      render(<NotificationCenter labels={labels} />)
+      await waitFor(() => expect(screen.getByTestId('notification-bell')).toBeTruthy())
+      fireEvent.click(screen.getByTestId('notification-bell'))
+    }
+
+    it('renders the translated sentence for a body that starts with the pre_greeting tag', async () => {
+      await openWithBody('[mcerr:pre_greeting] Error: connect ENETUNREACH 2001:db8::1:587')
+      const sentence = lookup('app.errors.presented.pre_greeting')!
+      expect(sentence).toBeTruthy()
+      const panel = screen.getByTestId('notification-panel')
+      expect(panel.textContent).toContain(sentence)
+      expect(panel.textContent).not.toContain('mcerr')
+      expect(panel.textContent).not.toContain('ENETUNREACH')
+    })
+
+    it('renders the translated sentence for a body that starts with the delivery_unknown tag', async () => {
+      await openWithBody('[mcerr:delivery_unknown] Error: Timeout')
+      const sentence = lookup('app.errors.presented.delivery_unknown')!
+      expect(sentence).toBeTruthy()
+      const panel = screen.getByTestId('notification-panel')
+      expect(panel.textContent).toContain(sentence)
+      expect(panel.textContent).not.toContain('mcerr')
+    })
+
+    it('renders an untagged body as is', async () => {
+      await openWithBody('550 5.1.1 no such user')
+      expect(screen.getByText('550 5.1.1 no such user')).toBeTruthy()
+    })
+
+    it('does not honour a tag that appears after other text', async () => {
+      await openWithBody('550 rejected: see [mcerr:pre_greeting]')
+      expect(screen.getByText('550 rejected: see [mcerr:pre_greeting]')).toBeTruthy()
+    })
+
+    it('renders no body element for an empty body', async () => {
+      await openWithBody('')
+      expect(document.querySelector('.notification-item-body')).toBeNull()
     })
   })
 })

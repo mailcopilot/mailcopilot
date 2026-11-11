@@ -28,6 +28,10 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
+# Windows installer notice pages (shown by the NSIS license control, which expects
+# CRLF line breaks): check them out as CRLF on every platform.
+build/license_*.txt text eol=crlf
+
 # Binary assets must never go through any line-ending filter.
 *.png binary
 *.ico binary

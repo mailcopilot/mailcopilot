@@ -1,0 +1,13 @@
+﻿MailCopilot - avis de confidentialité
+
+Veuillez lire cet avis avant d'installer. La politique de confidentialité complète : https://docs.mailcopilot.io/legal/privacy-policy
+
+Outre la communication avec les serveurs de messagerie que vous avez configurés, MailCopilot contacte de lui-même :
+
+1. Recherche de mises à jour. Environ une fois par heure, MailCopilot demande à notre serveur de mises à jour s'il existe une nouvelle version. Le serveur voit votre adresse IP et le type de votre système d'exploitation et de votre processeur. Rien sur vos e-mails, vos comptes ou votre usage n'est envoyé. Sur une nouvelle installation, un choix vous est proposé au premier démarrage, avant la première vérification ; vous pouvez le modifier à tout moment dans Paramètres > À propos. Lorsqu'elle est désactivée, MailCopilot ne lance plus de nouvelle vérification de lui-même ; une vérification ou un téléchargement déjà en cours peut aller à son terme.
+
+2. Données de diagnostic et d'usage. Désactivées tant que vous ne les autorisez pas ; la question est posée au premier démarrage. Elles ne contiennent jamais le contenu de vos e-mails.
+
+3. Assistant IA. Facultatif. Les requêtes vont uniquement au fournisseur que vous avez configuré, avec votre propre clé.
+
+4. Photos des expéditeurs. Par défaut, les photos des expéditeurs sont chargées depuis Gravatar : une empreinte de l'adresse de l'expéditeur et votre adresse IP sont transmises à Gravatar. Vous pouvez le désactiver dans les paramètres.

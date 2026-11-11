@@ -94,6 +94,10 @@ export async function runGoogleOAuthFlow(params: {
   openExternal: (url: string) => void | Promise<void>
   timeoutMs?: number
   scopes?: string[]
+  /** Address of the mailbox being reconnected, sent as `login_hint`. Only a
+   *  hint: Google may ignore it and the user can pick another account in the
+   *  browser, so the caller must still compare the address in the token. */
+  loginHint?: string
   /** Best-effort progress sink. Never awaited and never allowed to fail the
    *  flow — a broken progress listener must not cost the user their sign-in. */
   onStage?: (stage: GoogleOAuthStage) => void
@@ -194,6 +198,7 @@ h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#334155}
       authUrl.searchParams.set('response_type', 'code')
       authUrl.searchParams.set('access_type', 'offline')
       authUrl.searchParams.set('prompt', 'consent')
+      if (params.loginHint) authUrl.searchParams.set('login_hint', params.loginHint)
       authUrl.searchParams.set('include_granted_scopes', 'true')
       authUrl.searchParams.set('state', state)
       authUrl.searchParams.set('code_challenge', challenge)

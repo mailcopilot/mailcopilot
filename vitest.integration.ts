@@ -3,7 +3,13 @@ import { resolve } from 'node:path'
 
 export default defineConfig({
   resolve: {
-    alias: { '@': resolve(__dirname, 'src') },
+    alias: {
+      '@': resolve(__dirname, 'src'),
+      // Same package aliases as vite.config.ts / tsconfig paths: packages/db
+      // re-exports from @mailcopilot/core, so the suite cannot load without them.
+      '@mailcopilot/types': resolve(__dirname, 'packages/types'),
+      '@mailcopilot/core': resolve(__dirname, 'packages/core'),
+    },
   },
   test: {
     include: ['tests/integration/**/*.test.ts'],

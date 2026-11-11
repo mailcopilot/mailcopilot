@@ -119,6 +119,80 @@ describe('parseCalendarPart', () => {
   })
 })
 
+// Dependency bump 2026-09 — GHSA-2x7j-588g-ccc2: nodemailer's addressparser
+// took O(n^2) time on a crafted address list. Fixed in nodemailer 9.1.0
+// ("addressparser: handle address lists in linear time" — confirmed by
+// reading node_modules/nodemailer/lib/addressparser/index.js: the old
+// accumulation "rebuild[t] the accumulator with concat()" per address, and
+// the old fragment-merge step spliced each fragment out one at a time —
+// both O(n) work repeated n times). The vulnerable pre-9.1.0 package is not
+// reproduced in this suite; the version floor and the single-copy
+// module-resolution invariant are pinned separately by
+// packages/net/dependencyVersions.test.ts. This test pins post-fix LINEAR
+// behaviour on the exact "address list" shape the advisory names, through
+// the code path that actually feeds untrusted
+// input to addressparser in this app: `validateSingleAddress` above calls
+// nodemailer's addressparser directly on the ORGANIZER value of an inbound
+// (attacker-controlled) invite. Empirically measured on the current,
+// patched addressparser: 20,000-entry list parses in ~60ms — the 2s bound
+// below leaves >30x headroom for a slow CI runner while still failing hard
+// (timeout or explicit assertion) if a future downgrade reintroduces
+// quadratic behaviour, where 20,000 entries would take far longer than any
+// sane test timeout.
+describe('parseCalendarPart — GHSA-2x7j-588g-ccc2 addressparser DoS regression', () => {
+  it('rejects a crafted multi-address ORGANIZER quickly instead of hanging', () => {
+    const bogusOrganizerList = Array.from(
+      { length: 20_000 },
+      (_, i) => `user${i}@example${i}.test`,
+    ).join(', ')
+    const ics = FIXTURE_REQUEST.replace(
+      /ORGANIZER[^\r\n]+\r\n/,
+      `ORGANIZER;CN=Alice Organizer:mailto:${bogusOrganizerList}\r\n`,
+    )
+
+    const start = Date.now()
+    const invite = parseCalendarPart(ics)
+    const elapsedMs = Date.now() - start
+
+    expect(elapsedMs).toBeLessThan(2000)
+    // validateSingleAddress requires EXACTLY one parsed addr-spec — a
+    // multi-address ORGANIZER is rejected the same way a missing one is
+    // (see "returns null when ORGANIZER is missing" above), so the whole
+    // invite comes back null rather than minting an RSVP to the wrong party.
+    expect(invite).toBeNull()
+  })
+
+  // The timing assertion above only proves parseCalendarPart returns quickly
+  // and null — it would pass identically if something upstream of the
+  // address parser (e.g. the control-character filter near
+  // validateSingleAddress's start) rejected the value first, without
+  // addressparser ever seeing a 20,000-entry list. These two cases use the
+  // exact same `user${i}@example${i}.test`-list construction, shrunk to a
+  // size that is cheap to reason about, to prove the multi-address payload
+  // actually reaches addressparser and that rejection comes specifically
+  // from the "exactly one address" check: a 2-address ORGANIZER built this
+  // way is rejected, and a 1-address ORGANIZER built the same way is not.
+  it('rejects a short 2-address ORGANIZER built the same way as the crafted list', () => {
+    const shortList = Array.from({ length: 2 }, (_, i) => `user${i}@example${i}.test`).join(', ')
+    const ics = FIXTURE_REQUEST.replace(
+      /ORGANIZER[^\r\n]+\r\n/,
+      `ORGANIZER;CN=Alice Organizer:mailto:${shortList}\r\n`,
+    )
+    expect(parseCalendarPart(ics)).toBeNull()
+  })
+
+  it('accepts a control single-address ORGANIZER built the same way', () => {
+    const singleAddress = Array.from({ length: 1 }, (_, i) => `user${i}@example${i}.test`).join(', ')
+    const ics = FIXTURE_REQUEST.replace(
+      /ORGANIZER[^\r\n]+\r\n/,
+      `ORGANIZER;CN=Alice Organizer:mailto:${singleAddress}\r\n`,
+    )
+    const invite = parseCalendarPart(ics)
+    expect(invite).not.toBeNull()
+    expect(invite!.organizerEmail).toBe('user0@example0.test')
+  })
+})
+
 describe('buildRsvpReply', () => {
   it('produces a METHOD:REPLY with a single self-ATTENDEE carrying PARTSTAT=ACCEPTED', () => {
     const invite = parseCalendarPart(FIXTURE_REQUEST)!

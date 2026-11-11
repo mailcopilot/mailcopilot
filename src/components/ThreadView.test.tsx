@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import React from 'react'
 import type { MailSummary } from '../../packages/types/mail'
@@ -81,6 +81,7 @@ Object.defineProperty(window, 'api', {
 })
 
 import ThreadView from './ThreadView'
+import { resetThreadNavigationDismissal } from '../hooks/threadNavigationDismissal'
 
 function makeMail(uid: number, overrides: Partial<MailSummary> = {}): MailSummary {
   return {
@@ -122,6 +123,9 @@ function defaultProps(
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // Window-scope by design (it must outlive a ThreadView unmount), so it also
+  // outlives a test case.
+  resetThreadNavigationDismissal()
   mockInvoke.mockResolvedValue({ conversationOrder: 'oldest-top' })
   // Default: strip inert. Individual summary-strip tests override this.
   mockUseThreadSummary.mockReturnValue(summaryState())
@@ -781,5 +785,186 @@ describe('ThreadView', () => {
       expect(mockInvoke).not.toHaveBeenCalledWith('net:sendMail', expect.anything())
       expect(mockInvoke).not.toHaveBeenCalledWith('smtp:send', expect.anything())
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §3.3.C-thread.4 — keyboard navigation inside the open thread.
+// The grammar is unit-tested in packages/core/threadKeyboard.test.ts and the
+// cursor mechanics in src/hooks/useThreadKeyboard.test.ts; here we assert the
+// wiring: which card the keys act on, and that the DOM reflects the cursor.
+// ---------------------------------------------------------------------------
+describe('ThreadView — keyboard navigation (§3.3.C-thread.4)', () => {
+  function renderThread(overrides: Partial<React.ComponentProps<typeof ThreadView>> = {}) {
+    const mails = [makeMail(1), makeMail(2), makeMail(3)]
+    const thread = makeThread(mails)
+    // oldest-top → cards render as uid 1, 2, 3.
+    return render(
+      React.createElement(
+        ThreadView,
+        defaultProps(thread, '1:INBOX:1', { order: 'oldest-top', ...overrides }),
+      ),
+    )
+  }
+
+  function cards() {
+    return screen.getAllByTestId('thread-card')
+  }
+
+  it('j moves the cursor to the next card and gives it DOM focus', () => {
+    renderThread()
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    expect(cards()[1]).toHaveAttribute('data-focused', 'true')
+    expect(cards()[0]).not.toHaveAttribute('data-focused')
+    expect(document.activeElement).toBe(cards()[1].querySelector('.thread-card-header'))
+  })
+
+  it('k walks back and the cursor never leaves the stack', () => {
+    renderThread()
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    expect(cards()[2]).toHaveAttribute('data-focused', 'true')
+    fireEvent.keyDown(window, { key: 'k', code: 'KeyK' })
+    fireEvent.keyDown(window, { key: 'k', code: 'KeyK' })
+    fireEvent.keyDown(window, { key: 'k', code: 'KeyK' })
+    expect(cards()[0]).toHaveAttribute('data-focused', 'true')
+  })
+
+  it('Enter on a focused collapsed card opens that message (and only it)', () => {
+    const onCardOpen = vi.fn()
+    renderThread({ onCardOpen })
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    fireEvent.keyDown(window, { key: 'Enter', code: 'Enter' })
+    expect(onCardOpen).toHaveBeenCalledTimes(1)
+    expect(onCardOpen.mock.calls[0][0].uid).toBe(2)
+  })
+
+  it('Space on the focused open card collapses it', () => {
+    renderThread()
+    expect(screen.getByTestId('body-slot')).toBeInTheDocument()
+    // Cursor starts from the open card: k at the top clamps onto it.
+    fireEvent.keyDown(window, { key: 'k', code: 'KeyK' })
+    expect(cards()[0]).toHaveAttribute('data-focused', 'true')
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' })
+    expect(screen.queryByTestId('body-slot')).not.toBeInTheDocument()
+  })
+
+  it('r / a / f act on the focused card, not on the open one', () => {
+    const onCardAction = vi.fn()
+    renderThread({ onCardAction })
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    fireEvent.keyDown(window, { key: 'r', code: 'KeyR' })
+    fireEvent.keyDown(window, { key: 'a', code: 'KeyA' })
+    fireEvent.keyDown(window, { key: 'f', code: 'KeyF' })
+    expect(onCardAction.mock.calls.map(c => [c[0].uid, c[1]])).toEqual([
+      [3, 'reply'],
+      [3, 'replyAll'],
+      [3, 'forward'],
+    ])
+  })
+
+  it('stays quiet until the cursor is placed', () => {
+    const onCardAction = vi.fn()
+    const onCardOpen = vi.fn()
+    renderThread({ onCardAction, onCardOpen })
+    fireEvent.keyDown(window, { key: 'r', code: 'KeyR' })
+    fireEvent.keyDown(window, { key: 'Enter', code: 'Enter' })
+    expect(onCardAction).not.toHaveBeenCalled()
+    expect(onCardOpen).not.toHaveBeenCalled()
+  })
+
+  it('Escape drops the cursor so the message list owns j / k again', () => {
+    renderThread()
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    expect(cards()[1]).toHaveAttribute('data-focused', 'true')
+    fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' })
+    expect(screen.queryByTestId('thread-view')?.querySelector('[data-focused]')).toBeNull()
+
+    // And stays out of the way: fireEvent returns false for a claimed event, so
+    // `true` here is the assertion that the list handler will see this keystroke.
+    expect(fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })).toBe(true)
+    expect(fireEvent.keyDown(window, { key: 'k', code: 'KeyK' })).toBe(true)
+    expect(screen.queryByTestId('thread-view')?.querySelector('[data-focused]')).toBeNull()
+  })
+
+  it('a card focused after Escape takes the keys back', () => {
+    renderThread()
+    fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' })
+    fireEvent.focus(cards()[0].querySelector('.thread-card-header')!)
+    expect(cards()[0]).toHaveAttribute('data-focused', 'true')
+    expect(fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })).toBe(false)
+    expect(cards()[1]).toHaveAttribute('data-focused', 'true')
+  })
+
+  it('takes the cursor from a header focused with the mouse', () => {
+    const onCardAction = vi.fn()
+    renderThread({ onCardAction })
+    const header = cards()[2].querySelector('.thread-card-header') as HTMLElement
+    // A raw .focus() is not wrapped by fireEvent, so React's onFocus has to be
+    // flushed like any other out-of-band update.
+    act(() => { header.focus() })
+    expect(cards()[2]).toHaveAttribute('data-focused', 'true')
+    fireEvent.keyDown(window, { key: 'f', code: 'KeyF' })
+    expect(onCardAction).toHaveBeenCalledWith(expect.objectContaining({ uid: 3 }), 'forward')
+  })
+
+  it('leaves Enter and r to a focused control outside the cards', () => {
+    // Tab out of the stack to a viewer-toolbar button: the cursor is still
+    // remembered, but the keys belong to whatever the browser focused.
+    const onCardOpen = vi.fn()
+    const onCardAction = vi.fn()
+    renderThread({ onCardOpen, onCardAction })
+    fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+    expect(cards()[1]).toHaveAttribute('data-focused', 'true')
+
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    outside.focus()
+
+    expect(fireEvent.keyDown(outside, { key: 'Enter', code: 'Enter' })).toBe(true)
+    expect(fireEvent.keyDown(outside, { key: 'r', code: 'KeyR' })).toBe(true)
+    expect(onCardOpen).not.toHaveBeenCalled()
+    expect(onCardAction).not.toHaveBeenCalled()
+    outside.remove()
+  })
+
+  it('Escape hands the keys back before the cursor was ever placed', () => {
+    renderThread()
+    expect(screen.queryByTestId('thread-view')?.querySelector('[data-focused]')).toBeNull()
+    // Claimed: the cards owned j / k from the moment the thread opened.
+    expect(fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' })).toBe(false)
+    expect(fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })).toBe(true)
+    expect(screen.queryByTestId('thread-view')?.querySelector('[data-focused]')).toBeNull()
+    // Second Escape is the list's again.
+    expect(fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' })).toBe(true)
+  })
+
+  it('does nothing when the parent wires no onCardAction', () => {
+    expect(() => {
+      renderThread({ onCardAction: undefined })
+      fireEvent.keyDown(window, { key: 'j', code: 'KeyJ' })
+      fireEvent.keyDown(window, { key: 'r', code: 'KeyR' })
+    }).not.toThrow()
+  })
+})
+
+describe('ThreadView — sender address menu', () => {
+  it('right-click on a card sender opens "Copy address" and copies the bare address without toggling the card', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const mails = [makeMail(1), makeMail(2)]
+    const onCardOpen = vi.fn()
+    render(
+      React.createElement(
+        ThreadView,
+        defaultProps(makeThread(mails), '1:INBOX:2', { renderBody: () => null, onCardOpen }),
+      ),
+    )
+    const sender = screen.getAllByText('Sender 1').find(el => el.classList.contains('thread-card-from'))!
+    fireEvent.contextMenu(sender, { button: 2, clientX: 40, clientY: 40 })
+    fireEvent.click(screen.getByTestId('address-context-copy'))
+    expect(writeText).toHaveBeenCalledWith('sender1@example.com')
+    expect(onCardOpen).not.toHaveBeenCalled()
   })
 })

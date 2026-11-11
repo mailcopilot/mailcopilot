@@ -1,3 +1,4 @@
+import { simpleParser } from 'mailparser'
 import { describe, expect, it, vi } from 'vitest'
 
 // `./message` transitively imports `./imap` which loads better-sqlite3 via
@@ -298,6 +299,56 @@ describe('packages/net/eml — linkify-it mailto: DoS regression (mailparser tex
 
     expect(details.text).toBeDefined()
     expect(elapsedMs).toBeLessThan(2000)
+  })
+})
+
+// Dependency bump 2026-09 — GHSA-2x7j-588g-ccc2: nodemailer's addressparser
+// took O(n^2) time on a crafted address list; fixed in nodemailer 9.1.0
+// ("addressparser: handle address lists in linear time" — verified by
+// reading node_modules/nodemailer/lib/addressparser/index.js, where the old
+// accumulation is described in the fixed code's own comments as O(n^2)
+// concat()/splice() work). mailparser does not reimplement address parsing:
+// `node_modules/mailparser/lib/mail-parser.js` does
+// `require('nodemailer/lib/addressparser')` and calls it directly on every
+// To/Cc/From/Reply-To header of every message this app parses — the
+// attacker-controlled input path is every inbound message, not a synthetic
+// microbenchmark. The vulnerable pre-9.1.0 package is not reproduced in this
+// suite; the version floor and the single-copy module-resolution invariant
+// are pinned separately by packages/net/dependencyVersions.test.ts. This
+// test pins post-fix LINEAR behaviour on the exact "address list" shape the
+// advisory names. Calibrated directly against `simpleParser`: below ~1 MiB
+// of header bytes mailparser preserves the full address list (20,000 entries here is
+// ~558 KiB, comfortably under that ceiling); above it mailparser silently
+// drops the header for unrelated reasons (its own oversized-header
+// protection), which would make a larger fixture assert nothing. 20,000
+// entries parsed in ~60-80ms when measured directly against the patched
+// addressparser; the 2s bound leaves generous headroom for CI while still
+// failing hard if a downgrade reintroduces quadratic behaviour.
+describe('packages/net/eml — addressparser address-list DoS regression (GHSA-2x7j-588g-ccc2)', () => {
+  it('parseEmlBuffer stays fast on a To header flooded with a crafted address list', async () => {
+    const addressCount = 20_000
+    const addresses = Array.from(
+      { length: addressCount },
+      (_, i) => `user${i}@example${i}.test`,
+    ).join(', ')
+    const eml = [
+      'From: Alice <alice@example.com>',
+      `To: ${addresses}`,
+      'Subject: Adversarial address list',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset="utf-8"',
+      '',
+      'body',
+      '',
+    ].join('\r\n')
+
+    const raw = Buffer.from(eml, 'utf8')
+    const start = Date.now()
+    const details = await parseEmlBuffer(1, raw)
+    const elapsedMs = Date.now() - start
+
+    expect(elapsedMs).toBeLessThan(2000)
+    expect(details.envelope?.to?.length).toBe(addressCount)
   })
 })
 
@@ -904,5 +955,229 @@ describe('packages/net/eml — MessageParseCap is a real union (§2.145 fix wave
     expect(describe_({ kind: 'hard', rawBytes: 1, limitBytes: 1 })).toBe('placeholder')
     expect(describe_({ kind: 'soft', rawBytes: 1, limitBytes: 1, canShowFull: true })).toBe('banner+button')
     expect(describe_({ kind: 'soft', rawBytes: 1, limitBytes: 1, canShowFull: false })).toBe('banner')
+  })
+})
+
+// Behaviours that changed (or were never pinned) when mailparser moved from
+// 3.9.x to 3.14.x. Real raw messages go through the same entry points the app
+// uses: `parseEmlBufferInline` (the streaming MailParser behind message
+// details) and `extractEmlAttachment` (the simpleParser behind attachment
+// download). No mocks of mailparser.
+describe('packages/net/eml — mailparser upgrade behaviours', () => {
+  const CRLF = '\r\n'
+  const eml = (lines: string[]): Buffer => Buffer.from(lines.join(CRLF) + CRLF, 'utf8')
+
+  /** One-attachment message; `partHeaders` are the attachment part's headers. */
+  const withAttachment = (partHeaders: string[]): Buffer =>
+    eml([
+      'From: Alice <alice@example.com>',
+      'To: Bob <bob@example.com>',
+      'Subject: Attachment names',
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="BND"',
+      '',
+      '--BND',
+      'Content-Type: text/plain; charset="utf-8"',
+      '',
+      'body',
+      '--BND',
+      ...partHeaders,
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from('payload', 'utf8').toString('base64'),
+      '--BND--',
+    ])
+
+  /** The filename as both parsers report it — they must agree. */
+  const filenamesFor = async (raw: Buffer) => {
+    const details = await parseEmlBufferInline(1, raw)
+    const extracted = await extractEmlAttachment(raw, 'eml:1')
+    return { light: details.attachments?.[0]?.filename, full: extracted?.filename }
+  }
+
+  describe('attachment filenames', () => {
+    it('decodes an RFC 2231 extended filename* (UTF-8, percent-encoded)', async () => {
+      const raw = withAttachment([
+        'Content-Type: application/pdf',
+        "Content-Disposition: attachment; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82%20%E2%82%AC.pdf",
+      ])
+      expect(await filenamesFor(raw)).toEqual({ light: 'отчёт €.pdf', full: 'отчёт €.pdf' })
+    })
+
+    it('joins RFC 2231 continuations (filename*0*, filename*1*, filename*2)', async () => {
+      const raw = withAttachment([
+        'Content-Type: application/pdf',
+        "Content-Disposition: attachment; filename*0*=utf-8''long%20na; filename*1*=me%20%C3%A9%20part; filename*2=\".pdf\"",
+      ])
+      expect(await filenamesFor(raw)).toEqual({ light: 'long name é part.pdf', full: 'long name é part.pdf' })
+    })
+
+    it('decodes an RFC 2047 encoded-word filename', async () => {
+      const raw = withAttachment([
+        'Content-Type: application/msword',
+        'Content-Disposition: attachment; filename="=?UTF-8?B?0LTQvtC60YPQvNC10L3Rgi5kb2M=?="',
+      ])
+      expect(await filenamesFor(raw)).toEqual({ light: 'документ.doc', full: 'документ.doc' })
+    })
+  })
+
+  describe('comments in structured attachment headers', () => {
+    it('drops a parenthesised comment from the reported contentType', async () => {
+      const raw = withAttachment([
+        'Content-Type: application/pdf (comment); name="c.pdf"',
+        'Content-Disposition: attachment; filename="c.pdf"',
+      ])
+      const details = await parseEmlBufferInline(1, raw)
+      expect(details.attachments?.[0]?.contentType).toBe('application/pdf')
+      expect(details.attachments?.[0]?.filename).toBe('c.pdf')
+    })
+
+    it('drops a parenthesised comment from the reported disposition', async () => {
+      const raw = withAttachment([
+        'Content-Type: application/pdf; name="c.pdf"',
+        'Content-Disposition: attachment (c2); filename="c.pdf"',
+      ])
+      const details = await parseEmlBufferInline(1, raw)
+      expect(details.attachments?.[0]?.disposition).toBe('attachment')
+    })
+  })
+
+  describe('duplicate and unusual headers', () => {
+    it('pins mailparser duplicate-header choice: the FIRST of two Subject lines wins', async () => {
+      const raw = eml([
+        'From: Alice <alice@example.com>',
+        'To: Bob <bob@example.com>',
+        'Subject: S',
+        'Subject: second subject',
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset="utf-8"',
+        '',
+        'body',
+      ])
+      const details = await parseEmlBufferInline(1, raw)
+      expect(details.envelope?.subject).toBe('S')
+    })
+
+    it('pins mailparser duplicate-From choice: the FIRST of two From lines is the sender shown', async () => {
+      const raw = eml([
+        'From: Alice <alice@example.com>',
+        'From: Mallory <mallory@example.org>',
+        'To: Bob <bob@example.com>',
+        'Subject: Two senders',
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset="utf-8"',
+        '',
+        'body',
+      ])
+      const details = await parseEmlBufferInline(1, raw)
+      expect(details.envelope?.from?.map((a) => a.address)).toEqual(['alice@example.com'])
+    })
+
+    it('pins mailparser duplicate-header choice for Message-ID, In-Reply-To, Reply-To and Date: the FIRST wins', async () => {
+      const raw = eml([
+        'From: Alice <alice@example.com>',
+        'To: Bob <bob@example.com>',
+        'Subject: Duplicates',
+        'Message-ID: <first@example.com>',
+        'Message-ID: <second@example.com>',
+        'In-Reply-To: <parent-first@example.com>',
+        'In-Reply-To: <parent-second@example.com>',
+        'Reply-To: First <first-reply@example.com>',
+        'Reply-To: Second <second-reply@example.org>',
+        'Date: Tue, 03 Nov 2026 10:00:00 +0000',
+        'Date: Wed, 04 Nov 2026 11:00:00 +0000',
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset="utf-8"',
+        '',
+        'body',
+      ])
+      const details = await parseEmlBufferInline(1, raw)
+      expect(details.envelope?.messageId).toBe('<first@example.com>')
+      expect(details.envelope?.inReplyTo).toBe('<parent-first@example.com>')
+      expect(details.envelope?.replyTo?.map((a) => a.address)).toEqual(['first-reply@example.com'])
+      expect(details.envelope?.date).toBe('2026-11-03T10:00:00.000Z')
+    })
+
+    it('keeps address and name structure for a display name with a quoted pair inside a group', async () => {
+      const raw = eml([
+        'From: Group: a@x.example, "q\\"uote" <b@x.example>;',
+        'To: Bob <bob@example.com>',
+        'Subject: Quoted pair',
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset="utf-8"',
+        '',
+        'body',
+      ])
+      // Pins the library contract that `parseLightweight` consumes (it reads the
+      // same structured `from` header), so it goes through the real
+      // `simpleParser`: `mapParsedAddrs` keeps only the top-level group entry.
+      // Only the structured `value` is asserted; the `text` rendering is not a contract.
+      const parsed = await simpleParser(raw)
+      const from = Array.isArray(parsed.from) ? parsed.from[0] : parsed.from
+      expect(from?.value).toHaveLength(1)
+      expect(from?.value[0]?.name).toBe('Group')
+      expect(from?.value[0]?.group?.map((a: { name: string; address?: string }) => ({ name: a.name, address: a.address }))).toEqual([
+        { name: '', address: 'a@x.example' },
+        { name: 'q"uote', address: 'b@x.example' },
+      ])
+
+      // And what the app derives from it today: the group's own entry, members dropped.
+      const details = await parseEmlBufferInline(1, raw)
+      expect(details.envelope?.from).toEqual([{ name: 'Group', address: undefined }])
+    })
+  })
+
+  describe('legacy charsets decode identically through parseEmlBufferInline and parseEmlBuffer', () => {
+    const body = (charset: string, cte: string, bytes: Buffer, type: 'plain' | 'html' = 'plain'): Buffer =>
+      Buffer.concat([
+        Buffer.from(
+          [
+            'From: Alice <alice@example.com>',
+            'To: Bob <bob@example.com>',
+            'Subject: Charset',
+            'MIME-Version: 1.0',
+            `Content-Type: text/${type}; charset=${charset}`,
+            `Content-Transfer-Encoding: ${cte}`,
+            '',
+            '',
+          ].join(CRLF),
+          'latin1',
+        ),
+        bytes,
+        Buffer.from(CRLF, 'latin1'),
+      ])
+
+    // koi8-r bytes of "Привет, мир! Тест кодировки", built without iconv so the
+    // fixture does not depend on the library under test.
+    const KOI8R = Buffer.from('f0d2c9d7c5d42c20cdc9d22120f4c5d3d420cbcfc4c9d2cfd7cbc9', 'hex')
+    // windows-1251 bytes of "<p>Привет из 1251</p>".
+    const CP1251 = Buffer.from('3c703ecff0e8e2e5f220e8e720313235313c2f703e', 'hex')
+    const ISO2022JP = Buffer.from('\x1b$BF|K\\8l$N%F%9%H\x1b(B', 'latin1')
+
+    const bothPaths = async (raw: Buffer) => {
+      const inline = await parseEmlBufferInline(1, raw)
+      const routed = await parseEmlBuffer(1, raw)
+      return { inline, routed }
+    }
+
+    it('decodes a koi8-r base64 body', async () => {
+      const { inline, routed } = await bothPaths(body('koi8-r', 'base64', Buffer.from(KOI8R.toString('base64'), 'latin1')))
+      expect(inline.text?.trim()).toBe('Привет, мир! Тест кодировки')
+      expect(routed.text).toBe(inline.text)
+    })
+
+    it('decodes a windows-1251 8bit html body', async () => {
+      const { inline, routed } = await bothPaths(body('windows-1251', '8bit', CP1251, 'html'))
+      expect(inline.html).toContain('<p>Привет из 1251</p>')
+      expect(routed.html).toBe(inline.html)
+    })
+
+    it('decodes an iso-2022-jp base64 body', async () => {
+      const { inline, routed } = await bothPaths(
+        body('iso-2022-jp', 'base64', Buffer.from(ISO2022JP.toString('base64'), 'latin1')),
+      )
+      expect(inline.text?.trim()).toBe('日本語のテスト')
+      expect(routed.text).toBe(inline.text)
+    })
   })
 })

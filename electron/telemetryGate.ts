@@ -28,6 +28,10 @@
 
 let _collectionAllowed = false
 let _sessionOriginMs = Date.now()
+// Counts transitions of the verdict. A MONOTONIC identity for "the consent window we are in": work that
+// accumulates over time (an AI request) records the epoch when it starts and reports only
+// if it is unchanged when it ends. The wall clock cannot stand in for this: it can step backwards.
+let _epoch = 0
 const _resetHooks: Array<() => void> = []
 
 /**
@@ -42,6 +46,11 @@ export function registerTelemetryCollectionResetHook(hook: () => void): void {
 /** May we accumulate and send telemetry right now? */
 export function isTelemetryCollectionAllowed(): boolean {
   return _collectionAllowed
+}
+
+/** Increases on every off->on and on->off transition; never decreases and never repeats within a process. */
+export function telemetryCollectionEpoch(): number {
+  return _epoch
 }
 
 /**
@@ -64,6 +73,7 @@ export function telemetryCollectionStartedAtMs(): number {
 export function setTelemetryCollectionAllowed(allowed: boolean): void {
   if (allowed === _collectionAllowed) return
   _collectionAllowed = allowed
+  _epoch++
   // Both directions drop the buffers:
   //   off→on  — nothing collected before the answer may be shipped after it.
   //   on→off  — a withdrawal (GDPR art. 7(3)) must not leave a buffer that a

@@ -1108,25 +1108,25 @@ describe('processAiRuleBatch — soft daily budget across ticks (audit-persisted
 
   it('a metered account accrues spend that binds the budget on the next tick', async () => {
     // A generous-enough budget admits the first account (positive headroom). Its
-    // metered spend (~0.02 for gpt-4o at 1000/1000 tokens) persists; on the next
+    // metered spend (~0.0125 for gpt-4o at 1000/1000 tokens) persists; on the next
     // tick that persisted spend leaves NO positive headroom, so the second
     // account is deferred by the soft budget gate.
-    const rules = [rule({ id: 'a', budgetPerDayUsd: 0.02 })]
+    const rules = [rule({ id: 'a', budgetPerDayUsd: 0.0125 })]
     const { deps, rate, rec, queue } = makeHarness({
       rules,
       respond: () => JSON.stringify([]),
       usage: () => ({ inputTokens: 1000, outputTokens: 1000 }),
-      model: 'gpt-4o', // 1000/1000 tokens → 0.005 + 0.015 = 0.02 metered
+      model: 'gpt-4o', // 1000/1000 tokens → 0.0025 + 0.01 = 0.0125 metered
       dynamicSpend: true,
       spentToday: 0,
     })
     queue.push(item(1, 1))
     await processAiRuleBatch(deps, rate)
-    expect(rec.chatCalls).toHaveLength(1) // first account admitted (0.02 budget > 0) and completed
+    expect(rec.chatCalls).toHaveLength(1) // first account admitted (0.0125 budget > 0) and completed
     expect(queue).toHaveLength(0)
 
-    // Tick 2: a fresh account. The ~0.02 metered spend already persisted meets
-    // the 0.02 cap (spentToday >= maxBudget) → budget exhausted → deferred.
+    // Tick 2: a fresh account. The ~0.0125 metered spend already persisted meets
+    // the 0.0125 cap (spentToday >= maxBudget) → budget exhausted → deferred.
     queue.push(item(2, 2))
     await processAiRuleBatch(deps, rate)
     expect(rec.chatCalls).toHaveLength(1) // no new call

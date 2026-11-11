@@ -11,6 +11,8 @@ Cliquez sur un message pour l'ouvrir dans le volet de lecture. Le corps du messa
 
 Navigation clavier : **j**/**k** (suivant/precedent), **o** ou **Enter** (ouvrir), **u** (retour a la liste).
 
+Ces touches font défiler les messages de la liste. Lorsqu'un fil de plusieurs messages est ouvert, **j** / **k** déplacent à la place un curseur entre ses cartes -- voir [Dans un fil de discussion](../keyboard-shortcuts#dans-un-fil-de-discussion) pour la liste complète des raccourcis disponibles dans ce cas.
+
 ## En-têtes de destinataires
 
 Le volet de lecture affiche les champs **To**, **Cc** et (pour les messages envoyés) **Bcc** au-dessus du corps du message. Lorsqu'un champ contient plus de trois adresses, MailCopilot masque le surplus : les trois premiers noms sont affichés en ligne, suivis d'un bouton **+N de plus**, où N est le nombre d'adresses masquées.
@@ -18,6 +20,8 @@ Le volet de lecture affiche les champs **To**, **Cc** et (pour les messages envo
 Cliquez sur **+N de plus** pour afficher la liste complète des destinataires sur plusieurs lignes. Cliquez à nouveau sur le bouton pour revenir à la vue résumée. Vous pouvez également appuyer sur **Esc** lorsque la liste est développée pour la réduire.
 
 Survolez un nom de destinataire pour afficher une infobulle avec la chaîne complète `Nom <email@host>`. Les utilisateurs du clavier peuvent accéder à chaque puce de destinataire et au bouton **+N de plus** via la touche Tab ; **Entrée** ou **Espace** sur le bouton bascule l'état développé.
+
+Faites un clic droit sur l'adresse d'un expéditeur ou d'un destinataire -- dans l'en-tête du message, dans les puces de destinataires, sur l'expéditeur d'une carte de fil ou dans la fenêtre de message autonome -- pour ouvrir un menu contextuel avec **Copier l'adresse**, qui copie l'adresse seule (par exemple `user@example.com`) dans le presse-papiers. L'expéditeur de l'en-tête et les puces de destinataires peuvent aussi être ouverts au clavier : accédez-y avec Tab, puis appuyez sur la touche Menu ou sur **Maj+F10**.
 
 **Confidentialité Bcc :** la ligne Bcc n'est affichée que pour les messages que vous avez envoyés vous-même. Elle n'est jamais affichée pour les messages reçus, de sorte que les destinataires Bcc des messages entrants restent privés.
 
@@ -57,6 +61,10 @@ Les fils comportant deux messages ou plus s'affichent sous la forme d'une pile v
 Les fils à message unique et les comptes avec le regroupement désactivé continuent d'utiliser le visualisateur simple — la vue en pile n'apparaît qu'à partir de deux messages.
 
 Désactivez cette option dans **Paramètres > Productivité > Regrouper les messages en conversations**.
+
+### Navigation au clavier dans un fil
+
+Une fois un fil de deux messages ou plus ouvert, **j** / **k** déplacent un curseur entre les cartes au lieu de faire défiler la liste des messages, et **r** / **a** / **f** répondent, répondent à tous ou transfèrent la carte où se trouve le curseur. Appuyez sur **Escape** pour quitter la navigation dans le fil et rendre **j** / **k** à la liste des messages. La liste complète des raccourcis disponibles pendant qu'un fil est ouvert se trouve dans [Dans un fil de discussion](../keyboard-shortcuts#dans-un-fil-de-discussion).
 
 ### Ordre de conversation
 
@@ -115,17 +123,25 @@ Cliquez sur **Traduire** au-dessus du corps du message, puis choisissez une lang
 
 Une fois la traduction affichee, un bouton bascule **Afficher l'original** / **Afficher la traduction** au-dessus du corps du message vous permet de revenir en arriere a tout moment. Le message enregistre lui-meme n'est jamais modifie -- la traduction n'est qu'une vue superposee.
 
-**Les messages HTML sont traduits a partir de leur version texte.** La traduction est toujours affichee en texte brut, meme pour un message HTML -- la mise en forme, la mise en page et les images integrees n'en font pas partie. Une legende au-dessus du texte traduit le precise explicitement : « La traduction est faite a partir de la version texte du message : sa mise en forme et ses images n'en font donc pas partie. »
+Au-dessus de la traduction, MailCopilot affiche « Traduit depuis le russe vers l'anglais », ou « Traduit en anglais » lorsque la langue d'origine n'est pas connue. La mise en forme et les images ne sont pas traduites.
 
-### Langue source detectee
+### Langue d'origine
 
-Avant de traduire, MailCopilot essaie d'identifier la langue d'origine du message sur votre appareil et, quand cela reussit, la nomme dans une legende au-dessus de la traduction (par exemple : « Traduction automatique de l'anglais vers le francais. L'original est a un clic. »). La detection est locale et sert uniquement d'etiquette -- elle ne decide jamais si le message peut etre traduit.
+MailCopilot essaie d'identifier la langue d'origine du message sur votre appareil. Lorsqu'il y parvient, l'avis au-dessus de la traduction la nomme. La détection ne sert qu'à cette étiquette.
 
-La legende peut etre corrigee dans les deux cas, pas seulement quand la detection echoue. Si la langue ne peut pas etre identifiee avec une confiance suffisante, MailCopilot traduit quand meme et n'affiche simplement aucune legende, proposant un selecteur **Langue de ce message** (texte d'aide : **Choisissez une langue**) pour la nommer vous-meme. Si une legende EST affichee mais nomme la mauvaise langue -- la detection locale peut confondre avec assurance des langues proches -- un lien **Ce n'est pas la bonne langue ?** a cote ouvre le meme selecteur. Dans les deux cas, nommer la langue est facultatif et se contente de mettre a jour la legende de la traduction deja affichee, en cache, sans nouvel appel au fournisseur.
+Pour indiquer ou corriger la langue, cliquez sur **Indiquer la langue d’origine**. Ce lien s'affiche que la langue ait été détectée ou non. Choisissez la langue dans le sélecteur **Langue de l’original** (texte d'aide : **Choisissez une langue**), puis cliquez sur **Appliquer**. Seule l'étiquette change, mise à jour depuis le cache ; le fournisseur n'est pas rappelé.
+
+### Messages longs
+
+Un message de 3000 caractères au plus est traduit en une seule requête. Un message plus long est découpé aux sauts de paragraphe (puis aux fins de phrase, puis aux espaces) en morceaux de 3000 caractères au plus. Chaque morceau est traduit par sa propre requête, trois à la fois, et les réponses sont réunies avec les sauts de paragraphe d'origine.
+
+Le résultat est tout ou rien : si un morceau échoue ou revient tronqué, aucune traduction n'est affichée et rien n'est mis en cache. Un message de plus de 60 000 caractères (jusqu’à environ 40 requêtes dans le pire cas) est refusé comme trop long. Les morceaux déjà traduits sont gardés dans la mémoire de l’application pendant une heure au plus : après un échec, une nouvelle tentative n’envoie que les morceaux manquants. Quitter le message n’arrête pas une traduction commencée : elle va jusqu’au bout, est enregistrée dans le cache et se trouve prête à votre retour. Désactiver la traduction pour la boîte l’arrête. Les morceaux sont traduits sans le texte voisin ; les termes et les formules d’adresse peuvent donc différer d’une partie à l’autre d’un long message. Un morceau sans lettre (chiffres, lignes de séparation) reste tel quel.
+
+Un message long représente donc plusieurs requêtes, chacune facturée à votre fournisseur IA et chacune enregistrée comme une entrée distincte dans le [journal d'audit IA](../privacy/ai-data#le-journal-daudit). La [traduction du brouillon](../ai-assistant#traduction-du-brouillon) ne découpe pas le texte et garde sa limite de 3000 caractères.
 
 ### Cache de traduction
 
-La traduction d'un message dans une langue donnee est mise en cache localement sur votre appareil, indexee par le contenu meme du message, la langue cible et la version du contrat de traduction (fournisseur, modele et forme du prompt) qui l'a produite -- rouvrir le meme message et choisir a nouveau la meme langue reutilise la traduction en cache au lieu de rappeler le fournisseur, et un changement ulterieur de la maniere dont MailCopilot produit les traductions est range sous une nouvelle cle plutot que de faire passer le resultat d'un ancien contrat pour actuel. Le cache n'a toujours pas de duree d'expiration propre -- c'est le plafond ci-dessous qui fait vieillir les entrees a sa place. Chaque compte conserve ses 500 traductions les plus recentes ; une fois cette limite atteinte, les traductions les plus anciennes de ce compte sont supprimees pour faire de la place aux nouvelles. Supprimer un compte supprime aussi ses traductions mises en cache.
+La traduction d'un message dans une langue donnee est mise en cache localement sur votre appareil, indexee par le contenu meme du message, la langue cible et la version du contrat de traduction (fournisseur, modele et forme du prompt) qui l'a produite -- rouvrir le meme message et choisir a nouveau la meme langue reutilise la traduction en cache au lieu de rappeler le fournisseur, et un changement ulterieur de la maniere dont MailCopilot produit les traductions est range sous une nouvelle cle plutot que de faire passer le resultat d'un ancien contrat pour actuel. Le cache n'a toujours pas de duree d'expiration propre -- c'est le plafond ci-dessous qui fait vieillir les entrees a sa place. Chaque compte conserve ses 200 traductions les plus recentes ; une fois cette limite atteinte, les traductions les plus anciennes de ce compte sont supprimees pour faire de la place aux nouvelles. Supprimer un compte supprime aussi ses traductions mises en cache. La traduction d'un message long est mise en cache en entier, sous le message entier.
 
 ### Si la traduction n'est pas disponible
 
@@ -133,13 +149,13 @@ MailCopilot indique la raison precise pour laquelle la traduction n'a pas pu etr
 
 - La traduction est desactivee pour ce compte.
 - Aucun fournisseur IA n'est encore configure.
-- Le fournisseur IA n'a pas renvoye de traduction et n'en a pas indique la raison.
-- La traduction ne tient pas dans la limite de reponse du fournisseur IA : elle est revenue tronquee et n'est pas affichee.
+- Le fournisseur IA n'a pas renvoyé de traduction.
+- La traduction n’a pas tenu dans la limite de réponse du fournisseur et n’est pas affichée. Réessayer donne le même résultat.
 - Le texte du message n'est pas encore telecharge.
-- Le message est trop long pour etre traduit en une seule fois, et il n'y a aucun moyen d'en traduire seulement une partie -- le message entier compte dans la limite, y compris les echanges anterieurs qui y seraient cites.
+- Ce message est trop long pour être traduit.
 - Le budget IA de cette periode est epuise.
 
-**Un bouton Reessayer n'apparait que la ou reessayer peut changer le resultat.** Chaque clic est une nouvelle requete facturee a votre fournisseur IA, donc MailCopilot ne propose pas ce bouton pour un refus qui se reproduirait a l'identique : la traduction butant sur la limite de reponse du fournisseur, le message trop long pour etre traduit du tout, ou la traduction desactivee pour ce compte. Pour les autres raisons -- le fournisseur ayant echoue sans explication, le message encore en telechargement, aucun fournisseur configure, ou le budget epuise -- **Reessayer** est affiche, car corriger la cause, ou simplement attendre, peut faire reussir la tentative suivante. A partir de la deuxieme tentative, le refus porte la mention **Tentative 2** (et ainsi de suite), pour qu'une nouvelle tentative qui ne change rien a l'ecran ne soit pas confondue avec un clic qui n'a pas fonctionne.
+**Un bouton Reessayer n'apparait que la ou reessayer peut changer le resultat.** Chaque clic est une nouvelle requete facturee a votre fournisseur IA, donc MailCopilot ne propose pas ce bouton pour un refus qui se reproduirait a l'identique : la traduction butant sur la limite de reponse du fournisseur, le message trop long pour etre traduit du tout, ou la traduction desactivee pour ce compte. Pour les autres raisons -- le fournisseur n'ayant pas renvoyé de traduction, le message encore en telechargement, aucun fournisseur configure, ou le budget epuise -- **Reessayer** est affiche, car corriger la cause, ou simplement attendre, peut faire reussir la tentative suivante. A partir de la deuxieme tentative, le refus porte la mention **Tentative 2** (et ainsi de suite), pour qu'une nouvelle tentative qui ne change rien a l'ecran ne soit pas confondue avec un clic qui n'a pas fonctionne.
 
 ## Pieces jointes
 
@@ -191,6 +207,8 @@ La fenêtre autonome est un espace de travail entièrement fonctionnel. Elle com
 - **Imprimer** -- imprimer le corps du message.
 
 Lorsque vous cliquez sur **Archiver**, ou sur **Supprimer** pour un message pouvant être déplacé vers la Corbeille, la fenêtre autonome affiche une bannière d'annulation intégrée pendant 3 secondes avant que MailCopilot effectue le déplacement et ferme la fenêtre. Cliquez sur **Annuler** pour abandonner l'opération — le message reste en place et la fenêtre reste ouverte. Tant que la bannière d'annulation est visible, les boutons **Archiver** et **Supprimer** sont désactivés ; **Répondre**, **Répondre à tous**, **Transférer**, **Étoiler / Retirer l'étoile**, **Marquer comme lu / non lu** et **Imprimer** restent disponibles.
+
+Fermer vous-même la fenêtre autonome pendant que la bannière d'annulation est encore visible -- par exemple via sa barre de titre -- valide le déplacement immédiatement, de la même façon que si les 3 secondes s'étaient écoulées. Cela n'annule pas l'action. Pour l'annuler, cliquez sur **Annuler** dans la bannière avant de fermer la fenêtre.
 
 Si le compte n'a pas de dossier Corbeille, ou si le message se trouve déjà dans la Corbeille, **Supprimer** demande une confirmation avant la suppression définitive — aucune bannière d'annulation n'apparaît et l'action est irréversible.
 

@@ -41,6 +41,9 @@ const i18nMap: Record<string, string> = {
   'settings.about.update.title': 'Updates',
   'settings.about.update.autoDownload': 'Automatically download updates',
   'settings.about.update.autoDownloadHint': 'Updates are downloaded in the background.',
+  'settings.about.update.checkEnabled': 'Check for updates in the background',
+  'settings.about.update.checkEnabledHint': 'Background checks contact the update server.',
+  'settings.about.update.autoDownloadNeedsCheck': 'Nothing downloads while background checks are off.',
   'settings.about.update.cannotSelfUpdateHint': 'Cannot self-update — folder not writable.',
   'settings.about.update.cannotSelfUpdateNoTarget': 'Cannot self-update — not an AppImage or system package.',
   'settings.about.update.cannotSelfUpdateUnknown': 'This installation cannot update itself automatically.',
@@ -134,14 +137,23 @@ function makeInfo(overrides: Partial<SystemInfoPayload> = {}): SystemInfoPayload
 }
 
 function renderComponent(
-  props: { autoUpdateEnabled?: boolean; onAutoUpdateEnabledChange?: (v: boolean) => void } = {},
+  props: {
+    autoUpdateEnabled?: boolean
+    onAutoUpdateEnabledChange?: (v: boolean) => void
+    updateCheckEnabled?: boolean
+    onUpdateCheckEnabledChange?: (v: boolean) => void
+  } = {},
 ) {
   const {
     autoUpdateEnabled = false,
     onAutoUpdateEnabledChange = vi.fn(),
+    updateCheckEnabled = true,
+    onUpdateCheckEnabledChange = vi.fn(),
   } = props
   return render(
-    React.createElement(SystemInfo, { autoUpdateEnabled, onAutoUpdateEnabledChange }),
+    React.createElement(SystemInfo, {
+      autoUpdateEnabled, onAutoUpdateEnabledChange, updateCheckEnabled, onUpdateCheckEnabledChange,
+    }),
   )
 }
 
@@ -252,6 +264,96 @@ describe('SystemInfo — system info display', () => {
     expect(screen.getByTestId('settings-about-app-version')).toBeInTheDocument()
     // No info rows (electron, chromium, node, platform) before info resolves.
     expect(screen.queryByTestId('settings-about-electron')).not.toBeInTheDocument()
+  })
+})
+
+describe('SystemInfo — background update check option', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    registeredListeners.clear()
+  })
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('checkbox reflects the updateCheckEnabled prop', async () => {
+    setupDefaultInvoke()
+    const on = renderComponent({ updateCheckEnabled: true })
+    await act(async () => {})
+    expect((screen.getByTestId('settings-about-update-check') as HTMLInputElement).checked).toBe(true)
+    on.unmount()
+
+    renderComponent({ updateCheckEnabled: false })
+    await act(async () => {})
+    expect((screen.getByTestId('settings-about-update-check') as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('reports the new value when the user clicks it', async () => {
+    setupDefaultInvoke()
+    const handler = vi.fn()
+    renderComponent({ updateCheckEnabled: true, onUpdateCheckEnabledChange: handler })
+    await act(async () => {})
+    await act(async () => { fireEvent.click(screen.getByTestId('settings-about-update-check')) })
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(false)
+  })
+
+  it('reports true when turned back on', async () => {
+    setupDefaultInvoke()
+    const handler = vi.fn()
+    renderComponent({ updateCheckEnabled: false, onUpdateCheckEnabledChange: handler })
+    await act(async () => {})
+    await act(async () => { fireEvent.click(screen.getByTestId('settings-about-update-check')) })
+    expect(handler).toHaveBeenCalledWith(true)
+  })
+
+  it('does not touch the auto-download preference when the option changes', async () => {
+    setupDefaultInvoke()
+    const autoHandler = vi.fn()
+    renderComponent({ updateCheckEnabled: true, onAutoUpdateEnabledChange: autoHandler })
+    await act(async () => {})
+    await act(async () => { fireEvent.click(screen.getByTestId('settings-about-update-check')) })
+    expect(autoHandler).not.toHaveBeenCalled()
+  })
+
+  it('shows the "needs a check" hint only while checks are off', async () => {
+    setupDefaultInvoke()
+    const on = renderComponent({ updateCheckEnabled: true })
+    await act(async () => {})
+    expect(screen.queryByTestId('settings-about-auto-download-needs-check')).not.toBeInTheDocument()
+    on.unmount()
+
+    renderComponent({ updateCheckEnabled: false })
+    await act(async () => {})
+    expect(screen.getByTestId('settings-about-auto-download-needs-check'))
+      .toHaveTextContent('Nothing downloads while background checks are off.')
+  })
+
+  it('keeps the auto-download checkbox operable while checks are off', async () => {
+    setupDefaultInvoke({ canSelfUpdate: true })
+    const handler = vi.fn()
+    renderComponent({ updateCheckEnabled: false, autoUpdateEnabled: false, onAutoUpdateEnabledChange: handler })
+    await act(async () => {})
+    const box = screen.getByTestId('settings-about-auto-update') as HTMLInputElement
+    expect(box.disabled).toBe(false)
+    await act(async () => { fireEvent.click(box) })
+    expect(handler).toHaveBeenCalledWith(true)
+  })
+
+  it('the manual "Check for updates" button stays enabled when checks are off', async () => {
+    setupDefaultInvoke({ isPackaged: true })
+    renderComponent({ updateCheckEnabled: false })
+    await act(async () => {})
+    const btn = screen.getByTestId('settings-about-check-update') as HTMLButtonElement
+    expect(btn.disabled).toBe(false)
+  })
+
+  it('the manual button still issues update:check when checks are off', async () => {
+    setupDefaultInvoke({ isPackaged: true })
+    renderComponent({ updateCheckEnabled: false })
+    await act(async () => {})
+    await act(async () => { fireEvent.click(screen.getByTestId('settings-about-check-update')) })
+    expect(mockInvoke).toHaveBeenCalledWith('update:check')
   })
 })
 

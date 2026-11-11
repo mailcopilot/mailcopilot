@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { AttachmentMeta, MailSummary, MessageDetails } from '../../packages/net/types'
 import {
   sanitizeMailHtml,
   replaceCidImages,
+  blockUnresolvedCidImages,
   extractExternalImageUrls,
   replaceExternalImages,
-  buildExternalImageReplacementMap,
+  BLOCKED_IMAGE_PLACEHOLDER_DATA_URI,
   buildMailIframeSrcDoc,
   MAX_EXTERNAL_IMAGE_URLS,
 } from '../utils/mail'
 import { rewriteMailHtmlLinks } from '../utils/mailLinks'
+import { buildInlineImageDataUri, newPendingRunId, patchPendingImages, pendingImageToken } from '../utils/pendingImages'
 import { collapseQuotedText } from '@mailcopilot/core'
 import {
   selectCidPartsToInline,
@@ -47,6 +49,12 @@ export interface UseMailIframeDocParams {
    * {@link collapseQuotedText} so `packages/core` stays i18n-free.
    */
   quotedTextLabel: string
+  /**
+   * The mounted mail iframe. Images that arrive after the body was handed to
+   * the iframe are written into its LIVE document (§2.308), so the hook needs
+   * the element; `null` until it mounts.
+   */
+  iframeRef: RefObject<HTMLIFrameElement | null>
 }
 
 export interface UseMailIframeDocReturn {
@@ -54,8 +62,10 @@ export interface UseMailIframeDocReturn {
    * Iframe srcdoc string, or `null` while computing. `null` is also returned
    * when the active email has no html body (caller falls back to text view).
    *
-   * The srcdoc is gated on completion of the external-image pipeline — no
-   * intermediate setMailIframeDoc call exposes a raw http(s) URL to the DOM.
+   * The srcdoc is available as soon as the html is sanitized: inline (CID) and
+   * allowed external images are inert placeholders in it and are swapped for the
+   * real `data:` URIs in the live iframe document as they arrive. At no moment
+   * does any document expose a raw http(s) URL.
    */
   doc: string | null
   /**
@@ -75,12 +85,18 @@ export interface UseMailIframeDocReturn {
    * Everything else keeps its chip, including a part the body draws from a CSS
    * background — one redundant chip is cheap, an unreachable file is not.
    *
-   * Empty until the substitution finishes, so the only transition is
-   * shown → hidden: a failed fetch (offline, IPC error) leaves the chip in
-   * place, instead of hiding a file the body could not draw either. It is
-   * committed together with {@link doc}, so both land in the same render.
+   * Grows as the images arrive (§2.308): empty when the body first shows, so
+   * the only transition is shown → hidden, one part at a time, each after its
+   * image has been written into the live document. A fetch that fails or never
+   * answers leaves the chip in place instead of hiding a file the body could
+   * not draw either.
    */
   hiddenAttachments: AttachmentMeta[]
+  /**
+   * Wire to the iframe's `onLoad`. A (re)loaded document starts with
+   * placeholders again; this re-applies every image that has already arrived.
+   */
+  onIframeLoad: () => void
 }
 
 /**
@@ -93,22 +109,21 @@ export interface UseMailIframeDocReturn {
  * open question of whether "no raw external URL in the iframe DOM" is a real
  * security invariant or best-effort: MailWindow.tsx does not honour it today.
  *
- * Pipeline (matches App.tsx wave-3 implementation):
+ * Pipeline:
  *   1. sanitize (DOMPurify) — drops script/iframe/image/media tags, on* attrs,
  *      decodes HTML entities in attribute values.
- *   2. replace cid: with data: via main-process inline-attachment fetch.
- *   3. extract every external http(s) URL from img/srcset/input/style/<style>.
- *   4. fetch a budget-capped subset via main-process proxy (inlined as
- *      `data:image/...;base64,...`).
- *   5. build replacement map — successes get their data URI, failures and
- *      over-budget URLs map to {@link BLOCKED_IMAGE_PLACEHOLDER_DATA_URI}.
- *   6. replace all mapped URLs in the DOM — iframe never receives a raw
- *      http(s) URL in any image-bearing position.
- *   7. rewrite mail links to the routed-mail scheme so click handling goes
- *      through the link prompt.
- *   8. collapse quoted text (blockquotes, Outlook/Gmail separators) using
- *      native `<details>`/`<summary>` — no JS injection in iframe.
- *   9. wrap in hardened srcdoc with `img-src 'self' data: cid:` CSP.
+ *   2. replace cid: references and the external image URLs inside the fetch
+ *      budget with pending tokens (inert placeholder + unique fragment); every
+ *      other external URL becomes the plain placeholder. The iframe never
+ *      receives a raw http(s) URL in any image-bearing position, and a `cid:`
+ *      reference with no pending token (no such part, or one past the inlining
+ *      ceiling) becomes the same plain placeholder (`blockUnresolvedCidImages`).
+ *   3. rewrite mail links, collapse quoted text, wrap in a hardened srcdoc with
+ *      the `img-src 'self' data: cid:` CSP — and hand it to the iframe NOW.
+ *   4. in the background, fetch the inline attachments and the budgeted
+ *      external images (via the main-process SSRF-safe proxy); as each one
+ *      arrives its token is swapped for the real `data:` URI in the LIVE iframe
+ *      document (see utils/pendingImages.ts). The text never waits for them.
  *
  * Cancellation: each effect run sets up a `cancelled` flag. When the effect
  * reruns (email switch, preference change) the previous closure aborts
@@ -193,7 +208,7 @@ function promoteLazyLoadAttrs(html: string): string {
 }
 
 export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeDocReturn {
-  const { active, details, alwaysLoadImages, showExternalImages, darkModeEmails, theme, quotedTextLabel } = params
+  const { active, details, alwaysLoadImages, showExternalImages, darkModeEmails, theme, quotedTextLabel, iframeRef } = params
 
   const [doc, setDoc] = useState<string | null>(null)
   const [hasExternalImages, setHasExternalImages] = useState(false)
@@ -223,6 +238,9 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
     () => selectCidPartsToInline(details?.attachments, preparedHtml),
     [details?.attachments, preparedHtml],
   )
+
+  const liveRun = useRef<{ flush: () => void } | null>(null)
+  const onIframeLoad = useCallback(() => { liveRun.current?.flush() }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -260,144 +278,152 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
 
     const darkMode = theme === 'dark' && darkModeEmails
 
+    // Pending tokens (see utils/pendingImages.ts): minted per run with a random
+    // id the sender can not know. Bytes of an earlier run are kept out of this
+    // document by `cancelled`, by `resolved` being per run, and by the iframe
+    // remount per message — not by the token.
+    const runId = newPendingRunId()
+    let nextToken = 0
+    /** token → the real data: URI, once the bytes have arrived. */
+    const resolved = new Map<string, string>()
+    /** tokens already written into a live document (hide-chip decision, below). */
+    const applied = new Set<string>()
+    /** token → the inline part it stands for (keyed by token: a Content-ID is sender text). */
+    const cidByToken = new Map<string, ResolvedCidPart<AttachmentMeta>>()
+
     /**
-     * Pre-fetch external images via the main-process proxy and return a
-     * URL→dataURI map. Only fetches a subset (budget-capped); every URL NOT
-     * in the returned map is later replaced by the inert placeholder so no
-     * raw http(s) URL survives into the iframe DOM.
+     * Write every image that has arrived into the iframe's live document, then
+     * update the chip row for the parts that actually landed. Safe to call at
+     * any time and any number of times: with no iframe, or one that has not
+     * loaded this srcdoc yet, nothing matches and the next call (the iframe's
+     * `onLoad`, or the next arrival) does the work.
      */
-    const fetchExternal = async (urls: string[]): Promise<Record<string, string>> => {
-      if (!allowExternal || urls.length === 0) return {}
-
-      // Budget cap: refuse to issue more than MAX_EXTERNAL_IMAGE_URLS fetches
-      // per message. This caps network concurrency; URLs past the budget are
-      // passed through to the placeholder path, not left raw.
-      const budget = urls.slice(0, MAX_EXTERNAL_IMAGE_URLS)
-
-      const urlToDataUri: Record<string, string> = {}
-      // Fetch in batches of 6 to avoid overwhelming the main process.
-      const BATCH = 6
-      for (let i = 0; i < budget.length && !cancelled; i += BATCH) {
-        const batch = budget.slice(i, i + BATCH)
-        await Promise.all(batch.map(async (url) => {
-          try {
-            const resp = await window.api.invoke('net:fetchExternalImage', url) as
-              | { ok: true; contentBase64: string; contentType: string }
-              | { ok: false; error?: string }
-            if (resp?.ok) urlToDataUri[url] = `data:${resp.contentType};base64,${resp.contentBase64}`
-            // On !ok, the URL is NOT added to urlToDataUri. buildExternalImageReplacementMap
-            // then substitutes BLOCKED_IMAGE_PLACEHOLDER_DATA_URI below — raw URL never
-            // survives into the iframe DOM.
-          } catch {
-            // Network/IPC failure — fall through to placeholder replacement.
-          }
-        }))
+    const flush = () => {
+      if (cancelled) return
+      const liveDoc = iframeRef.current?.contentDocument
+      if (!liveDoc) return
+      let grew = false
+      for (const token of patchPendingImages(liveDoc, resolved)) {
+        if (!applied.has(token)) { applied.add(token); grew = true }
       }
-      return urlToDataUri
+      if (!grew) return
+      // §2.128 condition 4 is read off what was really written into the body.
+      const substituted = [...applied].flatMap(t => cidByToken.get(t) ?? [])
+      setHiddenAttachments(selectPartsToHide(substituted, preparedHtml))
+    }
+    liveRun.current = { flush }
+
+    // ---- Phase 1: the body, immediately. No network wait of any kind. ----
+    //
+    // Sanitize already happened in `preparedHtml` — BEFORE any replacement.
+    // DOMPurify:
+    //   - drops dangerous tags (script, iframe, <image>, <base>, <meta>,
+    //     <video>, <audio>, <feImage>)
+    //   - drops dangerous attrs (on*, background)
+    //   - decodes HTML entities in attribute values, normalizing the attack
+    //     surface for the subsequent DOM-based extractor/replacer.
+    // Running sanitize AFTER replace would re-introduce decoded-entity
+    // bypasses (e.g. `src="https&#58;//…"` would survive the extractor and
+    // then be decoded by DOMPurify straight into the iframe DOM).
+    let html = preparedHtml
+
+    // Inline (CID) images: each gets its own pending token; the bytes are
+    // fetched in phase 2. `replaceCidImages` targets `cid:<id>` tokens
+    // regardless of attribute context and is not a source of external-URL
+    // leakage. A `Map`, not an object literal: the key is the sender's
+    // `Content-ID`, and an object's key space is not made of data
+    // (`obj['__proto__'] = uri` creates no own property, so the substitution
+    // would silently not happen).
+    const cidToToken = new Map<string, string>()
+    for (const entry of cidPartsToInline) {
+      const token = pendingImageToken(runId, nextToken++)
+      cidToToken.set(entry.cid, token)
+      cidByToken.set(token, entry)
+    }
+    if (cidToToken.size > 0) html = replaceCidImages(html, cidToToken)
+
+    // Extract EVERY external URL up-front — we must account for all of them
+    // in the final DOM whether the fetch succeeds, fails, or is skipped
+    // (user has not allowed external images). Unlike the wave-1 cap, this
+    // list is uncapped at extraction time; {@link MAX_EXTERNAL_IMAGE_URLS}
+    // applies only to the fetch budget.
+    const extractedUrls = extractExternalImageUrls(html)
+
+    // Banner derivation — authoritative (driven by the same extractor the
+    // security pipeline uses), no double-parse.
+    setHasExternalImages(extractedUrls.length > 0)
+
+    // Every extracted URL maps to the inert placeholder, so the iframe DOM
+    // never contains a raw http(s) URL in any image-bearing position. Those
+    // inside the fetch budget (a subset, via the main-process proxy, and only
+    // when the user allowed external images) get a pending token instead:
+    // visually the same placeholder, but swappable once the bytes arrive.
+    const fetchUrls = allowExternal ? extractedUrls.slice(0, MAX_EXTERNAL_IMAGE_URLS) : []
+    const externalByToken = new Map<string, string>()
+    const replacementMap: Record<string, string> = {}
+    for (const url of extractedUrls) replacementMap[url] = BLOCKED_IMAGE_PLACEHOLDER_DATA_URI
+    for (const url of fetchUrls) {
+      const token = pendingImageToken(runId, nextToken++)
+      externalByToken.set(token, url)
+      replacementMap[url] = token
+    }
+    // A `cid:` reference no pending token answers for (no such part, or one past the
+    // inlining ceiling, so nothing is fetched for it) must not reach the iframe as `cid:`:
+    // the browser would draw its broken-image icon. It ends as the same placeholder a
+    // blocked image does; its chip stays. Runs AFTER the external pass, never before: the
+    // placeholder carries a `"`, and inside a double-quoted external
+    // `url("//host … url(cid:x) …")` it would end that token early and hide the URL from
+    // the extractor.
+    const finalHtml = blockUnresolvedCidImages(replaceExternalImages(html, replacementMap))
+
+    const linkedHtml = rewriteMailHtmlLinks(finalHtml)
+    // Collapse quoted text (blockquotes, Outlook separators) using native
+    // <details>/<summary> so no JS injection is required in the iframe.
+    const safeBody = collapseQuotedText(linkedHtml, 'html', { label: quotedTextLabel })
+    setDoc(buildMailIframeSrcDoc(safeBody, { darkMode }))
+
+    // ---- Phase 2: images, in the background, each applied as it arrives. ----
+    const arrived = (token: string, dataUri: string | null) => {
+      if (cancelled || !dataUri) return
+      resolved.set(token, dataUri)
+      flush()
     }
 
     void (async () => {
-      // Sanitize already happened in `preparedHtml` — BEFORE any replacement.
-      // DOMPurify:
-      //   - drops dangerous tags (script, iframe, <image>, <base>, <meta>,
-      //     <video>, <audio>, <feImage>)
-      //   - drops dangerous attrs (on*, background)
-      //   - decodes HTML entities in attribute values, normalizing the attack
-      //     surface for the subsequent DOM-based extractor/replacer.
-      // Running sanitize AFTER replace would re-introduce decoded-entity
-      // bypasses (e.g. `src="https&#58;//…"` would survive the extractor and
-      // then be decoded by DOMPurify straight into the iframe DOM).
-      let html = preparedHtml
-
-      // Replace CID images with data: URIs. `replaceCidImages` targets
-      // `cid:<id>` tokens regardless of attribute context and is not a source
-      // of external-URL leakage.
-      //
-      // `substituted` collects the parts whose bytes actually arrived — §2.128
-      // condition 4. A part whose fetch failed is NOT in it, so it keeps its
-      // chip: the body shows a broken image, and the file has to stay reachable
-      // from somewhere.
-      let substituted: ResolvedCidPart<AttachmentMeta>[] = []
-      if (cidPartsToInline.length > 0) {
-        // A `Map`, not an object literal: the key is the sender's `Content-ID`,
-        // and an object's key space is not made of data. `obj['__proto__'] = uri`
-        // hits the inherited setter, creates no own property, and
-        // `replaceCidImages` (which walks own properties) never sees the pair —
-        // the image is not substituted, while the code below would have counted
-        // the part as substituted and dropped its chip. A message with
-        // `Content-ID: <__proto__>` plus `<img src="cid:__proto__">` thus removed
-        // a real attachment from the list without drawing it anywhere.
-        const cidToDataUri = new Map<string, string>()
-        await Promise.all(cidPartsToInline.map(async (entry) => {
-          const att = entry.attachment
+      await Promise.all([
+        // Inline attachments, all at once (as before).
+        ...[...cidByToken].map(async ([token, entry]) => {
           try {
-            const resp = await window.api.invoke('net:attachmentBase64', ctx.accountId, ctx.folder, ctx.uid, att.part) as
+            const resp = await window.api.invoke('net:attachmentBase64', ctx.accountId, ctx.folder, ctx.uid, entry.attachment.part) as
               | { ok: true; contentBase64: string; contentType?: string }
               | { ok: false; error?: string }
             if (!resp || !resp.ok) return
-            const ct = (att.contentType || resp.contentType || 'application/octet-stream').trim() || 'application/octet-stream'
-            cidToDataUri.set(entry.cid, `data:${ct};base64,${resp.contentBase64}`)
-          } catch { /* ignore */ }
-        }))
-        // Condition 4 is read off the very container the substitution consumes,
-        // rather than recorded as each fetch returns: a part counts as
-        // substituted exactly when `replaceCidImages` will find a data URI under
-        // its cid. Bookkeeping kept beside the write asserts an intention — that
-        // the write landed — and that intention is what failed here, with the
-        // chip disappearing for an image the body never received.
-        // A truthy value, not just presence of the key: `replaceCidImages` skips
-        // an empty data URI, so an empty one would not substitute either.
-        substituted = cidPartsToInline.filter(entry => Boolean(cidToDataUri.get(entry.cid)))
-        html = replaceCidImages(html, cidToDataUri)
-      }
-
-      // Conditions 2 and 3 on top of what really got substituted, against the
-      // html the substitution ran on (`preparedHtml` still carries the `cid:`
-      // tokens; `html` no longer does).
-      const hidden = selectPartsToHide(substituted, preparedHtml)
-
-      // Extract EVERY external URL up-front — we must account for all of them
-      // in the final DOM whether the fetch succeeds, fails, or is skipped
-      // (user has not allowed external images). Unlike the wave-1 cap, this
-      // list is uncapped at extraction time; {@link MAX_EXTERNAL_IMAGE_URLS}
-      // applies only to the fetch budget inside fetchExternal().
-      const extractedUrls = extractExternalImageUrls(html)
-
-      // Banner derivation — authoritative (driven by the same extractor the
-      // security pipeline uses), no double-parse. Set before awaiting fetch
-      // so the banner appears immediately while images resolve.
-      if (!cancelled) setHasExternalImages(extractedUrls.length > 0)
-
-      // Pre-fetch a budgeted subset via the main-process proxy. Returns only
-      // URLs that fetched successfully; everything else (unfetched due to
-      // budget, failed fetch, or allowExternal=false) is replaced with the
-      // inert placeholder below.
-      const inlinedMap = await fetchExternal(extractedUrls)
-      if (cancelled) return
-
-      // Build replacement map covering ALL extracted URLs: successful fetch →
-      // inlined data URI, everything else → inert placeholder data URI. The
-      // placeholder path also fires when allowExternal=false — the iframe CSP
-      // would block the request anyway, but explicit replacement guarantees
-      // the iframe DOM never contains a raw http(s) URL in any image-bearing
-      // position.
-      const replacementMap = buildExternalImageReplacementMap(extractedUrls, inlinedMap)
-      const finalHtml = replaceExternalImages(html, replacementMap)
-
-      const linkedHtml = rewriteMailHtmlLinks(finalHtml)
-      // Collapse quoted text (blockquotes, Outlook separators) using native
-      // <details>/<summary> so no JS injection is required in the iframe.
-      const safeBody = collapseQuotedText(linkedHtml, 'html', { label: quotedTextLabel })
-      const out = buildMailIframeSrcDoc(safeBody, { darkMode })
-      // One commit: the body and the chip row change in the same render, so a
-      // chip never blinks out ahead of the image that replaced it.
-      if (!cancelled) {
-        setHiddenAttachments(hidden)
-        setDoc(out)
-      }
+            arrived(token, buildInlineImageDataUri(entry.attachment.contentType || resp.contentType, resp.contentBase64))
+          } catch { /* a part that does not arrive keeps its placeholder and its chip */ }
+        }),
+        // External images, in batches of 6 so the main process is not swamped.
+        (async () => {
+          const BATCH = 6
+          const tokens = [...externalByToken]
+          for (let i = 0; i < tokens.length && !cancelled; i += BATCH) {
+            await Promise.all(tokens.slice(i, i + BATCH).map(async ([token, url]) => {
+              try {
+                const resp = await window.api.invoke('net:fetchExternalImage', url) as
+                  | { ok: true; contentBase64: string; contentType: string }
+                  | { ok: false; error?: string }
+                // On !ok / throw the placeholder simply stays — the raw URL never reaches the DOM.
+                if (resp?.ok) arrived(token, buildInlineImageDataUri(resp.contentType, resp.contentBase64))
+              } catch { /* network / IPC failure — placeholder stays */ }
+            }))
+          }
+        })(),
+      ])
     })()
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      if (liveRun.current?.flush === flush) liveRun.current = null
+    }
     // `preparedHtml` and `cidPartsToInline` are memoized from details.html /
     // details.attachments, so they are the granular deps — anything else inside
     // `details` (text body, flags, envelope) does not affect the srcdoc.
@@ -405,7 +431,7 @@ export function useMailIframeDoc(params: UseMailIframeDocParams): UseMailIframeD
     // detail updates. `details?.html` stays in the list because the early
     // return above branches on it (an html body that sanitizes to an empty
     // string still produces a srcdoc).
-  }, [active, alwaysLoadImages, cidPartsToInline, darkModeEmails, details?.html, preparedHtml, quotedTextLabel, showExternalImages, theme])
+  }, [active, alwaysLoadImages, cidPartsToInline, darkModeEmails, details?.html, iframeRef, preparedHtml, quotedTextLabel, showExternalImages, theme])
 
-  return { doc, hasExternalImages, hiddenAttachments }
+  return { doc, hasExternalImages, hiddenAttachments, onIframeLoad }
 }

@@ -368,8 +368,28 @@ export type ComposeInit = {
   text?: string
   html?: string
   attachments?: ComposeAttachment[]
-  /** Original email reference for Send & Archive (reply only) */
+  /**
+   * The message the user opened this reply on. It is BOTH the threading pointer
+   * (main derives In-Reply-To / References from it) AND the Send & Archive
+   * target, so it is only ever set from the message the user actually opened.
+   */
   replyRef?: { accountId: number; folder: string; uid: number }
+  /**
+   * A thread pointer main RESTORED for a reopened reply draft. It threads the
+   * reply exactly like `replyRef` but is never an archive target: it was found
+   * again by Message-ID, which can match several copies of one message (a copy
+   * in Trash or Junk, a label folder, a forged duplicate). Its own field, not a
+   * flag on `replyRef`, so the distinction survives the send queue, Undo and
+   * Outbox Edit, which rebuild an init from the stored pointers.
+   */
+  threadRef?: { accountId: number; folder: string; uid: number }
+  /**
+   * The saved draft this window is opening (`source: 'draft'`). A pointer only:
+   * main reads the reply headers stored in that draft message from its cache and
+   * turns them into `threadRef`, so a reply draft keeps answering its parent.
+   * Never forwarded to the window.
+   */
+  draftRef?: { accountId: number; folder: string; uid: number }
   /** Original recipients for misdirection check (reply only) */
   originalRecipients?: string[]
   /** Telemetry: where the user came from (reply/forward/template/mailto/...). */

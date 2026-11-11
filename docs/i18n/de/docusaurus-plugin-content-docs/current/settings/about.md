@@ -33,6 +33,14 @@ Diese Informationen sind nützlich, wenn Sie Fehler melden oder die Kompatibilit
 
 Der Abschnitt **Updates** ermöglicht Ihnen, zu steuern, wie MailCopilot sich selbst aktualisiert.
 
+### Im Hintergrund nach Updates suchen
+
+Wenn diese Option aktiviert ist, sucht MailCopilot beim Start und danach etwa einmal pro Stunde nach neuen Versionen. Jede Prüfung ist eine gewöhnliche HTTPS-Anfrage an unseren Update-Server nach einer kleinen Metadaten-Datei. Der Server sieht Ihre IP-Adresse und – anhand des Namens der angeforderten Datei – die Art Ihres Betriebssystems und Ihrer Prozessorarchitektur. Die Prüfung selbst sendet nicht die Version von MailCopilot, ebenso wenig irgendetwas über Ihre E-Mails, Konten oder Ihre Nutzung. Beim Herunterladen eines Updates werden dagegen Versionen verraten: Die Namen der angeforderten Dateien enthalten Versionsnummern, und ein Differenzial-Download fordert zusätzlich die Block-Map-Datei der aktuell installierten Version an (Name der Form `mailcopilot-<current-version>-setup.exe.blockmap` unter Windows), woran der Server erkennt, welche Version läuft.
+
+Diese Einstellung ist **standardmäßig aktiviert**. Ein Neustart ist nicht nötig: Das Ausschalten stoppt neue automatische Prüfungen, sobald Sie speichern. Eine Prüfung oder ein automatischer Download, die bzw. den die Update-Bibliothek bereits begonnen hat, kann trotzdem noch abgeschlossen werden (ein begonnener Download wird nicht abgebrochen; eine Prüfung kann gerade ihre Konfiguration lesen und versucht eine abgelehnte Verbindung mehrmals erneut). Sie wird auch auf dem Bildschirm beim ersten Start angeboten, in einem Block **Updates**, der von der Diagnosefrage getrennt und von Ihrer Antwort darauf unabhängig ist. Automatische Prüfungen werden nur bei einer völlig neuen Installation zurückgehalten (ein Profil ohne frühere Antwort auf den Bildschirm beim ersten Start und ohne E-Mail-Konto): Dort warten sie, bis dieser Bildschirm beantwortet ist, und ihn ohne Antwort zu schließen speichert nichts. Jedes bestehende Profil prüft weiterhin, auch eines, das den Bildschirm beim ersten Start nach einer Änderung der Offenlegung erneut beantworten muss. Die Einstellung finden Sie hier unter **Einstellungen → Über**.
+
+Davon abgesehen kontaktiert MailCopilot, wenn diese Option deaktiviert ist, den Update-Server nie von sich aus: weder eine Prüfung beim Start noch stündliche Prüfungen. Die Schaltfläche **Nach Updates suchen** weiter unten können Sie jederzeit verwenden.
+
 ### Updates automatisch im Hintergrund herunterladen
 
 Wenn diese Option aktiviert ist, lädt MailCopilot neue Versionen automatisch herunter, sobald sie verfügbar sind. Sobald ein Download abgeschlossen ist, werden Sie aufgefordert, die Anwendung neu zu starten, um das Update anzuwenden. Es sind keine weiteren Aktionen erforderlich, bis Sie bereit zum Neustart sind.
@@ -41,9 +49,11 @@ Wenn diese Option deaktiviert ist, benachrichtigt MailCopilot Sie über verfügb
 
 Diese Einstellung ist **standardmäßig deaktiviert** (muss explizit aktiviert werden). Aktivieren Sie sie, damit MailCopilot Updates ohne manuelle Eingabe herunterlädt.
 
+Diese Option wirkt nur, solange **Im Hintergrund nach Updates suchen** aktiviert ist, denn ein automatischer Download ist ohne Prüfung nicht möglich. Solange die Hintergrundprüfung ausgeschaltet ist, bleibt das Kontrollkästchen verfügbar und ein Hinweis erklärt dies; Ihre Wahl bleibt erhalten und gilt wieder, sobald die Hintergrundprüfung eingeschaltet wird. In diesem Zustand zeigt eine manuelle Prüfung, die ein Update findet, die Schaltfläche **Herunterladen** an, und es wird kein neuer automatischer Download gestartet (ein bereits laufender kann trotzdem noch abgeschlossen werden).
+
 ### Nach Updates suchen
 
-Klicken Sie auf die Schaltfläche **Nach Updates suchen**, um jederzeit manuell eine Updateprüfung auszulösen. Die Schaltfläche und der Statusbereich spiegeln den aktuellen Stand des Update-Prozesses wider:
+Klicken Sie auf die Schaltfläche **Nach Updates suchen**, um jederzeit manuell eine Updateprüfung auszulösen. Sie funktioniert unabhängig davon, ob die Hintergrundprüfung aktiviert ist, denn der Klick ist eine ausdrückliche Anforderung. Die Schaltfläche und der Statusbereich spiegeln den aktuellen Stand des Update-Prozesses wider:
 
 - **inaktiv** — die Schaltfläche **Nach Updates suchen** ist sichtbar und einsatzbereit.
 - **Wird geprüft…** — eine Updateprüfung wird durchgeführt; die Schaltfläche ist deaktiviert, bis die Prüfung abgeschlossen ist.

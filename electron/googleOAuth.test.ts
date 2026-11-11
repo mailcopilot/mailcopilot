@@ -60,6 +60,32 @@ describe('googleOAuth', { timeout: 30_000 }, () => {
       expect(stagesAtOpen).toEqual(['browser'])
     })
 
+    async function captureAuthUrl(extra: { loginHint?: string } = {}): Promise<URL> {
+      let opened = ''
+      await runGoogleOAuthFlow({
+        clientId: 'test-client',
+        openExternal: (url) => { opened = url },
+        timeoutMs: 200,
+        ...extra,
+      }).catch(() => { /* expected callback timeout */ })
+      return new URL(opened)
+    }
+
+    it('puts the login hint into the authorization URL when one is given (§2.297)', async () => {
+      const url = await captureAuthUrl({ loginHint: 'ada@gmail.com' })
+      expect(url.searchParams.get('login_hint')).toBe('ada@gmail.com')
+    })
+
+    it('sends no login_hint when none is given', async () => {
+      const url = await captureAuthUrl()
+      expect(url.searchParams.has('login_hint')).toBe(false)
+    })
+
+    it('sends no login_hint for an empty hint', async () => {
+      const url = await captureAuthUrl({ loginHint: '' })
+      expect(url.searchParams.has('login_hint')).toBe(false)
+    })
+
     it('never lets a throwing progress listener break the flow', async () => {
       let opened = false
 

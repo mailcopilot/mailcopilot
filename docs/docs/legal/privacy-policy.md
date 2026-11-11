@@ -6,7 +6,7 @@ title: Privacy Policy
 # Privacy Policy
 
 **Effective date:** February 13, 2026
-**Last updated:** February 13, 2026
+**Last updated:** November 4, 2026
 
 ## 1. Introduction
 
@@ -143,7 +143,7 @@ Specifically:
 
 ## 7. Google OAuth 2.0
 
-When you connect a Gmail account, MailCopilot uses Google OAuth 2.0 with PKCE (RFC 7636) to obtain access. We request the following scopes:
+When you connect a Gmail account with Google sign-in, MailCopilot uses Google OAuth 2.0 with PKCE (RFC 7636) to obtain access. In the official MailCopilot build, Google sign-in is no longer offered for new Gmail mailboxes (they connect with an app password over IMAP/SMTP); it remains available for mailboxes that already use it and for builds made from source with their own Google client. When Google sign-in is used, we request the following scopes:
 
 | Scope | Purpose |
 |---|---|
@@ -196,7 +196,11 @@ We implement the following security measures:
 
 ## 12. Automatic Updates
 
-MailCopilot checks for updates periodically. Update metadata (version number, file hash) is downloaded from our release repository. **No personal data is sent** during the update check. You can disable automatic update checks in Settings.
+MailCopilot checks for updates in the background: when it starts, and then about once an hour. An update check is an ordinary HTTPS request to our update server for a small metadata file (version number and file hash). As with any web request, the server sees your IP address and, from the name of the file requested, the type of your operating system and processor architecture. The check itself does not send the version of MailCopilot you are running (the application compares versions locally), and no mail, account details or usage data are included. The request carries only ordinary HTTP headers, such as a generic user agent. A compatibility header that the update library uses for staged rollouts is sent with a fixed all-zero value, identical for every installation, so it identifies nothing. Downloading an update is different: it does reveal versions, because the names of the files requested contain version numbers, and when a differential download is used, the request for the block-map file of the version you currently have installed (named like `mailcopilot-<current-version>-setup.exe.blockmap` on Windows) tells the server which version is running.
+
+You decide whether this happens. **Check for updates in the background** is on by default and can be switched off in Settings → About → Updates, or on the first-run screen. No restart is needed: switching it off stops new automatic checks as soon as you save. A check or an automatic download that the update library has already started may still complete (a download that has begun is not cancelled; a check can be partway through reading its configuration, and it retries a refused connection a few times). Apart from that, when it is off, MailCopilot never contacts the update server on its own — no check at start and none every hour. The **Check for updates** button still works, because clicking it is your explicit request. A new automatic download cannot start without a check, so the "Automatically download updates in the background" option has no effect while background checks are off. On a brand-new installation — a profile with no earlier answer to the first-run screen and no mail account — MailCopilot sends no automatic update request until you have answered the first-run screen; closing that screen without answering records nothing, so the wait continues. Every existing profile keeps checking, including one that is shown the first-run screen again after a change to the disclosure.
+
+On Windows, the installer shows a privacy notice page (a short summary with a link to this policy) before the installation steps, in the installer's language (English, Russian, French, German, Spanish or Italian; other installer languages show English). You must accept it to continue. This page is not shown for silent installs or for automatic updates. The Linux and macOS packages have no installer page; for them, the first-run screen and Settings are where this information and the choice are presented.
 
 ## 13. Children's Privacy
 

@@ -52,10 +52,16 @@ async function applyLanguage(page: Page, lang: Language): Promise<void> {
 }
 
 async function ensureSidebarExpanded(page: Page): Promise<void> {
-  const expanded = await page.evaluate(() => localStorage.getItem('mailcopilot:sidebar') === '1')
-  if (expanded) return
-  await page.locator('.sidebar-toggle-btn').click()
-  await expect.poll(async () => page.evaluate(() => localStorage.getItem('mailcopilot:sidebar') === '1')).toBe(true)
+  const toggle = page.locator('.sidebar-toggle-btn')
+  await expect(toggle).toBeVisible({ timeout: 10_000 })
+  // Read the state off the button, not off localStorage. With no preference
+  // stored the pane defaults to EXPANDED (App.tsx: `saved === null` -> true), so
+  // treating "no key" as collapsed made this helper click the toggle and
+  // collapse the pane it was meant to open. The expand tooltip is rendered only
+  // while collapsed, which makes its presence the honest signal.
+  if (await toggle.getAttribute('data-tooltip') === null) return
+  await toggle.click()
+  await expect.poll(async () => toggle.getAttribute('data-tooltip'), { timeout: 10_000 }).toBeNull()
 }
 
 async function captureForLanguage(page: Page, lang: Language): Promise<void> {

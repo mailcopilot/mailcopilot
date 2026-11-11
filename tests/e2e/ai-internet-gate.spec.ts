@@ -82,13 +82,12 @@ async function emitInternetToolPendingViaIpc(
 // Tests
 // ---------------------------------------------------------------------------
 
-test('AI panel: Shield icon is visible in panel header when egress policy is not allow', async () => {
+test('AI panel: header carries no egress shield icon under the default policy', async () => {
   const ctx: Partial<AppContext> = {}
   try {
     Object.assign(ctx, await launchApp())
     const appCtx = ctx as AppContext
 
-    // Ensure AI panel is enabled and mounted.
     await appCtx.page.evaluate(async () => {
       const api = (window as unknown as { api: { invoke: (ch: string, ...a: unknown[]) => Promise<unknown> } }).api
       await api.invoke('settings:save', {
@@ -101,36 +100,10 @@ test('AI panel: Shield icon is visible in panel header when egress policy is not
 
     await openAiPanel(appCtx)
 
-    // Shield icon must be visible for default-deny / ask policies.
-    await expect(appCtx.page.getByTestId('ai-egress-shield')).toBeVisible({
-      timeout: EXPECT_TIMEOUT,
-    })
-  } finally {
-    await cleanupApp(ctx)
-  }
-})
-
-test('AI panel: Shield icon is NOT visible when egress policy is set to allow', async () => {
-  const ctx: Partial<AppContext> = {}
-  try {
-    Object.assign(ctx, await launchApp())
-    const appCtx = ctx as AppContext
-
-    await appCtx.page.evaluate(async () => {
-      const api = (window as unknown as { api: { invoke: (ch: string, ...a: unknown[]) => Promise<unknown> } }).api
-      await api.invoke('settings:save', {
-        aiProvider: 'openai-api',
-        aiOpenAiBaseUrl: 'http://127.0.0.1:11434/v1',
-        aiPrivacyConsent: true,
-        aiEgressPolicy: 'allow',
-      })
-    })
-
-    await openAiPanel(appCtx)
-
-    await expect(appCtx.page.getByTestId('ai-egress-shield')).not.toBeVisible({
-      timeout: EXPECT_TIMEOUT,
-    })
+    // The panel is open (its history toggle is in the same header) and the
+    // retired shield indicator is not there.
+    await expect(appCtx.page.getByTestId('ai-sessions-toggle')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(appCtx.page.getByTestId('ai-egress-shield')).toHaveCount(0)
   } finally {
     await cleanupApp(ctx)
   }

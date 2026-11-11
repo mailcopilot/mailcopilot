@@ -61,3 +61,31 @@ export function computeIsE2E(env: E2EFlagEnv, isPackaged: boolean): boolean {
   if (isPackaged) return false
   return env.MAILCOPILOT_E2E === '1'
 }
+
+/**
+ * Whether this process may go on running, as far as the single-instance lock is
+ * concerned: `true` means "carry on", `false` means another instance already
+ * holds the lock and this one must quit.
+ *
+ * The lock exists because two instances on one profile share the SQLite file
+ * and, with it, the send queue: the second one's stuck-row reset re-queues a
+ * send the first is still performing (a send may legitimately outlast the
+ * two-minute cut-off — the socket timeout is an INACTIVITY timeout, not a limit
+ * on the whole operation) and the message goes out twice. So the lock is
+ * skipped only for the e2e harness, which runs several isolated instances in
+ * parallel — and "the e2e harness" is `computeIsE2E`, the canonical flag, not
+ * the bare environment variable: on a shipped build `MAILCOPILOT_E2E=1` is set
+ * by anything running as the user and must decide nothing, this included.
+ *
+ * `requestLock` is injected (`app.requestSingleInstanceLock` in production) so
+ * the decision is testable without Electron. It is not called at all when the
+ * harness skips the lock.
+ */
+export function mayRunAlongsideOtherInstances(
+  env: E2EFlagEnv,
+  isPackaged: boolean,
+  requestLock: () => boolean,
+): boolean {
+  if (computeIsE2E(env, isPackaged)) return true
+  return requestLock()
+}

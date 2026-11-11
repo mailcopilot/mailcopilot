@@ -132,7 +132,9 @@ export function consentColumnState(
   return granted === accountIds.length ? 'all' : 'some'
 }
 
-/** One cell written; every other entry, including unknown ids, carried through. */
+/**
+ * One cell written; every other entry, including unknown ids, carried through.
+ */
 export function withConsent(
   map: AiConsentMap,
   accountId: number,

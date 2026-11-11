@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { autoconfigWithDeps, __private__ } from './autoconfig'
+import { autoconfigWithDeps, gmailPresetAutoconfig, __private__ } from './autoconfig'
 
 describe('packages/net/autoconfig', () => {
   it('parseThunderbirdXml extracts IMAP/SMTP servers', () => {
@@ -47,6 +47,21 @@ describe('packages/net/autoconfig', () => {
     expect(fetchMock).not.toHaveBeenCalled()
     expect(mxMock).not.toHaveBeenCalled()
     expect(probeMock).not.toHaveBeenCalled()
+  })
+
+  it('gmailPresetAutoconfig returns the gmail.com preset with no network lookup', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    try {
+      expect(gmailPresetAutoconfig()).toEqual({
+        imap: { host: 'imap.gmail.com', port: 993, secure: true },
+        smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
+        displayName: 'Gmail',
+        source: 'preset',
+      })
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 
   it('autoconfigWithDeps uses domain-autoconfig after failed ISPDB', async () => {

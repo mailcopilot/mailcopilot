@@ -28,6 +28,19 @@
 const BUILT_IN_CLIENT_ID = typeof __GOOGLE_OAUTH_CLIENT_ID__ === 'string' ? __GOOGLE_OAUTH_CLIENT_ID__ : ''
 const BUILT_IN_CLIENT_SECRET = typeof __GOOGLE_OAUTH_CLIENT_SECRET__ === 'string' ? __GOOGLE_OAUTH_CLIENT_SECRET__ : ''
 
+/** Build-time switch for connecting NEW mailboxes through Google sign-in.
+ *  `vite.config.ts` bakes `false` into official builds (the release pipelines
+ *  set `MAILCOPILOT_OFFICIAL_BUILD`) and `true` everywhere else, so a
+ *  self-build with its own client keeps the sign-in by default. It is
+ *  deliberately NOT derived from where the client id came from: the official
+ *  client id is extractable from the shipped binary, so "the key came from the
+ *  environment" would reopen the sign-in for the official build run with that
+ *  id. Where the identifier is not declared at all (a bundle built without the
+ *  `define`) the answer is closed, never open. */
+function readNewMailboxesFlag(): boolean {
+  return typeof __GOOGLE_NEW_MAILBOXES__ === 'boolean' ? __GOOGLE_NEW_MAILBOXES__ : false
+}
+
 export type GoogleOAuthCredentials = {
   clientId: string
   /** Empty for a public (secret-less) client — the token endpoint is then
@@ -71,6 +84,12 @@ export function getGoogleOAuthCredentials(): GoogleOAuthCredentials | null {
 /** True when Gmail OAuth sign-in can be attempted at all. */
 export function isGoogleOAuthConfigured(): boolean {
   return getGoogleOAuthCredentials() !== null
+}
+
+/** True when this build may connect a mailbox that has no Google sign-in yet.
+ *  Reconnecting an existing Google mailbox does not depend on it. */
+export function areNewGoogleMailboxesAllowed(): boolean {
+  return readNewMailboxesFlag()
 }
 
 /** Credentials or a user-facing error. Call this at the entry points of the

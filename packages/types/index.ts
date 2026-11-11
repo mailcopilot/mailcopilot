@@ -647,3 +647,5 @@ export type TranslatedDraft = {
 export type TranslateDraftResult =
   | { ok: true; translation: TranslatedDraft }
   | { ok: false; reason: TranslateDraftRefusalReason }
+
+

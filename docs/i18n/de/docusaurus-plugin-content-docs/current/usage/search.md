@@ -57,3 +57,11 @@ Bei der Suche in einem bestimmten Ordner kann MailCopilot auch den IMAP-Server a
 ## Relevanzranking
 
 Suchergebnisse werden nach Relevanz sortiert. Treffer im Betreff werden höher eingestuft als Treffer im Nachrichtentext.
+
+## Den KI-Assistenten zu Ihrer Post befragen
+
+Die Suche findet Nachrichten. Wenn Sie lieber in eigenen Worten eine Frage stellen möchten, nutzen Sie den KI-Assistenten: öffnen Sie das KI-Chat-Panel über die Seitenleiste.
+
+- **Derselbe Cache und Index.** Wenn der Assistent Ihre Post durchsucht, nutzt er den lokalen Cache und den Suchindex, die auf dieser Seite beschrieben sind. Alles unter [Suchvollständigkeit](#suchvollständigkeit) gilt daher auch für seine Antworten: Eine noch nicht indexierte Nachricht kann übersehen werden. Ist der Index eines durchsuchten Postfachs noch unvollständig, weist eine Zeile unter der Antwort darauf hin.
+
+Wie der Assistent arbeitet, was er an Ihren KI-Anbieter sendet und wie er Links auf Nachrichten markiert, die er nicht erhalten hat, ist unter [KI-Assistent](../ai-assistant#ki-panel-oeffnen) beschrieben.

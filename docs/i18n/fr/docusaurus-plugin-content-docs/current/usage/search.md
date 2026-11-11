@@ -57,3 +57,11 @@ Lors de la recherche dans un dossier spécifique, MailCopilot peut également in
 ## Classement par pertinence
 
 Les résultats sont classés par pertinence. Les correspondances dans le sujet sont mieux classées que celles dans le corps du message.
+
+## Interroger l'assistant IA sur votre courrier
+
+La recherche trouve des messages. Si vous préférez poser une question avec vos propres mots, utilisez l'assistant IA : ouvrez le panneau du chat IA depuis la barre latérale.
+
+- **Même cache et même index.** Lorsque l'assistant cherche dans votre courrier, il utilise le cache local et l'index de recherche décrits sur cette page ; tout ce qui figure dans [Complétude de la recherche](#complétude-de-la-recherche) s'applique donc aussi à ses réponses : un message pas encore indexé peut être manqué. Si l'index d'une boîte consultée est encore incomplet, une ligne sous la réponse l'indique.
+
+Le fonctionnement de l'assistant, ce qu'il envoie à votre fournisseur d'IA et la façon dont il signale les liens vers des messages qu'il n'a pas reçus sont décrits dans [Assistant IA](../ai-assistant#ouverture-du-panneau-ia).

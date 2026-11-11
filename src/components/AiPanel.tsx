@@ -4,10 +4,9 @@
  */
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { X, Plus, Send, Square, Sparkles, Loader2, ShieldCheck, Key, ExternalLink, History, Trash2, Mail, FolderOpen, AlertCircle } from 'lucide-react'
-import { normalizeMailrefs } from '../utils/normalizeMailrefs'
+import AiAnswerMarkdown from './AiAnswerMarkdown'
+import { useCitations } from '../hooks/useCitations'
 import { singleFlightInvoke } from '../utils/ipcSingleFlight'
 // §2.127 — `presentedError` lives in src/utils/errorPresentation.ts. Applies to
 // `invoke()` rejections only: the `{ ok: false, reason }` / stream-event
@@ -16,10 +15,9 @@ import { singleFlightInvoke } from '../utils/ipcSingleFlight'
 import { presentedError } from '../utils/errorPresentation'
 import { isApiKeyProvider, type AiApiKeySavedMap } from '../utils/aiApiKey'
 import AiActionConfirmation, { type PendingActionSummary } from './AiActionConfirmation'
+import AiSources from './AiSources'
 
 // --- Types ---
-
-export type EgressPolicy = 'default-deny' | 'ask' | 'allow'
 
 /** Payload from the `ai:internet-tool-pending` IPC event (§3.10 P2). */
 type InternetToolPending = {
@@ -30,16 +28,23 @@ type InternetToolPending = {
   args?: unknown
 }
 
+/** The panel renders its messages as Markdown and i18next does not escape values: a model id (typed by the user or
+ * listed by a custom endpoint) must not turn into a link or formatting inside the sentence. */
+function escapeMarkdown(text: string): string {
+  return text.replace(/[\\`*_{}[\]()<>#+!|~&]/g, '\\$&')
+}
+
 type MessageRef = { accountId: number; folder: string; uid: number }
-type AiSource = { ref: MessageRef; reason?: string; subject?: string; from?: string; date?: string }
 
 type AiStreamEvent =
   | { type: 'text_delta'; requestId: string; text: string }
   | { type: 'tool_use_start'; requestId: string; toolName: string; toolInput: unknown }
   | { type: 'tool_use_end'; requestId: string; toolName: string; result: string }
   | { type: 'thinking'; requestId: string; text: string }
-  | { type: 'result'; requestId: string; text: string; sessionId: string; costUsd?: number; sources?: AiSource[] }
-  | { type: 'error'; requestId: string; message: string }
+  | { type: 'result'; requestId: string; text: string; sessionId: string; costUsd?: number }
+  | { type: 'index_incomplete'; requestId: string }
+  // `failure: 'model'` + `model`: the provider does not serve the chosen model (mirrors the error event of ai.ts); `failure: 'endpoint'`: the server answered 404 for the route.
+  | { type: 'error'; requestId: string; message: string; failure?: string; model?: string }
   // §2.51.f2 — non-error interruption notice (mirrors `AiStreamNoticeCode` in
   // electron/services/ai.ts). The main process has no i18next instance, so it
   // sends a machine-readable `code` plus an English `message` fallback and the
@@ -68,7 +73,12 @@ type AuthStatus =
 type AiMessage = {
   role: 'user' | 'assistant'
   content: string
-  sources?: AiSource[]
+  /** A mail search ran against a local index that was still incomplete. Not persisted. */
+  indexIncomplete?: boolean
+  /** Request that produced this answer; lets a late event find its message. */
+  requestId?: string
+  /** Loaded from a session saved before citation tickets: its place links keep working (main marks every newer answer). */
+  legacyLinks?: boolean
   costUsd?: number | null
 }
 
@@ -90,13 +100,10 @@ export type AiPanelProps = {
   aiPrivacyConsent?: boolean
   aiSendOnEnter?: boolean
   aiShowSources?: boolean
-  /**
-   * §3.10 P2 outbound egress policy. Used for the Shield icon tooltip label.
-   * Defaults to `'default-deny'` to match the backend's `defaultEgressPolicy()`.
-   */
-  aiEgressPolicy?: EgressPolicy
   onSettingsChange?: (key: string, value: unknown) => void
   onOpenSource?: (ref: MessageRef) => void | Promise<void>
+  /** Open the message a citation ticket of this session names (main resolves it; nothing opens if it is gone). */
+  onOpenCitation?: (sessionId: string, token: string) => void | Promise<void>
   quickPrompt?: string | null
   onQuickPromptHandled?: () => void
 }
@@ -119,9 +126,9 @@ export default function AiPanel({
   aiPrivacyConsent,
   aiSendOnEnter = true,
   aiShowSources = true,
-  aiEgressPolicy = 'default-deny',
   onSettingsChange,
   onOpenSource,
+  onOpenCitation,
   quickPrompt,
   onQuickPromptHandled,
 }: AiPanelProps) {
@@ -159,7 +166,6 @@ export default function AiPanel({
   const messagesContainerRef = useRef<HTMLDivElement | null>(null)
   const userScrolledUpRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const streamingTextRef = useRef('')
   // Forward ref to sendMessage so handleApplyPendingAction (declared above
   // sendMessage to keep the wiring readable) can nudge the AI without a
   // circular `useCallback` dep. sendMessage assigns into this ref each render.
@@ -175,12 +181,32 @@ export default function AiPanel({
   // Keep ref in sync with state for use inside callbacks
   useEffect(() => { activeSessionIdRef.current = activeSessionId }, [activeSessionId])
 
+  // The session each request this panel started was asked in, and the request now on screen. A
+  // result is matched to its own request and session, never to "the last answer" or "the active
+  // chat": a late result of an earlier chat must not give its sources to the next one.
+  const requestSessionRef = useRef<Map<string, string>>(new Map())
+  const currentRequestIdRef = useRef<string | null>(null)
+  // The text each request has streamed so far, keyed by request: two requests never share a buffer.
+  const textByRequestRef = useRef<Map<string, string>>(new Map())
+  // Ref first, state second: a check made right after a stop must already see the stop.
+  const setCurrentRequest = useCallback((id: string | null) => {
+    currentRequestIdRef.current = id
+    setCurrentRequestId(id)
+  }, [])
+
   // Prompt history (up/down arrow navigation, like in a terminal)
   const promptHistoryRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
   const draftRef = useRef('')
 
   // Session cost — sum of costUsd across all assistant messages
+  // What main says each citation ticket of the finished answers is (a source of this chat or not).
+  const finishedAnswers = useMemo(
+    () => messages.flatMap((m, i) => (m.role === 'assistant' && !m.legacyLinks && !(isStreaming && i === messages.length - 1) ? [m.content] : [])),
+    [messages, isStreaming],
+  )
+  const { citations, tokensOf: citationTokensOf } = useCitations(activeSessionId, finishedAnswers)
+
   const sessionCost = useMemo(() => {
     let total = 0
     for (const msg of messages) {
@@ -369,91 +395,111 @@ export default function AiPanel({
 
     const handler = (event: AiStreamEvent) => {
       if (!event || !event.requestId) return
+      // A preview tool may have registered a pending action in main whichever request ran it; the registry is
+      // global to the app, so this refresh is not gated by request ownership (it only reads).
+      if (event.type === 'tool_use_end') {
+        // Tool use status is shown in the status bar, not inline.
+        // §3.10 P0: any preview tool may have just registered a new
+        // pending action. Refresh from main on every tool_use_end —
+        // it's a synchronous map iteration in the registry, so the cost
+        // is trivial and we never go stale.
+        const stripped = event.toolName.replace('mcp__mailcopilot__', '')
+        if (stripped.startsWith('preview_') || stripped.endsWith('_preview') || stripped.startsWith('apply_') || stripped.endsWith('_apply')) {
+          void refreshPendingActions()
+        }
+        return
+      }
+      // Only events of a request this panel instance started are read at all.
+      const ownerSession = requestSessionRef.current.get(event.requestId)
+      if (!ownerSession) return
+      // The request on screen drives the status line and the Stop button; an earlier chat's request does not.
+      const isCurrent = currentRequestIdRef.current === event.requestId
 
       switch (event.type) {
-        case 'text_delta':
-          streamingTextRef.current += event.text
+        case 'text_delta': {
+          const text = (textByRequestRef.current.get(event.requestId) ?? '') + event.text
+          textByRequestRef.current.set(event.requestId, text)
+          // The answer of THIS request, wherever it is; nothing happens when its chat is not on screen.
           setMessages(prev => {
+            const idx = prev.findIndex(m => m.role === 'assistant' && m.requestId === event.requestId)
+            if (idx < 0) return prev
             const next = [...prev]
-            const last = next[next.length - 1]
-            if (last && last.role === 'assistant') {
-              next[next.length - 1] = { ...last, content: streamingTextRef.current }
-            }
+            next[idx] = { ...next[idx]!, content: text }
             return next
           })
-          break
-
-        case 'tool_use_start':
-          setStreamStatus(t('ai.panel.usingTool', { tool: event.toolName.replace('mcp__mailcopilot__', '') }))
-          break
-
-        case 'tool_use_end': {
-          // Tool use status is shown in the status bar, not inline.
-          // §3.10 P0: any preview tool may have just registered a new
-          // pending action. Refresh from main on every tool_use_end —
-          // it's a synchronous map iteration in the registry, so the cost
-          // is trivial and we never go stale.
-          const stripped = event.toolName.replace('mcp__mailcopilot__', '')
-          if (stripped.startsWith('preview_') || stripped.endsWith('_preview') || stripped.startsWith('apply_') || stripped.endsWith('_apply')) {
-            void refreshPendingActions()
-          }
           break
         }
 
+        case 'tool_use_start':
+          if (isCurrent) setStreamStatus(t('ai.panel.usingTool', { tool: event.toolName.replace('mcp__mailcopilot__', '') }))
+          break
+
         case 'status':
-          if (event.status === 'thinking') setStreamStatus(t('ai.panel.thinking'))
-          else if (event.status === 'streaming') setStreamStatus(t('ai.panel.streaming'))
-          else if (event.status === 'done') {
-            setIsStreaming(false)
-            setStreamStatus(null)
-            setCurrentRequestId(null)
+          if (event.status === 'done') {
+            if (isCurrent) {
+              setIsStreaming(false)
+              setStreamStatus(null)
+              setCurrentRequest(null)
+            }
+            // `done` is NOT the last event of a request: a notice (e.g. "no action was prepared") follows it, and
+            // it must still find its owner. The request is forgotten when a newer one pushes it out of the bound.
+            textByRequestRef.current.delete(event.requestId)
+          } else if (isCurrent) {
+            if (event.status === 'thinking') setStreamStatus(t('ai.panel.thinking'))
+            else if (event.status === 'streaming') setStreamStatus(t('ai.panel.streaming'))
           }
           break
 
-        case 'result':
+        // Arrives after `result`, only when the count had already finished: one line under that answer.
+        case 'index_incomplete':
+          setMessages(prev => prev.map(m => (m.role === 'assistant' && m.requestId === event.requestId ? { ...m, indexIncomplete: true } : m)))
+          break
+
+        case 'result': {
           // sessionId from Claude SDK is persisted via updateAiSessionClaudeId in main.ts
           // Final text is already in the message via text_delta
+          const sid = ownerSession
           setMessages(prev => {
+            const idx = prev.findIndex(m => m.role === 'assistant' && m.requestId === event.requestId)
+            // The request's chat is no longer on screen: there is no answer here to give its verdict to.
+            if (idx < 0) return prev
             const next = [...prev]
-            const last = next[next.length - 1]
-            if (last && last.role === 'assistant') {
-              next[next.length - 1] = {
-                ...last,
-                ...(event.sources && event.sources.length > 0 ? { sources: event.sources } : {}),
-                costUsd: event.costUsd ?? null,
-              }
+            next[idx] = {
+              ...next[idx]!,
+              costUsd: event.costUsd ?? null,
             }
             return next
           })
-          setIsStreaming(false)
-          setStreamStatus(null)
-          setCurrentRequestId(null)
-          // Persist assistant message and maybe generate title
-          {
-            const sid = activeSessionIdRef.current
-            const assistantText = event.text
-            if (sid && assistantText) {
-              sessionWriteQueueRef.current = sessionWriteQueueRef.current.then(async () => {
-                try {
-                  await window.api.invoke('aiSession:addMessage', { sessionId: sid, role: 'assistant', content: assistantText, costUsd: event.costUsd ?? undefined })
-                } catch { /* ignore */ }
-                // Generate title after first exchange (2 messages: user + assistant)
-                try {
-                  const msgs = await window.api.invoke('aiSession:messages', sid) as { role: string; content: string }[]
-                  if (msgs.length === 2) {
-                    const userMsg = msgs.find(m => m.role === 'user')?.content || ''
-                    const res = await window.api.invoke('aiSession:generateTitle', sid, userMsg, assistantText) as { title?: string }
-                    const title = res?.title
-                    if (title) {
-                      setSessionList(prev => prev.map(s => s.id === sid ? { ...s, title } : s))
-                    }
+          // Only the request on screen ends the streaming state; an earlier chat's result does not.
+          if (isCurrent) {
+            setIsStreaming(false)
+            setStreamStatus(null)
+            setCurrentRequest(null)
+          }
+          // Persist assistant message (into the chat the request was asked in) and maybe generate title
+          const assistantText = event.text
+          if (assistantText) {
+            sessionWriteQueueRef.current = sessionWriteQueueRef.current.then(async () => {
+              try {
+                await window.api.invoke('aiSession:addMessage', { sessionId: sid, role: 'assistant', content: assistantText, costUsd: event.costUsd ?? undefined })
+              } catch { /* ignore */ }
+              // Generate title after first exchange (2 messages: user + assistant)
+              try {
+                const msgs = await window.api.invoke('aiSession:messages', sid) as { role: string; content: string }[]
+                if (msgs.length === 2) {
+                  const userMsg = msgs.find(m => m.role === 'user')?.content || ''
+                  const res = await window.api.invoke('aiSession:generateTitle', sid, userMsg, assistantText) as { title?: string }
+                  const title = res?.title
+                  if (title) {
+                    setSessionList(prev => prev.map(s => s.id === sid ? { ...s, title } : s))
                   }
-                } catch { /* ignore */ }
-                void loadSessionList()
-              })
-            }
+                }
+              } catch { /* ignore */ }
+              void loadSessionList()
+            })
           }
           break
+        }
 
         // §2.51.f2 — the request was cut short for a known, non-error reason
         // (currently: the per-request cost ceiling). Appended as its own
@@ -470,7 +516,10 @@ export default function AiPanel({
           }
           const key = noticeKey[event.code]
           const noticeText = key ? t(key) : event.message
-          setMessages(prev => [...prev, { role: 'assistant', content: noticeText }])
+          // On screen only when the request's own answer is (a notice of an earlier chat is not shown here).
+          setMessages(prev => (prev.some(m => m.role === 'assistant' && m.requestId === event.requestId)
+            ? [...prev, { role: 'assistant', content: noticeText }]
+            : prev))
           // The notice belongs in the stored history too. Without this it lived
           // on screen only: reopening the session showed the answer WITHOUT the
           // correction, so a turn that armed nothing came back looking like a
@@ -485,7 +534,7 @@ export default function AiPanel({
           // `message`, and persisting that would freeze an untranslated string
           // into the history forever; on screen it is transient and harmless.
           if (key) {
-            const sid = activeSessionIdRef.current
+            const sid = ownerSession
             if (sid) {
               sessionWriteQueueRef.current = sessionWriteQueueRef.current.then(async () => {
                 try {
@@ -498,17 +547,25 @@ export default function AiPanel({
         }
 
         case 'error':
-          setIsStreaming(false)
-          setStreamStatus(null)
-          setCurrentRequestId(null)
+          if (isCurrent) {
+            setIsStreaming(false)
+            setStreamStatus(null)
+            setCurrentRequest(null)
+          }
+          requestSessionRef.current.delete(event.requestId)
+          textByRequestRef.current.delete(event.requestId)
           setMessages(prev => {
+            const idx = prev.findIndex(m => m.role === 'assistant' && m.requestId === event.requestId)
+            // The request's answer is not on screen: its error is not either.
+            if (idx < 0) return prev
             const next = [...prev]
-            const last = next[next.length - 1]
-            if (last && last.role === 'assistant' && !last.content) {
-              next[next.length - 1] = { ...last, content: `**${t('ai.errors.errorPrefix')}:** ${event.message}` }
-            } else {
-              next.push({ role: 'assistant', content: `**${t('ai.errors.errorPrefix')}:** ${event.message}` })
-            }
+            const errorText = event.failure === 'model' && event.model
+              ? `**${t('ai.errors.errorPrefix')}:** ${t('ai.errors.modelUnavailable', { model: escapeMarkdown(event.model) })}`
+              : event.failure === 'endpoint'
+                ? `**${t('ai.errors.errorPrefix')}:** ${t('ai.errors.endpointNotFound')}`
+                : `**${t('ai.errors.errorPrefix')}:** ${event.message}`
+            if (!next[idx]!.content) next[idx] = { ...next[idx]!, content: errorText }
+            else next.splice(idx + 1, 0, { role: 'assistant', content: errorText })
             return next
           })
           break
@@ -519,7 +576,7 @@ export default function AiPanel({
     return () => {
       window.api.off('ai:stream', handler as (...args: unknown[]) => void)
     }
-  }, [open, t, loadSessionList, refreshPendingActions])
+  }, [open, t, loadSessionList, refreshPendingActions, setCurrentRequest])
 
   // §3.10 P2: subscribe to main-process internet-tool consent requests.
   // Main sends `ai:internet-tool-pending` when an egress tool call is
@@ -577,16 +634,15 @@ export default function AiPanel({
     draftRef.current = ''
 
     setInput('')
-    streamingTextRef.current = ''
     const reqId = nextRequestId()
-    setCurrentRequestId(reqId)
+    setCurrentRequest(reqId)
     setIsStreaming(true)
     setStreamStatus(t('ai.panel.thinking'))
 
     setMessages(prev => [
       ...prev,
       { role: 'user', content: prompt },
-      { role: 'assistant', content: '' },
+      { role: 'assistant', content: '', requestId: reqId },
     ])
 
     // Create session if needed, persist user message, then send
@@ -604,9 +660,19 @@ export default function AiPanel({
       try {
         await window.api.invoke('aiSession:addMessage', { sessionId: sid, role: 'user', content: prompt })
       } catch { /* ignore */ }
+      // The user stopped this request, or opened another chat, while the writes above were running:
+      // it is no longer the request on screen, so it is not sent at all.
+      if (currentRequestIdRef.current !== reqId) return
+      requestSessionRef.current.set(reqId, sid)
+      // Bounded: the owner of a finished request is kept only long enough for its trailing events.
+      while (requestSessionRef.current.size > 16) {
+        const oldest = requestSessionRef.current.keys().next().value
+        if (oldest === undefined) break
+        requestSessionRef.current.delete(oldest)
+      }
       void window.api.invoke('ai:chat', reqId, prompt, contextType ? { type: contextType, data: contextData } : undefined, sid, aiProvider)
     })()
-  }, [input, isStreaming, contextType, contextData, aiProvider, t])
+  }, [input, isStreaming, contextType, contextData, aiProvider, t, setCurrentRequest])
 
   // Keep sendMessageRef in sync — used by handleApplyPendingAction (declared
   // above sendMessage to keep the confirmation-block wiring readable).
@@ -649,12 +715,14 @@ export default function AiPanel({
   // Stop generation
   const stopGeneration = useCallback(() => {
     if (currentRequestId) {
+      requestSessionRef.current.delete(currentRequestId)
+      textByRequestRef.current.delete(currentRequestId)
       void window.api.invoke('ai:stop', currentRequestId)
       setIsStreaming(false)
       setStreamStatus(null)
-      setCurrentRequestId(null)
+      setCurrentRequest(null)
     }
-  }, [currentRequestId])
+  }, [currentRequestId, setCurrentRequest])
 
   // New chat
   const newChat = useCallback(() => {
@@ -663,7 +731,6 @@ export default function AiPanel({
     setActiveSessionId(null)
     setShowSessionList(false)
     setPendingActions([])
-    streamingTextRef.current = ''
     void window.api.invoke('ai:newSession')
     void loadSessionList()
     void refreshPendingActions()
@@ -679,11 +746,10 @@ export default function AiPanel({
       // shared session-boundary IPC; despite the name it just clears the pending
       // preview registry on the main side.
       void window.api.invoke('ai:newSession')
-      const msgs = await window.api.invoke('aiSession:messages', id) as Array<{ role: 'user' | 'assistant'; content: string; costUsd: number | null }>
-      setMessages(msgs.map(m => ({ role: m.role, content: m.content, costUsd: m.costUsd })))
+      const msgs = await window.api.invoke('aiSession:messages', id) as Array<{ role: 'user' | 'assistant'; content: string; costUsd: number | null; citationVersion: number | null }>
+      setMessages(msgs.map(m => ({ role: m.role, content: m.content, costUsd: m.costUsd, ...(m.role === 'assistant' && m.citationVersion == null ? { legacyLinks: true } : {}) })))
       setActiveSessionId(id)
       setShowSessionList(false)
-      streamingTextRef.current = ''
       void refreshPendingActions()
     } catch { /* ignore */ }
   }, [isStreaming, stopGeneration, refreshPendingActions])
@@ -700,7 +766,6 @@ export default function AiPanel({
         void window.api.invoke('ai:newSession')
         setMessages([])
         setActiveSessionId(null)
-        streamingTextRef.current = ''
       }
       void loadSessionList()
     } catch { /* ignore */ }
@@ -723,7 +788,6 @@ export default function AiPanel({
       await window.api.invoke('aiSession:deleteAll')
       setMessages([])
       setActiveSessionId(null)
-      streamingTextRef.current = ''
       void loadSessionList()
     } catch { /* ignore */ }
   }, [isStreaming, stopGeneration, loadSessionList])
@@ -848,34 +912,6 @@ export default function AiPanel({
     setShowPrivacy(false)
     onSettingsChange?.('aiPrivacyConsent', true)
   }, [onSettingsChange])
-
-  // Custom markdown link renderer for mailref:// protocol
-  const markdownComponents = useMemo(() => ({
-    a: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
-      if (href?.startsWith('mailref://')) {
-        const path = href.slice('mailref://'.length)
-        const firstSlash = path.indexOf('/')
-        const lastSlash = path.lastIndexOf('/')
-        if (firstSlash > 0 && lastSlash > firstSlash) {
-          const accountId = Number(path.slice(0, firstSlash))
-          const folder = decodeURIComponent(path.slice(firstSlash + 1, lastSlash))
-          const uid = Number(path.slice(lastSlash + 1))
-          if (accountId > 0 && folder && uid > 0) {
-            return (
-              <button
-                type="button"
-                className="ai-inline-mail-link"
-                onClick={() => { void onOpenSource?.({ accountId, folder, uid }) }}
-              >
-                {children}
-              </button>
-            )
-          }
-        }
-      }
-      return <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>
-    },
-  }), [onOpenSource])
 
   if (!open) return null
 
@@ -1018,17 +1054,6 @@ export default function AiPanel({
           )}
         </div>
         <div className="ai-panel-actions">
-          {/* §3.10 P2: shield icon indicates egress is intercepted (policy ≠ allow) */}
-          {aiEgressPolicy !== 'allow' && (
-            <span
-              className="btn-icon ai-egress-shield"
-              data-testid="ai-egress-shield"
-              title={t('ai.egress.shieldTooltip')}
-              aria-label={t('ai.egress.shieldTooltip')}
-            >
-              <ShieldCheck size={14} />
-            </span>
-          )}
           <button
             className={`btn-icon${showSessionList ? ' active' : ''}`}
             onClick={() => setShowSessionList(prev => !prev)}
@@ -1102,34 +1127,31 @@ export default function AiPanel({
           <div key={`msg-${i}`} className={`ai-message ai-message-${msg.role}`} data-testid={`ai-message-${msg.role}`}>
             {msg.role === 'assistant' ? (
               <div className="ai-message-content">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={markdownComponents}
-                  urlTransform={(url) => url.startsWith('mailref://') ? url : defaultUrlTransform(url)}
-                >
-                  {normalizeMailrefs(msg.content || (isStreaming && i === messages.length - 1 ? '...' : ''))}
-                </ReactMarkdown>
-                {aiShowSources && msg.sources && msg.sources.length > 0 && (
-                  <div className="ai-sources">
-                    <div className="ai-sources-title">{t('ai.panel.sources')}</div>
-                    <div className="ai-sources-list">
-                      {msg.sources.map((src, idx) => (
-                        <button
-                          key={`${src.ref.accountId}:${src.ref.folder}:${src.ref.uid}:${idx}`}
-                          type="button"
-                          className="ai-source-link"
-                          onClick={() => { void onOpenSource?.(src.ref) }}
-                          title={src.subject ? `${src.from || ''} — ${src.subject}` : `${src.ref.folder}/${src.ref.uid}`}
-                        >
-                          <span className="ai-source-num">#{idx + 1}</span>
-                          {src.subject
-                            ? <span className="ai-source-subject">{src.subject}</span>
-                            : <span className="ai-source-fallback">{src.ref.folder}/{src.ref.uid}</span>}
-                          {src.from && <span className="ai-source-from">{src.from}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                <AiAnswerMarkdown
+                  content={msg.content || (isStreaming && i === messages.length - 1 ? '...' : '')}
+                  citations={citations}
+                  streaming={isStreaming && i === messages.length - 1}
+                  legacyLinks={msg.legacyLinks}
+                  onOpenCitation={token => { if (activeSessionId) void onOpenCitation?.(activeSessionId, token) }}
+                  onOpenSource={onOpenSource}
+                />
+                {aiShowSources && !msg.legacyLinks && !(isStreaming && i === messages.length - 1) && (() => {
+                  // Sources under the answer = the tickets of its links that this session knows (found or gone), in order.
+                  const cited = citationTokensOf(msg.content).flatMap(token => {
+                    const c = citations.get(token)
+                    return c && c.status !== 'unknown' ? [c] : []
+                  })
+                  if (cited.length === 0) return null
+                  return (
+                    <AiSources
+                      key={`${activeSessionId ?? ''}:${i}`}
+                      cited={cited}
+                      onOpen={token => { if (activeSessionId) void onOpenCitation?.(activeSessionId, token) }}
+                    />
+                  )
+                })()}
+                {msg.indexIncomplete && (
+                  <div className="ai-index-note" data-testid="ai-index-note">{t('ai.panel.indexIncomplete')}</div>
                 )}
                 {typeof msg.costUsd === 'number' && msg.costUsd > 0 && (
                   <span className="ai-cost-badge" title={t('ai.panel.costTooltip', { cost: `$${msg.costUsd.toFixed(4)}` })}>

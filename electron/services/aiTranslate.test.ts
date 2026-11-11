@@ -40,7 +40,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   AI_TRANSLATION_CONTRACT_VERSION,
+  TRANSLATE_CHUNK_CONCURRENCY,
   TRANSLATE_INPUT_CHAR_CAP,
+  TRANSLATE_MESSAGE_MAX_CHARS,
+  __readyPieceCountForTests,
   __resetRecentTranslationsForTests,
   buildTranslateDeps,
   forgetAccountTranslations,
@@ -53,8 +56,10 @@ import {
   type TranslateDeps,
 } from './aiTranslate'
 import { aiChatSimpleOutcome, isLocalInferenceEndpoint, selectSummaryProvider } from './ai'
+import { getSettings } from '../../packages/net/config'
 import { getAiTranslation, upsertAiTranslation } from '../../packages/db'
 import { DATA_BOUNDARY_START, DATA_BOUNDARY_END } from '../../packages/core'
+import { splitForTranslation } from '../../packages/core/translateChunks'
 import type { LanguageDetection } from '../../packages/core/language'
 import type { TranslateMessageRequest } from '@mailcopilot/types'
 
@@ -130,7 +135,11 @@ type Fakes = {
   getMessageText: ReturnType<typeof vi.fn>
 }
 
+/** Ready pieces of the deps under test; fresh for every `makeDeps`. */
+let readyPieces = new Map<string, string>()
+
 function makeDeps(over: Partial<TranslateDeps> = {}): Fakes {
+  readyPieces = new Map()
   const chat = vi.fn(async (): Promise<TranslateChatOutcome> => billed('Good afternoon, the invoice is attached.'))
   const appendAudit = vi.fn()
   const recordSpan = vi.fn()
@@ -148,6 +157,11 @@ function makeDeps(over: Partial<TranslateDeps> = {}): Fakes {
     putCached,
     selectProvider: () => ({ provider: 'openai-api', wasLocal: false, allowFabrication: true }),
     runExclusive: (_accountId, run) => run(),
+    getReadyPiece: (...a) => readyPieces.get(a.join('|')),
+    putReadyPiece: (...a) => { readyPieces.set(a.slice(0, 4).join('|'), a[4] as string) },
+    clearReadyPieces: (...a) => {
+      for (const k of [...readyPieces.keys()]) if (k.startsWith(a.join('|') + '|')) readyPieces.delete(k)
+    },
     outputTokenCap: 2000,
     admitBudget: () => ({ ok: true, reservation: { id: 'r1' } }),
     settleBudget,
@@ -227,27 +241,35 @@ describe('generateTranslation — refusals that never reach a provider', () => {
     }
   })
 
-  it('refuses too_long instead of translating part of a message', async () => {
+  it('refuses too_long above the overall message limit, with nothing sent', async () => {
     const { deps, chat, recordSpan } = makeDeps({
-      getMessageText: () => 'x'.repeat(TRANSLATE_INPUT_CHAR_CAP + 1),
+      getMessageText: () => 'x'.repeat(TRANSLATE_MESSAGE_MAX_CHARS + 1),
     })
     await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'too_long' })
     expect(chat).not.toHaveBeenCalled()
     expect(recordSpan).not.toHaveBeenCalled()
   })
 
-  it('accepts a message at EXACTLY the input cap — the refusal is "over", not "at"', async () => {
-    // A boundary test that only proves something because the assertion differs
-    // from the +1 case above: `>` in `prepareTranslate` (not `>=`) means a
-    // message sitting exactly on the cap must be translated, not refused.
-    // Flip that comparison operator and this goes red while the +1 test above
-    // stays green — which is what makes the pair together meaningful.
+  it('accepts a message at EXACTLY the overall limit — the refusal is "over", not "at"', async () => {
+    // `>` in `prepareTranslate`, not `>=`: the +1 case above and this one differ
+    // only by a character, which is what makes the pair a boundary test.
     const { deps, chat } = makeDeps({
-      getMessageText: () => 'x'.repeat(TRANSLATE_INPUT_CHAR_CAP),
+      getMessageText: () => ('word '.repeat(TRANSLATE_MESSAGE_MAX_CHARS / 5)),
     })
     const res = await generateTranslation(deps, REQ)
     expect(res.ok).toBe(true)
-    expect(chat).toHaveBeenCalledTimes(1)
+    expect(chat.mock.calls.length).toBeGreaterThan(1)
+  })
+
+  it('translates a message just over the per-request budget instead of refusing it (regression)', async () => {
+    // Before chunking every message over 3000 characters was refused too_long,
+    // which in practice meant almost any mail with quoted history.
+    const { deps, chat } = makeDeps({
+      getMessageText: () => 'x'.repeat(TRANSLATE_INPUT_CHAR_CAP + 1),
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res.ok).toBe(true)
+    expect(chat).toHaveBeenCalledTimes(2)
   })
 
   it("accepts the user's own source language and skips detection entirely", async () => {
@@ -1392,5 +1414,376 @@ describe('buildTranslateDeps — chat answers the AUDIT question, not just the b
     const call = calls[calls.length - 1] as unknown[]
     expect(call[2]).toBe('openai-api')
     expect(call[3]).toMatchObject({ settings: expect.anything() })
+  })
+})
+
+describe('generateTranslation — a long message is translated in pieces', () => {
+  /** The text the model was shown for one call, taken out of the boundary markers. */
+  function pieceOf(call: unknown[]): string {
+    const prompt = call[2] as string
+    const from = prompt.indexOf(`${DATA_BOUNDARY_START}\n`) + DATA_BOUNDARY_START.length + 1
+    return prompt.slice(from, prompt.lastIndexOf(`\n${DATA_BOUNDARY_END}`))
+  }
+
+  /** Mail shaped like the real failure: a short reply on top of quoted history. */
+  function mailWithQuotedHistory(totalChars: number): string {
+    const head = 'Thanks, Thursday works for me.\n\nPlease send the signed invoice.\n\nOn Mon, Alice wrote:\n'
+    const quoted = Array.from({ length: 2000 }, (_, i) => `> Earlier line ${i}: the contract terms were discussed at length.`)
+    return (head + quoted.join('\n')).slice(0, totalChars)
+  }
+
+  /** A chat that "translates" by upper-casing the piece, so stitching is observable. */
+  const echoUpper = async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> =>
+    billed(pieceOf([0, 0, user]).toUpperCase())
+
+  it('translates a 20 000 character message with quoted history (it used to be refused)', async () => {
+    const text = mailWithQuotedHistory(20_000)
+    expect(text.length).toBe(20_000)
+    const chat = vi.fn(echoUpper)
+    const { deps, putCached, appendAudit, recordSpan, settleBudget, releaseBudget } = makeDeps({
+      getMessageText: () => text,
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res.ok).toBe(true)
+    // About seven requests at 3000 characters each, none above the budget.
+    const calls = chat.mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(7)
+    expect(calls.length).toBeLessThanOrEqual(9)
+    for (const c of calls) expect(pieceOf(c).length).toBeLessThanOrEqual(TRANSLATE_INPUT_CHAR_CAP)
+    // Every request is built exactly like the single request: same system prompt.
+    for (const c of calls) expect(c[1]).toBe(buildTranslateSystemPrompt('en'))
+    // Stitching reproduces the paragraph structure exactly.
+    if (res.ok) expect(res.translation.translatedText).toBe(text.toUpperCase().trim())
+    // Contracts: cache holds the WHOLE translation under the whole source hash,
+    // one audit row and one admission/settlement per request, ONE span.
+    expect(putCached).toHaveBeenCalledTimes(1)
+    expect(putCached.mock.calls[0][0].translatedText).toBe(text.toUpperCase().trim())
+    expect(appendAudit).toHaveBeenCalledTimes(calls.length)
+    expect(settleBudget).toHaveBeenCalledTimes(calls.length)
+    expect(releaseBudget).not.toHaveBeenCalled()
+    expect(recordSpan).toHaveBeenCalledTimes(1)
+    expect(recordSpan.mock.calls[0][0]).toMatchObject({ errorClass: 'none', tokensIn: 200 * calls.length })
+  })
+
+  it('keeps a single request for a message within the per-request budget', async () => {
+    const { deps, chat } = makeDeps({ getMessageText: () => 'x'.repeat(TRANSLATE_INPUT_CHAR_CAP) })
+    await generateTranslation(deps, REQ)
+    expect(chat).toHaveBeenCalledTimes(1)
+  })
+
+  it('never has more than three requests in flight', async () => {
+    let inFlight = 0
+    let peak = 0
+    const gates: Array<() => void> = []
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await new Promise<void>((resolve) => gates.push(resolve))
+      inFlight--
+      return billed(pieceOf([0, 0, user]))
+    })
+    const { deps } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(20_000),
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const done = generateTranslation(deps, REQ)
+    // Release one request at a time until the whole translation completes.
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 0))
+      const gate = gates.shift()
+      if (!gate) {
+        if (inFlight === 0) break
+        continue
+      }
+      expect(inFlight).toBeLessThanOrEqual(TRANSLATE_CHUNK_CONCURRENCY)
+      gate()
+    }
+    await expect(done).resolves.toMatchObject({ ok: true })
+    expect(peak).toBe(TRANSLATE_CHUNK_CONCURRENCY)
+    expect(chat.mock.calls.length).toBeGreaterThan(TRANSLATE_CHUNK_CONCURRENCY)
+  })
+
+  it('fails the whole translation when one piece fails, and shows and caches nothing', async () => {
+    let n = 0
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      n++
+      if (n === 2) return { kind: 'unbilled', reason: 'rejected', dispatched: true }
+      return billed(pieceOf([0, 0, user]))
+    })
+    const { deps, putCached, recordSpan, appendAudit, releaseBudget } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(40_000),
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res).toEqual({ ok: false, reason: 'provider_error' })
+    expect(putCached).not.toHaveBeenCalled()
+    // The remaining pieces were not started: far fewer than the ~14 a full run needs.
+    expect(chat.mock.calls.length).toBeLessThan(8)
+    expect(recordSpan).toHaveBeenCalledTimes(1)
+    expect(recordSpan.mock.calls[0][0].errorClass).toBe('provider_error')
+    // One audit row per request that reached the provider, errors included.
+    expect(appendAudit).toHaveBeenCalledTimes(chat.mock.calls.length)
+    expect(releaseBudget).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses the whole translation when one piece comes back cut off', async () => {
+    let n = 0
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      n++
+      return n === 3 ? billed('half a translat', 100, 'length') : billed(pieceOf([0, 0, user]))
+    })
+    const { deps, putCached } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(40_000),
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res).toEqual({ ok: false, reason: 'answer_too_long' })
+    expect(putCached).not.toHaveBeenCalled()
+  })
+
+  it('refuses the whole translation when one piece comes back empty', async () => {
+    let n = 0
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      n++
+      return n === 2 ? billed('   ') : billed(pieceOf([0, 0, user]))
+    })
+    const { deps, putCached } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(20_000),
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'provider_error' })
+    expect(putCached).not.toHaveBeenCalled()
+  })
+
+  it('stops starting pieces when the budget denies a later one, and reports budget', async () => {
+    let admitted = 0
+    const chat = vi.fn(echoUpper)
+    const { deps, putCached, releaseBudget } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(40_000),
+      admitBudget: () => (++admitted <= 4 ? { ok: true, reservation: { id: admitted } } : { ok: false }),
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    await expect(generateTranslation(deps, REQ)).resolves.toEqual({ ok: false, reason: 'budget' })
+    expect(chat).toHaveBeenCalledTimes(4)
+    expect(putCached).not.toHaveBeenCalled()
+    expect(releaseBudget).not.toHaveBeenCalled()
+  })
+
+  it('a retry after a failure pays only for the pieces that are missing', async () => {
+    const text = mailWithQuotedHistory(20_000)
+    let failIndexCall = 0
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      failIndexCall++
+      if (failIndexCall === 5) return billed('cut', 100, 'length')
+      return billed(pieceOf([0, 0, user]).toUpperCase())
+    })
+    const { deps, putCached } = makeDeps({
+      getMessageText: () => text,
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const first = await generateTranslation(deps, REQ)
+    expect(first.ok).toBe(false)
+    expect(putCached).not.toHaveBeenCalled()
+    const paidFirst = chat.mock.calls.length
+    const keptPieces = readyPieces.size
+    expect(keptPieces).toBeGreaterThan(0)
+
+    const second = await generateTranslation(deps, REQ)
+    expect(second.ok).toBe(true)
+    // Only the pieces that never came back whole were sent again.
+    const total = splitForTranslation(text, TRANSLATE_INPUT_CHAR_CAP).pieces.length
+    expect(chat.mock.calls.length - paidFirst).toBe(total - keptPieces)
+    if (second.ok) expect(second.translation.translatedText).toBe(text.toUpperCase().trim())
+    // Ready pieces are dropped once the whole translation exists.
+    expect(readyPieces.size).toBe(0)
+    expect(putCached).toHaveBeenCalledTimes(1)
+  })
+
+  it('stitches by piece number even when the pieces finish in reverse order', async () => {
+    const text = mailWithQuotedHistory(12_000)
+    const resolvers: Array<() => void> = []
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      await new Promise<void>((resolve) => resolvers.push(resolve))
+      return billed(pieceOf([0, 0, user]).toUpperCase())
+    })
+    const { deps } = makeDeps({
+      getMessageText: () => text,
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const done = generateTranslation(deps, REQ)
+    // Release the newest request first, each time, until everything is done.
+    for (let guard = 0; guard < 200; guard++) {
+      await new Promise((r) => setTimeout(r, 0))
+      const last = resolvers.pop()
+      if (last) last()
+      else if (chat.mock.calls.length > 0 && resolvers.length === 0) {
+        const settled = await Promise.race([done.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 5))])
+        if (settled) break
+      }
+    }
+    const res = await done
+    expect(res.ok).toBe(true)
+    if (res.ok) expect(res.translation.translatedText).toBe(text.toUpperCase().trim())
+  })
+
+  it('returns a piece with no letters as it is, without a request', async () => {
+    const letters = 'Hello there, this is a sentence of ordinary text. '.repeat(40).trim()
+    const text = `${letters}\n\n${'-'.repeat(2999)}\n\n${letters}`
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> =>
+      billed(pieceOf([0, 0, user]).toUpperCase()))
+    const { deps } = makeDeps({
+      getMessageText: () => text,
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res.ok).toBe(true)
+    for (const c of chat.mock.calls) expect(pieceOf(c)).toMatch(/\p{L}/u)
+    if (res.ok) expect(res.translation.translatedText).toBe(text.toUpperCase().trim())
+  })
+
+  it('keeps the indentation of a piece that starts with indented text', async () => {
+    const para = (n: number) => `    indented paragraph ${n}: ` + 'word '.repeat(40).trim()
+    const text = Array.from({ length: 30 }, (_, i) => para(i)).join('\n\n')
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> =>
+      billed(pieceOf([0, 0, user]).trim().toUpperCase()))
+    const { deps } = makeDeps({
+      getMessageText: () => text,
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      const lines = res.translation.translatedText.split('\n\n')
+      // Every paragraph after the first still begins with its original indent.
+      for (const line of lines.slice(1)) expect(line.startsWith('    ')).toBe(true)
+    }
+  })
+
+  it('stops sending pieces, and stores nothing, once the opt-in is turned off mid-translation', async () => {
+    let enabled = true
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      enabled = false
+      return billed(pieceOf([0, 0, user]))
+    })
+    const { deps, putCached } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(40_000),
+      isEnabledForAccount: () => enabled,
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res).toEqual({ ok: false, reason: 'opt_out' })
+    expect(chat.mock.calls.length).toBeLessThanOrEqual(TRANSLATE_CHUNK_CONCURRENCY)
+    expect(putCached).not.toHaveBeenCalled()
+    expect(readyPieces.size).toBe(0)
+  })
+
+  it('does not let a throwing dependency leave sibling lanes sending', async () => {
+    let calls = 0
+    const chat = vi.fn(async (_p: string, _s: string, user: string): Promise<TranslateChatOutcome> => {
+      calls++
+      await new Promise((r) => setTimeout(r, 2))
+      return billed(pieceOf([0, 0, user]))
+    })
+    const { deps, reportFailure } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(40_000),
+      getReadyPiece: () => { throw new Error('memory tier broke') },
+      chat: chat as unknown as TranslateDeps['chat'],
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res).toEqual({ ok: false, reason: 'provider_error' })
+    const settled = calls
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls).toBe(settled)
+    expect(reportFailure).toHaveBeenCalled()
+  })
+
+  it('hands the detector at most its own input ceiling, however long the message is', async () => {
+    const detectLanguage = vi.fn((): LanguageDetection => ({ ok: true, iso6393: 'eng' }))
+    const { deps } = makeDeps({ getMessageText: () => mailWithQuotedHistory(40_000), detectLanguage })
+    await generateTranslation(deps, REQ)
+    expect((detectLanguage.mock.calls[0] as unknown as [string])[0].length).toBe(3000)
+  })
+
+  it('serves a repeat of a long message from the cache without a request', async () => {
+    const cached = cachedRow({ translatedText: 'whole cached translation' })
+    const { deps, chat } = makeDeps({
+      getMessageText: () => mailWithQuotedHistory(20_000),
+      getCached: () => cached,
+    })
+    const res = await generateTranslation(deps, REQ)
+    expect(res.ok && res.translation.cached).toBe(true)
+    expect(chat).not.toHaveBeenCalled()
+  })
+
+  it('forgets the unfinished pieces of a removed account, and only that account', () => {
+    __resetRecentTranslationsForTests()
+    const deps = buildTranslateDeps(null)
+    deps.putReadyPiece(1, 'h', 'en', 0, 'one')
+    deps.putReadyPiece(2, 'h', 'en', 0, 'two')
+    expect(__readyPieceCountForTests()).toBe(2)
+    forgetAccountTranslations(1)
+    expect(__readyPieceCountForTests()).toBe(1)
+    expect(deps.getReadyPiece(1, 'h', 'en', 0)).toBeUndefined()
+    expect(deps.getReadyPiece(2, 'h', 'en', 0)).toBe('two')
+    deps.clearReadyPieces(2, 'h', 'en')
+    expect(__readyPieceCountForTests()).toBe(0)
+  })
+
+  it('does not stitch pieces produced under another provider or model into a retry', () => {
+    __resetRecentTranslationsForTests()
+    const asMock = (fn: unknown) => fn as unknown as ReturnType<typeof vi.fn>
+    const build = (provider: string, model: string) => {
+      asMock(selectSummaryProvider).mockReturnValue({ provider, wasLocal: false } as never)
+      asMock(getSettings).mockReturnValue({ aiModel: model } as never)
+      return buildTranslateDeps(null)
+    }
+    const first = build('openai-api', 'model-a')
+    first.putReadyPiece(1, 'h', 'en', 0, 'from a')
+    // Same producer: the piece is found.
+    expect(build('openai-api', 'model-a').getReadyPiece(1, 'h', 'en', 0)).toBe('from a')
+    // Another model, or another provider: it is not.
+    expect(build('openai-api', 'model-b').getReadyPiece(1, 'h', 'en', 0)).toBeUndefined()
+    expect(build('anthropic-api', 'model-a').getReadyPiece(1, 'h', 'en', 0)).toBeUndefined()
+    // Finishing the translation clears the pieces of every producer.
+    build('anthropic-api', 'model-a').putReadyPiece(1, 'h', 'en', 0, 'from b')
+    expect(__readyPieceCountForTests()).toBe(2)
+    build('openai-api', 'model-b').clearReadyPieces(1, 'h', 'en')
+    expect(__readyPieceCountForTests()).toBe(0)
+    restoreAiMockDefaults()
+    asMock(getSettings).mockReturnValue({})
+  })
+
+  it('does not stitch pieces produced by another server address into a retry', () => {
+    __resetRecentTranslationsForTests()
+    const asMock = (fn: unknown) => fn as unknown as ReturnType<typeof vi.fn>
+    const build = (baseUrl: string) => {
+      asMock(selectSummaryProvider).mockReturnValue({ provider: 'openai-api', wasLocal: false } as never)
+      asMock(getSettings).mockReturnValue({ aiModel: 'same-model', aiOpenAiBaseUrl: baseUrl } as never)
+      return buildTranslateDeps(null)
+    }
+    build('https://remote.example.com').putReadyPiece(1, 'h', 'en', 0, 'from the remote server')
+    // Same address: found. Another address with the SAME model id: not found.
+    expect(build('https://remote.example.com').getReadyPiece(1, 'h', 'en', 0)).toBe('from the remote server')
+    expect(build('http://localhost:11434').getReadyPiece(1, 'h', 'en', 0)).toBeUndefined()
+    // The address is compared as the guard compares it: a trailing slash and /v1 are the same server.
+    expect(build('https://remote.example.com/v1/').getReadyPiece(1, 'h', 'en', 0)).toBe('from the remote server')
+    restoreAiMockDefaults()
+    asMock(getSettings).mockReturnValue({})
+  })
+
+  it('lets an unfinished piece expire after its lifetime', () => {
+    vi.useFakeTimers()
+    try {
+      __resetRecentTranslationsForTests()
+      const deps = buildTranslateDeps(null)
+      deps.putReadyPiece(1, 'h', 'en', 3, 'kept')
+      vi.advanceTimersByTime(30 * 60 * 1000)
+      expect(deps.getReadyPiece(1, 'h', 'en', 3)).toBe('kept')
+      vi.advanceTimersByTime(31 * 60 * 1000)
+      expect(deps.getReadyPiece(1, 'h', 'en', 3)).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

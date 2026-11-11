@@ -462,11 +462,13 @@ test('B6: a translation completes even though the source language cannot be name
     // `loading` or `refused`.
     await expect(page.getByTestId('mail-translate-toggle')).toBeVisible()
 
-    // The picker OFFERS a caption over the translation that is already on
-    // screen above. It is not disabled-until-answered gating: the Apply
-    // button starts disabled (nothing chosen yet) and the translation is
-    // fully readable regardless.
-    await expect(page.getByTestId('mail-translate-source-offer')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    // The notice names only the target (no source was determined), and a short
+    // link offers to state the original language. The picker is closed until the
+    // link is used, and nothing about it gates the translation on screen.
+    await expect(page.getByTestId('mail-translate-notice')).toContainText('Translated into', { timeout: EXPECT_TIMEOUT })
+    await expect(page.getByTestId('mail-translate-source-offer')).toHaveCount(0)
+    await expect(page.getByTestId('mail-translate-source-choice')).toHaveCount(0)
+    await page.getByTestId('mail-translate-source-restate').click()
     await expect(page.getByTestId('mail-translate-source-choice')).toBeVisible()
     const applyButton = page.getByTestId('mail-translate-source-apply')
     await expect(applyButton).toBeVisible()
@@ -507,11 +509,11 @@ test('B6: restating an already-captioned translation updates the caption without
     // test) requires.
     const translated = page.getByTestId('mail-body-translated')
     await expect(translated).toBeVisible({ timeout: EXPECT_TIMEOUT })
-    await expect(page.getByTestId('mail-translate-source-offer')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await page.getByTestId('mail-translate-source-restate').click()
     await page.getByTestId('mail-translate-source').selectOption('ru')
     await page.getByTestId('mail-translate-source-apply').click()
 
-    await expect(page.getByTestId('mail-translate-source-offer')).toHaveCount(0)
+    await expect(page.getByTestId('mail-translate-source-choice')).toHaveCount(0)
     const notice = page.getByTestId('mail-translate-notice')
     await expect(notice).toContainText('from Russian into', { timeout: EXPECT_TIMEOUT })
     // Answering the offer re-requested, but it is the SAME text and target as
@@ -763,12 +765,12 @@ test('B6: the toggle switch and the source-restate control expose live aria-pres
     // `LANGUAGE_DETECTION_MIN_SCRIPT_CHARS`, so the first translation comes back
     // uncaptioned — answer the offer once, exactly as the restate-cache test
     // above does, purely to reach the state this test is actually about.
-    await expect(page.getByTestId('mail-translate-source-offer')).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await page.getByTestId('mail-translate-source-restate').click()
     await page.getByTestId('mail-translate-source').selectOption('ru')
     await page.getByTestId('mail-translate-source-apply').click()
-    await expect(page.getByTestId('mail-translate-source-offer')).toHaveCount(0)
+    await expect(page.getByTestId('mail-translate-source-choice')).toHaveCount(0)
 
-    const restate = page.getByRole('button', { name: 'Not the right language?', expanded: false })
+    const restate = page.getByRole('button', { name: 'Set the original language', expanded: false })
     await expect(restate).toBeVisible({ timeout: EXPECT_TIMEOUT })
     // The controlled region is not rendered AT ALL while collapsed
     // (`sourceChoiceVisible` false) — its absence here is the baseline the
@@ -782,7 +784,7 @@ test('B6: the toggle switch and the source-restate control expose live aria-pres
     // Removing `aria-expanded={state.sourceChoiceOpen}` has the same failure
     // mode as the toggle above: the role-based locator stops resolving to
     // this element and this assertion times out instead of reading `false`.
-    await expect(page.getByRole('button', { name: 'Not the right language?', expanded: true })).toBeVisible({ timeout: EXPECT_TIMEOUT })
+    await expect(page.getByRole('button', { name: 'Set the original language', expanded: true })).toBeVisible({ timeout: EXPECT_TIMEOUT })
     // The id `aria-controls` names is really on screen now, not just a string
     // that happens to match nothing.
     await expect(page.locator(`#${controlsId}`)).toBeVisible()

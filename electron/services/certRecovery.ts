@@ -107,6 +107,7 @@
 import { createLogger } from '../logger'
 import { captureException } from '../sentry'
 import type { CertErrorPayload } from '../../packages/net/imap'
+import { toCertFailureReason, type CertFailureReason } from '../../packages/core/certFailureReason'
 import { unknownCertTrust, type CertProbeTransport, type CertTrustReport } from '../../packages/net/tls'
 
 const log = createLogger('CertRecovery')
@@ -164,8 +165,10 @@ export type CertRecoveryRequiredPayload = {
   fingerprintSha256: string
   /** True = chain trusted by OS store only (local interception signature). */
   systemOnly: boolean
-  /** Raw IMAP/TLS error message — untrusted display-only string. */
+  /** Raw IMAP/TLS error message — untrusted, never displayed. */
   rawMessage: string
+  /** Readable failure class from the error code; the dialog's "Details". */
+  reason: CertFailureReason
 }
 
 /** Payload of the `cert:interceptionNotice` broadcast (renderer contract, Phase A3). */
@@ -437,6 +440,7 @@ export function initCertRecovery(deps: CertRecoveryDeps): CertRecoveryService {
         // that failed on transport says nothing about the trust chain.
         systemOnly: report.conclusive && report.systemOnly,
         rawMessage: p.rawMessage,
+        reason: toCertFailureReason(p.reason),
       }
       const recipients = deps.broadcast('cert:recoveryRequired', payload)
       if (recipients <= 0) {

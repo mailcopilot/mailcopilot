@@ -119,6 +119,9 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockInvoke.mockImplementation(defaultInvoke)
   localStorage.clear()
+  // A send closes the window a moment later; in jsdom `window.close()` tears the
+  // whole document down, which would kill whichever test is running by then.
+  vi.spyOn(window, 'close').mockImplementation(() => undefined)
 })
 
 afterEach(cleanup)
@@ -445,7 +448,7 @@ describe('Compose §3.3 B6.f3 — a stale drafts:wasSent continuation cannot res
     { id: 2, email: 'bob@two.example', smtp: { user: '' }, imap: { user: '' } },
   ]
   const A_DRAFT_ID = 'draft-of-account-one'
-  const A_SECRET = 'Ann’s unsent private text'
+  const ANN_DRAFT_TEXT = 'Ann’s unsent private text'
 
   function seedAccountOneDraft() {
     localStorage.setItem(`mailcopilot:draft:last:1`, A_DRAFT_ID)
@@ -454,7 +457,7 @@ describe('Compose §3.3 B6.f3 — a stale drafts:wasSent continuation cannot res
       cc: '',
       bcc: '',
       subject: 'Ann private subject',
-      text: A_SECRET,
+      text: ANN_DRAFT_TEXT,
       updatedAt: new Date().toISOString(),
     }))
   }
@@ -514,7 +517,7 @@ describe('Compose §3.3 B6.f3 — a stale drafts:wasSent continuation cannot res
     expect(screen.getByTestId('compose-text')).toHaveValue('Hi Bob,')
     expect(screen.getByTestId('compose-from')).toHaveAttribute('data-selected-value', '2')
     // Nothing of account 1's draft reached the form, by any route.
-    expect(document.body.textContent).not.toContain(A_SECRET)
+    expect(document.body.textContent).not.toContain(ANN_DRAFT_TEXT)
     expect(document.body.textContent).not.toContain('Ann private subject')
     expect(screen.queryByText(lookup('compose.status.draftRestored')!)).not.toBeInTheDocument()
   })
@@ -572,7 +575,267 @@ describe('Compose §3.3 B6.f3 — a stale drafts:wasSent continuation cannot res
     }, { timeout: 3000 })
 
     const annDraft = localStorage.getItem(`mailcopilot:draft:${A_DRAFT_ID}`) || ''
-    expect(annDraft).toContain(A_SECRET)
+    expect(annDraft).toContain(ANN_DRAFT_TEXT)
     expect(annDraft).not.toContain('Hi Bob')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reply threading — the pointer to the parent rides in the enqueued payload.
+// Main derives In-Reply-To / References from it; if the window drops it, the
+// reply is sent unthreaded and no main-side test can notice.
+// ---------------------------------------------------------------------------
+describe('Compose — a reply enqueues a pointer to its parent', () => {
+  const ACCOUNT = { id: 1, email: 'ann@one.example', smtp: { user: '' }, imap: { user: '' } }
+
+  async function sendFrom(init: Record<string, unknown>): Promise<Record<string, unknown>> {
+    mockInvoke.mockImplementation((channel: string) => {
+      switch (channel) {
+        case 'settings:get':
+          return Promise.resolve({ draftSyncEnabled: false, sendDelaySeconds: 0 })
+        case 'compose:getInit':
+          return Promise.resolve({ accountId: 1, init })
+        case 'accounts:list':
+          return Promise.resolve([ACCOUNT])
+        case 'accounts:getCurrent':
+          return Promise.resolve(1)
+        case 'accounts:get':
+          return Promise.resolve(ACCOUNT)
+        default:
+          return defaultInvoke(channel)
+      }
+    })
+    renderCompose()
+    await waitFor(() => expect(screen.getByTestId('compose-send')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('compose-send'))
+    await waitFor(() => expect(mockInvoke.mock.calls.some(c => c[0] === 'mail:scheduleSend')).toBe(true))
+    const call = mockInvoke.mock.calls.find(c => c[0] === 'mail:scheduleSend')!
+    return (call as unknown[])[2] as Record<string, unknown>
+  }
+
+  it('carries the replyRef of the message being answered', async () => {
+    const replyRef = { accountId: 1, folder: 'INBOX', uid: 42 }
+    const payload = await sendFrom({ to: 'bob@one.example', subject: 'Re: Hi', text: 'ok', replyRef })
+    expect(payload.replyRef).toEqual(replyRef)
+  })
+
+  it('carries no replyRef for a message that answers nothing', async () => {
+    const payload = await sendFrom({ to: 'bob@one.example', subject: 'Hi', text: 'ok' })
+    expect(payload.replyRef).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A reused window (`compose:init`) must set or reset the reply pointer the same
+// way the first open (`compose:getInit`) does. Main reuses one Compose window
+// for every reply, forward and new message; a pointer that survives the next
+// init threads the wrong message under the previous one's chain.
+// ---------------------------------------------------------------------------
+describe('Compose — a reused window carries the pointer of the CURRENT message only', () => {
+  const ACCOUNT = { id: 1, email: 'ann@one.example', smtp: { user: '' }, imap: { user: '' } }
+  const REF_A = { accountId: 1, folder: 'INBOX', uid: 11 }
+  const REF_B = { accountId: 1, folder: 'INBOX', uid: 22 }
+
+  function mockSingleAccount(first: Record<string, unknown>) {
+    mockInvoke.mockImplementation((channel: string) => {
+      switch (channel) {
+        case 'settings:get':
+          return Promise.resolve({ draftSyncEnabled: false, sendDelaySeconds: 0 })
+        case 'compose:getInit':
+          return Promise.resolve({ accountId: 1, init: first })
+        case 'accounts:list':
+          return Promise.resolve([ACCOUNT])
+        case 'accounts:getCurrent':
+          return Promise.resolve(1)
+        case 'accounts:get':
+          return Promise.resolve(ACCOUNT)
+        default:
+          return defaultInvoke(channel)
+      }
+    })
+  }
+
+  /** Open with `first`, reuse the window with `next` (a `compose:init`), send, return the payload. */
+  async function sendAfterReuse(first: Record<string, unknown>, next: Record<string, unknown> | null) {
+    mockSingleAccount(first)
+    renderCompose()
+    await waitFor(() => expect(screen.getByTestId('compose-send')).toBeEnabled())
+    const onInit = mockOn.mock.calls.find(c => c[0] === 'compose:init')?.[1] as (p: unknown) => void
+    await act(async () => { onInit({ accountId: 1, init: next }) })
+    // The recipient field of the reused form is what makes the send valid again.
+    fireEvent.change(screen.getByTestId('compose-to'), { target: { value: 'bob@one.example' } })
+    fireEvent.change(screen.getByTestId('compose-subject'), { target: { value: 'Hello' } })
+    fireEvent.change(screen.getByTestId('compose-text'), { target: { value: 'Body' } })
+    await waitFor(() => expect(screen.getByTestId('compose-send')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('compose-send'))
+    await waitFor(() => expect(mockInvoke.mock.calls.some(c => c[0] === 'mail:scheduleSend')).toBe(true))
+    const call = mockInvoke.mock.calls.find(c => c[0] === 'mail:scheduleSend')!
+    return (call as unknown[])[2] as Record<string, unknown>
+  }
+
+  const reply = (replyRef: typeof REF_A) => ({ to: 'bob@one.example', subject: 'Re: Hi', text: 'ok', replyRef })
+
+  it('reply to A, then reply to B: the payload points at B', async () => {
+    const payload = await sendAfterReuse(reply(REF_A), reply(REF_B))
+    expect(payload.replyRef).toEqual(REF_B)
+  })
+
+  it('reply to A, then a forward: the payload carries no pointer', async () => {
+    const payload = await sendAfterReuse(reply(REF_A), { subject: 'Fwd: Hi', text: 'see below' })
+    expect(payload.replyRef).toBeUndefined()
+  })
+
+  it('reply to A, then a new message (no init): the payload carries no pointer', async () => {
+    const payload = await sendAfterReuse(reply(REF_A), null)
+    expect(payload.replyRef).toBeUndefined()
+  })
+
+  it('new message, then a reply to B: the payload points at B', async () => {
+    const payload = await sendAfterReuse({ to: 'bob@one.example', subject: 'Hi', text: 'ok' }, reply(REF_B))
+    expect(payload.replyRef).toEqual(REF_B)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// A saved reply draft must remember what it answers: the autosave to the Drafts
+// folder carries the pointer, and main writes In-Reply-To / References into the
+// draft message from it.
+// ---------------------------------------------------------------------------
+describe('Compose — the autosave of a reply draft carries the pointer to its parent', () => {
+  const ACCOUNT = { id: 1, email: 'ann@one.example', smtp: { user: '' }, imap: { user: '' } }
+
+  async function autosavePayload(init: Record<string, unknown>): Promise<Record<string, unknown>> {
+    mockInvoke.mockImplementation((channel: string) => {
+      switch (channel) {
+        case 'settings:get':
+          return Promise.resolve({ draftSyncEnabled: true, sendDelaySeconds: 0 })
+        case 'compose:getInit':
+          return Promise.resolve({ accountId: 1, init })
+        case 'accounts:list':
+          return Promise.resolve([ACCOUNT])
+        case 'accounts:getCurrent':
+          return Promise.resolve(1)
+        case 'accounts:get':
+          return Promise.resolve(ACCOUNT)
+        case 'net:mailboxesAndRoles':
+          return Promise.resolve({ roles: { drafts: 'Drafts' } })
+        default:
+          return defaultInvoke(channel)
+      }
+    })
+    renderCompose()
+    await waitFor(() => expect(mockInvoke.mock.calls.some(c => c[0] === 'net:saveDraft')).toBe(true), { timeout: 8000 })
+    const call = mockInvoke.mock.calls.find(c => c[0] === 'net:saveDraft')!
+    return (call as unknown[])[4] as Record<string, unknown>
+  }
+
+  it('a reply autosave names the message it answers', async () => {
+    const replyRef = { accountId: 1, folder: 'INBOX', uid: 42 }
+    const payload = await autosavePayload({ to: 'bob@one.example', subject: 'Re: Hi', text: 'ok', replyRef })
+    expect(payload.replyRef).toEqual(replyRef)
+  }, 15_000)
+
+  it('a new-message autosave names nothing', async () => {
+    const payload = await autosavePayload({ to: 'bob@one.example', subject: 'Hi', text: 'ok' })
+    expect(payload.replyRef).toBeUndefined()
+  }, 15_000)
+})
+
+// ---------------------------------------------------------------------------
+// Two pointers, two meanings. `replyRef` is the message the user opened a reply
+// on: it threads the reply AND is the Send & Archive target. `threadRef` is a
+// pointer main restored for a reopened draft by Message-ID, which can match
+// several copies of one message: it threads the reply and is never archived.
+// Keeping them as separate FIELDS (not one field plus a flag) is what lets the
+// distinction survive the send queue, Undo and Outbox Edit.
+// ---------------------------------------------------------------------------
+describe('Compose — a restored thread pointer threads but never archives', () => {
+  const ACCOUNT = { id: 1, email: 'ann@one.example', smtp: { user: '' }, imap: { user: '' } }
+  const ref = { accountId: 1, folder: 'INBOX', uid: 42 }
+  const ref2 = { accountId: 1, folder: 'INBOX', uid: 43 }
+
+  function mockWith(first: Record<string, unknown>) {
+    mockInvoke.mockImplementation((channel: string) => {
+      switch (channel) {
+        case 'settings:get':
+          return Promise.resolve({ draftSyncEnabled: false, sendDelaySeconds: 0 })
+        case 'compose:getInit':
+          return Promise.resolve({ accountId: 1, init: first })
+        case 'accounts:list':
+          return Promise.resolve([ACCOUNT])
+        case 'accounts:getCurrent':
+          return Promise.resolve(1)
+        case 'accounts:get':
+          return Promise.resolve(ACCOUNT)
+        case 'net:mailboxesAndRoles':
+          return Promise.resolve({ roles: { archive: 'Archive', drafts: 'Drafts' } })
+        default:
+          return defaultInvoke(channel)
+      }
+    })
+  }
+
+  async function open(first: Record<string, unknown>) {
+    mockWith(first)
+    renderCompose()
+    await waitFor(() => expect(screen.getByTestId('compose-send')).toBeEnabled())
+  }
+
+  async function reuse(next: Record<string, unknown>) {
+    const onInit = mockOn.mock.calls.find(c => c[0] === 'compose:init')?.[1] as (p: unknown) => void
+    await act(async () => { onInit({ accountId: 1, init: next }) })
+    fireEvent.change(screen.getByTestId('compose-to'), { target: { value: 'bob@one.example' } })
+    fireEvent.change(screen.getByTestId('compose-subject'), { target: { value: 'Hello' } })
+    fireEvent.change(screen.getByTestId('compose-text'), { target: { value: 'Body' } })
+    await waitFor(() => expect(screen.getByTestId('compose-send')).toBeEnabled())
+  }
+
+  async function archiveOffered(): Promise<boolean> {
+    fireEvent.click(screen.getByTestId('compose-send-dropdown-toggle'))
+    await waitFor(() => expect(screen.getByTestId('compose-send-menu')).toBeInTheDocument())
+    return screen.queryByTestId('compose-send-archive') !== null
+  }
+
+  async function sentPayload(): Promise<Record<string, unknown>> {
+    fireEvent.click(screen.getByTestId('compose-send'))
+    await waitFor(() => expect(mockInvoke.mock.calls.some(c => c[0] === 'mail:scheduleSend')).toBe(true))
+    return (mockInvoke.mock.calls.find(c => c[0] === 'mail:scheduleSend') as unknown[])[2] as Record<string, unknown>
+  }
+
+  const reply = { to: 'bob@one.example', subject: 'Re: Hi', text: 'ok' }
+
+  it('a first-time reply threads by replyRef and offers Send & Archive', async () => {
+    await open({ ...reply, replyRef: ref, source: 'reply' })
+    expect(await archiveOffered()).toBe(true)
+    const payload = await sentPayload()
+    expect(payload.replyRef).toEqual(ref)
+    expect(payload.threadRef).toBeUndefined()
+  })
+
+  it('a reopened reply draft threads by threadRef and offers no Send & Archive', async () => {
+    await open({ ...reply, threadRef: ref, source: 'draft' })
+    expect(await archiveOffered()).toBe(false)
+    const payload = await sentPayload()
+    expect(payload.threadRef).toEqual(ref)
+    expect(payload.replyRef).toBeUndefined()
+  })
+
+  it('a reused window: draft, then a real reply — the archive target comes back and the restored pointer is gone', async () => {
+    await open({ ...reply, threadRef: ref, source: 'draft' })
+    await reuse({ ...reply, replyRef: ref2, source: 'reply' })
+    expect(await archiveOffered()).toBe(true)
+    const payload = await sentPayload()
+    expect(payload.replyRef).toEqual(ref2)
+    expect(payload.threadRef).toBeUndefined()
+  })
+
+  it('a reused window: a reply, then a draft — the archive target is gone', async () => {
+    await open({ ...reply, replyRef: ref, source: 'reply' })
+    await reuse({ ...reply, threadRef: ref2, source: 'draft' })
+    expect(await archiveOffered()).toBe(false)
+    const payload = await sentPayload()
+    expect(payload.threadRef).toEqual(ref2)
+    expect(payload.replyRef).toBeUndefined()
   })
 })

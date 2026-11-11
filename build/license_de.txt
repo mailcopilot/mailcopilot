@@ -1,0 +1,13 @@
+﻿MailCopilot - Datenschutzhinweis
+
+Bitte lesen Sie diesen Hinweis vor der Installation. Die vollständige Datenschutzerklärung: https://docs.mailcopilot.io/legal/privacy-policy
+
+Neben der Kommunikation mit den von Ihnen eingerichteten Mailservern kontaktiert MailCopilot von sich aus:
+
+1. Update-Suche. Etwa einmal pro Stunde fragt MailCopilot unseren Update-Server, ob eine neue Version vorliegt. Der Server sieht Ihre IP-Adresse sowie die Art Ihres Betriebssystems und Prozessors. Nichts über Ihre E-Mails, Konten oder Nutzung wird gesendet. Bei einer Neuinstallation wird beim ersten Start, vor der ersten Suche, eine Auswahl angezeigt; Sie können sie jederzeit unter Einstellungen > Über ändern. Ist sie aus, startet MailCopilot von selbst keine neue Suche mehr; eine bereits laufende Suche oder ein bereits laufender Download kann noch abgeschlossen werden.
+
+2. Diagnose- und Nutzungsdaten. Aus, bis Sie sie erlauben; Sie werden beim ersten Start gefragt. Sie enthalten nie den Inhalt Ihrer E-Mails.
+
+3. KI-Assistent. Optional. Anfragen gehen nur an den von Ihnen eingerichteten Anbieter, mit Ihrem eigenen Schlüssel.
+
+4. Absenderfotos. Standardmäßig werden Absenderfotos von Gravatar geladen: Ein Hash der Absenderadresse und Ihre IP-Adresse gehen an Gravatar. Sie können das in den Einstellungen ausschalten.

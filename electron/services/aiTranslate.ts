@@ -47,7 +47,8 @@
 //     call, settle with the actual cost after, release ONLY on a provably
 //     unbilled outcome; an ambiguous post-dispatch failure keeps the floor.
 //   - THE AUDIT LOG RECORDS WHAT LEFT THE MACHINE, and nothing else. One row per
-//     request that actually reached a provider — including the unexpected-throw
+//     request that actually reached a provider (a long message is several
+//     requests, so several rows) — including the unexpected-throw
 //     path (§3.3.B4.f2) — and NO row for anything that failed locally: a cache
 //     hit, an unconfigured key, an unsupported provider, a proxy that would not
 //     construct, a host that could not be reached. Those are not "silent AI
@@ -55,11 +56,11 @@
 //     log answer "how often did we try" while claiming to answer "what was
 //     sent". Local failures stay visible in TELEMETRY, which is the aggregate
 //     that legitimately counts attempts (§3.3.B6.f1).
-//   - Exactly ONE span per request that got as far as an answer — a generation,
-//     a cache hit (`cache_hit: true`) or a failure — including the
-//     unexpected-throw path. The pure input-gate refusals (opt-out, no cached
-//     body, over the input cap) and the two pre-call refusals (`no_provider`,
-//     `budget`) emit none; they are counted, if at all, by their own surfaces.
+//   - Exactly ONE span per translation that got as far as an answer — a
+//     generation (however many pieces it took), a cache hit (`cache_hit: true`)
+//     or a failure — including the unexpected-throw path. The pure input-gate
+//     refusals (opt-out, no cached body, over the message limit) and the two
+//     pre-call refusals (`no_provider`, `budget` before any request) emit none; they are counted, if at all, by their own surfaces.
 //   - PII-free telemetry: aggregates only. The message text, the translation,
 //     the subject, the addresses and the folder name never reach a span, a
 //     counter, a log line or Sentry.
@@ -69,10 +70,12 @@
 
 import { z } from 'zod'
 import { wrapUntrusted } from '../../packages/core'
+import { joinTranslatedChunks, splitForTranslation } from '../../packages/core/translateChunks'
 // Imported BY PATH, not through the `packages/core` barrel: `language.ts` is
 // the franc-facing module and the barrel is bundled into the renderer. See the
 // header of that file.
 import {
+  LANGUAGE_DETECTION_MAX_INPUT_CHARS,
   TRANSLATE_LANGUAGE_CODES,
   TRANSLATE_LANGUAGE_NAMES,
   detectTextLanguage,
@@ -101,6 +104,7 @@ import {
   type AiChatStopReason,
   type AiProvider,
 } from './ai'
+import { openAiBaseUrlForRequest } from './aiDestination'
 import { estimateAiRuleCostUsd, nullUsageReservationUsd } from '../../packages/core'
 import { startMetricSpan } from '../metrics'
 import { captureException } from '../sentry'
@@ -114,42 +118,57 @@ import type {
 
 const log = createLogger('AiTranslate')
 
+/** A piece with no letter in any script has nothing to translate. */
+const HAS_LETTER = /\p{L}/u
+
 /**
- * Cap on the message text one translation pass accepts. A PRODUCT CAP, stated as
- * such (§3.3.B6.f1) — read the next paragraph before treating it as a proof.
+ * Budget of ONE provider request, in characters of source text. A PRODUCT CAP,
+ * stated as such (§3.3.B6.f1) — read the next paragraph before treating it as a
+ * proof.
  *
- * An earlier version of this docblock called the number DERIVED, on the argument
- * that 2000 output tokens carry ~3000 characters at a worst case of ~1.5–2
- * characters per token. That derivation does not hold and is not repeated here.
- * Characters per token is a property of the tokenizer, the script and the
- * DIRECTION of the translation, none of which this constant knows: a CJK target
- * — and Chinese, Japanese, Korean and Hindi are all offered targets — routinely
- * lands near or below one character per token, so 3000 characters of source can
- * demand well over 2000 output tokens. Any honest constant built the other way
- * would have to be small enough for the worst supported pair, which would refuse
- * ordinary Latin-script mail that translates perfectly well.
+ * It is not derived. Characters per token is a property of the tokenizer, the
+ * script and the DIRECTION of the translation, none of which this constant
+ * knows: a CJK target — and Chinese, Japanese, Korean and Hindi are all offered
+ * targets — routinely lands near or below one character per token, so 3000
+ * characters of source can demand well over 2000 output tokens. What it carries
+ * is a chosen ceiling on how much text one request is asked to return. Whether
+ * an answer actually fit is the provider's fact, read through
+ * {@link isIncompleteCompletion}.
  *
- * So the number is a chosen ceiling on how much of one reading-pane message we
- * will pay to translate in a single pass, and the guarantee it carries is
- * bounded accordingly: it keeps a single request from being arbitrarily
- * expensive and gives an EARLY, structural refusal — before the single-flight,
- * before admission, before a provider call, with nothing spent and nothing
- * sliced. What it deliberately does NOT claim is "everything under this cap
- * fits in the output budget". That claim belongs to the provider, and
- * {@link isIncompleteCompletion} is where we read the provider's own answer.
+ * Since the chunking fix this is the size of a PIECE, not a limit on the
+ * message: a longer message is split at paragraph and sentence boundaries into
+ * pieces of at most this size, one request each ({@link TRANSLATE_MESSAGE_MAX_CHARS}
+ * bounds how many). The previous version refused every message above it, which
+ * in practice meant almost any mail with quoted history.
  *
- * A REFUSAL threshold, not a truncation point, for the B7 reason: a translation
- * silently cut in half is worse than no translation, because nothing in the
- * result says the second half of the letter was never translated — the user
- * reads a complete-looking message that simply stops meaning what the original
- * meant.
+ * Still the DRAFT limit: `composeTranslate.ts` has its own request path for the
+ * user's own text and refuses above this size, so a draft is not chunked.
  *
- * Note also why the output cap may not simply be raised to make the arithmetic
- * work: the §2.51 budget reservation is a floor priced FOR
- * `AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS`, so asking for more output than the floor
- * was priced against is an under-reservation.
+ * A piece that does not come back whole is REFUSED, never shown cut, for the B7
+ * reason: a translation silently cut in half is worse than none, because
+ * nothing in the result says the rest of the letter was never translated. The
+ * output cap may not be raised to make the arithmetic work either: the §2.51
+ * budget reservation is a floor priced FOR `AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS`.
  */
 export const TRANSLATE_INPUT_CHAR_CAP = 3000
+
+/**
+ * Overall limit on the message text of one translation, in characters. About 20
+ * requests at {@link TRANSLATE_INPUT_CHAR_CAP} for ordinary prose and up to about
+ * 40 in the worst case (greedy packing guarantees only that two neighbouring
+ * pieces together exceed the budget, so paragraphs of about 1600 characters
+ * fill one piece each): a bound on time and on the spend one click puts on the
+ * user's own API key. Above it the request is
+ * refused early (`too_long`) with nothing sent. Chosen, not derived: ordinary
+ * mail with long quoted history stays well under it, and a message beyond it is
+ * almost always a pasted log or a forwarded archive that nobody wants machine
+ * translated in one click.
+ */
+export const TRANSLATE_MESSAGE_MAX_CHARS = 60_000
+
+/** Pieces of one message translated at the same time. Bounds the burst against
+ *  the provider's rate limit; the §2.51 admission is per request regardless. */
+export const TRANSLATE_CHUNK_CONCURRENCY = 3
 
 /**
  * Version of the TRANSLATION CONTRACT — the system prompt, the output handling
@@ -171,6 +190,8 @@ export const TRANSLATE_INPUT_CHAR_CAP = 3000
  * per-account ceiling.
  */
 export const AI_TRANSLATION_CONTRACT_VERSION = 'v1'
+// Chunking did NOT bump this: a text within one request budget is sent exactly
+// as before, and a longer one never had a cached row to retire.
 
 /**
  * The system prompt, built from a closed table.
@@ -405,6 +426,17 @@ export interface TranslateDeps {
    * `err.name`, which an arbitrary throw could have loaded with message text.
    */
   reportFailure: (marker: string, err: unknown) => void
+  /**
+   * Pieces already translated for this (account, source, target) and not yet
+   * part of a finished translation, held in this process's memory so a retry
+   * after a failure on piece k does not pay for the pieces that were fine. See
+   * {@link TranslateDeps.putReadyPiece}.
+   */
+  getReadyPiece: (accountId: number, sourceHash: string, targetLang: string, index: number) => string | undefined
+  /** Remember one COMPLETE piece translation (never a refused or cut-off one). */
+  putReadyPiece: (accountId: number, sourceHash: string, targetLang: string, index: number, text: string) => void
+  /** Forget every ready piece of one translation: called once the whole is done. */
+  clearReadyPieces: (accountId: number, sourceHash: string, targetLang: string) => void
   /** Monotonic-enough clock, injectable for tests. */
   now: () => number
   /** Structured logger. Never receives message content. */
@@ -459,9 +491,9 @@ export function prepareTranslate(deps: TranslateDeps, req: TranslateMessageReque
     deps.log.warn('translate: no cached text for the message ref — refusing without a provider call')
     return refuse('empty_input')
   }
-  if (text.length > TRANSLATE_INPUT_CHAR_CAP) {
+  if (text.length > TRANSLATE_MESSAGE_MAX_CHARS) {
     deps.log.warn(
-      `translate: message over the ${TRANSLATE_INPUT_CHAR_CAP}-char input cap — refusing instead of translating part of it`,
+      `translate: message over the ${TRANSLATE_MESSAGE_MAX_CHARS}-char limit — refusing instead of translating part of it`,
     )
     return refuse('too_long')
   }
@@ -473,7 +505,9 @@ export function prepareTranslate(deps: TranslateDeps, req: TranslateMessageReque
   // reaches the model.
   let sourceLang: TranslateLanguageCode | null = req.sourceLang ?? null
   if (!sourceLang) {
-    const detection = deps.detectLanguage(text)
+    // SLICED here as well as inside the detector: the message may now be 60 000
+    // characters and the detector pass is synchronous on the main process.
+    const detection = deps.detectLanguage(text.slice(0, LANGUAGE_DETECTION_MAX_INPUT_CHARS))
     sourceLang = detection.ok ? languageCodeFromIso6393(detection.iso6393) : null
   }
 
@@ -487,7 +521,7 @@ export function prepareTranslate(deps: TranslateDeps, req: TranslateMessageReque
  *
  * Flow:
  *   1. Pure input gate (`prepareTranslate`): opt-in OFF / no cached body /
- *      over cap. None of these reserves money, calls a provider, or takes the
+ *      over the message limit. None of these reserves money, calls a provider, or takes the
  *      single-flight slot. Language detection runs here but gates NOTHING — it
  *      only produces the caption.
  *   2. Cache lookup by (account, content hash, target). A HIT returns without a
@@ -496,7 +530,9 @@ export function prepareTranslate(deps: TranslateDeps, req: TranslateMessageReque
  *   3. Single-flight per account, then provider selection (none →
  *      `no_provider`, never recorded as a failed API call).
  *   4. §2.51 atomic, fail-closed budget admission → `budget`, never a throw.
- *   5. Generate: wrapUntrusted() the text → one-shot call pinned to the
+ *   5. Generate: split the text into pieces of at most TRANSLATE_INPUT_CHAR_CAP
+ *      (one piece for an ordinary message), up to TRANSLATE_CHUNK_CONCURRENCY in
+ *      flight, ALL-OR-NOTHING. Per piece: wrapUntrusted() the text → one-shot call pinned to the
  *      selected provider, taken as the un-collapsed billing verdict. `billed`
  *      settles once BEFORE inspecting the output; `unbilled` releases;
  *      `ambiguous` keeps the conservative floor unless the endpoint is
@@ -611,8 +647,66 @@ function asLanguageCode(value: string | null | undefined): TranslateLanguageCode
     : null
 }
 
+/** Per-translation state shared by the chunk workers of one `runTranslate`. */
+interface TranslateRun {
+  /** Provider calls actually attempted (the span is emitted iff this is > 0). */
+  chatCalls: number
+  tokensIn: number | null
+  tokensOut: number | null
+  /** The FIRST failure. Later ones (siblings finishing after it) never overwrite it. */
+  failure: { reason: TranslateRefusalReason; errorClass: 'provider_error' | 'parse_error' | 'internal_error' } | null
+}
+
+function noteUsage(run: TranslateRun, result: TranslateChatResult | null): void {
+  const usage = result?.usage
+  if (!usage) return
+  run.tokensIn = (run.tokensIn ?? 0) + usage.inputTokens
+  run.tokensOut = (run.tokensOut ?? 0) + usage.outputTokens
+}
+
+function noteFailure(
+  run: TranslateRun,
+  reason: TranslateRefusalReason,
+  errorClass: 'provider_error' | 'parse_error' | 'internal_error',
+): null {
+  if (!run.failure) run.failure = { reason, errorClass }
+  return null
+}
+
+/**
+ * Run `worker` over `count` items with at most `limit` in flight, pulling items
+ * in order. `shouldStop` is consulted before each item is STARTED, so a failure
+ * or a cancellation stops the remaining items; those already in flight finish
+ * (a provider call that has left cannot be recalled, and its billing is settled
+ * by its own worker).
+ */
+async function runBounded(
+  count: number,
+  limit: number,
+  shouldStop: () => boolean,
+  worker: (index: number) => Promise<void>,
+): Promise<void> {
+  let next = 0
+  const lane = async (): Promise<void> => {
+    while (!shouldStop()) {
+      const index = next++
+      if (index >= count) return
+      await worker(index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, count) }, lane))
+}
+
 /**
  * The paid half of a translation, inside the per-account single-flight.
+ *
+ * A message above {@link TRANSLATE_INPUT_CHAR_CAP} is cut into pieces
+ * (`splitForTranslation`), each piece is translated by its own request with at
+ * most {@link TRANSLATE_CHUNK_CONCURRENCY} in flight, and the answers are joined
+ * with the original gaps. ALL-OR-NOTHING: if any piece is refused, fails or comes
+ * back incomplete, the whole translation fails with that reason, nothing partial
+ * is returned and nothing is cached. A message within the budget is one piece and
+ * takes exactly the single-request path it always had.
  *
  * Kept separate from the gate so the broad failure boundary wraps EXACTLY the
  * work that can book money, an audit row or a span — and so the span state
@@ -630,17 +724,7 @@ async function runTranslate(
   let spanWasLocal = false
   const started = readClock(deps)
   const sourceLabeled = sourceLang !== null
-  // Whether anything about this message has actually left the machine. It gates
-  // the AUDIT ROW and nothing else (§3.3.B6.f1): the audit log is the user's
-  // record of what was sent, so a row for a request that never left is a false
-  // entry in the one log they read to check exactly that. Flipped from the
-  // provider outcome's own `dispatched` verdict, or conservatively to `true`
-  // when the chat dependency throws and leaves us no verdict at all.
-  let leftTheMachine = false
-  // A reservation admitted but not yet settled. The handled paths null it out;
-  // the broad catch releases whatever is left, so an unexpected throw between
-  // admission and the provider call cannot leave a hold lingering (§2.51).
-  let reservationToRelease: TranslateReservation | null = null
+  const run: TranslateRun = { chatCalls: 0, tokensIn: null, tokensOut: null, failure: null }
 
   try {
     // Second cache read, INSIDE the single-flight. The first one ran before the
@@ -679,6 +763,12 @@ async function runTranslate(
       deps.log.error('translate: in-flight cache read failed — generating instead', err)
     }
 
+    // The gate in `prepareTranslate` ran before the queue; a request that waited
+    // behind a long translation re-asks here, inside the single-flight.
+    if (!deps.isEnabledForAccount(req.accountId)) {
+      return { ok: false, reason: 'opt_out' }
+    }
+
     const { provider, wasLocal, allowFabrication } = deps.selectProvider()
     if (!provider) {
       return { ok: false, reason: 'no_provider' }
@@ -686,22 +776,181 @@ async function runTranslate(
     spanProvider = provider
     spanWasLocal = wasLocal
 
+    // The whole text goes in, unmodified — the cap was enforced as a REFUSAL, so
+    // nothing is shortened; a long message is cut into pieces whose concatenation
+    // (with the original gaps) is the original text.
+    const { pieces, gaps } = splitForTranslation(text, TRANSLATE_INPUT_CHAR_CAP)
+    const translated: Array<string | null> = pieces.map(() => null)
+
+    // Consent is checked again before EVERY piece: a translation is now a job of
+    // minutes, and an account whose opt-in was turned off (or that was removed,
+    // which purges its consent) must not keep sending its message text.
+    const consentHolds = (): boolean => {
+      try { return deps.isEnabledForAccount(req.accountId) } catch { return false }
+    }
+    const stopped = (): boolean => {
+      if (run.failure !== null) return true
+      if (!consentHolds()) {
+        noteFailure(run, 'opt_out', 'provider_error')
+        return true
+      }
+      return false
+    }
+    await runBounded(pieces.length, TRANSLATE_CHUNK_CONCURRENCY, stopped, async (index) => {
+     // A throw from a dependency here must not reject the lane: the other lanes
+     // would keep sending after the single-flight slot was released.
+     try {
+      // Already translated by an earlier attempt that failed elsewhere: reuse it,
+      // no admission and no request.
+      const ready = deps.getReadyPiece(req.accountId, sourceHash, req.targetLang, index)
+      if (ready !== undefined) {
+        translated[index] = ready
+        return
+      }
+      // Nothing to translate in a piece without a single letter (digits,
+      // punctuation, a separator line): return it as it is. Sending it would
+      // spend a request, and a model answering "nothing to translate" with an
+      // empty text would fail the whole message.
+      if (!HAS_LETTER.test(pieces[index])) {
+        translated[index] = pieces[index]
+        return
+      }
+      const out = await translateChunk(deps, req, run, provider, allowFabrication, pieces[index])
+      if (out !== null) {
+        translated[index] = out
+        if (consentHolds()) deps.putReadyPiece(req.accountId, sourceHash, req.targetLang, index, out)
+      }
+     } catch (err) {
+      deps.log.error('translate: piece worker threw', err)
+      deps.reportFailure('ai_translate_failed', err)
+      noteFailure(run, 'provider_error', 'internal_error')
+     }
+    })
+
+    if (run.failure) {
+      // Nothing partial is shown or cached. A budget or setup refusal before
+      // any provider call emits no span, exactly as it did before chunking.
+      if (run.chatCalls > 0) {
+        recordTranslateSpan(deps, {
+          provider,
+          wasLocal,
+          tokensIn: run.tokensIn,
+          tokensOut: run.tokensOut,
+          latencyMs: readClock(deps) - started,
+          errorClass: run.failure.errorClass,
+          sourceLabeled,
+          targetLang: req.targetLang,
+          cacheHit: false,
+        })
+      }
+      return { ok: false, reason: run.failure.reason }
+    }
+
+    // Stitched BY PIECE NUMBER, never in completion order: the pieces finish in
+    // any order and the gaps are the original text between neighbours.
+    const translatedText = normalizeTranslationOutput(joinTranslatedChunks(translated as string[], gaps))
+    deps.clearReadyPieces(req.accountId, sourceHash, req.targetLang)
+
+    // A translation finished after consent was withdrawn is dropped, not stored.
+    if (!consentHolds()) return { ok: false, reason: 'opt_out' }
+
+    // Cache write is best-effort: a translation the user can read now must not
+    // be lost to a failed INSERT. Keyed on the WHOLE source hash, holding the
+    // whole translation — chunking is invisible to the cache.
+    try {
+      deps.putCached({
+        accountId: req.accountId,
+        sourceHash,
+        targetLang: req.targetLang,
+        sourceLang,
+        translatedText,
+        provider,
+        wasLocal,
+      })
+    } catch (err) {
+      deps.log.error('translate: cache write failed (non-fatal)', err)
+    }
+
+    recordTranslateSpan(deps, {
+      provider,
+      wasLocal,
+      tokensIn: run.tokensIn,
+      tokensOut: run.tokensOut,
+      latencyMs: readClock(deps) - started,
+      errorClass: 'none',
+      sourceLabeled,
+      targetLang: req.targetLang,
+      cacheHit: false,
+    })
+
+    return {
+      ok: true,
+      translation: {
+        translatedText,
+        sourceLang,
+        targetLang: req.targetLang,
+        provider,
+        cached: false,
+        sourceIsTextProjection: true,
+      },
+    }
+  } catch (err) {
+    // Unexpected orchestration throw — NOT the handled provider paths, each of
+    // which returns after its chunk booked its own audit row. The audit rows
+    // belong to the chunks (one per request that left the machine), so this
+    // boundary books the span only.
+    deps.log.error('translate: unexpected orchestration throw', err)
+    recordTranslateFailure(
+      deps, spanProvider, spanWasLocal, started, 'internal_error', null, sourceLabeled, req.targetLang,
+      false,
+    )
+    deps.reportFailure('ai_translate_failed', err)
+    return { ok: false, reason: 'provider_error' }
+  }
+}
+
+/**
+ * One request for one piece: admission → provider call → settlement → the
+ * completeness checks → the audit row. Returns the piece's translation, or
+ * `null` after recording the first failure on `run`. NEVER throws: every path
+ * settles or releases its own reservation and writes its own audit row, so the
+ * concurrent workers cannot leak a hold or lose a record of what was sent.
+ *
+ * Everything per request is exactly what the single request always did: the
+ * §2.51 admission and settlement are per paid generation (a long message is
+ * several), the audit log has one row per request that left the machine, and the
+ * completeness rule is the same {@link isIncompleteCompletion}.
+ */
+async function translateChunk(
+  deps: TranslateDeps,
+  req: TranslateMessageRequest,
+  run: TranslateRun,
+  provider: string,
+  allowFabrication: boolean,
+  piece: string,
+): Promise<string | null> {
+  let leftTheMachine = false
+  // A reservation admitted but not yet settled. The handled paths null it out;
+  // the broad catch releases whatever is left, so an unexpected throw between
+  // admission and the provider call cannot leave a hold lingering (§2.51).
+  let reservationToRelease: TranslateReservation | null = null
+
+  try {
     // §2.51 — atomic admission. A denial (over cap) and a broken meter (throw,
     // caught in the helper) both produce the SAME structured refusal.
     const admission = admitTranslateBudget(deps, req.accountId, provider)
     if (!admission.ok) {
-      return { ok: false, reason: 'budget' }
+      return noteFailure(run, 'budget', 'provider_error')
     }
     reservationToRelease = admission.reservation
 
-    // The whole text goes in, unmodified — the cap was enforced as a REFUSAL,
-    // so anything reaching here is within it and must not be shortened.
     // wrapUntrusted() neutralizes forged boundary markers inside the message,
-    // and the markers always enclose the entire text the model sees.
+    // and the markers always enclose the entire piece the model sees.
     const systemPrompt = buildTranslateSystemPrompt(req.targetLang)
-    const userPrompt = `Translate this email message:\n\n${wrapUntrusted(text)}`
+    const userPrompt = `Translate this email message:\n\n${wrapUntrusted(piece)}`
 
     let outcome: TranslateChatOutcome
+    run.chatCalls++
     try {
       outcome = await deps.chat(provider, systemPrompt, userPrompt)
     } catch (err) {
@@ -717,8 +966,8 @@ async function runTranslate(
       // prevent, while an extra row for a request that never left is visible and
       // harmless. (This is the opposite direction from the money decision above
       // only in appearance — both take the side whose mistake is bounded.)
-      recordTranslateFailure(deps, provider, wasLocal, started, 'provider_error', null, sourceLabeled, req.targetLang, true)
-      return { ok: false, reason: 'provider_error' }
+      appendTranslateAudit(deps, { provider, result: null, untrustedWrapped: 1, outcome: 'error' })
+      return noteFailure(run, 'provider_error', 'provider_error')
     }
 
     if (outcome.kind !== 'billed') {
@@ -736,16 +985,16 @@ async function runTranslate(
       }
       reservationToRelease = null
       leftTheMachine = outcome.dispatched === true
-      recordTranslateFailure(
-        deps, provider, wasLocal, started, 'provider_error', null, sourceLabeled, req.targetLang,
-        leftTheMachine,
-      )
-      return { ok: false, reason: 'provider_error' }
+      if (leftTheMachine) {
+        appendTranslateAudit(deps, { provider, result: null, untrustedWrapped: 1, outcome: 'error' })
+      }
+      return noteFailure(run, 'provider_error', 'provider_error')
     }
 
     // A billed completion is dispatched by definition.
     leftTheMachine = true
     const result = outcome.result
+    noteUsage(run, result)
 
     // A billed completion spent tokens. Settle EXACTLY ONCE and BEFORE
     // inspecting the output, so a stream of unusable responses still advances
@@ -779,11 +1028,11 @@ async function runTranslate(
         'translate: provider returned no usable text '
         + `(stop_reason=${result.stopReason}, output_tokens=${result.usage?.outputTokens ?? 'unreported'})`,
       )
-      recordTranslateFailure(deps, provider, wasLocal, started, 'parse_error', result, sourceLabeled, req.targetLang, true)
-      return { ok: false, reason: noAnswerReason }
+      appendTranslateAudit(deps, { provider, result, untrustedWrapped: 1, outcome: 'error' })
+      return noteFailure(run, noAnswerReason, 'parse_error')
     }
     if (isIncompleteCompletion(result, deps.outputTokenCap)) {
-      // The answer never reached its end, so the tail of the message is missing
+      // The answer never reached its end, so the tail of the piece is missing
       // and nothing in the text says so. Refuse rather than show a translation
       // that silently stops — the same rule as the input cap above, applied to
       // the cases the input cap could not predict. The verdict in the log line
@@ -791,54 +1040,19 @@ async function runTranslate(
       deps.log.warn(
         `translate: incomplete completion (stop_reason=${result.stopReason}) — refusing a partial translation`,
       )
-      recordTranslateFailure(deps, provider, wasLocal, started, 'parse_error', result, sourceLabeled, req.targetLang, true)
-      return { ok: false, reason: noAnswerReason }
-    }
-
-    // Cache write is best-effort: a translation the user can read now must not
-    // be lost to a failed INSERT.
-    try {
-      deps.putCached({
-        accountId: req.accountId,
-        sourceHash,
-        targetLang: req.targetLang,
-        sourceLang,
-        translatedText,
-        provider,
-        wasLocal,
-      })
-    } catch (err) {
-      deps.log.error('translate: cache write failed (non-fatal)', err)
+      appendTranslateAudit(deps, { provider, result, untrustedWrapped: 1, outcome: 'error' })
+      return noteFailure(run, noAnswerReason, 'parse_error')
     }
 
     appendTranslateAudit(deps, { provider, result, untrustedWrapped: 1, outcome: 'ok' })
-    recordTranslateSpan(deps, {
-      provider,
-      wasLocal,
-      tokensIn: result.usage?.inputTokens ?? null,
-      tokensOut: result.usage?.outputTokens ?? null,
-      latencyMs: readClock(deps) - started,
-      errorClass: 'none',
-      sourceLabeled,
-      targetLang: req.targetLang,
-      cacheHit: false,
-    })
-
-    return {
-      ok: true,
-      translation: {
-        translatedText,
-        sourceLang,
-        targetLang: req.targetLang,
-        provider,
-        cached: false,
-        sourceIsTextProjection: true,
-      },
-    }
+    // The answer is trimmed, which would eat the indentation of the piece's
+    // first line; give the piece's own leading whitespace back (the whole
+    // result is trimmed once more at the very start by the caller).
+    return piece.slice(0, piece.length - piece.trimStart().length) + translatedText
   } catch (err) {
-    // Unexpected orchestration throw — NOT the handled provider paths above,
-    // each of which returns after booking its own audit row and span.
-    deps.log.error('translate: unexpected orchestration throw', err)
+    // Unexpected throw — NOT the handled provider paths above, each of which
+    // returns after booking its own audit row.
+    deps.log.error('translate: unexpected chunk throw', err)
     if (reservationToRelease) {
       releaseTranslateReservation(deps, reservationToRelease)
       reservationToRelease = null
@@ -847,12 +1061,11 @@ async function runTranslate(
     // `provider_error` would poison the signal the class exists to carry. The
     // audit row follows `leftTheMachine`, which is already set by the time any
     // post-dispatch step can throw.
-    recordTranslateFailure(
-      deps, spanProvider, spanWasLocal, started, 'internal_error', null, sourceLabeled, req.targetLang,
-      leftTheMachine,
-    )
+    if (leftTheMachine) {
+      appendTranslateAudit(deps, { provider, result: null, untrustedWrapped: 1, outcome: 'error' })
+    }
     deps.reportFailure('ai_translate_failed', err)
-    return { ok: false, reason: 'provider_error' }
+    return noteFailure(run, 'provider_error', 'internal_error')
   }
 }
 
@@ -1364,10 +1577,11 @@ function recallTranslation(
  * durable cache, and it stopped being one at precisely the moment the subset
  * property is what is being relied on.
  *
- * (2) Account ids are REUSED — `saveAccount` mints `Math.max(...) + 1`, so
- * removing the highest-numbered mailbox frees its id for the next one created,
- * and a surviving entry becomes addressable by an account that never produced
- * it. The content hash in the key makes that hard to reach in practice (the new
+ * (2) Account ids USED to be reused — `saveAccount` minted `Math.max(...) + 1`, so
+ * removing the highest-numbered mailbox freed its id for the next one created,
+ * and a surviving entry became addressable by an account that never produced
+ * it. Numbers are issued once now (`readAccountIdHighWater`), so this is defence
+ * in depth. The content hash in the key makes that hard to reach in practice (the new
  * mailbox would have to hold byte-identical text), which is why this is the
  * second reason and not the first — but "hard to reach" is not the sentence
  * either document writes.
@@ -1385,6 +1599,9 @@ export function forgetAccountTranslations(accountId: number): void {
     for (const key of [...recentTranslations.keys()]) {
       if (key.startsWith(prefix)) recentTranslations.delete(key)
     }
+    for (const key of [...readyPieces.keys()]) {
+      if (key.startsWith(prefix)) readyPieces.delete(key)
+    }
   } catch { /* an account teardown step may not fail */ }
 }
 
@@ -1392,6 +1609,95 @@ export function forgetAccountTranslations(accountId: number): void {
  *  translations. Nothing in the product calls it. */
 export function __resetRecentTranslationsForTests(): void {
   recentTranslations.clear()
+  readyPieces.clear()
+}
+
+/** Test-only: how many unfinished-translation pieces this process holds. */
+export function __readyPieceCountForTests(): number {
+  return readyPieces.size
+}
+
+/**
+ * The THIRD tier: finished PIECES of a translation that has not finished yet.
+ *
+ * A long message is translated in pieces, all or nothing. Without this, piece 17
+ * of 20 failing (a rate limit under three parallel requests, the output ceiling)
+ * threw away 16 paid answers and a retry paid for all 20 again. Pieces that came
+ * back whole are kept here, keyed like the whole translation plus the producer
+ * (provider and model) and the piece number, so a retry sends only the missing ones. Only the whole translation is
+ * ever shown or written to SQLite; this tier is neither a cache the reader can
+ * see nor a source of truth.
+ *
+ * Cleared on success (the whole is cached then), by age, by size (oldest first)
+ * and when the account is removed ({@link forgetAccountTranslations}): the text
+ * is derived from the user's message, so it follows the same deletion promise as
+ * the tier above. The contract version is part of the key for the same reason.
+ */
+const READY_PIECES_MAX = 80
+const READY_PIECE_TTL_MS = 60 * 60 * 1000
+
+const readyPieces = new Map<string, { text: string; at: number }>()
+
+/**
+ * `scope` names WHO produced the piece (provider and model). After a failure the
+ * reader may switch provider or model and retry; pieces from another producer
+ * must not be stitched into the new translation, or the stored row and the span
+ * would name a producer that wrote only part of the text.
+ */
+function readyPieceKey(
+  accountId: number, sourceHash: string, targetLang: string, scope: string, index: number,
+): string {
+  return `${readyPieceGroupPrefix(accountId, sourceHash, targetLang)}${scope}\u0000${index}`
+}
+
+function readyPieceGroupPrefix(accountId: number, sourceHash: string, targetLang: string): string {
+  return `${recentTranslationAccountPrefix(accountId)}${sourceHash}\u0000${targetLang}`
+    + `\u0000${AI_TRANSLATION_CONTRACT_VERSION}\u0000`
+}
+
+function getReadyPieceFromMemory(
+  accountId: number, sourceHash: string, targetLang: string, scope: string, index: number,
+): string | undefined {
+  try {
+    const key = readyPieceKey(accountId, sourceHash, targetLang, scope, index)
+    const held = readyPieces.get(key)
+    if (!held) return undefined
+    if (Date.now() - held.at > READY_PIECE_TTL_MS) {
+      readyPieces.delete(key)
+      return undefined
+    }
+    return held.text
+  } catch {
+    return undefined
+  }
+}
+
+function putReadyPieceInMemory(
+  accountId: number, sourceHash: string, targetLang: string, scope: string, index: number, text: string,
+): void {
+  try {
+    const key = readyPieceKey(accountId, sourceHash, targetLang, scope, index)
+    const now = Date.now()
+    for (const [k, held] of [...readyPieces]) {
+      if (now - held.at > READY_PIECE_TTL_MS) readyPieces.delete(k)
+    }
+    readyPieces.delete(key)
+    readyPieces.set(key, { text, at: now })
+    while (readyPieces.size > READY_PIECES_MAX) {
+      const oldest = readyPieces.keys().next()
+      if (oldest.done) break
+      readyPieces.delete(oldest.value)
+    }
+  } catch { /* a memory tier may not break a translation */ }
+}
+
+function clearReadyPiecesInMemory(accountId: number, sourceHash: string, targetLang: string): void {
+  try {
+    const prefix = readyPieceGroupPrefix(accountId, sourceHash, targetLang)
+    for (const key of [...readyPieces.keys()]) {
+      if (key.startsWith(prefix)) readyPieces.delete(key)
+    }
+  } catch { /* cleanup may not fail a translation */ }
 }
 
 /**
@@ -1437,6 +1743,15 @@ export async function resolveTrigramScorer(): Promise<TrigramScorer | null> {
   return loadTrigramScorer()
 }
 
+function pieceServerScope(raw: string | undefined): string {
+  try {
+    return openAiBaseUrlForRequest(raw)
+  } catch {
+    // An address that cannot be a server is its own scope; it never matches a working one.
+    return `unusable\u0001${raw ?? ''}`
+  }
+}
+
 /**
  * Build the real dependency bundle for one request.
  *
@@ -1471,6 +1786,10 @@ export function buildTranslateDeps(scorer: TrigramScorer | null): TranslateDeps 
   // Nobody bills you for a model on your own machine — same input, opposite
   // question, so it stays derived from the endpoint classification alone.
   const allowFabrication = !endpointIsLocal
+  // The producer of a kept piece is the provider, the model AND, for the OpenAI-compatible contour, the server: the
+  // same model id behind another address is another producer, and mixing their pieces would also mislabel the result's
+  // `wasLocal`. The address is compared the way the destination guard compares it (trailing slash and /v1 folded).
+  const pieceScope = `${provider}\u0001${settings.aiModel || ''}\u0001${provider === 'openai-api' ? pieceServerScope(settings.aiOpenAiBaseUrl) : ''}`
 
   return {
     isEnabledForAccount: isTranslateEnabledForAccount,
@@ -1550,6 +1869,13 @@ export function buildTranslateDeps(scorer: TrigramScorer | null): TranslateDeps 
     },
     selectProvider: () => ({ provider, wasLocal, allowFabrication }),
     runExclusive: withTranslateSingleFlight,
+    // Keyed also by provider and model (see `readyPieceKey`): `pieceScope` is read
+    // from the same pinned snapshot the request itself runs under.
+    getReadyPiece: (accountId, sourceHash, targetLang, index) =>
+      getReadyPieceFromMemory(accountId, sourceHash, targetLang, pieceScope, index),
+    putReadyPiece: (accountId, sourceHash, targetLang, index, text) =>
+      putReadyPieceInMemory(accountId, sourceHash, targetLang, pieceScope, index, text),
+    clearReadyPieces: clearReadyPiecesInMemory,
     outputTokenCap: AI_CHAT_SIMPLE_MAX_OUTPUT_TOKENS,
     admitBudget: (accountId, prov) => {
       // Same model string the thread-summary path reserves against

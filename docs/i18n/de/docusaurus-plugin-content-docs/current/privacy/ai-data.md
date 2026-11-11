@@ -25,6 +25,16 @@ Wenn Sie den KI-Assistenten verwenden, uebertraegt MailCopilot folgende Daten an
 
 Der KI-Assistent ist vollstaendig optional. Wenn Sie keinen Anbieter konfigurieren, werden keine E-Mail-Daten an einen externen Dienst uebertragen.
 
+Das Laden der Modellliste unter **Einstellungen > KI** sendet eine Anfrage mit Ihrem gespeicherten API-Schlüssel an den Endpunkt des Anbieters, über dieselben Proxy- und Zertifikatsvertrauenseinstellungen wie der Chat. Die Anfrage enthält keine E-Mail-Inhalte. MailCopilot liest den Schlüssel im Hauptprozess aus dem System-Schlüsselspeicher.
+
+Die obige Liste beschreibt das KI-Panel. Die KI-Funktionen, die außerhalb davon laufen, haben eigene Datenflüsse, die in den folgenden Abschnitten beschrieben werden.
+
+Links auf Nachrichten in einer Antwort und die Liste **Quellen** darunter gelten nur für Nachrichten als bestätigt, die im Gespräch tatsächlich an den Assistenten übergeben wurden; ein Link auf jede andere Nachricht wird als einfacher Text mit der Markierung **unbestätigt** angezeigt. Bestätigt bedeutet nur, dass die Nachricht an den Assistenten übergeben wurde, nicht dass die Antwort sie korrekt wiedergibt. Siehe [Quellen und unbestätigte Links](../ai-assistant#quellen-und-unbestätigte-links).
+
+## Die vier KI-Einwilligungen je Postfach
+
+Vier KI-Funktionen brauchen Ihre getrennte Einwilligung, die je Postfach in der Tabelle **KI-Funktionen je Postfach** unter **Einstellungen > KI** erteilt wird: [KI-Thread-Zusammenfassung](#ki-thread-zusammenfassung), [Sofortantwort](#sofortantwort), [KI-Korrekturlesen](#ai-proofread) und [Nachrichtenübersetzung und Entwurfsübersetzung](#nachrichtenübersetzung) (eine gemeinsame Einwilligung **KI-Übersetzung**). Alle vier sind standardmäßig deaktiviert. Jede Spalte der Tabelle ist ein eigener Zweck: Es gibt ein Kontrollkästchen je Postfach und Funktion, ein Kontrollkästchen im Spaltenkopf wirkt auf diese eine Funktion in allen Postfächern, und kein Bedienelement schaltet überall alles ein. Eine Einwilligung zu widerrufen kostet einen Klick, genauso viel wie sie zu erteilen, und wirkt ab der nächsten Anfrage. Jede Einwilligung ist in der Tabelle immer aufgeführt, ob eingeschaltet oder ausgeschaltet. In der App bleiben die Bedienelemente von AI Proofread und Entwurfsübersetzung sichtbar, wenn ihre Einwilligung ausgeschaltet ist -- grau dargestellt, mit einem Hinweis, wo sie eingeschaltet werden; ein Klick darauf sendet nichts, und der Hauptprozess lehnt die Anfrage auch selbstständig ab. Die Bedienelemente von KI-Thread-Zusammenfassung, Sofortantwort und Nachrichtenübersetzung werden nicht angezeigt, solange ihre Einwilligung ausgeschaltet ist. Siehe [KI-Funktionen je Postfach](../ai-assistant#ki-funktionen-je-postfach).
+
 ## KI-Thread-Zusammenfassung
 
 Die [KI-Thread-Zusammenfassung](../ai-assistant#ki-thread-zusammenfassung) ist eine separate, optionale Funktion, die eine kurze Zusammenfassung eines geoeffneten Threads erzeugt. Sie folgt denselben Schutzmassnahmen wie der Rest des KI-Assistenten:
@@ -83,11 +93,12 @@ Die [Nachrichtenübersetzung](../ai-assistant#nachrichtenübersetzung) ist eine 
 
 - **Standardmäßig deaktiviert, pro Konto.** Es wird nichts zur Übersetzung gesendet, solange Sie **Einstellungen > KI > KI-Übersetzung** nicht für dieses spezifische Konto aktivieren. Bei Deaktivierung wird die Schaltfläche Übersetzen nicht angezeigt, und es wird keine Anfrage gesendet.
 - **Nur auf Anfrage.** Ein Anbieter wird nur aufgerufen, wenn Sie auf **Übersetzen** klicken -- es gibt keine automatische Übersetzung beim Öffnen einer Nachricht.
-- **Projektion auf reinen Text.** Der Anbieter sieht und liefert immer nur reinen Text: Die Übersetzung wird aus der Textfassung der Nachricht erzeugt, nie aus dem HTML-Markup, auch bei einer HTML-Nachricht.
+- **Reiner Text.** Der Anbieter sieht und liefert nur reinen Text, nie HTML-Markup, auch bei einer HTML-Nachricht. Formatierung und Bilder werden nicht übersetzt.
+- **Lange Nachrichten werden in mehreren Anfragen gesendet.** Eine Nachricht mit mehr als 3000 Zeichen wird in Teile von höchstens 3000 Zeichen zerlegt (an Absatzumbrüchen, dann an Satzenden, dann an Leerraum), und jeder Teil wird als eigene Anfrage gesendet, drei gleichzeitig. Jede Anfrage wird Ihrem Anbieter berechnet. Schlägt ein Teil fehl oder kommt abgeschnitten zurück, wird nichts angezeigt und nichts zwischengespeichert. Eine Nachricht mit mehr als 60 000 Zeichen (im ungünstigsten Fall bis zu etwa 40 Anfragen) wird abgelehnt. Die Entwurfsübersetzung wird nicht zerlegt und behält ihr Limit von 3000 Zeichen. Bereits übersetzte Teile werden bis zu einer Stunde im Arbeitsspeicher der App gehalten, sodass ein erneuter Versuch nach einem Fehler nur die fehlenden Teile sendet. Das Verlassen der Nachricht stoppt eine begonnene Übersetzung nicht: Sie wird beendet, im Cache gespeichert und ist beim Zurückkehren fertig. Das Ausschalten der Übersetzung für das Postfach stoppt sie. Die Teile werden ohne den benachbarten Text übersetzt, daher können Begriffe und Anredeformen in verschiedenen Teilen einer langen Nachricht voneinander abweichen. Ein Teil ohne Buchstaben (Ziffern, Trennzeilen) bleibt unverändert. Die gehaltenen Teile liegen nur im Arbeitsspeicher der App und werden mit dem Konto entfernt.
 - **Nur Text aus dem Cache.** Der Nachrichtentext stammt aus dem lokalen Cache von MailCopilot anhand von Konto, Ordner und Nachrichten-UID -- nie aus dem, was gerade im Fenster angezeigt wird.
 - **Umhüllter Inhalt.** Der Nachrichtentext wird mit `wrapUntrusted()`-Grenzmarkierungen umhüllt, bevor er den KI-Anbieter erreicht -- derselbe Schutz, der unter [Schutz vor Prompt-Injection](#schutz-vor-prompt-injection) beschrieben wird.
-- **Zwischengespeichert, nicht erneut gesendet.** Eine bereits erstellte Übersetzung für eine Nachricht, eine Zielsprache und eine Version des Übersetzungsvertrags (Anbieter, Modell und Prompt-Form) wird bei späteren Öffnungen aus einem lokalen Cache bedient -- es erreicht keine Anfrage den Anbieter ein zweites Mal für dieselbe Nachricht, Sprache und denselben Vertrag. Cache-Einträge haben keine eigene Ablaufzeit: Eine spätere Änderung daran, wie MailCopilot Übersetzungen erzeugt, wird unter einem neuen Schlüssel abgelegt, statt das Ergebnis eines älteren Vertrags als aktuell auszugeben. Sie sind auf 500 pro Konto begrenzt und werden zusammen mit dem Konto gelöscht.
-- **Auditierte Erzeugungen.** Jedes Mal, wenn eine Übersetzung tatsächlich erzeugt wird (und nicht aus dem Cache bedient wird), wird ein Eintrag im [KI-Auditprotokoll](#das-auditprotokoll) geschrieben. Ein Cache-Treffer schreibt keinen Eintrag.
+- **Zwischengespeichert, nicht erneut gesendet.** Eine bereits erstellte Übersetzung für eine Nachricht, eine Zielsprache und eine Version des Übersetzungsvertrags (Anbieter, Modell und Prompt-Form) wird bei späteren Öffnungen aus einem lokalen Cache bedient -- es erreicht keine Anfrage den Anbieter ein zweites Mal für dieselbe Nachricht, Sprache und denselben Vertrag. Cache-Einträge haben keine eigene Ablaufzeit: Eine spätere Änderung daran, wie MailCopilot Übersetzungen erzeugt, wird unter einem neuen Schlüssel abgelegt, statt das Ergebnis eines älteren Vertrags als aktuell auszugeben. Sie sind auf 200 pro Konto begrenzt und werden zusammen mit dem Konto gelöscht. Die Übersetzung einer langen Nachricht wird als Ganzes unter der ganzen Nachricht zwischengespeichert.
+- **Auditierte Anfragen.** Jede Anfrage an den Anbieter (nicht aus dem Cache bedient) schreibt einen Eintrag in das [KI-Auditprotokoll](#das-auditprotokoll); eine lange Nachricht, die in mehreren Anfragen gesendet wird, schreibt daher mehrere Einträge. Ein Cache-Treffer schreibt keinen Eintrag.
 - **Anbieterauswahl.** Die Nachrichtenübersetzung nutzt Ihren konfigurierten **API-Key-Anbieter** (Anthropic, OpenAI-kompatibel oder Google Gemini).
 - **Budgetbewusst.** Wenn das tägliche KI-Budget erreicht wurde, wird die Übersetzung sauber abgelehnt -- siehe [Nachrichtenübersetzung](../ai-assistant#nachrichtenübersetzung) für das, was Sie in diesem Fall sehen.
 - **Telemetrie enthält keine Nachrichteninhalte.** Das pseudonyme Nutzungsereignis, das bei jedem Aufruf des Anbieters erfasst wird, enthält nur die Anbieterkennung, ob das Modell lokal lief, Tokenzahlen, Latenz, eine gebündelte Fehlerklasse, ob eine Ausgangssprache beschriftet werden konnte (niemals welche), den Code der gewählten Zielsprache sowie, ob das Ergebnis aus dem Cache stammte -- niemals den Nachrichtentext, die Übersetzung, den Betreff, die Adressen, den Ordnernamen oder die erkannte Ausgangssprache selbst.
@@ -110,35 +121,39 @@ Die [Entwurfsübersetzung](../ai-assistant#entwurfsübersetzung) ist das Gegenst
 
 ## KI-Egress-Richtlinie
 
-MailCopilot interceptiert jeden ausgehenden Internet-Tool-Aufruf, den die KI ausfuehren moechte -- Websuche, Web-Abruf und externe MCP-Tool-Aufrufe -- und unterbricht die KI, um Ihre Genehmigung vor der Ausfuehrung einzuholen. Dies verhindert, dass eine bossartige E-Mail Ihre Daten durch einen Prompt-Injection-Angriff still und leise exfiltriert.
+Die Einstellung **KI-Webzugriff** von MailCopilot (**Einstellungen → AI**) steuert zwei unterschiedliche Arten ausgehenden Zugriffs, die der Assistent ausfuehren kann: Aufrufe Ihrer eigenen verbundenen externen MCP-Server und -- nur wenn Sie den Anbieter **Anthropic** verwenden -- die eingebauten Websuch- und Seitenabruf-Tools des Assistenten. Dies verhindert, dass eine boesartige E-Mail Ihre Daten durch einen Prompt-Injection-Angriff still und leise exfiltriert.
 
-### Funktionsweise
+### Funktionsweise (externe MCP-Tool-Aufrufe)
 
-Wenn die KI ein Internet-Tool nutzen moechte (z. B. eine Websuche durchfuehren), unterbricht MailCopilot die Antwort und zeigt ein integriertes Bestaetigungsdialogfeld im KI-Panel mit der Meldung **«KI möchte auf das Internet zugreifen»** an. Das Dialogfeld zeigt:
+Wenn die KI ein Tool auf einem Ihrer verbundenen externen MCP-Server aufrufen moechte, unterbricht MailCopilot die Antwort und zeigt ein integriertes Bestaetigungsdialogfeld im KI-Panel mit der Meldung **«KI möchte auf das Internet zugreifen»** an. Das Dialogfeld zeigt:
 
-- Den Aktionstyp -- «Websuche:», «URL abrufen:» oder «Externer Tool-Aufruf»
-- Die angeforderte Suchanfrage, URL oder den Namen des externen Tools (sofern verfuegbar)
+- Den Aktionstyp und, sofern verfuegbar, den Namen des externen Tools
 - Die Schaltflaechen **Erlauben** und **Ablehnen**
 
-Klicken Sie auf **Erlauben**, um der KI das Fortfahren zu erlauben, oder auf **Ablehnen**, um abzulehnen. Ihre Entscheidung gilt fuer den gesamten aktuellen Antwort-Durchlauf -- wenn die KI in einer Antwort mehrere Internet-Tool-Aufrufe macht, werden Sie nur einmal gefragt. Ein Klick auf **Erlauben** gewaehrt Zugriff fuer alle verbleibenden Aufrufe dieses Durchlaufs.
+Klicken Sie auf **Erlauben**, um der KI das Fortfahren zu erlauben, oder auf **Ablehnen**, um abzulehnen. Ihre Entscheidung gilt fuer den gesamten aktuellen Antwort-Durchlauf -- wenn die KI in einer Antwort mehrere externe Tool-Aufrufe macht, werden Sie nur einmal gefragt. Ein Klick auf **Erlauben** gewaehrt Zugriff fuer alle verbleibenden Aufrufe dieses Durchlaufs.
 
-Wenn Sie nicht innerhalb von 30 Sekunden antworten, lehnt MailCopilot den Tool-Aufruf automatisch ab.
+Wenn Sie nicht innerhalb von 30 Sekunden antworten, lehnt MailCopilot den Tool-Aufruf automatisch ab. Dieses Bestaetigungsdialogfeld gilt unabhaengig davon, welchen KI-Anbieter Sie verwenden, immer dann, wenn der Assistent einen externen MCP-Server erreicht.
 
-### Schild-Symbol
+### Anthropics eingebaute Websuche
 
-Im KI-Panel-Header wird ein Schild-Symbol angezeigt, wenn die Egress-Interception aktiv ist. Beim Hovern erscheint: «KI-Webzugriff wird abgefangen – jeder ausgehende Aufruf erfordert Ihre Genehmigung». Dieses Symbol bestaetigt, dass der Interceptor laeuft und kein Internet-Aufruf Ihre Genehmigung umgehen kann.
+Wenn Sie den Anbieter **Anthropic** (Claude) verwenden, hat der Assistent zusaetzlich Zugriff auf eine eingebaute Websuch- und Seitenabruf-Faehigkeit, die als Teil der Antwortgenerierung auf den eigenen Servern von Anthropic laeuft. Da dies ausserhalb von MailCopilot geschieht, gibt es keine Moeglichkeit, die Antwort zu unterbrechen und dafuer ein Bestaetigungsdialogfeld anzuzeigen. Stattdessen wird im Voraus durch Ihre Einstellung **KI-Webzugriff** entschieden, ob diese Tools dem Assistenten ueberhaupt angeboten werden -- bevor Sie Ihre Nachricht senden:
+
+- **Immer erlauben** -- der Assistent kann frei im Web suchen und Seiten abrufen.
+- **Standardmäßig ablehnen** oder **Bei jeder Antwort fragen** -- die eingebauten Websuch- und Seitenabruf-Tools werden dem Assistenten ueberhaupt nicht angeboten, sodass er nicht selbststaendig im Web suchen kann. Wechseln Sie zu **Immer erlauben**, wenn Sie das moechten.
+
+Diese Faehigkeit ist spezifisch fuer den Anbieter Anthropic. Bei den Anbietern OpenAI-kompatibel und Google Gemini erreicht der Assistent das Internet nur ueber Ihre verbundenen externen MCP-Server, wie oben beschrieben.
 
 ### Richtlinieneinstellungen
 
-Sie koennen die Egress-Richtlinie unter **Einstellungen → AI** anpassen (unter der Steuerung **KI-Webzugriff**). Diese Einstellung steuert, wann die KI Internet-Tools verwenden kann. Bei **Standardmäßig ablehnen** oder **Bei jeder Antwort fragen** wird MailCopilot beim ersten Internet-Tool-Aufruf in jedem Antwort-Durchlauf um Bestaetigung gebeten. Bei **Immer erlauben** wird die Abfrage uebersprungen -- Internet-Tools werden ohne Bestaetigung ausgefuehrt:
+Sie koennen die Richtlinie unter **Einstellungen → AI** anpassen, unter **KI-Webzugriff**:
 
-- **Standardmäßig ablehnen (empfohlen)** -- alle Internet-Tool-Aufrufe abfangen; Sie genehmigen oder lehnen jeden Durchlauf ueber das Bestaetigungsdialogfeld ab.
-- **Bei jeder Antwort fragen** -- gleiches Verhalten wie Standardabweisung: explizite Pro-Durchlauf-Einwilligung ueber das Bestaetigungsdialogfeld.
-- **Immer erlauben** -- die KI kann Web-Tools frei aufrufen. Warnung: Die KI kann E-Mail-Inhalte an externe Dienste senden.
+- **Standardmäßig ablehnen (empfohlen)** -- externe MCP-Tool-Aufrufe werden abgefangen und erfordern jedes Mal Ihre Bestaetigung; Anthropics eingebaute Websuche / Seitenabruf wird dem Assistenten nicht angeboten.
+- **Bei jeder Antwort fragen** -- gleiches Verhalten wie **Standardmäßig ablehnen**.
+- **Immer erlauben** -- externe MCP-Tool-Aufrufe werden ohne Bestaetigung ausgefuehrt, und Anthropics eingebaute Websuche / Seitenabruf ist verfuegbar. Warnung: Die KI kann E-Mail-Inhalte an externe Dienste senden.
 
 ### Auditprotokoll
 
-Jeder abgefangene Internet-Tool-Aufruf erstellt einen Eintrag im Auditprotokoll; abgelehnte Aufrufe erhoehen die Spalte **Blockiert**, waehrend genehmigte Aufrufe mit **Blockiert** = 0 aufgezeichnet werden. Jeder Eintrag wird auch im Telemetrieereignis `ai.egress.intercepted` mit Tags gezaehlt, die den Tool-Namen, das Ergebnis (genehmigt oder abgelehnt) und ob die Einwilligung fuer diesen Durchlauf bereits erteilt worden war, angeben. Fuer Anfrage- und URL-Details speichert das Auditprotokoll nur einen SHA-256-Hash, der auf die ersten 16 Hexadezimalzeichen gekuerzt ist; rohe Anfragen und URLs werden niemals auf den Datentraeger geschrieben.
+Jeder abgefangene externe MCP-Tool-Aufruf wird in der Spalte **Blockiert** des Audit-Eintrags dieser Anfrage erfasst -- abgelehnte Aufrufe erhoehen den Zaehler, waehrend eine vollstaendig genehmigte Anfrage **Blockiert** = 0 beibehaelt. Jede Interception wird auch im Telemetrieereignis `ai.egress.intercepted` mit Tags gezaehlt, die den Tool-Namen, das Ergebnis (genehmigt oder abgelehnt) und ob die Einwilligung fuer diesen Durchlauf bereits erteilt worden war, angeben. Fuer Anfrage- und URL-Details speichert das Auditprotokoll nur einen SHA-256-Hash, der auf die ersten 16 Hexadezimalzeichen gekuerzt ist; rohe Anfragen und URLs werden niemals auf den Datentraeger geschrieben. Anthropics eingebaute Websuch- und Seitenabruf-Aufrufe werden nicht abgefangen, sodass sie **Blockiert** nie erhoehen und `ai.egress.intercepted` nie ausloesen. Jeder solche Aufruf wird trotzdem als eigener Eintrag im Auditprotokoll festgehalten, mit demselben gekuerzten SHA-256-Hash der Anfrage oder URL wie oben beschrieben -- niemals mit dem rohen Text. Dieser Eintrag belegt, dass der ausgehende Aufruf stattgefunden hat, und laesst Sie Wiederholungen erkennen; er sagt nicht, was tatsaechlich gesendet wurde. Die rohe Anfrage wird absichtlich nicht gespeichert: Das Risiko hier ist ein Datenabfluss ueber die Anfrage selbst, und deren woertliche Speicherung wuerde lediglich eine zweite Kopie dieses Abflusses schaffen.
 
 ## Das Auditprotokoll
 
