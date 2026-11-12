@@ -1,0 +1,374 @@
+# Builds and publishes a stable release: Linux (AppImage, deb, rpm), Windows
+# (NSIS) and macOS (universal DMG), then a GitHub Release with those files.
+#
+# Started by the stable tag `vX.Y.Z` that GitLab's `mirror-release` job pushes
+# to this mirror together with the clean source snapshot. GitLab then copies the
+# same files into its Package Registry, which the website and electron-updater
+# read: its `publish` job downloads THIS run's artifacts (not the release
+# assets) and refuses unless every file is byte-identical to an asset of the
+# release published here (scripts/fetch-github-release.mjs). Nightly tags are
+# never pushed here and build nothing.
+#
+# A push to a `release-rehearsal/**` branch is ALWAYS a dry run (below). It is
+# how a release is rehearsed before this file reaches the mirror's default
+# branch, where GitHub requires a workflow to live before `workflow_dispatch`
+# can start it. GitLab's manual `mirror-rehearsal` job pushes the clean export
+# there (scripts/mirror-github.sh, MIRROR_REHEARSAL=1).
+#
+# `workflow_dispatch`:
+#   - dry_run (default): builds all three platforms from the chosen ref and
+#     uploads the artifacts under `dry-run-*` names, so they can never be taken
+#     for a release. No release is created. Used to rehearse a release.
+#   - dry_run off: allowed on a stable tag only. Recovery path when the tag push
+#     did not start a run (an Actions outage, a dropped event).
+#
+# Re-running for a tag whose release is already published builds nothing: the
+# release is never modified once published (scripts/publish-github-release.mjs).
+
+name: Release
+
+run-name: ${{ ((github.event_name == 'workflow_dispatch' && inputs.dry_run) || github.ref_type == 'branch') && format('Dry run on {0}', github.ref_name) || format('Release {0}', github.ref_name) }}
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+    branches:
+      - 'release-rehearsal/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and upload artifacts only; create no release. Turn off only on a vX.Y.Z tag.'
+        type: boolean
+        default: true
+
+# Every action is pinned to a full commit SHA (the version is in the trailing
+# comment), as GitHub's security hardening guide recommends: a tag can be moved,
+# a commit cannot. The container image stays on its tag for now.
+# Checked: `git ls-remote https://github.com/actions/<name> refs/tags/<tag>` gives each SHA as the upstream tag commit.
+
+# Nothing by default; each job names the one scope it needs.
+permissions: {}
+
+# Runs for the same ref queue up instead of racing to publish one release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.decide.outputs.tag }}
+      release: ${{ steps.decide.outputs.release }}
+      published: ${{ steps.decide.outputs.published }}
+      artifact_prefix: ${{ steps.decide.outputs.artifact_prefix }}
+      channel: ${{ steps.decide.outputs.channel }}
+    steps:
+      - name: Checkout the triggering commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # A release needs a stable tag that matches package.json; a release that is
+      # already published is left alone (builds and publication are skipped).
+      - name: Decide what this run is
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A branch push can only be a rehearsal branch (see `on:`), and a
+          # rehearsal never publishes, whatever else is true.
+          DRY_RUN: ${{ ((github.event_name == 'workflow_dispatch' && inputs.dry_run) || (github.event_name == 'push' && github.ref_type == 'branch')) && 'true' || 'false' }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            # electron-builder names the update feeds after the channel of the
+            # version: a prerelease (develop: 1.27.0-nightly.9) writes nightly*.yml.
+            # The upload paths follow it, so a rehearsal uploads what it built.
+            channel=$(node -p "(/^\d+\.\d+\.\d+-([0-9A-Za-z-]+)/.exec(require('./package.json').version) || [, 'latest'])[1]")
+            if ! [[ "$channel" =~ ^[0-9A-Za-z-]+$ ]]; then
+              echo "::error::Cannot derive the update channel from package.json (got '${channel}')."
+              exit 1
+            fi
+            # electron-builder falls back to `latest` for a numeric first prerelease
+            # identifier (1.0.0-0.1); our versions are stable or -nightly.N, so refuse it.
+            if [[ "$channel" =~ ^[0-9]+$ ]]; then
+              echo "::error::package.json version starts its prerelease with a number (${channel}); only stable or -<name>.N versions are built."
+              exit 1
+            fi
+            {
+              echo "tag=dry-run"
+              echo "release=false"
+              echo "published=false"
+              echo "artifact_prefix=dry-run-"
+              echo "channel=${channel}"
+            } >> "$GITHUB_OUTPUT"
+            echo "Dry run on ${REF_NAME} (${GITHUB_SHA}): artifacts only, no release; update channel ${channel}."
+            exit 0
+          fi
+          if [ "$REF_TYPE" != "tag" ] || ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::A release runs on a stable vX.Y.Z tag only (got ${REF_TYPE} '${REF_NAME}'). Use dry_run for anything else."
+            exit 1
+          fi
+          version=$(node -p "require('./package.json').version")
+          if [ "v${version}" != "$REF_NAME" ]; then
+            echo "::error::Tag ${REF_NAME} does not match package.json version ${version}."
+            exit 1
+          fi
+          # GET /releases/tags/{tag} answers for PUBLISHED releases only.
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${REF_NAME}" --silent 2> lookup.err; then
+            published=true
+            echo "Release ${REF_NAME} is already published; nothing will be built or changed."
+          elif grep -q 'HTTP 404' lookup.err; then
+            published=false
+          else
+            cat lookup.err
+            exit 1
+          fi
+          {
+            echo "tag=${REF_NAME}"
+            echo "release=true"
+            echo "published=${published}"
+            echo "artifact_prefix="
+            echo "channel=latest"
+          } >> "$GITHUB_OUTPUT"
+
+  # The three builds share one contract: check out exactly the commit this run is
+  # for, refuse on missing delivery variables (scripts/check-release-vars.mjs),
+  # package with `--publish never`, upload the installers and the update feed.
+  #
+  # Delivery variables, read from the mirror's settings (never from the tracked
+  # files — the mirror is public):
+  #   MAILCOPILOT_UPDATE_URL — repository VARIABLE; the electron-updater feed,
+  #     baked into app-update.yml. Public by nature: it ships in every installer.
+  #     The job hands it over RAW (MAILCOPILOT_UPDATE_URL_RAW); the guard step
+  #     (`--from-github-settings`) trims it, refuses whitespace inside, on a
+  #     release requires its sha256 to be the one recorded in
+  #     scripts/check-release-vars.mjs, and only then writes the judged value to
+  #     $GITHUB_ENV as MAILCOPILOT_UPDATE_URL for the build. No job defines
+  #     MAILCOPILOT_UPDATE_URL itself, so no precedence rule is relied upon.
+  #   SENTRY_DSN, MAILCOPILOT_GOOGLE_CLIENT_ID, MAILCOPILOT_GOOGLE_CLIENT_SECRET —
+  #     repository SECRETS. The DSN and the Desktop OAuth client secret also ship
+  #     inside every build (PKCE protects the exchange); keeping them as secrets
+  #     keeps them out of this public repository's logs.
+  # They are declared at job level so the guard step judges exactly what the
+  # build bakes. Accepted trade-off: job-level env is visible to every step,
+  # including `npm ci` lifecycle scripts. A protected GitHub Environment is the
+  # possible later hardening.
+  #
+  # CI_COMMIT_TAG is what check-release-vars.mjs reads to choose its tier: a
+  # vX.Y.Z value makes a missing variable stop the build; the dry-run value
+  # only warns.
+  #
+  # SENTRY_AUTH_TOKEN is deliberately absent: vite.config.ts skips the
+  # sourcemap upload without it, and a dispatcher chooses the ref of a dry run.
+  build-linux:
+    needs: prepare
+    if: needs.prepare.outputs.published != 'true'
+    # Built inside the image the GitLab test jobs use, which sets the
+    # compatibility floor of the packages: glibc 2.35 (Ubuntu 22.04+, Debian 12+,
+    # Fedora 36+). A newer image would silently raise it. Native modules are
+    # compiled with clang-15 from the jammy archive: the V8 headers of Electron
+    # 43 do not compile with GCC 11 or 12 (see the `.install` notes in GitLab CI).
+    runs-on: ubuntu-22.04
+    container:
+      image: electronuserland/builder:22
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      MAILCOPILOT_OFFICIAL_BUILD: '1'
+      CI_COMMIT_TAG: ${{ needs.prepare.outputs.tag }}
+      MAILCOPILOT_UPDATE_URL_RAW: ${{ vars.MAILCOPILOT_UPDATE_URL }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      MAILCOPILOT_GOOGLE_CLIENT_ID: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_ID }}
+      MAILCOPILOT_GOOGLE_CLIENT_SECRET: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_SECRET }}
+      CC: clang-15
+      CXX: clang++-15
+    steps:
+      - name: Checkout the triggering commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install clang-15
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends clang-15
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npx --no install-electron
+
+      - name: Check release delivery variables (§2.255)
+        run: node scripts/check-release-vars.mjs --from-github-settings
+
+      - name: Build (typecheck + bundle + package)
+        run: |
+          npx tsc
+          npx vite build
+          npx electron-builder --linux appimage deb rpm --publish never
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ needs.prepare.outputs.artifact_prefix }}linux-build
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/${{ needs.prepare.outputs.channel }}-linux.yml
+          retention-days: 30
+          if-no-files-found: error
+
+  build-windows:
+    needs: prepare
+    if: needs.prepare.outputs.published != 'true'
+    # Pinned to windows-2022, NOT windows-latest: on the windows-2025 image
+    # node-gyp 11 cannot find the Visual Studio C++ toolchain ("Could not find
+    # any Visual Studio installation to use"), so the better-sqlite3 rebuild
+    # fails. Revisit when windows-2022 is retired (explicit MSVC setup step).
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      MAILCOPILOT_OFFICIAL_BUILD: '1'
+      CI_COMMIT_TAG: ${{ needs.prepare.outputs.tag }}
+      MAILCOPILOT_UPDATE_URL_RAW: ${{ vars.MAILCOPILOT_UPDATE_URL }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      MAILCOPILOT_GOOGLE_CLIENT_ID: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_ID }}
+      MAILCOPILOT_GOOGLE_CLIENT_SECRET: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_SECRET }}
+    steps:
+      - name: Checkout the triggering commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check release delivery variables (§2.255)
+        run: node scripts/check-release-vars.mjs --from-github-settings
+
+      - name: Build (typecheck + bundle + package)
+        run: |
+          npx tsc
+          npx vite build
+          npx electron-builder --win nsis --publish never
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ needs.prepare.outputs.artifact_prefix }}windows-build
+          path: |
+            dist/*.exe
+            dist/${{ needs.prepare.outputs.channel }}.yml
+          retention-days: 30
+          if-no-files-found: error
+
+  build-macos:
+    needs: prepare
+    if: needs.prepare.outputs.published != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      MAILCOPILOT_OFFICIAL_BUILD: '1'
+      CI_COMMIT_TAG: ${{ needs.prepare.outputs.tag }}
+      MAILCOPILOT_UPDATE_URL_RAW: ${{ vars.MAILCOPILOT_UPDATE_URL }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      MAILCOPILOT_GOOGLE_CLIENT_ID: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_ID }}
+      MAILCOPILOT_GOOGLE_CLIENT_SECRET: ${{ secrets.MAILCOPILOT_GOOGLE_CLIENT_SECRET }}
+      # Unsigned for now (BACKLOG §2.285): no Developer ID certificate is configured.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout the triggering commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The universal merge needs native binaries for both architectures; npm ci
+      # on an arm64 runner installs only @napi-rs/canvas-darwin-arm64.
+      # Exactly the version package-lock.json records: an unversioned install
+      # would take whatever npm's `latest` tag points at on the day of the build.
+      - name: Install cross-arch native modules
+        run: |
+          version=$(node -p "require('./package-lock.json').packages['node_modules/@napi-rs/canvas-darwin-x64'].version")
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::package-lock.json records no exact version of @napi-rs/canvas-darwin-x64 (got '${version}')."
+            exit 1
+          fi
+          npm install --no-save --force "@napi-rs/canvas-darwin-x64@${version}"
+
+      - name: Check release delivery variables (§2.255)
+        run: node scripts/check-release-vars.mjs --from-github-settings
+
+      - name: Build (typecheck + bundle + package)
+        run: |
+          npx tsc
+          npx vite build
+          npx electron-builder --mac dmg --universal --publish never
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ needs.prepare.outputs.artifact_prefix }}macos-build
+          path: |
+            dist/*.dmg
+            dist/${{ needs.prepare.outputs.channel }}-mac.yml
+          retention-days: 30
+          if-no-files-found: error
+
+  # Creates a draft, uploads every file, then publishes. Runs no npm install and
+  # sees no repository secret: only the run's token with `contents: write`.
+  publish-github:
+    needs: [prepare, build-linux, build-windows, build-macos]
+    if: needs.prepare.outputs.release == 'true' && needs.prepare.outputs.published != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the triggering commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download the platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: '*-build'
+          merge-multiple: true
+
+      - name: Publish the GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: node scripts/publish-github-release.mjs

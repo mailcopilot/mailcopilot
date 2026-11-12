@@ -15,9 +15,9 @@
  * ours by design (see the `source` tier below). The guarantee is therefore
  * "nothing we PUBLISH ships an unset delivery variable", not "no artifact
  * electron-builder can produce". Before this guard, the only release-variable
- * check lived inside `scripts/trigger-github-build.sh`, knew about two
- * variables out of the set, and ran on the Windows/macOS path only —
- * `build-linux` had no check at all and actively manufactured a value:
+ * check lived inside the old GitLab dispatch script, knew about two
+ * variables out of the set, and ran on the Windows/macOS path only — the
+ * GitLab Linux build had no check at all and actively manufactured a value:
  *
  *     export MAILCOPILOT_UPDATE_URL="${MAILCOPILOT_UPDATE_URL:-https://placeholder.local/updates}"
  *
@@ -25,23 +25,21 @@
  *
  * ## Three tiers, because one rule cannot serve all three callers
  *
- * The tier is read from a tag, not from a flag a caller invents for us. On
- * GitLab that tag is the platform's own `CI_COMMIT_TAG`. On GitHub it is
- * forwarded as the `tag` dispatch input, which means a MANUAL dispatcher there
- * can choose a non-release-looking value and get the softer tier — a real
- * limit, stated here rather than papered over. It is bounded: the GitLab
- * trigger derives that input from a verified tag, and a manual GitHub run
- * produces an Actions artifact that nothing publishes (`publish` in
- * `.gitlab-ci.yml` is tag-only). Shipping such an artifact takes a human
- * deciding to, at which point the guard is not the control that failed.
+ * The tier is read from a tag, not from a flag a caller invents for us. Every
+ * installer is built by `.github/workflows/release.yml`, whose `prepare` job
+ * sets `CI_COMMIT_TAG` to the pushed `vX.Y.Z` tag — after checking it is a
+ * stable tag matching package.json — or to `dry-run` for a rehearsal. A dry
+ * run therefore gets the softer tier; it uploads `dry-run-*` artifacts that
+ * the GitLab copy never accepts and creates no release, so nothing it builds
+ * reaches a user.
  *
  *   release  — `CI_COMMIT_TAG` matches `vX.Y.Z`. This artifact reaches users.
  *              Every delivery variable is REQUIRED; a missing one stops the
  *              build.
- *   nightly  — running in CI, no release tag. Everything WARNS; nothing stops
- *              the build. A `develop` pipeline produces a validation artifact
- *              that expires in 7 days and reaches no user: `publish` in
- *              `.gitlab-ci.yml` runs on `vX.Y.Z` tags ONLY, so there is no
+ *   nightly  — running in CI, no release tag (today: a release.yml dry run).
+ *              Everything WARNS; nothing stops the build. Such an artifact
+ *              reaches no user: the registry copy (`publish` in
+ *              `.gitlab-ci.yml`) runs on `vX.Y.Z` tags ONLY, so there is no
  *              nightly feed to break.
  *
  *              An earlier revision of this file REQUIRED the update URL here,
@@ -72,10 +70,42 @@
  * Usage:
  *   node scripts/check-release-vars.mjs            # classify from env, enforce
  *   node scripts/check-release-vars.mjs --explain  # print the tier and exit 0
+ *   node scripts/check-release-vars.mjs --from-github-settings
+ *     # release.yml build jobs: judge MAILCOPILOT_UPDATE_URL_RAW (trimmed), then
+ *     # export the judged value to $GITHUB_ENV as MAILCOPILOT_UPDATE_URL
  */
+
+import { createHash } from 'node:crypto'
+import { appendFileSync } from 'node:fs'
 
 /** A release tag looks exactly like the one `.gitlab-ci.yml` publishes on. */
 const RELEASE_TAG_RE = /^v[0-9]+\.[0-9]+\.[0-9]+$/
+
+/**
+ * SHA-256 of the one update feed a release may carry (the URL with no
+ * surrounding whitespace). Only the hash is recorded: the mirror is public and
+ * the address names an internal host.
+ *
+ * Why a release pins it at all: the feed now comes from a repository VARIABLE
+ * of the public mirror, which nothing on the GitLab side reads any more. An
+ * installer carrying an attacker-chosen feed would offer that party's
+ * "updates" to every user, and a variable on the mirror is a much easier place
+ * to change than a value baked by our own pipeline. Changing the feed on
+ * purpose means changing this constant in the same review.
+ *
+ * Recompute from the value with surrounding whitespace trimmed (never commit the URL):
+ *   printf %s "$MAILCOPILOT_UPDATE_URL" | sha256sum
+ */
+export const EXPECTED_UPDATE_URL_SHA256 = 'd7d5e0b44d30472b92ec4a3a4af8c8f1e18bf167a7cce5a9f1c42808ba407c16'
+
+/** The update feed as a build receives it: surrounding whitespace dropped. */
+export function normalizeUpdateUrl(raw) {
+  return (raw || '').trim()
+}
+
+export function sha256Hex(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
 
 /**
  * Variables that must carry a real value in a shipped artifact, with the
@@ -174,7 +204,8 @@ function isTruthyFlag(raw) {
  * cannot be done from here — it belongs to whoever owns the update feed, and
  * guessing at it would be the same mistake as estimating state we do not own
  * (CLAUDE.md §5 «Кто владеет правдой»). Matching a known-retired literal needs
- * no such judgement.
+ * no such judgement, and neither does the release-tier pin below
+ * (EXPECTED_UPDATE_URL_SHA256): the choice of feed is ours, recorded here.
  *
  * Compared case-insensitively after trimming, because a value re-typed by hand
  * into a CI settings form is not guaranteed to keep its case.
@@ -191,10 +222,16 @@ const RETIRED_PLACEHOLDERS = {
  * `placeholder` means the value is there and is the wrong one, which reads as a
  * lie if we call it "unset".
  */
-function classifyValue(env, name) {
+function classifyValue(env, name, expectedFeedSha256) {
   const value = (env[name] || '').trim()
   if (!value) return 'absent'
   if (RETIRED_PLACEHOLDERS[name]?.has(value.toLowerCase())) return 'placeholder'
+  if (name === 'MAILCOPILOT_UPDATE_URL') {
+    // A tab or newline INSIDE the value is not something a URL parser can be
+    // trusted to drop the same way everywhere; it is refused, never repaired.
+    if (/\s/.test(value)) return 'whitespace'
+    if (expectedFeedSha256 && sha256Hex(value) !== expectedFeedSha256) return 'unexpected-feed'
+  }
   return null
 }
 
@@ -205,12 +242,13 @@ function classifyValue(env, name) {
  * Entries are `{ ...spec, problem }`, so a caller (and the tests) can tell an
  * absent value from a placeholder without re-deriving it from the environment.
  */
-export function evaluateReleaseVars(tier, env) {
+export function evaluateReleaseVars(tier, env, { expectedFeedSha256 = EXPECTED_UPDATE_URL_SHA256 } = {}) {
   if (tier === 'source') return { missing: [], warnings: [] }
   const missing = []
   const warnings = []
   for (const spec of DELIVERY_VARS) {
-    const problem = classifyValue(env, spec.name)
+    // The feed pin applies to a release only: a dry run or nightly reaches no user.
+    const problem = classifyValue(env, spec.name, tier === 'release' ? expectedFeedSha256 : null)
     if (!problem) continue
     ;(tier === 'release' ? missing : warnings).push({ ...spec, problem })
   }
@@ -219,6 +257,13 @@ export function evaluateReleaseVars(tier, env) {
 
 /** How a single offending variable is described in both message blocks. */
 function describe(entry) {
+  if (entry.problem === 'unexpected-feed') {
+    return `  ${entry.name} is not the update feed recorded in scripts/check-release-vars.mjs ` +
+      '(its sha256 differs): the installer would offer updates from an address nobody reviewed.'
+  }
+  if (entry.problem === 'whitespace') {
+    return `  ${entry.name} contains whitespace inside the value; fix the setting rather than relying on a parser to drop it.`
+  }
   const prefix =
     entry.problem === 'placeholder'
       ? `${entry.name} is set to a retired placeholder`
@@ -241,13 +286,12 @@ function remediation(env) {
     return [
       'This job runs on GitHub Actions, so the fix is on the mirror, not in GitLab.',
       'Where each value comes from here:',
-      '  MAILCOPILOT_GOOGLE_CLIENT_ID / _SECRET — repository SECRETS only. The GitLab',
-      '    trigger never forwards these, by design (a dispatch input is printed in this',
-      '    public mirror\'s Actions UI). If they are missing, create them on the mirror.',
-      '  MAILCOPILOT_UPDATE_URL — dispatch input from scripts/trigger-github-build.sh.',
-      '    Empty here usually means it was empty on the GitLab side; fix it there.',
-      '  SENTRY_DSN — dispatch input, falling back to the SENTRY_DSN repository secret',
-      '    when the input is empty. Missing means BOTH are unset.',
+      '  MAILCOPILOT_GOOGLE_CLIENT_ID / _SECRET — repository SECRETS only. If they are',
+      '    missing, create them on the mirror.',
+      '  SENTRY_DSN — repository SECRET.',
+      '  MAILCOPILOT_UPDATE_URL — repository VARIABLE (not a secret: it ships in every',
+      '    installer). Settings → Secrets and variables → Actions → Variables. On a',
+      '    release it must hash to EXPECTED_UPDATE_URL_SHA256 in this script.',
       'Secrets are created by hand: scripts/mirror-github.sh recreates the repository and',
       'never carries them, so a freshly re-mirrored repo has none. Check',
       'Settings → Secrets and variables → Actions, then re-run.',
@@ -286,8 +330,39 @@ function render(tier, { missing, warnings }, env = {}) {
   return { text: lines.join('\n'), failed: true }
 }
 
+/**
+ * `--from-github-settings` (release.yml build jobs): the job hands the raw
+ * repository variable over as MAILCOPILOT_UPDATE_URL_RAW and does NOT define
+ * MAILCOPILOT_UPDATE_URL itself. This mode judges the TRIMMED value and, only
+ * when the check passes, writes exactly that value to $GITHUB_ENV, from where
+ * the following steps (the build) read it. The build therefore bakes the value
+ * that was judged, and no precedence rule between a job's `env:` and
+ * $GITHUB_ENV is relied upon (GitHub documents none).
+ *
+ * A value with whitespace inside is never written, whatever the tier: one more
+ * line in $GITHUB_ENV would set any environment variable for the build.
+ */
+export function githubSettingsEnv(env) {
+  return { ...env, MAILCOPILOT_UPDATE_URL: env.MAILCOPILOT_UPDATE_URL_RAW ?? '' }
+}
+
+function exportUpdateUrl(env) {
+  const value = normalizeUpdateUrl(env.MAILCOPILOT_UPDATE_URL)
+  if (!value) return
+  if (/\s/.test(value)) {
+    process.stderr.write('Error: MAILCOPILOT_UPDATE_URL contains whitespace inside the value; refusing to pass it to the build.\n')
+    process.exit(1)
+  }
+  if (!env.GITHUB_ENV) {
+    process.stderr.write('Error: --from-github-settings needs $GITHUB_ENV (it only runs inside GitHub Actions).\n')
+    process.exit(1)
+  }
+  appendFileSync(env.GITHUB_ENV, `MAILCOPILOT_UPDATE_URL=${value}\n`)
+}
+
 function main() {
-  const env = process.env
+  const fromGithub = process.argv.includes('--from-github-settings')
+  const env = fromGithub ? githubSettingsEnv(process.env) : process.env
   const tier = classifyBuildTier(env)
 
   if (process.argv.includes('--explain')) {
@@ -306,6 +381,7 @@ function main() {
   const { text, failed } = render(tier, result, env)
   if (text) process[failed ? 'stderr' : 'stdout'].write(`${text}\n`)
   if (failed) process.exit(1)
+  if (fromGithub) exportUpdateUrl(env)
   process.stdout.write(`Release-vars check OK (${tier}): every required delivery variable is set.\n`)
 }
 

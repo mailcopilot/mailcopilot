@@ -433,7 +433,8 @@ describe('packages/net/safeRemoteFetch', () => {
         req.on('end', () => {
           const path = req.url ?? '/'
           hits.push({ path, method: req.method ?? '', body: Buffer.concat(chunks).toString('utf8') })
-          const route = routes()[path]
+          // Own entries only: a path like `/constructor` must not reach Object.prototype.
+          const route = Object.prototype.hasOwnProperty.call(routes(), path) ? routes()[path] : undefined
           if (!route) {
             res.writeHead(404)
             res.end()

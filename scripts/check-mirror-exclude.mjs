@@ -17,8 +17,8 @@
  * colocated at their real on-disk path. LIST_PATH is resolved via
  * `import.meta.url`, which Node fully resolves through symlinks — if this
  * script is invoked via a symlink, the guard will read the list next to the
- * real module, while the bash mirror scripts (`mirror-github.sh`,
- * `trigger-github-macos.sh`) resolve `$0` relative to the symlink location.
+ * real module, while the bash mirror script (`mirror-github.sh`) resolves
+ * `$0` relative to the symlink location.
  * Symlinked invocation is therefore unsupported; mirror scripts are always
  * invoked directly from the repo tree in CI.
  */
@@ -42,17 +42,18 @@ export const CRITICAL_PATHS = [
   'CHANGELOG.md',
   // Internal scripts
   'scripts/publish-packages.sh',
+  'scripts/fetch-github-release.mjs',
   'scripts/test-mail.mjs',
   'scripts/test-mcp-virustotal.mjs',
   'scripts/mirror-github.sh',
-  'scripts/trigger-github-macos.sh',
-  'scripts/trigger-github-build.sh',
   // The export guard embeds the internal markers it scans for
   'scripts/check-mirror-export.mjs',
   // Tests whose subject is excluded from the mirror
   'scripts/check-mirror-exclude.test.mjs',
   'scripts/check-mirror-export.test.mjs',
-  'scripts/trigger-github-build.test.mjs',
+  'scripts/mirror-github.test.mjs',
+  'scripts/fetch-github-release.test.mjs',
+  'scripts/publish-packages.test.mjs',
   'scripts/enforce-e2e-wrapper.test.mjs',
   'scripts/reflection-checkpoint.test.mjs',
   // AI agents and internal instructions
@@ -172,9 +173,8 @@ export function listTrackedFiles(root = ROOT) {
  * `MAILCOPILOT_MIRROR_EXPORT=1`, which had no producer at all: no mirror script
  * and no CI job ever set it, while ANY shell that happened to export the name
  * could switch the exemption on. A signal that nobody produces and anybody can
- * forge is not a signal. The mirror scripts now write this file INTO THE SNAPSHOT
- * after the exclude filter has run (`mirror-github.sh`,
- * `trigger-github-build.sh`), so the declaration:
+ * forge is not a signal. The mirror script now writes this file INTO THE SNAPSHOT
+ * after the exclude filter has run (`mirror-github.sh`), so the declaration:
  *   - is produced by exactly one place — the export path itself;
  *   - travels with the artefact it describes, instead of with the ambient env;
  *   - cannot exist in the internal repository without somebody committing it,

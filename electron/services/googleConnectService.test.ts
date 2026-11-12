@@ -468,6 +468,25 @@ describe('connectGoogleAccount — probes and tokeninfo', () => {
     expectNothingPersisted(h)
   })
 
+  it.each([
+    ['https://mail.google.com/x'],
+    ['xhttps://mail.google.com/'],
+    ['https://mail.google.com'],
+  ])('rejects a granted scope that only contains the mail scope as a substring (%s)', async (lookalike) => {
+    const h = harness({ stored: googleMailbox() })
+    h.fns.fetchTokenInfo.mockResolvedValue({ scope: `openid ${lookalike}` })
+    await expect(connectGoogleAccount(7, h.deps)).rejects.toThrow(/scope/)
+    expect(h.fns.testImap).not.toHaveBeenCalled()
+    expectNothingPersisted(h)
+  })
+
+  it('accepts the mail scope anywhere in the granted list', async () => {
+    const h = harness({ stored: googleMailbox() })
+    h.fns.fetchTokenInfo.mockResolvedValue({ scope: `${GOOGLE_SCOPE} openid email` })
+    await connectGoogleAccount(7, h.deps)
+    expect(h.fns.testImap).toHaveBeenCalled()
+  })
+
   it('rejects before any probe when tokeninfo reports the token invalid', async () => {
     const h = harness({ stored: googleMailbox() })
     h.fns.fetchTokenInfo.mockResolvedValue({ error_description: 'Invalid Value' })

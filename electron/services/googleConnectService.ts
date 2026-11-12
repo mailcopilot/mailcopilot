@@ -52,6 +52,9 @@ export type GoogleConnectResult =
   | { ok: true; id: number; email: string; tlsCertRequired?: { imap?: Endpoint; smtp?: Endpoint } }
   | { ok: false; refusal: GoogleConnectRefusal }
 
+/** The one scope the IMAP/SMTP XOAUTH2 login needs; matched as a whole token of the tokeninfo scope list. */
+const GMAIL_FULL_ACCESS_SCOPE = 'https://mail.google.com/'
+
 const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
   Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} timeout (${ms / 1000}s)`)), ms))])
 
@@ -111,9 +114,9 @@ export async function connectGoogleAccount(existingId: number | undefined, deps:
     if (info.error_description) {
       throw new Error(`Google access token is invalid: ${info.error_description}`)
     }
-    const scopes = (info.scope || '').split(' ')
-    if (!scopes.includes('https://mail.google.com/')) {
-      throw new Error('Google access token does not contain scope https://mail.google.com/ — add this scope in OAuth consent screen in Google Cloud Console (Scopes section)')
+    const grantedScopes = new Set((info.scope || '').split(' '))
+    if (!grantedScopes.has(GMAIL_FULL_ACCESS_SCOPE)) {
+      throw new Error(`Google access token does not contain scope ${GMAIL_FULL_ACCESS_SCOPE} — add this scope in OAuth consent screen in Google Cloud Console (Scopes section)`)
     }
     log.info('Scopes OK')
   } catch (e) {

@@ -341,7 +341,8 @@ describe('citation tickets against the real step loop (§3.3 B3)', () => {
     await ask({ sessionId: 's1' })
     expect(mockMintAiCitation).toHaveBeenCalledWith('s1', expect.objectContaining({ accountId: 1, folder: 'INBOX', uid: 42, messageId: '<42@test>' }))
     // the ticket is the FIRST field of the row the model reads
-    expect(bodies(fetchSpy)[1]).toMatch(new RegExp(`\\{\\\\*"cite\\\\*":\\\\*"${link(42).replace(/[/]/g, '\\/')}`))
+    // Backslashes dropped first, so the check does not depend on how many JSON layers escaped the quotes.
+    expect(bodies(fetchSpy)[1]!.split('\\').join('')).toContain(`{"cite":"${link(42)}`)
   })
 
   it('search_emails: every row has its own link', async () => {

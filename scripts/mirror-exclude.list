@@ -1,6 +1,5 @@
 # Source of truth for the GitHub public mirror EXCLUDE list.
-# Consumed by scripts/mirror-github.sh, scripts/trigger-github-macos.sh,
-# scripts/trigger-github-build.sh, and scripts/check-mirror-exclude.mjs (guard).
+# Consumed by scripts/mirror-github.sh and scripts/check-mirror-exclude.mjs (guard).
 #
 # Format: one path per line. Everything from the first `#` to the end of the
 # line is stripped as a comment — at column 0, after whitespace, or directly
@@ -23,11 +22,13 @@ CHANGELOG.md
 
 # Internal scripts (GitLab registry, test infra, mirroring)
 scripts/publish-packages.sh
+# Runs in the GitLab `publish` job only (copies a GitHub release into the
+# registry). Its sibling scripts/publish-github-release.mjs is NOT listed: the
+# release workflow runs it on the mirror itself.
+scripts/fetch-github-release.mjs
 scripts/test-mail.mjs
 scripts/test-mcp-virustotal.mjs
 scripts/mirror-github.sh
-scripts/trigger-github-macos.sh
-scripts/trigger-github-build.sh
 
 # The export guard spells out the internal hostnames and developer paths it
 # scans for, so publishing it would leak exactly what it protects. It is
@@ -41,8 +42,8 @@ scripts/check-mirror-export.mjs
 # `.mirror-export` — an entry that contradicted the one invariant this file has
 # ("an excluded file's content does not reach the mirror") and framed a plainly
 # public, self-describing notice as internal. The template is public data; the
-# machinery that copies it (mirror-github.sh, trigger-github-build.sh,
-# check-mirror-export.mjs) is what stays internal. It is allowlisted as a public
+# machinery that copies it (mirror-github.sh, check-mirror-export.mjs) is what
+# stays internal. It is allowlisted as a public
 # scripts/ entry in PUBLIC_TREE_ALLOWLIST.
 
 # Tests whose subject is itself excluded from the mirror. Keeping them would
@@ -52,22 +53,22 @@ scripts/check-mirror-export.mjs
 # that keeps the remaining tooling honest.
 scripts/check-mirror-exclude.test.mjs
 scripts/check-mirror-export.test.mjs
-scripts/trigger-github-build.test.mjs
+scripts/mirror-github.test.mjs
+scripts/fetch-github-release.test.mjs
+scripts/publish-packages.test.mjs
 scripts/enforce-e2e-wrapper.test.mjs
 scripts/reflection-checkpoint.test.mjs
 scripts/run-native-tests.test.mjs
 # §2.255: the GUARD (scripts/check-release-vars.mjs) is public — a source builder
 # benefits from reading why a build refuses, and it reads only variable names.
-# Its test is not, for the reason above: two of its assertions read
-# `.gitlab-ci.yml` (they pin that the guard is deliberately ABSENT from the two
-# dispatch-only jobs), and that file is excluded a few lines up. Exported, the
+# Its test is not, for the reason above: some of its assertions read
+# `.gitlab-ci.yml` (they pin that no GitLab job builds an installer any more,
+# so the guard has no GitLab call site), and that file is excluded a few lines up. Exported, the
 # test would throw ENOENT. Making those assertions skip when the file is missing
 # was rejected: they are the negative half of the wiring contract, and coverage
 # that silently disappears in one environment is worse than coverage that lives
 # in one repository.
 scripts/check-release-vars.test.mjs
-# §2.297: reads .gitlab-ci.yml, which the mirror does not carry (same case as above).
-scripts/official-build-flag.test.mjs
 
 # Internal capture tooling: the OAuth-verification video recorder and the
 # marketing screenshot gallery. Neither is a test of the product — they drive the

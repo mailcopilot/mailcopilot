@@ -41,7 +41,7 @@ afterEach(async () => {
 /** A TLS connect with no timeout of its own: against the silent server it never settles. */
 function tlsOpen(targetPort: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const sock = tls.connect({ host: '127.0.0.1', port: targetPort, rejectUnauthorized: false })
+    const sock = tls.connect({ host: '127.0.0.1', port: targetPort })
     sock.on('secureConnect', () => { sock.destroy(); resolve('details') })
     sock.on('error', reject)
     sock.on('close', () => reject(new Error('socket closed')))
