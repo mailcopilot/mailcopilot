@@ -72,18 +72,56 @@ describe('main.ts — send-queue final-failure branch uses finalSendFailureText'
     expect(source.match(/rescheduleSendQueue\(item\.id, retryAt\)/g)).toHaveLength(1)
   })
 
-  it('resets stuck "sending" rows from exactly one place, after the pass mutex is taken', () => {
-    // listDueSendQueue() un-sticks rows left in `sending` for over two minutes. A send that is
-    // still in flight is safe from it only because every pass holds sendQueueProcessing for its
-    // whole duration and this is the only caller.
-    expect(source.match(/listDueSendQueue\(/g)).toHaveLength(1)
+  it('recovers abandoned "sending" rows from exactly one place, after the pass mutex is taken', () => {
+    // A row left in `sending` goes to `failed` (delivery_unknown), never back to `queued`. The
+    // recovery fails rows claimed over two minutes ago; that is safe for a live send of this
+    // process only because every pass holds sendQueueProcessing for its whole duration and
+    // this is the only caller.
+    expect(source.match(/recoverAbandonedSends\(/g)).toHaveLength(1)
+    expect(source.match(/failAbandonedSendQueue\b/g)).toHaveLength(2) // import + the recovery deps
     const start = source.indexOf('async function processSendQueue() {')
     const guard = source.indexOf('if (sendQueueProcessing) return', start)
-    const call = source.indexOf('listDueSendQueue(', start)
+    const recover = source.indexOf('recoverAbandonedSends()', start)
+    const due = source.indexOf('listDueSendQueue(', start)
     expect(start).toBeGreaterThan(-1)
     expect(guard).toBeGreaterThan(start)
-    expect(call).toBeGreaterThan(guard)
-    expect(source.indexOf('sendQueueProcessing = true', guard)).toBeLessThan(call)
+    expect(source.indexOf('sendQueueProcessing = true', guard)).toBeLessThan(recover)
+    expect(recover).toBeLessThan(due)
+    expect(source.match(/listDueSendQueue\(/g)).toHaveLength(1)
+  })
+
+  it('reports a failed abandoned-send notification to Sentry with a closed tag and no error text', () => {
+    const wiring = sliceBetween(source, 'const recoverAbandonedSends = createSendQueueRecovery({', '\n})\n')
+    const reportError = wiring.slice(wiring.indexOf('reportError: (err) => {'))
+    expect(reportError).toContain("captureException(synthetic, { source: 'sendQueue:abandonedReport' })")
+    expect(reportError).toContain("new Error('send_queue_abandoned_report_failed')")
+    expect(reportError).not.toMatch(/captureException\(err\b/)
+  })
+
+  it('sends every attempt of a queued row with the Message-ID stored on the row', () => {
+    const pass = sliceBetween(source, 'async function processSendQueue() {', '} catch (e) {')
+    expect(pass).toContain('const messageId = item.messageId ?? ensureSendQueueMessageId(item.id, mintMessageId(sendFromFor(item.accountId, options).fromEmail)) ?? undefined')
+    expect(pass).toContain('await sendMailWithAccountConfig(item.accountId, options, messageId)')
+    // Both enqueue paths mint it once, at enqueue, at the domain of the address the From header will carry.
+    expect(source.match(/enqueueSendQueue\(id, withReplyThreading\(id, parsedMessage\), sendAt, randomUUID\(\), archiveRef, mintMessageId\(sendFromFor\(id, parsedMessage\)\.fromEmail\)\)/g)).toHaveLength(2)
+    expect(source).not.toMatch(/mintMessageId\([^)]*\.from\)/)
+    // The send path resolves the From header through the same helper.
+    const send = sliceBetween(source, 'async function sendMailWithAccountConfig(', 'if (IS_E2E) {')
+    expect(send).toContain('const { fromHeader } = sendFromFor(accountId, parsedOptions)')
+    expect(source).toContain('const sendMailOptionsForTransport = messageId ? { ...transportFields, messageId } : transportFields')
+  })
+
+  it('only the queue pass supplies a Message-ID: the direct send, RSVP and E2E paths call with two arguments', () => {
+    const calls = [...source.matchAll(/sendMailWithAccountConfig\(([^\n]*)\)/g)]
+      .map(m => m[1])
+      .filter(args => args.length > 0 && !args.includes('parsedOptions: SendMailOptions')) // not the declaration or a comment
+    expect(calls).toHaveLength(4)
+    expect(calls.filter(args => args.includes('messageId'))).toEqual(['item.accountId, options, messageId'])
+  })
+
+  it('the renderer-facing send schema has no messageId field, so a Message-ID can only come from the queue', () => {
+    const schema = sliceBetween(source, 'const sendMailOptionsSchema = z.object({', 'const queuedSendOptionsSchema')
+    expect(schema).not.toMatch(/messageId/i)
   })
 
   it('leaves the transient (retry) branch storing no failure text', () => {

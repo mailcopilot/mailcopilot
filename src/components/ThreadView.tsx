@@ -52,6 +52,8 @@ interface ThreadViewProps {
   /** Body content for the currently expanded (active) card — rendered as a slot */
   renderBody: () => React.ReactNode
   gravatarEnabled: boolean
+  /** Normalized addresses of the user's own accounts (no Gravatar lookup for them). */
+  ownAddresses: ReadonlySet<string>
   /**
    * Conversation card order override. When provided, this value is passed
    * directly to useConversationOrder as an override, which skips the async
@@ -150,6 +152,7 @@ export default function ThreadView({
   onCardOpen,
   renderBody,
   gravatarEnabled,
+  ownAddresses,
   order: orderProp,
   summaryEnabled = false,
   instantReplyEnabled = false,
@@ -255,6 +258,7 @@ export default function ThreadView({
                   from={card.item.from}
                   fromAddr={card.item.fromAddr}
                   gravatarEnabled={gravatarEnabled}
+                  ownAddresses={ownAddresses}
                 />
                 <div className="thread-card-header-meta">
                   <div className="thread-card-header-row">

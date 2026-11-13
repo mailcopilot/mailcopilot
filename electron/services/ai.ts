@@ -949,12 +949,13 @@ function stripMessageForList(msg: MessageRow, includeBodyPreview = false): Omit<
 }
 
 /**
- * Truncate a tool result string if it exceeds the max length.
- * Appends a truncation notice so the AI knows data was cut.
+ * Cut the RAW content of a tool result to the size cap and wrap it. The cut comes first: cutting after wrapping
+ * removed the closing boundary marker of an over-cap result and left the rest of the turn unfenced. The truncation
+ * notice follows the closing marker, so the model still sees that data was cut; it is our text, not untrusted data.
  */
-function truncateToolResult(text: string): string {
-  if (text.length <= TOOL_RESULT_MAX_CHARS) return text
-  return text.slice(0, TOOL_RESULT_MAX_CHARS) + truncationNotice(TOOL_RESULT_MAX_CHARS)
+function wrapToolResult(raw: string): string {
+  if (raw.length <= TOOL_RESULT_MAX_CHARS) return wrapUntrusted(raw)
+  return wrapUntrusted(raw.slice(0, TOOL_RESULT_MAX_CHARS)) + truncationNotice(TOOL_RESULT_MAX_CHARS)
 }
 
 // --- Untrusted data boundary markers for prompt injection defense ---
@@ -1337,7 +1338,7 @@ function registerMailTools(
         // call multiple times (each call increments the counter once and
         // emits one outer pair of markers), and the audit log faithfully
         // reflects N reads even when N-1 of them are cache hits.
-        return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(cachedRaw)) }] }
+        return { content: [{ type: 'text' as const, text: wrapToolResult(cachedRaw) }] }
       }
       logAI.info(`MCP get_email accountId=${accountId} folder=${folder} uid=${uid}`)
       const msg = getMessage(accountId, folder, uid)
@@ -1361,7 +1362,7 @@ function registerMailTools(
       if (raw.length <= TOOL_RESULT_MAX_CHARS && cache.size < GET_EMAIL_CACHE_MAX) {
         cache.set(cacheKey, raw)
       }
-      return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(raw)) }] }
+      return { content: [{ type: 'text' as const, text: wrapToolResult(raw) }] }
     },
   )
 
@@ -1385,7 +1386,7 @@ function registerMailTools(
       logAI.info(`MCP list_emails → ${rows.length} emails, hasMore=${hasMore}`)
       const sessionId = citationSessionStorage.getStore()
       const slim = rows.map(r => withCitation(sessionId, r, stripMessageForList(r, includeBodyPreview)))
-      return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify({ emails: slim, hasMore, nextBeforeUid: hasMore ? lastUid : null }))) }] }
+      return { content: [{ type: 'text' as const, text: wrapToolResult(JSON.stringify({ emails: slim, hasMore, nextBeforeUid: hasMore ? lastUid : null })) }] }
     },
   )
 
@@ -1452,7 +1453,7 @@ function registerMailTools(
       turnGuard?.noteSearchResult(searchKey, rows.length)
       const sessionId = citationSessionStorage.getStore()
       const slim = rows.map(r => withCitation(sessionId, r, stripMessageForList(r, includeBodyPreview)))
-      return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(slim))) }] }
+      return { content: [{ type: 'text' as const, text: wrapToolResult(JSON.stringify(slim)) }] }
     },
   )
 
@@ -1506,7 +1507,7 @@ function registerMailTools(
       logAI.info(`MCP get_thread → ${thread.length} messages in thread`)
       const sessionId = citationSessionStorage.getStore()
       const slim = thread.map(r => withCitation(sessionId, r, stripMessageForList(r)))
-      return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(slim))) }] }
+      return { content: [{ type: 'text' as const, text: wrapToolResult(JSON.stringify(slim)) }] }
     },
   )
 
@@ -1561,7 +1562,7 @@ function registerMailTools(
       const ctx = getUiContext()
       logAI.info(`MCP get_current_context → ${ctx ? ctx.type : 'null'}`)
       if (!ctx) return { content: [{ type: 'text' as const, text: 'No active context' }] }
-      return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(ctx))) }] }
+      return { content: [{ type: 'text' as const, text: wrapToolResult(JSON.stringify(ctx)) }] }
     },
   )
 
@@ -2038,7 +2039,7 @@ function registerMailTools(
         return {
           content: [{
             type: 'text' as const,
-            text: truncateToolResult(wrapUntrusted(JSON.stringify({ rows: limited, total: rows.length, truncated }))),
+            text: wrapToolResult(JSON.stringify({ rows: limited, total: rows.length, truncated })),
           }],
         }
       } catch (err: unknown) {
@@ -2976,7 +2977,7 @@ function registerMailTools(
       // assembled prompt still carries the explicit untrusted boundary
       // even when a tool result is verbatim cited by the model. Mirrors
       // the `call_external_tool` result wrapping below.
-      return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(tools))) }] }
+      return { content: [{ type: 'text' as const, text: wrapToolResult(JSON.stringify(tools)) }] }
     },
   )
 
@@ -3026,7 +3027,7 @@ function registerMailTools(
       try {
         const result = await mcpClientManagerRef.callTool(serverId, toolName, args ?? {})
         logAI.info(`MCP call_external_tool → ok`)
-        return { content: [{ type: 'text' as const, text: truncateToolResult(wrapUntrusted(JSON.stringify(result))) }] }
+        return { content: [{ type: 'text' as const, text: wrapToolResult(JSON.stringify(result)) }] }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         // err.message may embed LLM-supplied serverId/toolName (mcpClient

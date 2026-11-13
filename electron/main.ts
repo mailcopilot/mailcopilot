@@ -325,6 +325,7 @@ import {
   buildRawMessage,
   classifySmtpError,
   finalSendFailureText,
+  mintMessageId,
   SMTP_RETRY_DELAYS_MS,
   setSeen,
   setFlagged,
@@ -447,6 +448,8 @@ import {
   markSendQueueSending,
   markSendQueueSent,
   markSendQueueFailed,
+  failAbandonedSendQueue,
+  ensureSendQueueMessageId,
   cancelSendQueue,
   sendQueueNow,
   rescheduleSendQueue,
@@ -636,6 +639,8 @@ import {
 } from './services/backgroundMail'
 import { disarmTray, shutdownTray } from './services/tray'
 import { requestQueueReschedule, requestQueueSendNow, type SendQueueMoveDeps } from './services/sendQueueMoves'
+import { createSendQueueRecovery } from './services/sendQueueRecovery'
+import { resolveSendFrom } from './services/sendFromAddress'
 import type { MailRef } from './services/desktopNotifications'
 // §2.119 — human confirmation before the address AI requests (and with them
 // the user's API key) are sent to changes. Both renderer routes that can move
@@ -2618,12 +2623,11 @@ app.on('before-quit', (event) => {
     // `sendMailWithAccountConfig()` awaits SMTP, so a send in progress here can
     // still be seconds from `markSendQueueSent()`. We do not await it and do not
     // give it a deadline of its own: the row is already claimed as `sending` and
-    // is durable in SQLite, `listDueSendQueue` in packages/db returns rows stuck
-    // in `sending` for over two minutes back to `queued`, and the queue is
-    // processed at startup. Quitting mid-send therefore costs a delay, not the
-    // message — the ordinary outbox model. (The residual is at-least-once
-    // delivery if the server accepted a message we never marked sent; that
-    // predates this handler and is out of its scope.)
+    // is durable in SQLite. Its outcome is unknown (the server may have accepted
+    // the message), so a queue pass of the next start, once the claim is two
+    // minutes old, moves it to `failed` with the delivery_unknown key instead of sending it again
+    // (electron/services/sendQueueRecovery.ts); the user can resend it from the
+    // Outbox, with the same Message-ID.
     //
     // 150ms, i.e. a bounded courtesy, not a guarantee.
     try { await new Promise<void>(resolve => setTimeout(resolve, 150)) } catch { /* ignore */ }
@@ -4944,22 +4948,14 @@ function notifyQueueEnqueued(payload: { id: string; accountId: number; sendAt: s
   broadcast('mail:queued', payload)
 }
 
-async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendMailOptions) {
-  const metaForFrom = IS_E2E ? E2E_ACCOUNTS.find(a => a.id === accountId) : getAccountMeta(accountId)
+// From address and header of a send; the enqueue mints the Message-ID at the same address.
+function sendFromFor(accountId: number, options: { from: string; identityId?: string }) {
+  return resolveSendFrom(IS_E2E ? E2E_ACCOUNTS.find(a => a.id === accountId) : getAccountMeta(accountId), options)
+}
 
-  // 2.3-B: honour identityId when Compose supplied it. The identity wins over
-  // both the legacy top-level `name` and the `parsedOptions.from` email — the
-  // whole point of the selector is to let the user send from an alias/other
-  // identity without touching the primary account config.
-  const matchedIdentity = parsedOptions.identityId
-    ? (metaForFrom?.identities ?? []).find(i => i.id === parsedOptions.identityId)
-    : undefined
-  const identityDisplayName = matchedIdentity?.displayName?.trim()
-  const identityEmail = matchedIdentity?.email?.trim()
-
-  const displayName = (identityDisplayName || metaForFrom?.name || '').trim()
-  const fromEmail = identityEmail || parsedOptions.from
-  const fromHeader = displayName ? `${displayName} <${fromEmail}>` : fromEmail
+async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendMailOptions, messageId?: string) {
+  // 2.3-B identity resolution lives in electron/services/sendFromAddress.ts.
+  const { fromHeader } = sendFromFor(accountId, parsedOptions)
 
   if (IS_E2E) {
     const now = new Date().toISOString()
@@ -4993,7 +4989,9 @@ async function sendMailWithAccountConfig(accountId: number, parsedOptions: SendM
   // Strip identityId before handing off — it's a renderer-side hint used
   // only by the From-header resolver above. Unknown fields are harmless
   // but noisy.
-  const { identityId: _identityId, replyRef: _replyRef, threadRef: _threadRef, ...sendMailOptionsForTransport } = parsedOptions
+  const { identityId: _identityId, replyRef: _replyRef, threadRef: _threadRef, ...transportFields } = parsedOptions
+  // The queue passes the Message-ID stored with the row, so every attempt sends the same one.
+  const sendMailOptionsForTransport = messageId ? { ...transportFields, messageId } : transportFields
   void _identityId
   void _replyRef
   void _threadRef
@@ -5241,11 +5239,43 @@ function smtpFailureKind(code: number | null, err: unknown): 'auth' | 'tls' | 'n
 
 let sendQueueProcessing = false
 
+function queueItemSubject(messageData: unknown): string {
+  return typeof messageData === 'object' && messageData && 'subject' in messageData
+    ? String((messageData as Record<string, unknown>).subject || '')
+    : ''
+}
+
+// Rows left in `sending` by a quit or a crash mid-send go to `failed` with the
+// delivery_unknown key, never back to `queued` (electron/services/sendQueueRecovery.ts).
+const recoverAbandonedSends = createSendQueueRecovery({
+  failAbandoned: failAbandonedSendQueue,
+  reportFailed: (row, failureText) => {
+    const subj = queueItemSubject(row.messageData)
+    recordEvent('send_queue.failed', { failure_kind: 'unknown' })
+    logMail.warn(`Send queue item ${row.id} was left in sending (quit or crash mid-send); marked failed, outcome unknown`)
+    broadcast('mail:sendFailed', { id: row.id, accountId: row.accountId, error: failureText, subject: subj })
+    addNotification('send_failed', subj || 'Send failed', failureText, row.id)
+    notifyQueueChanged(row.accountId)
+  },
+  // A report that fails does not stop the pass. Sentry gets a synthetic error with a
+  // closed source tag; the real error, which may carry free text, stays in the local log.
+  reportError: (err) => {
+    try {
+      logMail.error('Could not report an abandoned send:', describeErrorReason(err))
+      const synthetic = new Error('send_queue_abandoned_report_failed')
+      synthetic.name = 'AbandonedSendReportError'
+      captureException(synthetic, { source: 'sendQueue:abandonedReport' })
+    } catch { /* reporting must never throw */ }
+  },
+  now: () => Date.now(),
+})
+
 async function processSendQueue() {
   if (shuttingDown) return
   if (sendQueueProcessing) return
   sendQueueProcessing = true
   try {
+    recoverAbandonedSends()
     const due = listDueSendQueue(new Date().toISOString(), 20)
     for (const item of due) {
       const claimed = markSendQueueSending(item.id)
@@ -5253,7 +5283,9 @@ async function processSendQueue() {
       const dispatchT0 = Date.now()
       try {
         const options = queuedSendOptionsSchema.parse(item.messageData)
-        await sendMailWithAccountConfig(item.accountId, options)
+        // Minted at enqueue; rows queued before the column existed get one here, once.
+        const messageId = item.messageId ?? ensureSendQueueMessageId(item.id, mintMessageId(sendFromFor(item.accountId, options).fromEmail)) ?? undefined
+        await sendMailWithAccountConfig(item.accountId, options, messageId)
         markSendQueueSent(item.id)
         // Telemetry: time from row creation to successful SMTP delivery.
         // item.createdAt is the original enqueue timestamp — this captures
@@ -5278,9 +5310,7 @@ async function processSendQueue() {
         }
       } catch (e) {
         const { code, isTransient } = classifySmtpError(e)
-        const subj = typeof item.messageData === 'object' && item.messageData && 'subject' in item.messageData
-          ? String((item.messageData as Record<string, unknown>).subject || '')
-          : ''
+        const subj = queueItemSubject(item.messageData)
 
         if (isTransient && item.attemptCount < 5) {
           // Transient error (4xx / network): reschedule with exponential backoff
@@ -7000,7 +7030,7 @@ handleIpc('mail:scheduleSend', async (_e, accountId: unknown, messageData: unkno
   const sendAt = delayMs <= 0
     ? new Date().toISOString()
     : new Date(Date.now() + delayMs).toISOString()
-  const queueId = enqueueSendQueue(id, withReplyThreading(id, parsedMessage), sendAt, randomUUID(), archiveRef)
+  const queueId = enqueueSendQueue(id, withReplyThreading(id, parsedMessage), sendAt, randomUUID(), archiveRef, mintMessageId(sendFromFor(id, parsedMessage).fromEmail))
   const source: QueueEnqueuedSource = delayMs <= 0 ? 'immediate' : 'delay'
   notifyQueueEnqueued({ id: queueId, accountId: id, sendAt, source })
   notifyQueueChanged(id)
@@ -7015,7 +7045,7 @@ handleIpc('mail:scheduleSendAt', async (_e, accountId: unknown, messageData: unk
   const sendAt = sendAtIsoSchema.parse(sendAtRaw)
   const archiveRef: ArchiveRef | null = archiveRefRaw ? archiveRefSchema.parse(archiveRefRaw) : null
   if (archiveRef && archiveRef.accountId !== id) throw new Error('archiveRef.accountId must match the sending account')
-  const queueId = enqueueSendQueue(id, withReplyThreading(id, parsedMessage), sendAt, randomUUID(), archiveRef)
+  const queueId = enqueueSendQueue(id, withReplyThreading(id, parsedMessage), sendAt, randomUUID(), archiveRef, mintMessageId(sendFromFor(id, parsedMessage).fromEmail))
   notifyQueueEnqueued({ id: queueId, accountId: id, sendAt, source: 'schedule' })
   notifyQueueChanged(id)
   if (new Date(sendAt).getTime() <= Date.now()) void processSendQueue()

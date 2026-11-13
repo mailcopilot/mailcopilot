@@ -50,7 +50,7 @@ Wenn Sie Ihr Konto verbinden, laedt die Anwendung folgende Daten herunter und sp
 
 ### 2.6 Fehlerberichte
 
-- Wenn die Sentry-Fehlerberichterstattung aktiv ist, erfassen wir **anonyme Absturzberichte** (Stack-Traces, Anwendungsversion, Betriebsumgebung). **Keine personenbezogenen Daten** (E-Mail-Inhalte, Adressen, Passwoerter oder Token) sind in den Fehlerberichten enthalten (`sendDefaultPii: false`).
+- Wenn Sie der Diagnose zugestimmt haben, erhält Sentry **Fehlerberichte** (Stack-Traces, Anwendungsversion, Betriebsumgebung) sowie Nutzungs- und Leistungsdiagnosen (Zähler, Dauern, eine Sitzungszusammenfassung). Sie enthalten eine gehashte zufällige Installationskennung, daher lassen sich die Berichte einer Installation miteinander verknüpfen; es handelt sich um pseudonyme Daten. Sie enthalten keine E-Mail-Inhalte, Adressen, Passwörter, Token oder KI-Prompts (`sendDefaultPii: false`). Einzelheiten stehen auf der Seite [Telemetrie](../privacy/telemetry.md).
 
 ## 3. Wie wir Ihre Daten speichern
 
@@ -159,8 +159,9 @@ OAuth-Token werden lokal auf Ihrem Geraet gespeichert (siehe Abschnitt 3). Wir u
 Wir geben Ihre personenbezogenen Daten **nicht** an Dritte weiter, ausser in den folgenden eingeschraenkten Faellen:
 
 - **AI-Anbieter** — nur mit Ihrer ausdruecklichen Zustimmung, wie in Abschnitt 5 beschrieben.
-- **Sentry** — nur anonyme Absturzberichte, ohne personenbezogene Daten (siehe Abschnitt 2.6).
+- **Sentry**: Fehlerberichte sowie Nutzungs- und Leistungsdiagnosen, nur mit Ihrer Einwilligung gesendet. Sie enthalten eine gehashte zufällige Installationskennung und keine Nachrichteninhalte, Adressen oder Prompts (siehe Abschnitt 2.6 und [Telemetrie](../privacy/telemetry.md)).
 - **Ihr E-Mail-Anbieter** — ueber Standard-IMAP/SMTP-Protokolle zur Bereitstellung der E-Mail-Funktionalitaet.
+- **Gravatar**: Solange Absenderfotos aktiviert sind, sendet MailCopilot den SHA-256-Hash jeder Absenderadresse und Ihre IP-Adresse an Gravatar, wie auf der Seite [Absenderfotos (Gravatar)](../privacy/sender-photos.md) beschrieben. Für ein Konto, dessen Avatar auf Gravatar steht, werden der Hash der Adresse dieses Kontos und Ihre IP-Adresse gesendet. Auf neuen Installationen ist die Option aus. Eine von einer Version vor 1.27.2 aktualisierte Installation behält die gespeicherte Einstellung, die bei den meisten Installationen an ist. Ausschalten können Sie sie unter Einstellungen > Produktivität.
 
 Wir verkaufen, vermieten oder handeln nicht mit Ihren personenbezogenen Daten.
 

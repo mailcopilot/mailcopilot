@@ -122,9 +122,9 @@ Cada cuenta se muestra en la barra lateral con un avatar -- un círculo de color
 
 ### Modos de visualización
 
-- **Letras** -- un círculo de color con 1--2 caracteres (iniciales). Puedes introducir iniciales personalizadas si las automáticas no son adecuadas.
-- **Icono** -- un círculo de color con un icono de la colección (correo, maletín, estrella, cohete, etc.).
-- **Gravatar** -- carga tu foto de perfil desde [Gravatar](https://gravatar.com) según tu dirección de email. Si no se encuentra un Gravatar, se muestran las letras.
+- **Letras**: un círculo de color con 1 o 2 caracteres (iniciales). Puedes introducir iniciales personalizadas si las automáticas no son adecuadas.
+- **Icono**: un círculo de color con un icono de la colección (correo, maletín, estrella, cohete, etc.).
+- **Gravatar**: carga tu foto de perfil desde [Gravatar](https://gravatar.com) según tu dirección de email. Si no se encuentra un Gravatar, se muestran las letras. Así Gravatar recibe el hash SHA-256 de tu dirección y ve tu dirección IP; consulta [Fotos de remitentes (Gravatar)](../privacy/sender-photos.md).
 
 ### Cambiar el color
 

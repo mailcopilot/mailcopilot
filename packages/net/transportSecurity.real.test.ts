@@ -2,12 +2,13 @@
 // servers. A mocked constructor would only prove that an option was passed; the
 // requirement is about what the libraries DO when the server never offers TLS,
 // so every assertion here is about bytes the server saw.
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 // imap.ts imports the SQLite layer (a native module built for Electron's ABI);
 // nothing in these tests touches it.
 vi.mock('../db', () => ({}))
 
 import crypto from 'node:crypto'
+import dns from 'node:dns'
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
@@ -284,11 +285,38 @@ describe('nodemailer error shapes the transport classifiers read', () => {
       .then(() => null, (e: unknown) => e as Record<string, unknown> & Error)
 
   it('DNS failure is EDNS on the CONN stage, a refused connect is ESOCKET with syscall connect', async () => {
-    const dns = await nodemailer
-      .createTransport({ host: 'nonexistent.invalid', port: 25, secure: false, connectionTimeout: 2000 })
-      .verify()
-      .then(() => null, (e: unknown) => e as Record<string, unknown>)
-    expect(dns).toMatchObject({ code: 'EDNS', command: 'CONN' })
+    // nodemailer resolves the host itself: Resolver#resolve4/#resolve6, then dns.lookup as a
+    // fallback, under its own 30 s DNS_TIMEOUT. Left real, that is a network query whose time
+    // belongs to the machine's resolver (a slow one outlives the 5 s test timeout). Answer
+    // NXDOMAIN on all three, which is what the .invalid TLD (RFC 6761) gives anyway; the
+    // library's own handling of that answer is still what produces EDNS.
+    const host = 'nonexistent.invalid'
+    const nxdomain = () => Object.assign(new Error(`queryA ENOTFOUND ${host}`), { code: 'ENOTFOUND' })
+    const resolverAnswer = (_name: string, cb: (err: Error) => void) => { setImmediate(cb, nxdomain()) }
+    const resolve4 = vi.spyOn(dns.Resolver.prototype, 'resolve4').mockImplementation(resolverAnswer as never)
+    const resolve6 = vi.spyOn(dns.Resolver.prototype, 'resolve6').mockImplementation(resolverAnswer as never)
+    const lookup = vi.spyOn(dns, 'lookup').mockImplementation(((_name: string, _opts: unknown, cb: (err: Error) => void) => {
+      setImmediate(cb, nxdomain())
+    }) as never)
+    nodemailerShared.dnsCache.delete(host)
+    let dnsFailure: Record<string, unknown> | null
+    let hits: number[] = []
+    try {
+      dnsFailure = await nodemailer
+        .createTransport({ host, port: 25, secure: false, connectionTimeout: 2000 })
+        .verify()
+        .then(() => null, (e: unknown) => e as Record<string, unknown>)
+    } finally {
+      hits = [resolve4, resolve6, lookup].map((spy) => spy.mock.calls.length)
+      for (const spy of [resolve4, resolve6, lookup]) spy.mockRestore()
+      nodemailerShared.dnsCache.delete(host)
+    }
+    expect(dnsFailure).toMatchObject({ code: 'EDNS', command: 'CONN' })
+    // The stubs, not the network, produced that answer.
+    // resolve6 is skipped by nodemailer on a machine with no IPv6 interface, so only the two
+    // calls every machine makes are required.
+    expect(hits[0], 'Resolver#resolve4 hits').toBeGreaterThan(0)
+    expect(hits[2], 'dns.lookup hits').toBeGreaterThan(0)
 
     const closed = await new Promise<number>((resolve) => {
       const s = net.createServer().listen(0, '127.0.0.1', () => {
@@ -635,6 +663,21 @@ describe('SMTP: threading headers of a reply reach the wire (RFC 5322 §3.6.4)',
 // No timer is added or changed: the library's own timers are shortened or
 // advanced here only so the test does not wait them out.
 describe('connection test against a server that never greets: readable, not the library text', () => {
+  // `testSmtpConnection` answers a greeting timeout by asking the system resolver for the
+  // host's A records (`findReachableIp` -> `dns.promises.resolve4`). The test host is the IP
+  // literal 127.0.0.1, and Node sends that to the resolver as a NAME: a real network query,
+  // ~50 ms on a healthy machine, several seconds (c-ares: 5 s per try) on a slow VPN or
+  // container resolver, which blew the 5 s test timeout. What the resolver says about an IP
+  // literal is NXDOMAIN, so pin exactly that; the retry-by-address branch then ends the same
+  // way it does here, without the machine's DNS in the loop. The server side stays real.
+  let resolve4: MockInstance<typeof dns.promises.resolve4>
+  beforeEach(() => {
+    resolve4 = vi.spyOn(dns.promises, 'resolve4').mockRejectedValue(
+      Object.assign(new Error('queryA ENOTFOUND 127.0.0.1'), { code: 'ENOTFOUND' }),
+    )
+  })
+  afterEach(() => { resolve4.mockRestore() })
+
   const withTestTimeouts = async <T,>(run: () => Promise<T>): Promise<T> => {
     const timeouts = __testOnly.testTimeouts
     const saved = { ...timeouts }
@@ -668,6 +711,7 @@ describe('connection test against a server that never greets: readable, not the 
     const srv = await silentTcp()
     const res = await withTestTimeouts(() => testSmtpConnection(smtpCfg(srv.port, false)))
     expect(srv.accepted()).toBeGreaterThan(0)
+    expect(resolve4).toHaveBeenCalledWith('127.0.0.1') // the retry branch ran against the pinned resolver
     expect(res.ok).toBe(false)
     expect(decodeErrorPresentation(res.error)).toBe('pre_greeting')
     expect(res.error).toContain('Greeting never received')
@@ -677,6 +721,7 @@ describe('connection test against a server that never greets: readable, not the 
     const srv = await tlsWithoutGreeting()
     const res = await withTestTimeouts(() => testSmtpConnection(smtpCfg(srv.port, true)))
     expect(srv.established()).toBeGreaterThan(0)
+    expect(resolve4).toHaveBeenCalledWith('127.0.0.1')
     expect(decodeErrorPresentation(res.error)).toBe('pre_greeting')
   })
 

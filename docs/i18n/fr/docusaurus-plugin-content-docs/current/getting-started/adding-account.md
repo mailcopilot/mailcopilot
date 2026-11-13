@@ -129,9 +129,9 @@ Chaque compte est affiché dans la barre latérale avec un avatar -- un cercle c
 
 ### Modes d'affichage
 
-- **Lettres** -- un cercle coloré avec 1--2 caractères (initiales). Vous pouvez saisir des initiales personnalisées si les automatiques ne conviennent pas.
-- **Icône** -- un cercle coloré avec une icône de la collection (courrier, mallette, étoile, fusée, etc.).
-- **Gravatar** -- charge votre photo de profil depuis [Gravatar](https://gravatar.com) en fonction de votre adresse e-mail. Si aucun Gravatar n'est trouvé, les lettres sont affichées.
+- **Lettres**: un cercle coloré avec 1 ou 2 caractères (initiales). Vous pouvez saisir des initiales personnalisées si les automatiques ne conviennent pas.
+- **Icône**: un cercle coloré avec une icône de la collection (courrier, mallette, étoile, fusée, etc.).
+- **Gravatar**: charge votre photo de profil depuis [Gravatar](https://gravatar.com) en fonction de votre adresse e-mail. Si aucun Gravatar n'est trouvé, les lettres sont affichées. Gravatar reçoit alors le hachage SHA-256 de votre adresse et voit votre adresse IP ; voir [Photos des expéditeurs (Gravatar)](../privacy/sender-photos.md).
 
 ### Changer la couleur
 

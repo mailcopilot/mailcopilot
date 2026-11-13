@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, cleanup } from '@testing-library/react'
+import { render, cleanup, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import React from 'react'
 import AccountAvatar from './AccountAvatar'
@@ -30,6 +30,16 @@ function makeAccount(overrides: Partial<AccountMeta> = {}): AccountMeta {
 }
 
 describe('AccountAvatar', () => {
+  describe('gravatar mode', () => {
+    it('sets no-referrer on the photo request', async () => {
+      const { container } = render(
+        React.createElement(AccountAvatar, { account: makeAccount({ avatarMode: 'gravatar' }) }),
+      )
+      await waitFor(() => expect(container.querySelector('img')).toBeTruthy())
+      expect(container.querySelector('img')!.getAttribute('referrerpolicy')).toBe('no-referrer')
+    })
+  })
+
   describe('initials mode', () => {
     it('renders computed initials when no avatarMode is set', () => {
       const { container } = render(

@@ -568,7 +568,7 @@
       "avatarIconLabel": "Choose icon",
       "avatarColor": "Color",
       "avatarPreview": "Preview",
-      "gravatarHint": "Uses your profile photo from gravatar.com for {{email}}",
+      "gravatarHint": "The photo is loaded from gravatar.com using a hash of {{email}}.",
       "gravatarNotFound": "No Gravatar found for {{email}}. Create one at gravatar.com"
     },
     "sections": {
@@ -661,7 +661,7 @@
     "privacy": {
       "alwaysLoadImages": "Always load external images",
       "gravatarInMail": "Show sender photos (Gravatar)",
-      "gravatarInMailHint": "Loads profile photos from gravatar.com for senders who have one",
+      "gravatarInMailHint": "Photos are loaded from gravatar.com using a hash of the sender's address.",
       "darkModeEmails": "Dark mode for email content",
       "darkModeEmailsHint": "Inverts colors of HTML emails in dark theme for comfortable reading"
     },

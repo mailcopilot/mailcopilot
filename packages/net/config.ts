@@ -1259,7 +1259,7 @@ export const settingsSchema = z.object({
   hotkeysPreset: z.enum(['gmail', 'outlook']).default('gmail'),
   sendDelaySeconds: z.number().int().min(0).max(60).default(0),
   alwaysLoadImages: z.boolean().default(false),
-  gravatarInMail: z.boolean().default(true),
+  gravatarInMail: z.boolean().default(false),
   groupConversations: z.boolean().default(true),
   sortMode: z.enum(['date', 'from', 'subject']).default('date'),
   autoAdvance: z.enum(['off', 'newer', 'older', 'back_to_list']).default('older'),

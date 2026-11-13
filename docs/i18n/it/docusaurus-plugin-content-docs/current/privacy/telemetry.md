@@ -144,7 +144,7 @@ Ogni volta che invii un messaggio all'assistente IA, MailCopilot registra una vo
 | --- | --- | --- | --- | --- |
 | `send_queue.enqueued` | event | no | `scheduled`, `send_and_archive`, `has_attachments`, `body_size_bucket` | Messaggio in uscita aggiunto a `send_queue` (immediato o pianificato). |
 | `send_queue.sent` | histogram | no | `scheduled` | Tempo dall'inserimento in coda alla consegna SMTP riuscita (value_ms). |
-| `send_queue.failed` | event | no | `failure_kind` | Tentativo di invio SMTP fallito in modo permanente (la coda si arrende). |
+| `send_queue.failed` | event | no | `failure_kind` | Tentativo di invio SMTP fallito in modo permanente (la coda si arrende), oppure messaggio rimasto a metà invio per una chiusura o un arresto anomalo dell'app e segnato come fallito al successivo avvio (in questo caso `failure_kind` è `unknown`). |
 | `send_queue.retried` | event | no | `attempt_number` | Errore di invio SMTP transitorio: messaggio rischedulato. |
 | `send_queue.append_failed` | event | no | `reason`, `provider_id` | La consegna SMTP è riuscita, ma il salvataggio di una copia del messaggio nella cartella Inviata via IMAP è fallito. Vedi la diagnostica della copia inviata descritta sopra in «Cosa inviamo». |
 

@@ -10,4 +10,4 @@ Además de comunicarse con los servidores de correo que usted configure, MailCop
 
 3. Asistente de IA. Opcional. Las solicitudes van solo al proveedor que usted configure, con su propia clave.
 
-4. Fotos de remitentes. De forma predeterminada, las fotos de los remitentes se cargan desde Gravatar: un hash de la dirección del remitente y su dirección IP llegan a Gravatar. Puede desactivarlo en Ajustes.
+4. Fotos de remitentes. Desactivadas en las instalaciones nuevas. Una instalación actualizada desde una versión anterior a 1.27.2 conserva su ajuste guardado, que en la mayoría de las instalaciones es activado. Si están activadas, el hash SHA-256 de la dirección de cada remitente y su dirección IP llegan a Gravatar; sus propias direcciones se omiten. Puede desactivarlas en Ajustes > Productividad.

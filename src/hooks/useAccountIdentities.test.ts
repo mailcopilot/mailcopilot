@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import { useAccountIdentities } from './useAccountIdentities'
+import { useAccountIdentities, collectOwnAddresses } from './useAccountIdentities'
 import type { AccountMeta } from '../../packages/types'
 
 function makeMeta(overrides: Partial<AccountMeta> = {}): AccountMeta {
@@ -97,5 +97,26 @@ describe('useAccountIdentities', () => {
     })
     const { result } = renderHook(() => useAccountIdentities(meta))
     expect(result.current).not.toContain('')
+  })
+})
+
+describe('collectOwnAddresses', () => {
+  it('collects identities, From and logins of every account, normalized', () => {
+    const a = makeMeta()
+    const b = makeMeta({
+      id: 2,
+      email: ' Alias@Example.org ',
+      imap: { host: 'i', port: 993, secure: true, user: 'login@example.org' },
+      smtp: { host: 's', port: 587, secure: false, user: 'login@example.org' },
+      identities: [{ id: 'x', displayName: 'B', email: 'Work@Example.org', isDefault: true }],
+    })
+    const set = collectOwnAddresses([a, b])
+    expect([...set].sort()).toEqual([
+      'alias@example.org', 'login@example.org', 'user@example.com', 'work@example.org',
+    ])
+  })
+
+  it('is empty for no accounts', () => {
+    expect(collectOwnAddresses([]).size).toBe(0)
   })
 })

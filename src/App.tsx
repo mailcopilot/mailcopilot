@@ -77,7 +77,7 @@ import { useRefreshFolderCounts } from './hooks/useRefreshFolderCounts'
 import { useKeyedDebounce } from './hooks/useKeyedDebounce'
 import { useSidebarCompactMode } from './hooks/useSidebarCompactMode'
 import { useMailIframeDoc } from './hooks/useMailIframeDoc'
-import { useAccountIdentities } from './hooks/useAccountIdentities'
+import { useAccountIdentities, collectOwnAddresses } from './hooks/useAccountIdentities'
 import { useShowFullMessage } from './hooks/useShowFullMessage'
 import { startColdStartSpan } from './utils/ipcSingleFlight'
 import { prettyFolderName } from './utils/folderDisplay'
@@ -255,7 +255,7 @@ export default function App() {
   )
   const [darkModeEmails, setDarkModeEmails] = useState(true)
   const [alwaysLoadImages, setAlwaysLoadImages] = useState(false)
-  const [gravatarInMail, setGravatarInMail] = useState(true)
+  const [gravatarInMail, setGravatarInMail] = useState(false)
   const [showExternalImages, setShowExternalImages] = useState(false)
   const [q, setQ] = useState('')
   const [searchScope, setSearchScope] = useState<'folder' | 'account' | 'all'>('account')
@@ -538,6 +538,7 @@ export default function App() {
     [active, accountsById],
   )
   const accountIdentities = useAccountIdentities(activeAccountMeta)
+  const ownAddresses = useMemo(() => collectOwnAddresses(accounts), [accounts])
 
   const maybeRecoverAuthIssue = useCallback(async (accountId: number, errorRaw: unknown): Promise<boolean> => {
     const account = accountsById.get(accountId)
@@ -916,7 +917,7 @@ export default function App() {
       if (Array.isArray(s.hiddenUnreadFolders)) setHiddenUnreadFolders(s.hiddenUnreadFolders as string[])
       setDarkModeEmails(Boolean(s.darkModeEmails ?? true))
       setAlwaysLoadImages(Boolean(s.alwaysLoadImages ?? false))
-      setGravatarInMail(Boolean(s.gravatarInMail ?? true))
+      setGravatarInMail(Boolean(s.gravatarInMail ?? false))
       setHotkeysPreset(s.hotkeysPreset === 'outlook' ? 'outlook' : 'gmail')
       setGroupConversations(Boolean(s.groupConversations ?? true))
       if (s.sortMode === 'date' || s.sortMode === 'from' || s.sortMode === 'subject') setSortMode(s.sortMode)
@@ -4986,6 +4987,7 @@ export default function App() {
                     from={m.from}
                     fromAddr={m.fromAddr}
                     gravatarEnabled={gravatarInMail}
+                    ownAddresses={ownAddresses}
                     title={m.fromAddr ? t('mail.filters.fromTooltip', { from: m.from || m.fromAddr }) : undefined}
                     onClick={(e) => {
                       if (!m.fromAddr) return
@@ -5228,6 +5230,7 @@ export default function App() {
                   activeKey={active ? mailKey(active) : null}
                   onCardOpen={item => { void openMail(item) }}
                   gravatarEnabled={gravatarInMail}
+                  ownAddresses={ownAddresses}
                   summaryEnabled={isAiFeatureEnabledForAccount(aiThreadSummaryEnabled, active?.accountId ?? activeThread.lead?.accountId)}
                   instantReplyEnabled={isAiFeatureEnabledForAccount(aiInstantReplyEnabled, active?.accountId ?? activeThread.lead?.accountId)}
                   onInstantReplyPick={(ref, draft) => { void instantReplyPick(ref, draft) }}

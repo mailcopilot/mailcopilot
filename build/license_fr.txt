@@ -10,4 +10,4 @@ Outre la communication avec les serveurs de messagerie que vous avez configurés
 
 3. Assistant IA. Facultatif. Les requêtes vont uniquement au fournisseur que vous avez configuré, avec votre propre clé.
 
-4. Photos des expéditeurs. Par défaut, les photos des expéditeurs sont chargées depuis Gravatar : une empreinte de l'adresse de l'expéditeur et votre adresse IP sont transmises à Gravatar. Vous pouvez le désactiver dans les paramètres.
+4. Photos des expéditeurs. Désactivées sur les nouvelles installations. Une installation mise à jour depuis une version antérieure à 1.27.2 conserve son réglage enregistré, activé pour la plupart des installations. Lorsqu'elles sont activées, le hachage SHA-256 de l'adresse de chaque expéditeur et votre adresse IP sont transmis à Gravatar ; vos propres adresses sont ignorées. Vous pouvez les désactiver dans Paramètres > Productivité.

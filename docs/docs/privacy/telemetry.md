@@ -144,7 +144,7 @@ Each time you send a message to the AI assistant, MailCopilot records one struct
 | --- | --- | --- | --- | --- |
 | `send_queue.enqueued` | event | no | `scheduled`, `send_and_archive`, `has_attachments`, `body_size_bucket` | Outgoing message added to send_queue (immediate or scheduled). |
 | `send_queue.sent` | histogram | no | `scheduled` | Time from enqueue to successful SMTP delivery (value_ms). |
-| `send_queue.failed` | event | no | `failure_kind` | SMTP attempt failed permanently (queue gave up). |
+| `send_queue.failed` | event | no | `failure_kind` | SMTP attempt failed permanently (queue gave up), or a message left in the middle of sending by a quit or crash was marked failed on the next start (`failure_kind` is `unknown` for that case). |
 | `send_queue.retried` | event | no | `attempt_number` | Transient SMTP error — message rescheduled. |
 | `send_queue.append_failed` | event | no | `reason`, `provider_id` | SMTP delivery succeeded but saving a copy of the message into the Sent folder over IMAP failed. See the sent-copy diagnostics described above under "What we send". |
 

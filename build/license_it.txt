@@ -10,4 +10,4 @@ Oltre a comunicare con i server di posta che hai configurato, MailCopilot contat
 
 3. Assistente IA. Facoltativo. Le richieste vanno solo al provider che hai configurato, con la tua chiave.
 
-4. Foto dei mittenti. Per impostazione predefinita le foto dei mittenti vengono caricate da Gravatar: un hash dell'indirizzo del mittente e il tuo indirizzo IP arrivano a Gravatar. Puoi disattivarlo nelle impostazioni.
+4. Foto dei mittenti. Disattivate sulle nuove installazioni. Un'installazione aggiornata da una versione precedente alla 1.27.2 mantiene l'impostazione salvata, che per la maggior parte delle installazioni è attiva. Quando sono attive, l'hash SHA-256 dell'indirizzo di ogni mittente e il tuo indirizzo IP arrivano a Gravatar; i tuoi indirizzi vengono saltati. Puoi disattivarle in Impostazioni > Produttività.

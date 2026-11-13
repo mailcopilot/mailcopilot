@@ -45,9 +45,9 @@ Besonders nuetzlich in Kombination mit [Senden und archivieren](../usage/composi
 
 ## Absenderfotos (Gravatar)
 
-Wenn aktiviert (Standard), zeigt MailCopilot Profilfotos neben den Absendernamen in der Nachrichtenliste an. Fotos werden von [Gravatar](https://gravatar.com) geladen. Hat ein Absender kein Gravatar-Profil, wird stattdessen ein farbiger Kreis mit Initialen angezeigt.
+Wenn aktiviert, zeigt MailCopilot Profilfotos neben den Absendernamen in der Nachrichtenliste an. Auf neuen Installationen ist die Option aus. Eine von einer Version vor 1.27.2 aktualisierte Installation behält die gespeicherte Einstellung, die bei den meisten Installationen an ist. Sie können sie unter Einstellungen > Produktivität ändern. Die Fotos werden von [Gravatar](https://gravatar.com) geladen, einem kostenlosen Dienst, der einer E-Mail-Adresse ein Avatarbild zuordnet. Für jeden Absender sendet MailCopilot den SHA-256-Hash seiner Adresse an Gravatar, und Gravatar sieht auch Ihre IP-Adresse. Hat ein Absender kein Gravatar-Profil, wird stattdessen ein farbiger Kreis mit Initialen angezeigt. Einzelheiten stehen auf der Seite [Absenderfotos (Gravatar)](../privacy/sender-photos.md).
 
-Deaktivieren Sie diese Option, wenn Sie nur Initialen-Avatare bevorzugen oder Netzwerkanfragen beim Durchsuchen Ihres Posteingangs vermeiden moechten.
+Lassen Sie die Option aus, wenn Initialen genügen oder Sie externe Netzwerkanfragen beim Durchsehen des Posteingangs vermeiden möchten.
 
 ## Dunkelmodus für E-Mail-Inhalte
 

@@ -10,4 +10,4 @@ Neben der Kommunikation mit den von Ihnen eingerichteten Mailservern kontaktiert
 
 3. KI-Assistent. Optional. Anfragen gehen nur an den von Ihnen eingerichteten Anbieter, mit Ihrem eigenen Schlüssel.
 
-4. Absenderfotos. Standardmäßig werden Absenderfotos von Gravatar geladen: Ein Hash der Absenderadresse und Ihre IP-Adresse gehen an Gravatar. Sie können das in den Einstellungen ausschalten.
+4. Absenderfotos. Auf neuen Installationen aus. Eine von einer Version vor 1.27.2 aktualisierte Installation behält ihre gespeicherte Einstellung, die bei den meisten Installationen an ist. Wenn aktiviert, gehen der SHA-256-Hash der Adresse jedes Absenders und Ihre IP-Adresse an Gravatar; Ihre eigenen Adressen werden übersprungen. Ausschalten unter Einstellungen > Produktivität.

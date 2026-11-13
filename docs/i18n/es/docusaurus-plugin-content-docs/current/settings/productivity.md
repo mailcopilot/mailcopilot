@@ -45,9 +45,9 @@ Funciona especialmente bien con [Enviar y archivar](../usage/composing-emails#se
 
 ## Fotos de remitentes (Gravatar)
 
-Cuando esta habilitado (por defecto), MailCopilot muestra fotos de perfil junto a los nombres de los remitentes en la lista de mensajes. Las fotos se cargan desde [Gravatar](https://gravatar.com). Si un remitente no tiene perfil de Gravatar, se muestra un circulo de color con sus iniciales.
+Cuando está activada, MailCopilot muestra fotos de perfil junto a los nombres de los remitentes en la lista de mensajes. En las instalaciones nuevas la opción está desactivada. Una instalación actualizada desde una versión anterior a 1.27.2 conserva el ajuste que tenía guardado, que en la mayoría de las instalaciones es activado. Puedes cambiarlo en Ajustes > Productividad. Las fotos se cargan desde [Gravatar](https://gravatar.com), un servicio gratuito que asocia un avatar a una dirección de correo. Por cada remitente, MailCopilot envía a Gravatar el hash SHA-256 de su dirección, y Gravatar también ve tu dirección IP. Si un remitente no tiene perfil de Gravatar, se muestra un círculo de color con sus iniciales. Los detalles están en la página [Fotos de remitentes (Gravatar)](../privacy/sender-photos.md).
 
-Desactive esta opcion si prefiere avatares solo con iniciales o si desea evitar solicitudes de red al navegar por su bandeja de entrada.
+Deja la opción desactivada si te bastan las iniciales o quieres evitar solicitudes de red externas al ver tu bandeja de entrada.
 
 ## Modo oscuro para el contenido de correos
 

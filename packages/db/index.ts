@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS send_queue(
   last_error TEXT,
   attempt_count INTEGER DEFAULT 0,
   archive_ref TEXT,
+  message_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -1351,6 +1352,12 @@ db.exec(`
 if (!hasColumn('send_queue', 'archive_ref')) {
   db.exec(`ALTER TABLE send_queue ADD COLUMN archive_ref TEXT`)
 }
+// Migration: the Message-ID minted once per queued message, so every attempt
+// (and a manual resend) carries the same one. NULL on rows queued before the
+// column existed; the queue fills it on first use (ensureSendQueueMessageId).
+if (!hasColumn('send_queue', 'message_id')) {
+  db.exec(`ALTER TABLE send_queue ADD COLUMN message_id TEXT`)
+}
 
 if (!hasColumn('folder_prefs', 'visible')) {
   db.exec(`ALTER TABLE folder_prefs ADD COLUMN visible INTEGER NOT NULL DEFAULT 1`)
@@ -1503,6 +1510,7 @@ let hadFts =
 // with messages_fts column list above): subject, from_addr, from_name,
 // to_addr, body_text, attachment_filenames.
 const FTS_UPDATE_TRIGGER_COLUMNS = 'subject, from_addr, from_name, to_addr, body_text, attachment_filenames'
+let ftsSwapNeeded = false
 if (hadFts) {
   try {
     const cols = db.prepare(`PRAGMA table_info(messages_fts)`).all() as Array<{ name?: unknown }>
@@ -1510,28 +1518,9 @@ if (hadFts) {
     const required = ['subject', 'from_addr', 'from_name', 'to_addr', 'body_text', 'attachment_filenames']
     const ok = required.every(n => names.has(n))
     if (!ok) {
-      // Atomic DROP+CREATE: wrap in transaction so a crash mid-migration won't leave
-      // the FTS table dropped but not recreated.
-      db.exec(`BEGIN;
-        DROP TRIGGER IF EXISTS messages_ai;
-        DROP TRIGGER IF EXISTS messages_ad;
-        DROP TRIGGER IF EXISTS messages_au;
-        DROP TABLE IF EXISTS messages_fts;
-
-        CREATE VIRTUAL TABLE messages_fts
-        USING fts5(subject, from_addr, from_name, to_addr, body_text, attachment_filenames, content='messages', content_rowid='id', tokenize='unicode61');
-
-        CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
-          INSERT INTO messages_fts(rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES (new.id, new.subject, new.from_addr, new.from_name, new.to_addr, new.body_text, new.attachment_filenames);
-        END;
-        CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
-          INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES ('delete', old.id, old.subject, old.from_addr, old.from_name, old.to_addr, old.body_text, old.attachment_filenames);
-        END;
-        CREATE TRIGGER messages_au AFTER UPDATE OF ${FTS_UPDATE_TRIGGER_COLUMNS} ON messages BEGIN
-          INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES ('delete', old.id, old.subject, old.from_addr, old.from_name, old.to_addr, old.body_text, old.attachment_filenames);
-          INSERT INTO messages_fts(rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES (new.id, new.subject, new.from_addr, new.from_name, new.to_addr, new.body_text, new.attachment_filenames);
-        END;
-      COMMIT;`)
+      // The swap (drop the old table and triggers, create the new ones) runs
+      // below in ONE transaction with the rebuild, see FTS_REBUILD.
+      ftsSwapNeeded = true
       hadFts = false
     }
   } catch {
@@ -1563,13 +1552,14 @@ try {
       const sql = triggerSqlRow?.sql || ''
       const hasOfClause = /AFTER\s+UPDATE\s+OF\s+/i.test(sql)
       if (sql && !hasOfClause) {
-        db.exec(`BEGIN;
+        // db.transaction, not BEGIN ... COMMIT in exec: see FTS_REBUILD below.
+        db.transaction(() => db.exec(`
           DROP TRIGGER messages_au;
           CREATE TRIGGER messages_au AFTER UPDATE OF ${FTS_UPDATE_TRIGGER_COLUMNS} ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES ('delete', old.id, old.subject, old.from_addr, old.from_name, old.to_addr, old.body_text, old.attachment_filenames);
             INSERT INTO messages_fts(rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES (new.id, new.subject, new.from_addr, new.from_name, new.to_addr, new.body_text, new.attachment_filenames);
           END;
-        COMMIT;`)
+        `))()
       }
     } catch {
       // Trigger introspection / migration failed — fall through and rely on
@@ -1580,7 +1570,7 @@ try {
     }
   }
 
-  db.exec(`
+  const ftsSchemaSql = `
 		CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
 		USING fts5(subject, from_addr, from_name, to_addr, body_text, attachment_filenames, content='messages', content_rowid='id', tokenize='unicode61');
 
@@ -1594,40 +1584,51 @@ try {
 		  INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES ('delete', old.id, old.subject, old.from_addr, old.from_name, old.to_addr, old.body_text, old.attachment_filenames);
 		  INSERT INTO messages_fts(rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames) VALUES (new.id, new.subject, new.from_addr, new.from_name, new.to_addr, new.body_text, new.attachment_filenames);
 		END;
-	`)
+	`
 
-  // If FTS was just created — rebuild the index from existing rows.
-  ftsEnabled = true
-  if (!hadFts) {
-    try {
-      // §2.15-ter (codex iteration 5 HIGH 2): the bare 'rebuild' command
-      // repopulates messages_fts from EVERY row in `messages`, including
-      // folders with folder_prefs.index_in_search=0 (Spam/Junk/Trash that
-      // the user excluded from search). After a schema migration or fresh
-      // FTS table creation, this would silently re-index excluded folders
-      // and violate the per-folder gate invariant. We follow up with a
-      // targeted DELETE to remove rows for excluded folders before any
-      // search query can hit the FTS index. Both statements run in a
-      // transaction so a partial failure cannot leave the index in a
-      // half-rebuilt state where excluded folders remain searchable.
-      db.transaction(() => {
-        db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`)
-        db.exec(
-          `INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames)
-           SELECT 'delete', m.id, m.subject, m.from_addr, m.from_name, m.to_addr, m.body_text, m.attachment_filenames
-           FROM messages m
-           JOIN folder_prefs fp
-             ON fp.account_id = m.account_id AND fp.folder_path = m.folder_path
-           WHERE fp.index_in_search = 0`
-        )
-      })()
-    } catch {
-      // Theoretically rebuild may fail on some SQLite builds/configurations.
-      // In that case we continue and fall back to LIKE when needed.
-    }
+  if (hadFts) {
+    db.exec(ftsSchemaSql)
+  } else {
+    // FTS_REBUILD: a new or swapped FTS table is created, filled and pruned in
+    // ONE transaction. The table and the rebuild used to commit separately, so
+    // a quit or a failed rebuild in between left a correctly shaped but EMPTY
+    // index; the next start saw a table with the right columns, never rebuilt
+    // it, and MATCH found nothing (no LIKE fallback, ftsEnabled was true). Now
+    // a failure rolls everything back (the old table and triggers stay), FTS
+    // stays off for this session (LIKE), and the next start runs it again.
+    // db.transaction rolls back on a throw; a hand-written BEGIN ... COMMIT in
+    // exec inside a catch once left the transaction open for the session.
+    //
+    // §2.15-ter (codex iteration 5 HIGH 2): the bare 'rebuild' command
+    // repopulates messages_fts from EVERY row in `messages`, including
+    // folders with folder_prefs.index_in_search=0 (Spam/Junk/Trash that
+    // the user excluded from search). The targeted DELETE right after it
+    // removes rows for excluded folders before any search can hit the index.
+    db.transaction(() => {
+      if (ftsSwapNeeded) {
+        db.exec(`
+          DROP TRIGGER IF EXISTS messages_ai;
+          DROP TRIGGER IF EXISTS messages_ad;
+          DROP TRIGGER IF EXISTS messages_au;
+          DROP TABLE IF EXISTS messages_fts;
+        `)
+      }
+      db.exec(ftsSchemaSql)
+      db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`)
+      db.exec(
+        `INSERT INTO messages_fts(messages_fts, rowid, subject, from_addr, from_name, to_addr, body_text, attachment_filenames)
+         SELECT 'delete', m.id, m.subject, m.from_addr, m.from_name, m.to_addr, m.body_text, m.attachment_filenames
+         FROM messages m
+         JOIN folder_prefs fp
+           ON fp.account_id = m.account_id AND fp.folder_path = m.folder_path
+         WHERE fp.index_in_search = 0`
+      )
+    })()
   }
+  ftsEnabled = true
 } catch {
-  // If FTS5 is not available in this SQLite build — continue without FTS (fallback to LIKE).
+  // FTS5 unavailable in this SQLite build, or FTS_REBUILD failed and rolled
+  // back: continue without FTS (fallback to LIKE).
   ftsEnabled = hadFts
 }
 
@@ -5075,6 +5076,8 @@ export type SendQueueRow = {
   createdAt: string
   updatedAt: string
   archiveRef: ArchiveRef | null
+  /** Message-ID header sent on every attempt; null only on rows queued before it was stored. */
+  messageId: string | null
 }
 
 type RawSendQueueRow = {
@@ -5088,6 +5091,7 @@ type RawSendQueueRow = {
   createdAt: string
   updatedAt: string
   archive_ref: string | null
+  message_id: string | null
 }
 
 function mapSendQueueRow(row: RawSendQueueRow): SendQueueRow {
@@ -5114,6 +5118,7 @@ function mapSendQueueRow(row: RawSendQueueRow): SendQueueRow {
     lastError: row.lastError,
     attemptCount: row.attemptCount,
     archiveRef,
+    messageId: row.message_id ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -5137,14 +5142,25 @@ export function enqueueSendQueue(
   sendAtIso: string,
   id?: string,
   archiveRef?: ArchiveRef | null,
+  messageId?: string | null,
 ): string {
   const now = queueNowIso()
   const queueId = (id || '').trim() || queueRandomId()
   db.prepare(`
-    INSERT INTO send_queue(id, account_id, message_data, send_at, status, last_error, attempt_count, archive_ref, created_at, updated_at)
-    VALUES(?, ?, ?, ?, 'queued', NULL, 0, ?, ?, ?)
-  `).run(queueId, accountId, JSON.stringify(messageData ?? {}), sendAtIso, archiveRef ? JSON.stringify(archiveRef) : null, now, now)
+    INSERT INTO send_queue(id, account_id, message_data, send_at, status, last_error, attempt_count, archive_ref, message_id, created_at, updated_at)
+    VALUES(?, ?, ?, ?, 'queued', NULL, 0, ?, ?, ?, ?)
+  `).run(queueId, accountId, JSON.stringify(messageData ?? {}), sendAtIso, archiveRef ? JSON.stringify(archiveRef) : null, messageId || null, now, now)
   return queueId
+}
+
+/**
+ * The row's Message-ID, storing `candidate` first if the row has none (rows
+ * queued before the column existed). Returns null when the row is gone.
+ */
+export function ensureSendQueueMessageId(id: string, candidate: string): string | null {
+  db.prepare(`UPDATE send_queue SET message_id=? WHERE id=? AND message_id IS NULL`).run(candidate, id)
+  const row = db.prepare(`SELECT message_id FROM send_queue WHERE id=?`).get(id) as { message_id: string | null } | undefined
+  return row?.message_id ?? null
 }
 
 export function getSendQueueById(id: string): SendQueueRow | undefined {
@@ -5158,6 +5174,7 @@ export function getSendQueueById(id: string): SendQueueRow | undefined {
       last_error as lastError,
       attempt_count as attemptCount,
       archive_ref,
+      message_id,
       created_at as createdAt,
       updated_at as updatedAt
     FROM send_queue
@@ -5197,6 +5214,7 @@ export function listSendQueue(opts?: { accountId?: number; statuses?: SendQueueS
       last_error as lastError,
       attempt_count as attemptCount,
       archive_ref,
+      message_id,
       created_at as createdAt,
       updated_at as updatedAt
     FROM send_queue
@@ -5208,15 +5226,43 @@ export function listSendQueue(opts?: { accountId?: number; statuses?: SendQueueS
   return rows.map(mapSendQueueRow)
 }
 
+/**
+ * Moves rows left in `sending` to `failed` with `errorText` and returns them.
+ *
+ * A row in `sending` that no live attempt owns was abandoned by a quit or a
+ * crash mid-send: the server may already have accepted the message, so the
+ * outcome is unknown and the row is never put back to `queued` (that resent it
+ * automatically). The user can still send it again by hand. `olderThanIso`
+ * limits the move to rows claimed before that time. The caller decides which
+ * rows no live attempt owns; see electron/services/sendQueueRecovery.ts.
+ */
+export function failAbandonedSendQueue(errorText: string, olderThanIso?: string): SendQueueRow[] {
+  const now = queueNowIso()
+  const err = (errorText || '').slice(0, 4000)
+  const rows = db.prepare(`
+    UPDATE send_queue
+    SET status='failed',
+        last_error=?,
+        updated_at=?
+    WHERE status='sending' AND (? IS NULL OR updated_at < ?)
+    RETURNING
+      id,
+      account_id as accountId,
+      message_data,
+      send_at as sendAt,
+      status,
+      last_error as lastError,
+      attempt_count as attemptCount,
+      archive_ref,
+      message_id,
+      created_at as createdAt,
+      updated_at as updatedAt
+  `).all(err, now, olderThanIso ?? null, olderThanIso ?? null) as RawSendQueueRow[]
+  return rows.map(mapSendQueueRow)
+}
+
 export function listDueSendQueue(nowIso = queueNowIso(), limit = 20): SendQueueRow[] {
   const lim = Math.max(1, Math.min(500, Math.floor(limit)))
-  // Recover stuck items: if status='sending' for >2 minutes, reset to 'queued' for retry.
-  // This handles crashes or timeouts during send.
-  const stuckCutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString()
-  db.prepare(`
-    UPDATE send_queue SET status='queued', updated_at=?
-    WHERE status='sending' AND updated_at < ?
-  `).run(nowIso, stuckCutoff)
   const rows = db.prepare(`
     SELECT
       id,
@@ -5227,6 +5273,7 @@ export function listDueSendQueue(nowIso = queueNowIso(), limit = 20): SendQueueR
       last_error as lastError,
       attempt_count as attemptCount,
       archive_ref,
+      message_id,
       created_at as createdAt,
       updated_at as updatedAt
     FROM send_queue

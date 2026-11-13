@@ -33,9 +33,9 @@ By default, external images in emails are blocked for privacy. Enable this optio
 
 ## Sender Photos (Gravatar)
 
-When enabled (the default), MailCopilot shows profile photos next to sender names in the message list. Photos are loaded from [Gravatar](https://gravatar.com) — a free service that links an avatar to an email address. If a sender does not have a Gravatar profile, a colored circle with their initials is displayed instead.
+When enabled, MailCopilot shows profile photos next to sender names in the message list. The option is off on new installs. An installation updated from a version before 1.27.2 keeps the setting it had saved, which for most installs is on. You can change it in Settings > Productivity. Photos come from [Gravatar](https://gravatar.com), a free service that links an avatar to an email address. For each sender, MailCopilot sends Gravatar the SHA-256 hash of the sender's address, and Gravatar also sees your IP address. If a sender has no Gravatar profile, a colored circle with their initials is displayed instead. Details are on the [Sender Photos (Gravatar)](../privacy/sender-photos.md) page.
 
-Disable this option if you prefer initials-only avatars or want to avoid external network requests when browsing your inbox.
+Leave this option off if you prefer initials-only avatars or want to avoid external network requests when browsing your inbox.
 
 ## Dark Mode for Email Content
 

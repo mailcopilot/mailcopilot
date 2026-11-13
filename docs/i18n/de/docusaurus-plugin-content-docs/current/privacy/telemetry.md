@@ -144,7 +144,7 @@ Jedes Mal, wenn Sie dem KI-Assistenten eine Nachricht senden, zeichnet MailCopil
 | --- | --- | --- | --- | --- |
 | `send_queue.enqueued` | event | nein | `scheduled`, `send_and_archive`, `has_attachments`, `body_size_bucket` | Ausgehende Nachricht zu `send_queue` hinzugefügt (sofort oder geplant). |
 | `send_queue.sent` | histogram | nein | `scheduled` | Zeit von der Einreihung bis zur erfolgreichen SMTP-Zustellung (value_ms). |
-| `send_queue.failed` | event | nein | `failure_kind` | SMTP-Sendeversuch endgültig fehlgeschlagen (Warteschlange hat aufgegeben). |
+| `send_queue.failed` | event | nein | `failure_kind` | SMTP-Sendeversuch endgültig fehlgeschlagen (Warteschlange hat aufgegeben), oder eine Nachricht, die beim Beenden oder Absturz mitten im Senden stand, wurde beim nächsten Start als fehlgeschlagen markiert (`failure_kind` ist dann `unknown`). |
 | `send_queue.retried` | event | nein | `attempt_number` | Vorübergehender SMTP-Sendefehler -- Nachricht neu eingeplant. |
 | `send_queue.append_failed` | event | nein | `reason`, `provider_id` | Die SMTP-Zustellung war erfolgreich, aber das Speichern einer Kopie der Nachricht im Gesendet-Ordner über IMAP ist fehlgeschlagen. Siehe die oben unter „Was wir senden" beschriebene Sent-Kopie-Diagnose. |
 

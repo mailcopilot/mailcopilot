@@ -144,7 +144,7 @@ Chaque fois que vous envoyez un message à l'assistant IA, MailCopilot enregistr
 | --- | --- | --- | --- | --- |
 | `send_queue.enqueued` | event | non | `scheduled`, `send_and_archive`, `has_attachments`, `body_size_bucket` | Message sortant ajouté à `send_queue` (immédiat ou planifié). |
 | `send_queue.sent` | histogram | non | `scheduled` | Temps entre l'ajout en file et la livraison SMTP réussie (value_ms). |
-| `send_queue.failed` | event | non | `failure_kind` | Tentative d'envoi SMTP définitivement échouée (la file a abandonné). |
+| `send_queue.failed` | event | non | `failure_kind` | Tentative d'envoi SMTP définitivement échouée (la file a abandonné), ou message resté en cours d'envoi après une fermeture de l'application ou un plantage, marqué comme échoué au démarrage suivant (`failure_kind` vaut `unknown` dans ce cas). |
 | `send_queue.retried` | event | non | `attempt_number` | Erreur d'envoi SMTP transitoire -- message reprogrammé. |
 | `send_queue.append_failed` | event | non | `reason`, `provider_id` | La livraison SMTP a réussi, mais l'enregistrement d'une copie du message dans le dossier Envoyés via IMAP a échoué. Voir le diagnostic de la copie envoyée décrit plus haut sous « Ce que nous envoyons ». |
 

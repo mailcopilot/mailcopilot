@@ -67,6 +67,7 @@ export default function AccountAvatar({ account, size = 36, unread, connStatus, 
         <img
           src={gravatarUrl}
           alt=""
+          referrerPolicy="no-referrer"
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           onError={() => { setGravatarFailed(true); onGravatarFailed?.() }}
         />

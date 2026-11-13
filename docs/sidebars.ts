@@ -44,6 +44,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'privacy/ai-data',
         'privacy/telemetry',
+        'privacy/sender-photos',
       ],
     },
     {

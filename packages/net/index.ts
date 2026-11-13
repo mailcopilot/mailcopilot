@@ -37,7 +37,7 @@ export {
 // work in `withImapPriority`; every net call underneath inherits it.
 export { withImapPriority, currentImapPriority } from './imapScheduler'
 export type { ImapPoolRequester } from './imapScheduler'
-export { testSmtpConnection, sendMail, buildRawMessage, classifySmtpError, finalSendFailureText, SMTP_RETRY_DELAYS_MS } from './smtp'
+export { testSmtpConnection, sendMail, buildRawMessage, classifySmtpError, finalSendFailureText, mintMessageId, SMTP_RETRY_DELAYS_MS } from './smtp'
 export {
   listAccounts,
   getAccountMeta,

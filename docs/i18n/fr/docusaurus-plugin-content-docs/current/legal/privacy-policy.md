@@ -50,7 +50,7 @@ Lorsque vous connectez votre compte, l'Application télécharge et met en cache 
 
 ### 2.6 Rapports d'erreurs
 
-- Si les rapports d'erreurs Sentry sont actifs, nous collectons des **rapports de plantage anonymes** (traces de pile, version de l'application, environnement d'exploitation). **Aucune donnée personnelle** (contenu des e-mails, adresses, mots de passe ou jetons) n'est incluse dans les rapports d'erreurs (`sendDefaultPii: false`).
+- Si vous avez accepté les diagnostics, Sentry reçoit des **rapports d'erreurs** (traces de pile, version de l'application, environnement d'exploitation) ainsi que des diagnostics d'usage et de performance (compteurs, durées, résumé de session). Ils comportent un identifiant d'installation aléatoire haché, donc les rapports d'une même installation peuvent être reliés entre eux : ce sont des données pseudonymes. Ils ne contiennent ni contenu d'e-mails, ni adresses, mots de passe, jetons ou requêtes à l'IA (`sendDefaultPii: false`). Les détails figurent sur la page [Télémétrie](../privacy/telemetry.md).
 
 ## 3. Comment nous stockons vos données
 
@@ -159,8 +159,9 @@ Les jetons OAuth sont stockés localement sur votre appareil (voir Section 3). N
 Nous ne partageons **pas** vos données personnelles avec des tiers, sauf dans les circonstances limitées suivantes :
 
 - **Fournisseurs AI** — uniquement avec votre consentement explicite, comme décrit dans la Section 5.
-- **Sentry** — rapports de plantage anonymes uniquement, sans données personnelles (voir Section 2.6).
+- **Sentry** : rapports d'erreurs et diagnostics d'usage et de performance, envoyés uniquement avec votre consentement. Ils comportent un identifiant d'installation aléatoire haché et ne contiennent ni contenu de messages, ni adresses, ni requêtes (voir Section 2.6 et [Télémétrie](../privacy/telemetry.md)).
 - **Votre fournisseur de messagerie** — via les protocoles standard IMAP/SMTP pour fournir les fonctionnalités de messagerie.
+- **Gravatar** : tant que les photos des expéditeurs sont activées, MailCopilot envoie à Gravatar le hachage SHA-256 de chaque adresse d'expéditeur et votre adresse IP, comme décrit dans [Photos des expéditeurs (Gravatar)](../privacy/sender-photos.md). Pour un compte dont l'avatar est réglé sur Gravatar, il envoie le hachage de l'adresse de ce compte et votre adresse IP. L'option est désactivée sur les nouvelles installations. Une installation mise à jour depuis une version antérieure à 1.27.2 conserve le réglage enregistré, qui est activé pour la plupart des installations. Désactivez-le dans Paramètres > Productivité.
 
 Nous ne vendons, ne louons et n'échangeons pas vos données personnelles.
 

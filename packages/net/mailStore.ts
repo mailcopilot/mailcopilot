@@ -9,6 +9,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { dataDir } from '../db'
 // §2.145 — one source for every size ceiling; see packages/net/limits.ts. This
 // module deliberately imports the leaf and not `./eml`: reading a file must not
@@ -39,11 +40,27 @@ function candidatePaths(accountId: number, folder: string, uid: number): string[
   return primary === legacy ? [primary] : [primary, legacy]
 }
 
-/** Saves the original message (RFC822) to disk */
+/**
+ * Saves the original message (RFC822) to disk.
+ *
+ * The bytes go to a temp file in the same directory and are renamed into
+ * place, so `{uid}.eml` is either absent, the previous complete file, or the
+ * new complete file. The readers treat any file at that path as the cached
+ * message; a plain write cut short by a crash or a full disk left a truncated
+ * one there for good. A process killed mid-write may leave the temp file; it
+ * never matches a reader's path.
+ */
 export function saveEml(accountId: number, folder: string, uid: number, raw: Buffer): void {
   const p = emlFilePath(accountId, folder, uid)
   fs.mkdirSync(path.dirname(p), { recursive: true })
-  fs.writeFileSync(p, raw)
+  const tmp = path.join(path.dirname(p), `.${uid}.eml.${process.pid}.${randomBytes(6).toString('hex')}.tmp`)
+  try {
+    fs.writeFileSync(tmp, raw)
+    fs.renameSync(tmp, p)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch { /* ignore */ }
+    throw e
+  }
   for (const legacyPath of candidatePaths(accountId, folder, uid).slice(1)) {
     try { fs.unlinkSync(legacyPath) } catch { /* ignore */ }
   }
@@ -133,16 +150,41 @@ export function emlExists(accountId: number, folder: string, uid: number): boole
   return candidatePaths(accountId, folder, uid).some(p => fs.existsSync(p))
 }
 
-/** Deletes an EML file */
-export function deleteEml(accountId: number, folder: string, uid: number): void {
+// Name of the temp file saveEml writes before the rename: `.{uid}.eml.{pid}.{hex}.tmp`.
+const EML_TEMP_RE = /^\.(\d+)\.eml\.\d+\.[0-9a-f]+\.tmp$/
+
+/**
+ * Removes temp files a killed saveEml left for these UIDs. They hold the
+ * message body, so deleting the message must take them too. saveEml is
+ * synchronous, so no write of this process is in flight while this runs.
+ */
+function deleteOrphanTemps(accountId: number, folder: string, uids: Set<number>): void {
+  const dir = path.dirname(emlFilePath(accountId, folder, 0))
+  let names: string[]
+  try { names = fs.readdirSync(dir) } catch { return }
+  for (const name of names) {
+    const m = EML_TEMP_RE.exec(name)
+    if (!m || !uids.has(Number(m[1]))) continue
+    try { fs.unlinkSync(path.join(dir, name)) } catch { /* ignore */ }
+  }
+}
+
+function deleteEmlFiles(accountId: number, folder: string, uid: number): void {
   for (const p of candidatePaths(accountId, folder, uid)) {
     try { fs.unlinkSync(p) } catch { /* file may not exist */ }
   }
 }
 
+/** Deletes an EML file */
+export function deleteEml(accountId: number, folder: string, uid: number): void {
+  deleteEmlFiles(accountId, folder, uid)
+  deleteOrphanTemps(accountId, folder, new Set([uid]))
+}
+
 /** Deletes EML files for the specified UIDs */
 export function deleteEmls(accountId: number, folder: string, uids: number[]): void {
-  for (const uid of uids) deleteEml(accountId, folder, uid)
+  for (const uid of uids) deleteEmlFiles(accountId, folder, uid)
+  if (uids.length > 0) deleteOrphanTemps(accountId, folder, new Set(uids))
 }
 
 /** Deletes all EML files for an account */

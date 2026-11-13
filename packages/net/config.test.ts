@@ -4679,3 +4679,33 @@ describe('account ids are issued once and never reused', () => {
     expect((await saveAccount(mailbox(3))).id).toBe(3)
   })
 })
+
+describe('getSettings — gravatarInMail is off unless the user turned it on', () => {
+  beforeEach(() => {
+    storeData.clear()
+  })
+
+  it('a stored record that predates the setting reads as off', () => {
+    storeData.set('settings', { theme: 'light', cacheDays: 30 })
+    expect(getSettings().gravatarInMail).toBe(false)
+  })
+
+  it('an explicit true survives the read; an explicit false stays false', () => {
+    storeData.set('settings', { theme: 'light', cacheDays: 30, gravatarInMail: true })
+    expect(getSettings().gravatarInMail).toBe(true)
+    storeData.set('settings', { theme: 'light', cacheDays: 30, gravatarInMail: false })
+    expect(getSettings().gravatarInMail).toBe(false)
+  })
+
+  it('a save that does not mention the setting persists it as off, not as the old default', () => {
+    saveSettings({ theme: 'dark', cacheDays: 30 } as Settings)
+    expect((storeData.get('settings') as { gravatarInMail?: boolean }).gravatarInMail).toBe(false)
+    expect(getSettings().gravatarInMail).toBe(false)
+  })
+
+  it('the renderer-writable schema accepts both values and leaves a missing one missing (no default injected on save)', () => {
+    expect(rendererWritableSettingsSchema.parse({ gravatarInMail: true }).gravatarInMail).toBe(true)
+    expect(rendererWritableSettingsSchema.parse({ gravatarInMail: false }).gravatarInMail).toBe(false)
+    expect('gravatarInMail' in rendererWritableSettingsSchema.parse({})).toBe(false)
+  })
+})

@@ -237,10 +237,14 @@ const DEFAULT_TEMPERATURE = 0.2
 
 /**
  * Sampling and reasoning parameters of an interactive chat turn (which always sends tools).
- * Reasoning family: no temperature, plus the lowest documented effort where there is one. Everything else:
- * temperature 0.2, as before. (`max_tokens` is not set on this path.)
+ * Claude: nothing. Reasoning family: no temperature, plus the lowest documented effort where there is one.
+ * Everything else: temperature 0.2, as before. (`max_tokens` is not set on this path.)
  */
 export function chatRequestParams(provider: AiProvider, model: string): ChatRequestParams {
+  // Claude: no sampling parameters on any model. Sonnet 5.5 and Haiku 5.5 answer 400 to a non-default
+  // temperature/top_p/top_k, newer models have them removed, API version 2026-10-21 rejects them everywhere, and
+  // omitting them is accepted by every Claude model. (@ai-sdk/anthropic drops temperature only when thinking is on.)
+  if (provider === 'anthropic-api') return {}
   const rule = provider === 'openai-api' ? openAiReasoningRule(model) : undefined
   if (!rule) return { temperature: DEFAULT_TEMPERATURE }
   return rule.lowestEffort ? { providerOptions: { openaiCompatible: { reasoningEffort: rule.lowestEffort } } } : {}

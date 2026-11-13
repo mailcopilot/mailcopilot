@@ -23,37 +23,50 @@ import type { AccountMeta } from '../../packages/types'
  * Returns a deduplicated, normalized (trim + lowercase) list of email
  * addresses that represent the given account. Returns [] if meta is undefined.
  */
+function accountAddresses(meta: AccountMeta | undefined): string[] {
+  if (!meta) return []
+
+  const raw: string[] = []
+
+  // 2.3-A multi-identity list (always non-empty after accountMetaSchema migration)
+  if (meta.identities) {
+    for (const id of meta.identities) {
+      if (id.email) raw.push(id.email)
+    }
+  }
+
+  // Legacy top-level email field
+  if (meta.email) raw.push(meta.email)
+
+  // SMTP / IMAP login addresses (may be alias or plus-address)
+  if (meta.smtp?.user) raw.push(meta.smtp.user)
+  if (meta.imap?.user) raw.push(meta.imap.user)
+
+  // Normalize and deduplicate
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const addr of raw) {
+    const norm = addr.trim().toLowerCase()
+    if (norm && !seen.has(norm)) {
+      seen.add(norm)
+      normalized.push(norm)
+    }
+  }
+
+  return normalized
+}
+
 export function useAccountIdentities(meta: AccountMeta | undefined): string[] {
-  return useMemo(() => {
-    if (!meta) return []
+  return useMemo(() => accountAddresses(meta), [meta])
+}
 
-    const raw: string[] = []
-
-    // 2.3-A multi-identity list (always non-empty after accountMetaSchema migration)
-    if (meta.identities) {
-      for (const id of meta.identities) {
-        if (id.email) raw.push(id.email)
-      }
-    }
-
-    // Legacy top-level email field
-    if (meta.email) raw.push(meta.email)
-
-    // SMTP / IMAP login addresses (may be alias or plus-address)
-    if (meta.smtp?.user) raw.push(meta.smtp.user)
-    if (meta.imap?.user) raw.push(meta.imap.user)
-
-    // Normalize and deduplicate
-    const seen = new Set<string>()
-    const normalized: string[] = []
-    for (const addr of raw) {
-      const norm = addr.trim().toLowerCase()
-      if (norm && !seen.has(norm)) {
-        seen.add(norm)
-        normalized.push(norm)
-      }
-    }
-
-    return normalized
-  }, [meta])
+/**
+ * Every address (trimmed, lowercase) that belongs to any configured account:
+ * identities, the From address and the IMAP/SMTP logins. Used to keep the
+ * user's own addresses out of third-party lookups such as Gravatar.
+ */
+export function collectOwnAddresses(metas: readonly AccountMeta[]): ReadonlySet<string> {
+  const out = new Set<string>()
+  for (const m of metas) for (const a of accountAddresses(m)) out.add(a)
+  return out
 }

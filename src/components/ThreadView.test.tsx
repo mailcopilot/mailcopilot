@@ -116,6 +116,7 @@ function defaultProps(
     onCardOpen: vi.fn(),
     renderBody: () => React.createElement('div', { 'data-testid': 'body-slot' }, 'mail body'),
     gravatarEnabled: false,
+    ownAddresses: new Set<string>(),
     order: 'oldest-top',
     ...overrides,
   }
@@ -403,6 +404,7 @@ describe('ThreadView', () => {
       onCardOpen: vi.fn(),
       renderBody: () => null,
       gravatarEnabled: false,
+      ownAddresses: new Set<string>(),
     }
     render(React.createElement(ThreadView, props))
     const { waitFor } = await import('@testing-library/react')
@@ -424,6 +426,7 @@ describe('ThreadView', () => {
       onCardOpen: vi.fn(),
       renderBody: () => null,
       gravatarEnabled: false,
+      ownAddresses: new Set<string>(),
     }
     render(React.createElement(ThreadView, props))
     const { waitFor, act: rtlAct } = await import('@testing-library/react')

@@ -122,9 +122,9 @@ Ogni account viene visualizzato nella barra laterale con un avatar -- un cerchio
 
 ### Modalità di visualizzazione
 
-- **Lettere** -- un cerchio colorato con 1--2 caratteri (iniziali). Puoi inserire iniziali personalizzate se quelle automatiche non sono adatte.
-- **Icona** -- un cerchio colorato con un'icona dalla collezione (posta, valigetta, stella, razzo, ecc.).
-- **Gravatar** -- carica la tua foto profilo da [Gravatar](https://gravatar.com) in base al tuo indirizzo email. Se non viene trovato un Gravatar, vengono mostrate le lettere.
+- **Lettere**: un cerchio colorato con 1 o 2 caratteri (iniziali). Puoi inserire iniziali personalizzate se quelle automatiche non sono adatte.
+- **Icona**: un cerchio colorato con un'icona dalla collezione (posta, valigetta, stella, razzo, ecc.).
+- **Gravatar**: carica la tua foto profilo da [Gravatar](https://gravatar.com) in base al tuo indirizzo email. Se non viene trovato un Gravatar, vengono mostrate le lettere. In questo caso Gravatar riceve l'hash SHA-256 del tuo indirizzo e vede il tuo indirizzo IP; vedi [Foto dei mittenti (Gravatar)](../privacy/sender-photos.md).
 
 ### Cambiare il colore
 

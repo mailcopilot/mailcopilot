@@ -144,7 +144,7 @@ Cada vez que envías un mensaje al asistente de IA, MailCopilot registra una ent
 | --- | --- | --- | --- | --- |
 | `send_queue.enqueued` | event | no | `scheduled`, `send_and_archive`, `has_attachments`, `body_size_bucket` | Mensaje saliente añadido a `send_queue` (inmediato o programado). |
 | `send_queue.sent` | histogram | no | `scheduled` | Tiempo desde el encolado hasta la entrega SMTP exitosa (value_ms). |
-| `send_queue.failed` | event | no | `failure_kind` | Intento de envío SMTP fallido de forma permanente (la cola se rinde). |
+| `send_queue.failed` | event | no | `failure_kind` | Intento de envío SMTP fallido de forma permanente (la cola se rinde), o mensaje que quedó a mitad de envío por un cierre o un fallo de la aplicación y se marcó como fallido en el siguiente inicio (en ese caso `failure_kind` es `unknown`). |
 | `send_queue.retried` | event | no | `attempt_number` | Error de envío SMTP transitorio: mensaje reprogramado. |
 | `send_queue.append_failed` | event | no | `reason`, `provider_id` | La entrega SMTP tuvo éxito, pero guardar una copia del mensaje en la carpeta Enviados por IMAP falló. Consulta el diagnóstico de la copia enviada descrito arriba en «Qué enviamos». |
 

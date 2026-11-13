@@ -129,9 +129,9 @@ Each account is displayed in the sidebar with an avatar -- a colored circle with
 
 ### Display modes
 
-- **Letters** -- a colored circle with 1--2 characters (initials). You can enter custom initials if the automatic ones are not ideal (for example, when all accounts have the same display name).
-- **Icon** -- a colored circle with an icon from a preset collection (mail, briefcase, star, rocket, etc.).
-- **Gravatar** -- loads your profile picture from [Gravatar](https://gravatar.com) based on your email address. If no Gravatar is found, the avatar falls back to letters.
+- **Letters**: a colored circle with one or two characters (initials). You can enter custom initials if the automatic ones are not ideal (for example, when all accounts have the same display name).
+- **Icon**: a colored circle with an icon from a preset collection (mail, briefcase, star, rocket, etc.).
+- **Gravatar**: loads your profile picture from [Gravatar](https://gravatar.com) based on your email address. If no Gravatar is found, the avatar falls back to letters. This sends Gravatar the SHA-256 hash of your address and reveals your IP address to it; see [Sender Photos (Gravatar)](../privacy/sender-photos.md).
 
 ### Changing the color
 

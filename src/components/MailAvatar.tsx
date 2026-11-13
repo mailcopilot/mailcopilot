@@ -6,6 +6,8 @@ interface MailAvatarProps {
   from: string
   fromAddr?: string
   gravatarEnabled: boolean
+  /** Normalized addresses of the user's own accounts; no Gravatar request is made for them. */
+  ownAddresses: ReadonlySet<string>
   title?: string
   onClick?: (e: React.MouseEvent) => void
 }
@@ -14,8 +16,9 @@ interface MailAvatarProps {
 const GRAVATAR_SIZE = 72
 
 /** Sender avatar in the mail list — initials or Gravatar photo. */
-export default function MailAvatar({ from, fromAddr, gravatarEnabled, title, onClick }: MailAvatarProps) {
+export default function MailAvatar({ from, fromAddr, gravatarEnabled: gravatarSetting, ownAddresses, title, onClick }: MailAvatarProps) {
   const email = fromAddr || ''
+  const gravatarEnabled = gravatarSetting && !ownAddresses.has(email.trim().toLowerCase())
   const [, setTick] = useState(0)
 
   const onReady = useCallback(() => setTick(t => t + 1), [])
@@ -40,6 +43,7 @@ export default function MailAvatar({ from, fromAddr, gravatarEnabled, title, onC
           src={gravatarUrl}
           alt=""
           loading="lazy"
+          referrerPolicy="no-referrer"
           onError={() => {
             markGravatarNotFound(email)
             setTick(t => t + 1)

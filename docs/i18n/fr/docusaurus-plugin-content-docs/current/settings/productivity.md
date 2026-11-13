@@ -29,9 +29,9 @@ Desactive la banniere de confidentialite pour les images.
 
 ## Photos des expediteurs (Gravatar)
 
-Lorsque cette option est activee (par defaut), MailCopilot affiche les photos de profil a cote des noms des expediteurs dans la liste des messages. Les photos sont chargees depuis [Gravatar](https://gravatar.com). Si un expediteur n'a pas de profil Gravatar, un cercle colore avec ses initiales est affiche a la place.
+Lorsque cette option est activée, MailCopilot affiche les photos de profil à côté des noms des expéditeurs dans la liste des messages. Elle est désactivée sur les nouvelles installations. Une installation mise à jour depuis une version antérieure à 1.27.2 conserve le réglage enregistré, qui est activé pour la plupart des installations. Vous pouvez le modifier dans Paramètres > Productivité. Les photos sont chargées depuis [Gravatar](https://gravatar.com), un service gratuit qui associe un avatar à une adresse e-mail. Pour chaque expéditeur, MailCopilot envoie à Gravatar le hachage SHA-256 de son adresse, et Gravatar voit aussi votre adresse IP. Si un expéditeur n'a pas de profil Gravatar, un cercle coloré avec ses initiales est affiché à la place. Les détails figurent sur la page [Photos des expéditeurs (Gravatar)](../privacy/sender-photos.md).
 
-Desactivez cette option si vous preferez des avatars avec initiales uniquement ou pour eviter les requetes reseau.
+Laissez l'option désactivée si les initiales vous suffisent ou si vous voulez éviter les requêtes réseau externes en parcourant votre boîte de réception.
 
 ## Mode sombre pour le contenu des e-mails
 

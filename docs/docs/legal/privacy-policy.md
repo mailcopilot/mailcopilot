@@ -50,7 +50,7 @@ When you connect your account, the Application downloads and caches:
 
 ### 2.6 Error Reports
 
-- If Sentry error reporting is active, we collect **anonymous crash reports** (stack traces, application version, operating environment). **No personal data** (email content, addresses, passwords, or tokens) is included in error reports (`sendDefaultPii: false`).
+- If you have agreed to diagnostics, Sentry receives **error reports** (stack traces, application version, operating environment) and usage and performance diagnostics (counts, durations, a session summary). They carry a hashed random install identifier, so reports from one installation can be linked to each other; this is pseudonymous data. They contain no email content, addresses, passwords, tokens or AI prompts (`sendDefaultPii: false`). Details are in [Telemetry](../privacy/telemetry.md).
 
 ## 3. How We Store Your Data
 
@@ -159,8 +159,9 @@ OAuth tokens are stored locally on your device (see Section 3). We never transmi
 We do **not** share your personal data with any third parties, except in the following limited circumstances:
 
 - **AI providers** — only with your explicit consent, as described in Section 5.
-- **Sentry** — anonymous crash reports only, with no personal data (see Section 2.6).
+- **Sentry**: error reports and usage and performance diagnostics, sent only with your consent. They carry a hashed random install identifier and contain no message content, addresses or prompts (see Section 2.6 and [Telemetry](../privacy/telemetry.md)).
 - **Your email provider** — through standard IMAP/SMTP protocols to deliver email functionality.
+- **Gravatar**: while sender photos are turned on, MailCopilot sends Gravatar the SHA-256 hash of each sender address and your IP address, as described in [Sender Photos (Gravatar)](../privacy/sender-photos.md). For an account whose avatar is set to Gravatar, it sends the hash of that account's address and your IP address. The option is off on new installs. An installation updated from a version before 1.27.2 keeps the setting it had saved, which for most installs is on. Turn it off in Settings > Productivity.
 
 We do not sell, rent, or trade your personal data.
 

@@ -215,10 +215,22 @@ describe('OpenAI reasoning-family request rules', () => {
 
   it('everything else keeps temperature 0.2 and sends no provider options', () => {
     expect(chatRequestParams('openai-api', 'gpt-4o-mini')).toEqual({ temperature: 0.2 })
-    expect(chatRequestParams('anthropic-api', 'claude-sonnet-5-5')).toEqual({ temperature: 0.2 })
     expect(chatRequestParams('gemini-api', 'gemini-3.8-flash')).toEqual({ temperature: 0.2 })
-    // The rule is for OpenAI ids only: another provider that happens to name a model alike is untouched.
-    expect(chatRequestParams('anthropic-api', 'gpt-5-mini')).toEqual({ temperature: 0.2 })
+  })
+
+  // Anthropic's model reference: Sonnet 5.5 and Haiku 5.5 answer 400 to a non-default temperature/top_p/top_k, the
+  // Opus 5.x, Sonnet 5 and Fable 5.x models have the parameters removed, and API version 2026-10-21 rejects them on
+  // every model. Leaving them out is accepted everywhere, so the Claude chat sends no sampling parameters at all.
+  it.each([
+    'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-fable-5-2',
+    'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001', 'claude-opus-4-8', '',
+  ])('anthropic-api chat sends no sampling parameters for %s', model => {
+    expect(chatRequestParams('anthropic-api', model)).toEqual({})
+  })
+
+  it('the OpenAI reasoning rule is for OpenAI ids only: another provider naming a model alike is untouched', () => {
+    expect(chatRequestParams('anthropic-api', 'gpt-5-mini')).toEqual({})
+    expect(chatRequestParams('gemini-api', 'gpt-5-mini')).toEqual({ temperature: 0.2 })
   })
 
   it.each([

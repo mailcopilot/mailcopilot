@@ -50,7 +50,7 @@ Quando connette il Suo account, l'Applicazione scarica e memorizza in cache:
 
 ### 2.6 Segnalazioni di errori
 
-- Se la segnalazione errori tramite Sentry è attiva, raccogliamo **rapporti anonimi sugli arresti anomali** (stack trace, versione dell'applicazione, ambiente operativo). **Nessun dato personale** (contenuto delle email, indirizzi, password o token) viene incluso nelle segnalazioni di errori (`sendDefaultPii: false`).
+- Se hai accettato la diagnostica, Sentry riceve **segnalazioni di errori** (stack trace, versione dell'applicazione, ambiente operativo) e diagnostica di utilizzo e prestazioni (contatori, durate, un riepilogo della sessione). Contengono un identificatore casuale di installazione sottoposto a hash, quindi le segnalazioni di una stessa installazione possono essere collegate tra loro: sono dati pseudonimi. Non contengono contenuto delle email, indirizzi, password, token o prompt dell'IA (`sendDefaultPii: false`). I dettagli sono nella pagina [Telemetria](../privacy/telemetry.md).
 
 ## 3. Come archiviamo i Suoi dati
 
@@ -159,8 +159,9 @@ I token OAuth sono archiviati localmente sul Suo dispositivo (vedere la Sezione 
 **Non** condividiamo i Suoi dati personali con terze parti, eccetto nelle seguenti circostanze limitate:
 
 - **Provider AI** — solo con il Suo consenso esplicito, come descritto nella Sezione 5.
-- **Sentry** — solo rapporti anonimi sugli arresti anomali, senza dati personali (vedere la Sezione 2.6).
+- **Sentry**: segnalazioni di errori e diagnostica di utilizzo e prestazioni, inviate solo con il tuo consenso. Contengono un identificatore casuale di installazione sottoposto a hash e nessun contenuto dei messaggi, indirizzo o prompt (vedere la Sezione 2.6 e [Telemetria](../privacy/telemetry.md)).
 - **Il Suo provider email** — attraverso i protocolli standard IMAP/SMTP per fornire le funzionalità email.
+- **Gravatar**: finché le foto dei mittenti sono attive, MailCopilot invia a Gravatar l'hash SHA-256 di ogni indirizzo di mittente e il tuo indirizzo IP, come descritto in [Foto dei mittenti (Gravatar)](../privacy/sender-photos.md). Per un account il cui avatar è impostato su Gravatar, invia l'hash dell'indirizzo di quell'account e il tuo indirizzo IP. Sulle nuove installazioni l'opzione è disattivata. Un'installazione aggiornata da una versione precedente alla 1.27.2 mantiene l'impostazione salvata, che per la maggior parte delle installazioni è attiva. Puoi disattivarla in Impostazioni > Produttività.
 
 Non vendiamo, affittiamo o scambiamo i Suoi dati personali.
 

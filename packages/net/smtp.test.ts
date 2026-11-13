@@ -49,7 +49,7 @@ vi.mock('node:net', () => ({
 }))
 
 import nodemailer from 'nodemailer'
-import { testSmtpConnection, sendMail, buildRawMessage, resolveIpv4All, findReachableIp, classifySmtpError, SMTP_RETRY_DELAYS_MS, __testOnly } from './smtp'
+import { testSmtpConnection, sendMail, buildRawMessage, mintMessageId, resolveIpv4All, findReachableIp, classifySmtpError, SMTP_RETRY_DELAYS_MS, __testOnly } from './smtp'
 import type { SmtpConfig } from './types'
 
 const cfg: SmtpConfig = {
@@ -801,5 +801,45 @@ describe('buildRawMessage: threading headers of a reply (Sent copy, Graph MIME)'
     const str = (await buildRawMessage(base)).toString('utf8')
     expect(str).not.toMatch(/^In-Reply-To:/im)
     expect(str).not.toMatch(/^References:/im)
+  })
+})
+
+describe('Message-ID minted once per queued message', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    netConnectBehavior = 'connect'
+    mockDnsResolve4.mockResolvedValue(['1.2.3.4'])
+  })
+
+  it('mintMessageId: a random id at the domain of the sender address', () => {
+    const a = mintMessageId('alice@Example.TEST')
+    const b = mintMessageId('Alice Doe <alice@example.test>')
+    expect(a).toMatch(/^<[0-9a-f-]{36}@example\.test>$/)
+    expect(b).toMatch(/^<[0-9a-f-]{36}@example\.test>$/)
+    expect(a).not.toBe(b)
+  })
+
+  it('mintMessageId: falls back to localhost when the address has no usable domain', () => {
+    expect(mintMessageId('no-domain')).toMatch(/^<[0-9a-f-]{36}@localhost>$/)
+    expect(mintMessageId('a@bad domain')).toMatch(/@localhost>$/)
+    expect(mintMessageId('a@пример.рф')).toMatch(/@localhost>$/)
+  })
+
+  it('sendMail hands the given Message-ID to the transport on every attempt, including the IPv4 retry', async () => {
+    const preGreetingTimeout = Object.assign(new Error('Connection timeout'), { code: 'ETIMEDOUT', command: 'CONN' })
+    mockSendMail
+      .mockRejectedValueOnce(preGreetingTimeout)
+      .mockResolvedValueOnce({ messageId: '<fixed@example.test>' })
+    const result = await sendMail(cfg, { from: 'a@example.test', to: 'b@test', subject: 'x', text: 'x', messageId: '<fixed@example.test>' })
+    expect(mockSendMail).toHaveBeenCalledTimes(2)
+    for (const call of mockSendMail.mock.calls) {
+      expect((call[0] as { messageId?: string }).messageId).toBe('<fixed@example.test>')
+    }
+    expect(result.messageId).toBe('<fixed@example.test>')
+  })
+
+  it('buildRawMessage (Graph MIME, Sent copy) writes the given Message-ID header', async () => {
+    const raw = await buildRawMessage({ from: 'a@example.test', to: 'b@test', subject: 'x', text: 'x', messageId: '<fixed@example.test>' })
+    expect(raw.toString('utf8')).toMatch(/^Message-ID: <fixed@example\.test>\r?$/m)
   })
 })

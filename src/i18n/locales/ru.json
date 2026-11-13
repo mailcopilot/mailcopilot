@@ -568,7 +568,7 @@
       "avatarIconLabel": "Выбрать иконку",
       "avatarColor": "Цвет",
       "avatarPreview": "Предпросмотр",
-      "gravatarHint": "Использует фото профиля с gravatar.com для {{email}}",
+      "gravatarHint": "Фото загружается с gravatar.com по хешу адреса {{email}}.",
       "gravatarNotFound": "Gravatar не найден для {{email}}. Создайте на gravatar.com"
     },
     "sections": {
@@ -661,7 +661,7 @@
     "privacy": {
       "alwaysLoadImages": "Всегда загружать внешние изображения",
       "gravatarInMail": "Показывать фото отправителей (Gravatar)",
-      "gravatarInMailHint": "Загружает фото профиля с gravatar.com для отправителей, у которых есть аватар",
+      "gravatarInMailHint": "Фото загружаются с gravatar.com по хешу адреса отправителя.",
       "darkModeEmails": "Тёмная тема для содержимого писем",
       "darkModeEmailsHint": "Инвертирует цвета HTML-писем в тёмной теме для комфортного чтения"
     },

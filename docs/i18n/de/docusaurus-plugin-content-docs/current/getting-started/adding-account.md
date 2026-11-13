@@ -127,9 +127,9 @@ Jedes Konto wird in der Seitenleiste mit einem Avatar angezeigt -- ein farbiger 
 
 ### Anzeigemodi
 
-- **Buchstaben** -- ein farbiger Kreis mit 1--2 Zeichen (Initialen). Sie können eigene Initialen eingeben, wenn die automatischen nicht passen.
-- **Symbol** -- ein farbiger Kreis mit einem Symbol aus der Sammlung (Post, Koffer, Stern, Rakete usw.).
-- **Gravatar** -- lädt Ihr Profilbild von [Gravatar](https://gravatar.com) basierend auf Ihrer E-Mail-Adresse. Wenn kein Gravatar gefunden wird, werden Buchstaben angezeigt.
+- **Buchstaben**: ein farbiger Kreis mit 1 oder 2 Zeichen (Initialen). Sie können eigene Initialen eingeben, wenn die automatischen nicht passen.
+- **Symbol**: ein farbiger Kreis mit einem Symbol aus der Sammlung (Post, Koffer, Stern, Rakete usw.).
+- **Gravatar**: lädt Ihr Profilbild von [Gravatar](https://gravatar.com) basierend auf Ihrer E-Mail-Adresse. Wenn kein Gravatar gefunden wird, werden Buchstaben angezeigt. Dabei erhält Gravatar den SHA-256-Hash Ihrer Adresse und sieht Ihre IP-Adresse; siehe [Absenderfotos (Gravatar)](../privacy/sender-photos.md).
 
 ### Farbe ändern
 

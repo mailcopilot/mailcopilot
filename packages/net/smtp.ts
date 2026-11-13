@@ -3,6 +3,7 @@ import nodemailer from 'nodemailer'
 // Path `nodemailer/lib/mail-composer` — stable API, used by many projects.
 import MailComposer from 'nodemailer/lib/mail-composer'
 import dns from 'node:dns'
+import { randomUUID } from 'node:crypto'
 import net from 'node:net'
 import type { ComposeAttachment, SmtpConfig } from './types'
 import { buildTlsOptions } from './tls'
@@ -37,6 +38,14 @@ export type SendMailOptions = {
    */
   inReplyTo?: string
   references?: string
+  /**
+   * Message-ID header (`<id@domain>`). The send queue mints it once per queued
+   * message (`mintMessageId`) and passes the stored value on every attempt, so a
+   * retry or a manual resend of a message the server may already have accepted
+   * reaches the recipient as the same message. Without it nodemailer and
+   * MailComposer generate a fresh one each time.
+   */
+  messageId?: string
   /**
    * §2.22 fix iter2A — `multipart/alternative` legs that nodemailer / MailComposer
    * surface alongside the plain `text` and `html` body. Used for `text/calendar;
@@ -174,6 +183,21 @@ export async function testSmtpConnection(cfg: SmtpConfig): Promise<SmtpTestResul
       return smtpTestFailure(retryErr)
     }
   }
+}
+
+const MESSAGE_ID_DOMAIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*$/
+
+/**
+ * A new Message-ID for an outgoing message: a random UUID at the domain of the
+ * sender address (the same shape nodemailer generates), `localhost` when the
+ * address has no usable ASCII domain.
+ */
+export function mintMessageId(from: string): string {
+  const addr = /<([^<>]*)>\s*$/.exec(from)?.[1] ?? from
+  const at = addr.lastIndexOf('@')
+  const domain = at >= 0 ? addr.slice(at + 1).trim() : ''
+  const right = domain.length <= 253 && MESSAGE_ID_DOMAIN_RE.test(domain) ? domain.toLowerCase() : 'localhost'
+  return `<${randomUUID()}@${right}>`
 }
 
 export async function sendMail(cfg: SmtpConfig, options: SendMailOptions) {
